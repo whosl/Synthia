@@ -1,10 +1,11 @@
 # EdAgent-Vivado
 
-**Vivado RTL Debug Agent** — 基于 Python + LangChain 的 Xilinx Vivado RTL 调试智能体框架。
-提供受控的 Vivado 执行环境、日志/报告解析引擎、常见错误知识库，以及由 Claude/GLM 驱动的
-LangChain agent，用于辅助综合、实现、时序诊断和 bug 修复。
+**Vivado RTL Debug Agent** — 基于 Python + LangChain + LangGraph 的 Xilinx Vivado RTL 调试智能体。
+支持远程 Vivado 执行、终端风格 Web UI、流式 Tool Call 可视化、Markdown 渲染、55 条错误知识库。
 
-> **版本:** v0.2.0 — 多 Agent 编排 + Vivado 深度集成 + 远程执行 + Web 仪表盘
+> **版本:** v0.2.0 — 终端 UI + 远程 SSH Vivado + Multi-Agent + 流式渲染
+
+**在线体验:** https://edagent.wenzhuolin.xyz/term
 
 ---
 
