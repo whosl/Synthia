@@ -442,7 +442,12 @@ function handle(ev,data){
     // Tool call block (keeps begin/done)
     case 'tool_start':
       if(currentReasoning && currentReasoning._icon){ currentReasoning._icon.innerHTML='&#10004;'; stopTimer(currentReasoning); }
-      currentReasoning=null; currentResponse=null; agentBuffer='';
+      // Flush pending response text before tool block
+      if(currentResponse && agentBuffer){
+        currentResponse.innerHTML=renderMarkdown(agentBuffer);
+        currentResponse=null; agentBuffer='';
+      }
+      currentReasoning=null;
       var th='<div class="tool-header" onclick="var b=this.parentElement.querySelector(\'.tool-body\');b.classList.toggle(\'collapsed\');this.querySelector(\'.arrow\').classList.toggle(\'collapsed\')">';
       th+='<span class="arrow">&#9660;</span> '+esc(data.name)+' <span class="icon"><span class="spinner-sm"></span> <span class="timer" style="font-size:10px;color:#484f58"></span></span></div>';
       th+='<div class="tool-body"><div class="args">'+esc(data.args||'')+'</div></div>';

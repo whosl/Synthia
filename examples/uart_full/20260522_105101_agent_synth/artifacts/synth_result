@@ -1,0 +1,10 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 1,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_full\\20260522_105101_agent_synth\\vivado_synth.log",
+  "elapsed_sec": 32.18,
+  "timed_out": false,
+  "remote": true,
+  "host": "root@192.168.31.150"
+}
