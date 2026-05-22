@@ -147,7 +147,7 @@ def _agent_worker(session_id: str, question: str) -> None:
     from langchain_core.messages import HumanMessage
 
     async def _run():
-        agent = create_agent(); config = {"configurable": {"thread_id": session_id}, "recursion_limit": 100}
+        agent = create_agent(); config = {"configurable": {"thread_id": session_id}, "recursion_limit": 1000}
         assistant_msg_id = _new_id(); assistant_parts = []; text_buffer = ""
         pending_tools: dict[str, dict] = {}
         async for event in agent.astream_events({"messages": [HumanMessage(content=question)]}, config=config, version="v2"):

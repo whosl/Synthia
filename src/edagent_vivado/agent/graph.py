@@ -1,9 +1,14 @@
-"""Agent graph — create the LangChain agent with tools."""
+"""Agent graph  create the LangChain agent with tools."""
 
 from __future__ import annotations
 
 import logging
+import os as _os
+import sqlite3
 from typing import Any, Iterator
+
+# Force local/mock mode
+_os.environ.pop("VIVADO_REMOTE_HOST", None)
 
 from langchain.agents import create_agent as langchain_create_agent
 from langchain_core.messages import HumanMessage
@@ -38,6 +43,26 @@ _TOOLS = [
 _checkpointer = MemorySaver()
 
 
+def _default_checkpointer():
+    """Return a persistent LangGraph checkpointer when the optional package exists.
+
+    The current environment may not include ``langgraph-checkpoint-sqlite``.
+    When it is installed, this automatically upgrades Phase 2 memory from
+    in-process ``MemorySaver`` to SQLite-backed thread state. Product-level
+    messages/context packages are always persisted separately.
+    """
+    if _os.environ.get("EDAGENT_DISABLE_SQLITE_CHECKPOINTER", "").lower() in ("1", "true", "yes"):
+        return _checkpointer
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore
+        from edagent_vivado.repository.db import _db_path  # local import avoids cycles
+
+        conn = sqlite3.connect(_db_path(), check_same_thread=False)
+        return SqliteSaver(conn)
+    except Exception:
+        return _checkpointer
+
+
 def create_agent(checkpointer=None) -> Any:
     """Create and return a configured LangChain agent graph.
 
@@ -51,7 +76,7 @@ def create_agent(checkpointer=None) -> Any:
                       durable persistence.
     """
     llm = get_llm()
-    chk = checkpointer or _checkpointer
+    chk = checkpointer or _default_checkpointer()
 
     agent = langchain_create_agent(
         model=llm,
@@ -71,7 +96,7 @@ def invoke_agent(agent: Any, question: str, thread_id: str = "default") -> str:
         question: The user's question.
         thread_id: Session identifier for conversation continuity.
     """
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
     result = agent.invoke(
         {"messages": [HumanMessage(content=question)]},
         config=config,
@@ -95,7 +120,7 @@ def stream_agent(agent: Any, question: str, thread_id: str = "default") -> Itera
     Yields:
         String tokens as the agent generates its response.
     """
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
     for chunk in agent.stream(
         {"messages": [HumanMessage(content=question)]},
         config=config,
@@ -119,7 +144,7 @@ def get_conversation_history(agent: Any, thread_id: str = "default") -> list[dic
     Returns:
         List of message dicts with 'role' and 'content' keys.
     """
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
     state = agent.get_state(config)
     messages: list[dict] = []
     if state and state.values:

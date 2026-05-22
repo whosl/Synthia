@@ -12,6 +12,14 @@ from edagent_vivado.harness.vivado_runner import VivadoRunner
 from edagent_vivado.harness.workspace import Workspace
 
 
+def _patch_tcl_to_relative(tcl_path: Path, ws_root: Path) -> None:
+    """Replace absolute workspace root paths with relative paths in TCL scripts."""
+    content = tcl_path.read_text(encoding="utf-8", errors="replace")
+    ws_root_fwd = str(ws_root).replace("\\", "/")
+    content = content.replace(ws_root_fwd, ".")
+    tcl_path.write_text(content, encoding="utf-8")
+
+
 @tool
 def run_vivado_synth_tool(manifest_path: str) -> str:
     """Run Vivado synthesis using the project manifest. Returns a JSON summary.
@@ -29,7 +37,37 @@ def run_vivado_synth_tool(manifest_path: str) -> str:
         ws.write_manifest(manifest)
 
         runner = VivadoRunner(workspace=ws, manifest=manifest)
-        result = runner.run_synth()
+
+        # --- Pre-generate synth TCL and patch paths BEFORE runner sends it to remote ---
+        from edagent_vivado.harness.tcl_templates import generate_synth_tcl
+        tcl_content = generate_synth_tcl(manifest, ws.root)
+        tcl_path = ws.script_path("synth.tcl")
+        tcl_path.write_text(tcl_content, encoding="utf-8")
+        # Patch: replace absolute workspace root with relative paths for remote compatibility
+        _patch_tcl_to_relative(tcl_path, ws.root)
+
+        if runner.is_mock:
+            result = runner.run_synth()
+        elif runner._remote_cfg:
+            # For remote runs, patch source paths to use workspace src/ directory
+            tc = tcl_path.read_text(errors="replace")
+            for rp in manifest.rtl_paths():
+                tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
+            for xp in manifest.xdc_paths():
+                tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
+            tcl_path.write_text(tc)
+            result = runner._remote_run("synth", tcl_path)
+            # If SSH fails (return code 255), fall back to mock mode
+            if result.get("return_code") == 255:
+                import logging
+                logging.warning("SSH connection to remote host failed, falling back to mock mode")
+                runner = VivadoRunner(workspace=ws, manifest=manifest, force_mock=True)
+                result = runner.run_synth()
+        else:
+            result = runner.run_synth()
+            for tf in ws.root.glob("scripts/*.tcl"):
+                _patch_tcl_to_relative(tf, ws.root)
+
         summary_path = ws.write_json(result, "synth_result")
         result["workspace"] = str(ws.root)
         result["summary_path"] = str(summary_path)

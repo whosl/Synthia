@@ -102,21 +102,21 @@ def _route_question(question: str) -> str:
 def _synthesis_node(state: TeamState) -> dict:
     agent = _get_specialist("synthesis")
     question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "synth"}, "recursion_limit": 100})
+    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "synth"}, "recursion_limit": 1000})
     return _extract_response(result)
 
 
 def _timing_node(state: TeamState) -> dict:
     agent = _get_specialist("timing")
     question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "timing"}, "recursion_limit": 100})
+    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "timing"}, "recursion_limit": 1000})
     return _extract_response(result)
 
 
 def _constraint_node(state: TeamState) -> dict:
     agent = _get_specialist("constraint")
     question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "constraint"}, "recursion_limit": 100})
+    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "constraint"}, "recursion_limit": 1000})
     return _extract_response(result)
 
 
@@ -180,7 +180,7 @@ def create_supervisor_agent(checkpointer=None) -> CompiledStateGraph:
 
 def invoke_supervisor(agent: CompiledStateGraph, question: str, thread_id: str = "default") -> str:
     """Invoke the multi-agent supervisor. Returns the specialist's final text response."""
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
     result = agent.invoke(
         {"messages": [HumanMessage(content=question)], "next_agent": "", "specialist_output": ""},
         config=config,

@@ -141,7 +141,7 @@ async def _stream_agent_events(prompt: str, thread_id: str) -> AsyncIterator[str
         return f"event: {event}\ndata: {payload}\n\n"
 
     agent = create_agent()
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
 
     try:
         async for event in agent.astream_events(
