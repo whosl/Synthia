@@ -1,0 +1,20 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 1,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_demo\\20260522_093855_agent_synth\\vivado_synth.log",
+  "elapsed_sec": 21.89,
+  "timed_out": false,
+  "remote": true,
+  "host": "root@192.168.31.150",
+  "log_summary": {
+    "error_count": 3,
+    "critical_warning_count": 0,
+    "warning_count": 0,
+    "top_error_signatures": [
+      "[Synth 8-439] module 'uart_rx' not found [/tmp/edagent_remote/20260522_093855_agent_synth/src/uart_top.v:18]",
+      "[Synth 8-6156] failed synthesizing module 'uart_top' [/tmp/edagent_remote/20260522_093855_agent_synth/src/uart_top.",
+      "[Common 17-69] Command failed: Synthesis failed - please see the console or run log file for details"
+    ]
+  }
+}

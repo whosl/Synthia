@@ -1,0 +1,24 @@
+project:
+  name: default
+  vivado_version: "2020.2"
+  flow: "non_project"
+  part: "xc7a50tfgg484-2"
+  top: "top"
+
+sources:
+  rtl: []
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc: []
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+qor_targets:
+  wns_min: 0.0
+  require_drc_clean: true

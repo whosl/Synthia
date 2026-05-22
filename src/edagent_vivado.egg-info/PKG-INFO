@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: edagent-vivado
+Version: 0.1.0
+Summary: Vivado RTL Debug Agent — a LangChain-based harness for Vivado RTL debugging
+Author: EDA Agent Engineering
+License: MIT
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: typer>=0.9
+Requires-Dist: rich>=13.0
+Requires-Dist: langchain>=0.3
+Requires-Dist: langchain-anthropic>=0.2
+Requires-Dist: langsmith>=0.1
+Requires-Dist: click>=8.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: mypy>=1.0; extra == "dev"

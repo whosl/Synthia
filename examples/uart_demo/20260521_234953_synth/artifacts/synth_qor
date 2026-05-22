@@ -1,0 +1,22 @@
+{
+  "timing": {
+    "wns": 0.123,
+    "tns": 0.0,
+    "whs": 0.045,
+    "ths": 0.0
+  },
+  "utilization": {
+    "lut": 1234,
+    "ff": 567,
+    "bram": 2,
+    "dsp": 0
+  },
+  "qor_passed": true,
+  "qor_checks": [
+    {
+      "check": "wns",
+      "passed": true,
+      "detail": "WNS=0.123ns (target >= 0.0ns)"
+    }
+  ]
+}

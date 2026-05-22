@@ -1,0 +1,32 @@
+constraints:
+  xdc:
+  - constrs/arty.xdc
+ip: []
+project:
+  flow: non_project
+  name: uart_echo
+  part: xc7a35ticsg324-1L
+  top: uart_top
+  vivado_version: '2022.1'
+qor_targets:
+  require_drc_clean: true
+  wns_min: 0.0
+remote:
+  host: root@192.168.31.150
+  user: root
+  vivado_path: /home/xilinx/vivado/Vivado/2022.1/bin/vivado
+  vivado_version: '2022.1'
+  work_dir: /tmp/edagent_remote/20260522_103709_agent_synth
+runs:
+  impl:
+    enabled: true
+  synth:
+    enabled: true
+sources:
+  include_dirs: []
+  rtl:
+  - rtl/uart_rx.v
+  - rtl/uart_tx.v
+  - rtl/uart_top.v
+  tb:
+  - tb/uart_tb.v

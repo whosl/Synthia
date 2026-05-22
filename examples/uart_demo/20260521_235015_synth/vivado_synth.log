@@ -1,0 +1,7 @@
+****** Vivado v2022.1 (64-bit) ******
+  SW Build 3526262
+INFO: [Common 17-234] Starting synth
+ERROR: [Synth 8-439] Module 'echo_handler' not found while processing module 'uart_top'
+ERROR: [Synth 8-439] Module 'uart_rx' not found while processing module 'uart_top'
+CRITICAL WARNING: [Common 17-69] Command 'synth_design' failed
+INFO: Synth failed with error(s)

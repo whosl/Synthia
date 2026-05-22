@@ -1,0 +1,27 @@
+{
+  "step": "synth",
+  "success": true,
+  "return_code": 0,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_demo\\20260521_214951_synth\\vivado_synth.log",
+  "elapsed_sec": 0.42,
+  "timed_out": false,
+  "mock": true,
+  "timing": {
+    "wns": 0.123,
+    "tns": 0.0,
+    "whs": 0.045,
+    "ths": 0.0
+  },
+  "utilization": {
+    "lut": 1234,
+    "ff": 567,
+    "bram": 2,
+    "dsp": 0
+  },
+  "log_summary": {
+    "error_count": 0,
+    "critical_warning_count": 0,
+    "warning_count": 0,
+    "top_error_signatures": []
+  }
+}

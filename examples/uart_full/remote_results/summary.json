@@ -1,0 +1,10 @@
+{
+  "project": "uart_echo",
+  "part": "xc7a35ticsg324-1L",
+  "host": "root@192.168.31.150",
+  "synth_passed": true,
+  "synth_elapsed_sec": 35.1,
+  "impl_passed": true,
+  "impl_elapsed_sec": 32.5,
+  "total_elapsed_sec": 70.6
+}

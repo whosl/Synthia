@@ -1,0 +1,29 @@
+constraints:
+  xdc:
+  - constrs/top.xdc
+ip: []
+project:
+  flow: non_project
+  name: uart_demo
+  part: xc7a50tfgg484-2
+  top: uart_top
+  vivado_version: '2020.2'
+qor_targets:
+  require_drc_clean: true
+  wns_min: 0.0
+remote:
+  host: root@192.168.31.150
+  user: root
+  vivado_path: /home/xilinx/vivado/Vivado/2022.1/bin/vivado
+  vivado_version: '2022.1'
+  work_dir: /tmp/edagent_remote/20260522_093037_agent_synth
+runs:
+  impl:
+    enabled: false
+  synth:
+    enabled: true
+sources:
+  include_dirs: []
+  rtl:
+  - rtl/uart_top.v
+  tb: []

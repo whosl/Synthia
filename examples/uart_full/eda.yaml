@@ -1,0 +1,29 @@
+project:
+  name: uart_echo
+  vivado_version: "2022.1"
+  flow: "non_project"
+  part: "xc7a35ticsg324-1L"
+  top: "uart_top"
+
+sources:
+  rtl:
+    - rtl/uart_rx.v
+    - rtl/uart_tx.v
+    - rtl/uart_top.v
+  tb:
+    - tb/uart_tb.v
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/arty.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: true
+
+qor_targets:
+  wns_min: 0.0
+  require_drc_clean: true

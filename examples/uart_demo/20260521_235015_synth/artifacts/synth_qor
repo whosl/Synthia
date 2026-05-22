@@ -1,0 +1,22 @@
+{
+  "timing": {
+    "wns": null,
+    "tns": null,
+    "whs": 0.045,
+    "ths": 0.0
+  },
+  "utilization": {
+    "lut": null,
+    "ff": null,
+    "bram": 2,
+    "dsp": 0
+  },
+  "qor_passed": true,
+  "qor_checks": [
+    {
+      "check": "wns",
+      "passed": true,
+      "detail": "WNS not available in report"
+    }
+  ]
+}

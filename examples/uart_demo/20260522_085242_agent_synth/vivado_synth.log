@@ -1,0 +1,18 @@
+#-----------------------------------------------------------
+# Vivado v2022.1 (64-bit)
+# SW Build 3526262 on Mon Apr 18 15:47:01 MDT 2022
+# IP Build 3524634 on Mon Apr 18 20:55:01 MDT 2022
+# Start of session at: Thu May 21 20:52:44 2026
+# Process ID: 671497
+# Current directory: /tmp/edagent_remote/20260522_085242_agent_synth
+# Command line: vivado -mode batch -source scripts/synth.tcl -log vivado_synth.log
+# Log file: /tmp/edagent_remote/20260522_085242_agent_synth/vivado_synth.log
+# Journal file: /tmp/edagent_remote/20260522_085242_agent_synth/vivado.jou
+# Running On: MiWiFi-RD08-srv, OS: Linux, CPU Frequency: 3494.401 MHz, CPU Physical cores: 8, Host memory: 8306 MB
+#-----------------------------------------------------------
+source scripts/synth.tcl
+# puts "INFO: Starting synthesis for uart_demo"
+INFO: Starting synthesis for uart_demo
+# read_verilog {E:/dev/edagent-vivado/examples/uart_demo/rtl/uart_top.v}
+ERROR: [Common 17-69] Command failed: File '/tmp/edagent_remote/20260522_085242_agent_synth/E:/dev/edagent-vivado/examples/uart_demo/rtl/uart_top.v' does not exist
+INFO: [Common 17-206] Exiting Vivado at Thu May 21 20:52:48 2026...

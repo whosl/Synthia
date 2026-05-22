@@ -1,0 +1,18 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 1,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_demo\\20260522_080135_agent_synth\\vivado_synth.log",
+  "elapsed_sec": 15.8,
+  "timed_out": false,
+  "remote": true,
+  "host": "root@192.168.31.150",
+  "log_summary": {
+    "error_count": 1,
+    "critical_warning_count": 0,
+    "warning_count": 0,
+    "top_error_signatures": [
+      "[Common 17-69] Command failed: File '/tmp/edagent_remote/20260522_080135_agent_synth/E:/dev/edagent-vivado/examples"
+    ]
+  }
+}

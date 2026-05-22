@@ -1,0 +1,25 @@
+*********************************************************************
+*                         Vivado v2020.2 (64-bit)
+*               SW Build 1104760 on Wed Jul 15 15:21:46 MDT 2020
+*                IP Build 1104513 on Wed Jul 15 15:27:44 MDT 2020
+** Copyright 1986-2020 Xilinx, Inc. All Rights Reserved.
+*********************************************************************
+
+INFO: [Common 17-234] Starting synthesis
+INFO: [Synth 8-256] Beginning synthesis of top module uart_top
+INFO: [Synth 8-256] Reading Verilog file /home/project/uart_top.v
+INFO: [Synth 8-256] Elaborating design
+
+WARNING: [Synth 8-3331] Design uart_top has unconnected port rx
+WARNING: [Synth 8-3331] Design uart_top has unconnected port led
+
+ERROR: [Synth 8-439] Module 'echo_handler' not found while processing module 'uart_top'
+ERROR: [Synth 8-439] Module 'uart_rx' not found while processing module 'uart_top'
+
+CRITICAL WARNING: [Common 17-69] Command 'synth_design' failed
+    Previous command returned error: 'synth_design -top uart_top -part xc7a50tfgg484-2'
+
+INFO: [Common 17-234] Synthesis failed with error(s)
+CRITICAL WARNING: [Common 17-69] tcl_unknown: file doesn't exist
+
+WARNING: [vivado 12-101] No checkpoint written due to errors

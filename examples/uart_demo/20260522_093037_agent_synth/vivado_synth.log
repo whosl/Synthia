@@ -1,0 +1,42 @@
+#-----------------------------------------------------------
+# Vivado v2022.1 (64-bit)
+# SW Build 3526262 on Mon Apr 18 15:47:01 MDT 2022
+# IP Build 3524634 on Mon Apr 18 20:55:01 MDT 2022
+# Start of session at: Thu May 21 21:30:40 2026
+# Process ID: 676778
+# Current directory: /tmp/edagent_remote/20260522_093037_agent_synth
+# Command line: vivado -mode batch -source scripts/synth.tcl -log vivado_synth.log
+# Log file: /tmp/edagent_remote/20260522_093037_agent_synth/vivado_synth.log
+# Journal file: /tmp/edagent_remote/20260522_093037_agent_synth/vivado.jou
+# Running On: MiWiFi-RD08-srv, OS: Linux, CPU Frequency: 3494.401 MHz, CPU Physical cores: 8, Host memory: 8306 MB
+#-----------------------------------------------------------
+source scripts/synth.tcl
+# puts "INFO: Starting synthesis for uart_demo"
+INFO: Starting synthesis for uart_demo
+# read_verilog {src/uart_top.v}
+# read_xdc {src/top.xdc}
+# synth_design -top uart_top -part xc7a50tfgg484-2
+Command: synth_design -top uart_top -part xc7a50tfgg484-2
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7a50t'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7a50t'
+INFO: [Device 21-403] Loading part xc7a50tfgg484-2
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 4 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 676785
+---------------------------------------------------------------------------------
+Starting RTL Elaboration : Time (s): cpu = 00:00:02 ; elapsed = 00:00:02 . Memory (MB): peak = 2853.660 ; gain = 0.000 ; free physical = 276 ; free virtual = 10946
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'uart_top' [/tmp/edagent_remote/20260522_093037_agent_synth/src/uart_top.v:5]
+ERROR: [Synth 8-439] module 'uart_rx' not found [/tmp/edagent_remote/20260522_093037_agent_synth/src/uart_top.v:18]
+	Parameter CLK_DIV bound to: 32'sb00000000000000000000000001010111 
+ERROR: [Synth 8-6156] failed synthesizing module 'uart_top' [/tmp/edagent_remote/20260522_093037_agent_synth/src/uart_top.v:5]
+---------------------------------------------------------------------------------
+Finished RTL Elaboration : Time (s): cpu = 00:00:03 ; elapsed = 00:00:03 . Memory (MB): peak = 2853.660 ; gain = 0.000 ; free physical = 1159 ; free virtual = 11830
+---------------------------------------------------------------------------------
+RTL Elaboration failed
+INFO: [Common 17-83] Releasing license: Synthesis
+7 Infos, 0 Warnings, 0 Critical Warnings and 3 Errors encountered.
+synth_design failed
+ERROR: [Common 17-69] Command failed: Synthesis failed - please see the console or run log file for details
+INFO: [Common 17-206] Exiting Vivado at Thu May 21 21:30:50 2026...

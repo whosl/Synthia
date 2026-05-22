@@ -1,0 +1,18 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 1,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_full\\20260522_103419_agent_synth\\vivado_synth.log",
+  "elapsed_sec": 32.99,
+  "timed_out": false,
+  "remote": true,
+  "host": "root@192.168.31.150",
+  "log_summary": {
+    "error_count": 1,
+    "critical_warning_count": 0,
+    "warning_count": 1,
+    "top_error_signatures": [
+      "[Common 17-37] Directory in which file post_synth_timing_summary.rpt is to be written does not exist [E:/dev/edagen"
+    ]
+  }
+}

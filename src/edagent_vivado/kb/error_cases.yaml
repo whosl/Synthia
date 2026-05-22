@@ -1,0 +1,656 @@
+# EdAgent-Vivado Error Knowledge Base
+# 50+ patterns covering synthesis, implementation, timing, constraints, IP, simulation
+
+# ===========================================================================
+# SYNTHESIS ERRORS
+# ===========================================================================
+
+- pattern: "\\[Synth\\s+8-439\\]"
+  category: "missing_module_or_bad_compile_order"
+  likely_causes:
+    - "RTL 文件没有加入 sources"
+    - "模块名拼写错误"
+    - "IP output products 未生成"
+    - "VHDL library 未正确映射"
+  suggested_actions:
+    - "检查 eda.yaml 中 sources.rtl"
+    - "全局搜索 module 定义"
+    - "检查 include_dirs 和 IP 生成目录"
+    - "确认文件读取顺序（被例化的模块应先编译）"
+
+- pattern: "\\[Synth\\s+8-5809\\]"
+  category: "black_box_inference"
+  likely_causes:
+    - "综合工具无法找到模块，将其推断为 black box"
+    - "文件被 exclude 或 read_verilog 顺序不对"
+  suggested_actions:
+    - "确认包含该模块定义的文件在 sources.rtl 中"
+    - "检查是否有 `exclude` 标记"
+    - "检查 file_type 是否正确（.v / .sv / .vhd）"
+
+- pattern: "\\[Synth\\s+8-327\\]"
+  category: "syntax_error"
+  likely_causes:
+    - "Verilog/VHDL 语法错误"
+    - "SystemVerilog 特性在不支持的 Vivado 版本中使用"
+    - "编码问题导致非法字符"
+  suggested_actions:
+    - "在 Vivado 外使用 verilator/slang 独立检查语法"
+    - "查看错误行号定位具体语法问题"
+    - "检查文件编码是否为 UTF-8"
+
+- pattern: "\\[Synth\\s+8-3352\\]"
+  category: "unresolved_parameter"
+  likely_causes:
+    - "parameter 没有找到值或定义不匹配"
+    - "defparam 使用不当"
+  suggested_actions:
+    - "检查 parameter/default 定义"
+    - "确认例化时参数传递的 #(...) 语法正确"
+
+- pattern: "\\[Synth\\s+8-6858\\]"
+  category: "multi_driven_net"
+  likely_causes:
+    - "多个 always block 驱动同一信号"
+    - "assign 和 always @(*) 同时驱动同一 net"
+    - "跨模块端口连接错误（output 接到 output）"
+  suggested_actions:
+    - "检查 multiply-driven nets 报告"
+    - "确保每个信号只有一个驱动源"
+    - "考虑使用 tri-state 总线或 MUX 结构"
+
+- pattern: "\\[Synth\\s+8-2576\\]"
+  category: "latch_inference"
+  likely_causes:
+    - "组合 always block 中条件分支不全（缺失 else / default）"
+    - "case 语句未覆盖所有可能值"
+  suggested_actions:
+    - "补全 else 分支或使用 default 赋值"
+    - "检查综合 report 中的 inferred latch 列表"
+    - "考虑添加 _comb 后缀区分组合和时序逻辑"
+
+- pattern: "\\[Synth\\s+8-3333\\]"
+  category: "undriven_input_port"
+  likely_causes:
+    - "顶层端口未连接或未被驱动"
+    - "模块例化时端口连接遗漏"
+  suggested_actions:
+    - "检查顶层 wrapper 中的端口连接"
+    - "检查约束文件中的管脚映射是否完整"
+
+- pattern: "\\[Synth\\s+8-3290\\]"
+  category: "excessive_latch_inference"
+  likely_causes:
+    - "设计中大量存在不完整的条件分支"
+  suggested_actions:
+    - "使用 lint 工具批量检查 latch inference"
+    - "检查并补全所有 case/if 语句的默认分支"
+
+- pattern: "\\[Synth\\s+8-4036\\]"
+  category: "ram_inference_failure"
+  likely_causes:
+    - "RAM inference 模式不满足 Xilinx 编码要求"
+    - "读写使能信号时序不匹配"
+    - "异步复位导致无法 inference 为 BRAM"
+  suggested_actions:
+    - "参考 Xilinx UG901 RAM coding guidelines"
+    - "使用 `ram_style` attribute 控制 inference"
+    - "检查 reset 是否对 data output 生效（应只 reset 控制信号）"
+
+- pattern: "\\[Synth\\s+8-43\\]"
+  category: "hierarchical_name_access"
+  likely_causes:
+    - "使用了 hierarchical name（如 top.sub.sig）"
+    - "跨模块作用域访问信号"
+  suggested_actions:
+    - "通过 port 传递信号，避免层级引用"
+    - "如果必须使用，确认 -flatten_hierarchy 设置"
+
+- pattern: "\\[Synth\\s+8-614\\]"
+  category: "loop_unroll_failure"
+  likely_causes:
+    - "for 循环变量范围无法在综合时确定"
+    - "generate loop 语法错误"
+  suggested_actions:
+    - "确认循环边界为常量或 parameter"
+    - "将变量驱动的循环改为 generate 迭代"
+
+# ===========================================================================
+# IMPLEMENTATION ERRORS
+# ===========================================================================
+
+- pattern: "\\[Place\\s+30-574\\]"
+  category: "placement_congestion"
+  likely_causes:
+    - "设计拥塞导致布局失败"
+    - "特定区域逻辑密度过高"
+    - "全局时钟资源不足"
+  suggested_actions:
+    - "检查 utilization 报告中 LUT/FF 密度"
+    - "尝试降低逻辑利用率"
+    - "检查时钟结构是否合理"
+    - "使用 Pblock 分散布局"
+
+- pattern: "\\[Place\\s+30-640\\]"
+  category: "placement_infeasible"
+  likely_causes:
+    - "Pblock 面积太小容纳不下逻辑"
+    - "固定位置约束冲突"
+  suggested_actions:
+    - "增大 Pblock 区域或移除部分固定位置约束"
+    - "运行 report_utilization -pblocks 查看分布"
+
+- pattern: "\\[Place\\s+30-375\\]"
+  category: "clock_region_placement"
+  likely_causes:
+    - "时钟域逻辑过度集中在单个 clock region"
+    - "跨 clock region 的路径无法满足时序"
+  suggested_actions:
+    - "检查时钟域规划，分散相关逻辑到不同 region"
+    - "使用 USER_CLOCK_ROOT 约束优化时钟网络"
+
+- pattern: "\\[Place\\s+30-377\\]"
+  category: "bel_assignment_failure"
+  likely_causes:
+    - "LOC/BEL 约束指向不可用的 site"
+    - "多个约束冲突"
+  suggested_actions:
+    - "运行 report_io 确认 site 可用性"
+    - "在 Vivado Device View 中检查 site 位置"
+
+- pattern: "\\[Place\\s+30-99\\]"
+  category: "placer_out_of_memory"
+  likely_causes:
+    - "设计规模超出机器可用内存"
+    - "place_design 选项过于激进"
+  suggested_actions:
+    - "使用 `-directive EarlyBlockPlacement` 减少内存"
+    - "增加机器内存或在更大实例上运行"
+
+- pattern: "\\[Route\\s+35-\\d+\\]"
+  category: "routing_congestion_or_delay"
+  likely_causes:
+    - "拥塞导致布线失败"
+    - "时序约束过于紧"
+    - "高扇出网络"
+  suggested_actions:
+    - "检查 WNS 是否很负"
+    - "运行 report_route_status"
+    - "检查高扇出信号，考虑寄存器复制"
+    - "使用 `-directive AlternateCLBRouting`"
+
+- pattern: "\\[Route\\s+35-12\\]"
+  category: "routing_unroutable"
+  likely_causes:
+    - "设计拥塞极其严重"
+    - "布线资源耗尽"
+  suggested_actions:
+    - "降低利用率或放宽时序约束"
+    - "使用更高性能器件"
+    - "尝试不同的综合策略"
+
+- pattern: "\\[Route\\s+35-109\\]"
+  category: "routing_timing_closure"
+  likely_causes:
+    - "布线时发现部分路径时序无法满足"
+    - "布局结果不理想导致布线路径过长"
+  suggested_actions:
+    - "返回布局阶段调整 Pblock"
+    - "检查高频网络是否需要 pipeline"
+
+- pattern: "\\[Opt\\s+30-58\\]"
+  category: "placement_constraint_conflict"
+  likely_causes:
+    - "Pblock 约束与逻辑不匹配"
+    - "BEL 或 LOC 约束冲突"
+    - "资源不足"
+  suggested_actions:
+    - "检查 XDC 中的 Pblock 约束"
+    - "运行 report_utilization 确认资源使用"
+    - "放宽位置约束后重新综合"
+
+- pattern: "\\[Opt\\s+30-627\\]"
+  category: "opt_design_netlist_corruption"
+  likely_causes:
+    - "opt_design 优化过程中出现意外状态"
+    - "第三方 IP netlist 与 Vivado 版本不兼容"
+  suggested_actions:
+    - "重新生成 IP output products"
+    - "检查 Vivado 版本与 IP 兼容性"
+    - "尝试跳过 opt_design -retarget 选项"
+
+- pattern: "\\[Phys_Opt\\s+33-\\d+\\]"
+  category: "physical_optimization_failed"
+  likely_causes:
+    - "phys_opt_design 无法找到优化空间"
+    - "设计过于紧凑，没有物理优化余地"
+  suggested_actions:
+    - "尝试不同的 phys_opt_design 选项组合"
+    - "返回综合阶段优化关键路径"
+
+- pattern: "\\[DRC\\s+23-20\\]"
+  category: "drc_io_standard"
+  likely_causes:
+    - "I/O standard 与 bank voltage 不匹配"
+    - "差分标准在单端 bank 上使用"
+  suggested_actions:
+    - "检查 Vivado device data sheet 中的 bank 信息"
+    - "调整 IOSTANDARD 约束匹配 bank VCCO"
+
+- pattern: "\\[DRC\\s+NSTD-1\\]"
+  category: "drc_io_standard_conflict"
+  likely_causes:
+    - "同一 bank 内混用了不兼容的 I/O standard"
+  suggested_actions:
+    - "检查同一 bank 内所有 pin 的 IOSTANDARD"
+    - "将不同标准的管脚分配到不同 bank"
+
+- pattern: "\\[DRC\\s+AVAL-\\d+\\]"
+  category: "drc_attribute_validation"
+  likely_causes:
+    - "XDC 约束中的属性值或对象名称无效"
+    - "set_property 的 value 不在允许范围内"
+  suggested_actions:
+    - "检查 set_property 命令语法和拼写"
+    - "参考 Vivado Properties Reference Guide (UG912)"
+
+- pattern: "\\[DRC\\s+REQP-\\d+\\]"
+  category: "drc_routing_requirement"
+  likely_causes:
+    - "时钟或复位网络未满足布线要求"
+    - "高扇出 net 需要特殊处理"
+  suggested_actions:
+    - "使用 set_clock_tree_options 调整时钟树"
+    - "对高扇出信号使用 BUFG 或复制"
+
+- pattern: "\\[Power\\s+33-332\\]"
+  category: "power_analysis_warning"
+  likely_causes:
+    - "功耗分析时缺少 SAIF 或 VCD 文件"
+    - "信号翻转率数据不完整"
+  suggested_actions:
+    - "提供仿真生成的 SAIF/VCD 文件"
+    - "使用 set_switching_activity 设定默认翻转率"
+
+# ===========================================================================
+# TIMING ERRORS
+# ===========================================================================
+
+- pattern: "\\[Timing\\s+38-282\\]"
+  category: "timing_violation_setup"
+  likely_causes:
+    - "设计时序未收敛"
+    - "时钟周期约束过紧"
+    - "组合逻辑路径过长"
+    - "跨时钟域路径没有约束"
+  suggested_actions:
+    - "检查 timing summary 中的 WNS/TNS"
+    - "确认所有时钟都已正确定义"
+    - "检查跨时钟域路径是否需要 false_path"
+    - "使用 report_timing -max_paths 查看最差路径"
+
+- pattern: "\\[Timing\\s+38-4\\]"
+  category: "unconstrained_clock"
+  likely_causes:
+    - "时钟未通过 create_clock 定义"
+    - "内部 generated clock 遗漏约束"
+  suggested_actions:
+    - "运行 check_timing -verbose 列出未约束时钟"
+    - "为所有时钟源添加 create_clock"
+    - "为时钟分频器输出添加 create_generated_clock"
+
+- pattern: "\\[Timing\\s+38-3\\]"
+  category: "unconstrained_input_delay"
+  likely_causes:
+    - "输入端口没有 set_input_delay"
+    - "I/O 时序未定义"
+  suggested_actions:
+    - "运行 report_timing -from [all_inputs] 检查"
+    - "添加 set_input_delay 和 set_output_delay 约束"
+
+- pattern: "\\[Timing\\s+38-322\\]"
+  category: "hold_violation"
+  likely_causes:
+    - "数据路径延迟过短"
+    - "时钟到时钟的 skew 过大"
+  suggested_actions:
+    - "检查最小延迟路径（hold time violation）"
+    - "增加数据路径上的逻辑或添加 buffer"
+    - "检查时钟树是否平衡"
+
+- pattern: "\\[Timing\\s+38-13\\]"
+  category: "pulse_width_violation"
+  likely_causes:
+    - "时钟脉冲太窄，不满足寄存器最小脉冲宽度"
+    - "时钟占空比严重偏离 50%"
+  suggested_actions:
+    - "调整时钟频率或占空比"
+    - "检查时钟周期是否短于最小脉冲宽度规格"
+
+- pattern: "\\[Timing\\s+38-27\\]"
+  category: "recovery_removal_violation"
+  likely_causes:
+    - "reset 信号相对于时钟不满足 recovery/removal 时间"
+  suggested_actions:
+    - "确保 reset 释放与时钟边沿满足 recovery timing"
+    - "对异步复位使用同步释放电路"
+
+- pattern: "\\[Timing\\s+38-308\\]"
+  category: "inter_clock_domain_path"
+  likely_causes:
+    - "CDC 路径的时序分析缺乏约束"
+    - "异步时钟域之间默认按最差情况分析"
+  suggested_actions:
+    - "为异步时钟域设置 set_clock_groups -asynchronous"
+    - "对已知安全 CDC 设置 false_path"
+    - "确认 CDC 电路正确（双触发器、FIFO 等）"
+
+- pattern: "\\[Timing\\s+38-29\\]"
+  category: "max_fanout_timing"
+  likely_causes:
+    - "高扇出网络的 delay 超过时序预算"
+    - "扇出超过 MAX_FANOUT 限制"
+  suggested_actions:
+    - "使用 set_max_fanout 控制扇出"
+    - "对高扇出信号进行寄存器复制"
+    - "考虑使用 BUFG 或 BUFH 驱动高扇出信号"
+
+- pattern: "\\[Timing\\s+38-363\\]"
+  category: "no_common_clock_path"
+  likely_causes:
+    - "源和目的时钟不具备共同路径"
+    - "时钟不相关或定义为异步"
+  suggested_actions:
+    - "确认两个时钟域之间是否正确约束"
+    - "检查不必要的数据路径是否跨时钟域"
+
+# ===========================================================================
+# XDC / CONSTRAINT ERRORS
+# ===========================================================================
+
+- pattern: "\\[Constraints\\s+18-\\d+\\]"
+  category: "constraint_syntax_error"
+  likely_causes:
+    - "XDC/Tcl 语法错误"
+    - "引用了不存在的 net/cell/pin 名称"
+    - "约束命令缺少必要参数"
+  suggested_actions:
+    - "检查约束中引用对象的名称是否与 RTL 匹配"
+    - "运行 get_* 命令验证对象存在"
+    - "确保 XDC 文件用 UTF-8 编码"
+
+- pattern: "\\[Designutils\\s+20-\\d+\\]"
+  category: "constraint_object_not_found"
+  likely_causes:
+    - "约束中引用的 net/cell/pin 在综合后被优化掉"
+    - "对象名称在综合后发生变化"
+  suggested_actions:
+    - "使用 `-quiet` 避免错误，或使用 dont_touch 保护对象"
+    - "综合后运行 get_* 命令确认对象名称"
+    - "使用 KEEP / DONT_TOUCH attribute 防止优化"
+
+- pattern: "\\[BD\\s+41-\\d+\\]"
+  category: "block_design_error"
+  likely_causes:
+    - "IP Integrator Block Design 连接错误"
+    - "BD 中的端口或引脚不匹配"
+  suggested_actions:
+    - "在 Block Design GUI 中 validate design"
+    - "检查 interface 连接类型是否匹配"
+    - "运行 validate_bd_design 获得详细错误"
+
+- pattern: "get_ports.*not\\s+found"
+  category: "port_not_found"
+  likely_causes:
+    - "XDC 中引用的 port 名在 RTL 中不存在"
+    - "综合后被重命名"
+  suggested_actions:
+    - "在 Vivado Tcl console 中运行 get_ports * 列出所有 port"
+    - "确认 port 名称正确（包括总线 notation [7:0]）"
+    - "检查是否在 wrapper 中端口名发生变化"
+
+# ===========================================================================
+# IP ERRORS
+# ===========================================================================
+
+- pattern: "\\[IP_Flow\\s+19-\\d+\\]"
+  category: "ip_generation_failed"
+  likely_causes:
+    - "IP output products 过期或损坏"
+    - "IP license 不可用"
+    - "IP 版本与 Vivado 版本不兼容"
+  suggested_actions:
+    - "在 Managed IP Project 中重新生成 output products"
+    - "运行 report_ip_status 检查 IP 状态"
+    - "升级 IP 到当前 Vivado 版本"
+
+- pattern: "\\[IP_Flow\\s+19-3461\\]"
+  category: "ip_license_missing"
+  likely_causes:
+    - "IP 需要付费 license"
+    - "license 文件过期或路径错误"
+  suggested_actions:
+    - "检查 XILINXD_LICENSE_FILE 环境变量"
+    - "运行 vivado -license 查看 license 状态"
+    - "确认 IP 是否在免费 IP 目录中"
+
+- pattern: "\\[IP_Flow\\s+19-3806\\]"
+  category: "ip_upgrade_required"
+  likely_causes:
+    - "IP 是旧版本生成的，需要升级到当前 Vivado 版本"
+  suggested_actions:
+    - "运行 report_ip_status 查看需要升级的 IP"
+    - "使用 upgrade_ip [get_ips *] 批量升级"
+
+- pattern: "\\[Coretcl\\s+2-\\d+\\]"
+  category: "ip_customization_error"
+  likely_causes:
+    - "IP 定制参数无效或超出允许范围"
+    - "IP GUI 生成的 Tcl 脚本中参数不合法"
+  suggested_actions:
+    - "检查 IP 配置参数是否有效"
+    - "使用 IP catalog 的默认参数测试"
+    - "确认参数值未超出 datasheet 范围"
+
+# ===========================================================================
+# SIMULATION ERRORS
+# ===========================================================================
+
+- pattern: "\\[XSIM\\s+43-\\d+\\]"
+  category: "xsim_error"
+  likely_causes:
+    - "仿真运行时发现设计问题"
+    - "testbench 中的断言失败"
+    - "仿真时间/内存不足"
+  suggested_actions:
+    - "检查仿真 log 中的详细错误信息"
+    - "确认 testbench 中的所有信号都已正确连接"
+    - "增加仿真超时时间"
+
+- pattern: "\\[XSIM\\s+43-3322\\]"
+  category: "xsim_elaboration_error"
+  likely_causes:
+    - "elaboration 阶段发现未解析的引用"
+    - "顶层模块名不正确或 testbench 顶层拼写错误"
+  suggested_actions:
+    - "确认 testbench 顶层模块名正确"
+    - "检查 xelab 命令中的 -snapshot 名称"
+
+- pattern: "\\[VRFC\\s+10-\\d+\\]"
+  category: "vhdl_compile_error"
+  likely_causes:
+    - "VHDL 编译错误"
+    - "VHDL library 映射不正确"
+  suggested_actions:
+    - "检查 VHDL 语法"
+    - "确认 library 声明和 use 子句正确"
+    - "使用 xvhdl --93 或 --2008 指定 VHDL 标准"
+
+- pattern: "\\[XSIM 43-3409\\].*PASS"
+  category: "simulation_pass"
+  likely_causes:
+    - "仿真通过（非错误，此处用于识别正常退出）"
+  suggested_actions:
+    - "无需操作"
+
+- pattern: "\\[XSIM 43-3409\\].*FAIL"
+  category: "simulation_test_failed"
+  likely_causes:
+    - "仿真测试失败"
+    - "DUT 输出与预期不匹配"
+    - "超时导致仿真未完成"
+  suggested_actions:
+    - "检查仿真波形找出差异点"
+    - "确认 testbench 中的预期值是否正确"
+    - "增加仿真时间预算"
+
+# ===========================================================================
+# COMMON / GENERAL ERRORS
+# ===========================================================================
+
+- pattern: "\\[Common\\s+17-69\\]"
+  category: "vivado_command_failed"
+  likely_causes:
+    - "前一个 Vivado 命令失败"
+    - "Tcl 参数或工程状态错误"
+    - "指定的文件路径不存在"
+  suggested_actions:
+    - "向上查找第一个 ERROR"
+    - "检查 Tcl 脚本和 Vivado log"
+    - "确认工作目录和文件路径正确"
+
+- pattern: "\\[Common\\s+17-143\\]"
+  category: "file_not_found"
+  likely_causes:
+    - "read_verilog/read_vhdl/read_xdc 中指定的文件不存在"
+    - "路径拼写错误或文件未生成"
+  suggested_actions:
+    - "确认文件路径存在且拼写正确"
+    - "检查相对路径基于的工作目录"
+    - "使用绝对路径或确认 project 工作目录"
+
+- pattern: "\\[Common\\s+17-179\\]"
+  category: "part_not_supported"
+  likely_causes:
+    - "选用的 part 在此 Vivado 版本中不受支持"
+    - "Vivado 版本太旧，不支持该器件"
+  suggested_actions:
+    - "升级 Vivado 版本"
+    - "或改为该版本支持的器件型号"
+    - "运行 vivado -help 查看支持的器件列表"
+
+- pattern: "\\[Common\\s+17-55\\]"
+  category: "tcl_script_error"
+  likely_causes:
+    - "Tcl 脚本中有未定义变量或语法错误"
+    - "调用了不存在的 Vivado Tcl 命令"
+  suggested_actions:
+    - "逐条在 Vivado Tcl Console 中测试"
+    - "检查脚本中变量是否正确设置"
+
+- pattern: "\\[Common\\s+17-741\\]"
+  category: "read_file_format_error"
+  likely_causes:
+    - "read_verilog 读取了非 Verilog 文件"
+    - "文件编码为 BOM 格式（UTF-16LE）"
+  suggested_actions:
+    - "确认文件内容确实是可综合的 Verilog/VHDL"
+    - "将文件转为 UTF-8 without BOM 编码"
+
+- pattern: "\\[Write_hw_platform\\s+55-\\d+\\]"
+  category: "hardware_export_error"
+  likely_causes:
+    - "write_hw_platform 时缺少必要的 IP 或 bitstream"
+    - "硬件平台信息不完整"
+  suggested_actions:
+    - "确认 bitstream 已正确生成"
+    - "确认所有需要的 IP 都在设计中"
+
+- pattern: "\\[Bitstream\\s+28-\\d+\\]"
+  category: "bitstream_generation_error"
+  likely_causes:
+    - "bitstream 生成时检测到 DRC 问题"
+    - "配置模式不匹配"
+  suggested_actions:
+    - "检查 DRC 报告解决所有 critical warning"
+    - "确认配置模式和编程接口选择正确"
+
+- pattern: "\\[Program_hw_devices\\s+33-\\d+\\]"
+  category: "device_programming_error"
+  likely_causes:
+    - "JTAG 连接失败或 cable 未检测到"
+    - "器件型号不匹配"
+  suggested_actions:
+    - "检查 programming cable 连接"
+    - "运行 vivado -mode tcl 后手动连接 hw_server"
+    - "确认板卡电源和配置模式开关正确"
+
+- pattern: "\\[Filemgmt\\s+56-\\d+\\]"
+  category: "file_management_error"
+  likely_causes:
+    - "文件复制或移动失败（权限 / 磁盘空间）"
+    - "project 目录被锁定"
+  suggested_actions:
+    - "检查磁盘空间"
+    - "确认 project 目录权限"
+    - "不要在多个 Vivado 实例中同时打开同一 project"
+
+- pattern: "CRITICAL\\s+WARNING.*\\[Timing\\s+38-\\d+\\]"
+  category: "timing_violation"
+  likely_causes:
+    - "设计时序未收敛"
+    - "时钟约束不准确"
+    - "组合逻辑路径过长"
+  suggested_actions:
+    - "检查 timing summary 中的 WNS/TNS"
+    - "确认所有时钟都已正确定义"
+    - "检查跨时钟域路径是否需要 false_path"
+
+- pattern: "DRC\\s+.*violation"
+  category: "drc_violation"
+  likely_causes:
+    - "物理设计违反 Xilinx DRC 规则"
+    - "管脚分配冲突"
+    - "电源域问题"
+  suggested_actions:
+    - "运行 report_drc 查看详细信息"
+    - "检查 XDC 中的管脚约束"
+    - "查阅 device user guide 相关规则"
+
+- pattern: "resource.*over-utilized|overmapped|resource\\s+limit"
+  category: "resource_overutilization"
+  likely_causes:
+    - "设计使用的资源超过器件总资源"
+    - "特定资源类型（BRAM/DSP/LUT）满载"
+  suggested_actions:
+    - "检查利用率报告"
+    - "简化设计或使用更高密度器件"
+    - "使用 resource sharing 优化"
+
+- pattern: "ERROR.*no\\s+such\\s+file|cannot\\s+open.*file"
+  category: "missing_file_generic"
+  likely_causes:
+    - "命令引用的文件不存在"
+    - "工作目录与预期不符"
+  suggested_actions:
+    - "使用绝对路径或确认工作目录"
+    - "确认文件确实存在且路径拼写正确"
+
+- pattern: "ERROR.*out\\s+of\\s+memory|Memory\\s+allocation"
+  category: "out_of_memory"
+  likely_causes:
+    - "Vivado 进程内存不足"
+    - "设计规模超出机器内存"
+  suggested_actions:
+    - "使用 64-bit Vivado 并增加机器内存"
+    - "使用增量综合/实现减少内存消耗"
+    - "将设计拆分为多个子模块"
+
+- pattern: "CRITICAL WARNING.*NO_LOAD"
+  category: "vivado_checkpoint_mismatch"
+  likely_causes:
+    - "checkpoint 来自不同 Vivado 版本"
+    - "checkpoint 损坏或不完整"
+  suggested_actions:
+    - "使用 match_version 重新生成 checkpoint"
+    - "在同版本内传递 checkpoint"

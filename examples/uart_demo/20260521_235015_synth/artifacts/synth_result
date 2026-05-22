@@ -1,0 +1,32 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 1,
+  "log": "E:\\dev\\edagent-vivado\\examples\\uart_demo\\20260521_235015_synth\\vivado_synth.log",
+  "elapsed_sec": 0.42,
+  "timed_out": false,
+  "mock": true,
+  "mock_fail": "synth_8_439",
+  "timing": {
+    "wns": null,
+    "tns": null,
+    "whs": 0.045,
+    "ths": 0.0
+  },
+  "utilization": {
+    "lut": null,
+    "ff": null,
+    "bram": 2,
+    "dsp": 0
+  },
+  "log_summary": {
+    "error_count": 2,
+    "critical_warning_count": 1,
+    "warning_count": 0,
+    "top_error_signatures": [
+      "[Synth 8-439] Module 'echo_handler' not found while processing module 'uart_top'",
+      "[Synth 8-439] Module 'uart_rx' not found while processing module 'uart_top'",
+      "[Common 17-69] Command 'synth_design' failed"
+    ]
+  }
+}

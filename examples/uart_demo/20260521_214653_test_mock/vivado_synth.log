@@ -1,0 +1,5 @@
+****** Vivado v2022.1 (64-bit) ******
+  SW Build 3526262
+INFO: [Common 17-234] Starting synth
+CRITICAL WARNING: [Timing 38-282] The design failed to meet timing requirements
+INFO: Synth completed successfully
