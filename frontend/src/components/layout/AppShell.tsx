@@ -13,15 +13,29 @@ const nav = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   return <div className="app-shell">
     <aside className="nav-rail">
-      <div className="brand"><span className="brand-mark"><Bot size={16} /></span><span>EdAgent‑Vivado</span></div>
+      <div className="brand">
+        <span className="brand-mark"><Bot size={15} /></span>
+        <span>EdAgent</span>
+      </div>
       <nav className="nav-items">
-        {nav.map((item) => <NavLink key={item.label} to={item.path} end={item.path === '/'} className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <item.icon size={16} /> <span>{item.label}</span>
-        </NavLink>)}
+        {nav.map((item) => (
+          <NavLink
+            key={item.label}
+            to={item.path}
+            end={item.path === '/'}
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+          >
+            <item.icon size={16} />
+            <span>{item.label}</span>
+          </NavLink>
+        ))}
       </nav>
       <div className="nav-footer">
-        <div className="user-card"><span className="avatar">EA</span><span>engineer</span></div>
-        <div>v0.3.0</div>
+        <div className="user-card">
+          <span className="avatar">EA</span>
+          <span style={{ color: 'var(--text-secondary)', fontSize: '13px', fontWeight: 500 }}>Engineer</span>
+        </div>
+        <div style={{ paddingLeft: 4 }}>v0.3.0</div>
       </div>
     </aside>
     <main className="app-main">{children}</main>

@@ -32,7 +32,10 @@ export default function SessionsPage() {
 
   return <div className="page">
     <div className="page-header">
-      <div><h1 className="page-title">Sessions</h1><p className="page-subtitle">Manage and resume engineering sessions</p></div>
+      <div>
+        <h1 className="page-title">Sessions</h1>
+        <p className="page-subtitle">Manage and resume engineering sessions</p>
+      </div>
       <Button className="ghost" onClick={() => refetch()}><RefreshCw size={15} /> Refresh</Button>
     </div>
 
@@ -54,7 +57,7 @@ export default function SessionsPage() {
         <thead><tr><th>Session</th><th>Status</th><th>Updated</th><th>Messages</th><th>Tools</th><th>Problems</th><th>Tokens</th><th /></tr></thead>
         <tbody>
           {sessions.map((s) => <tr key={s.id} onClick={() => navigate(`/term?session=${s.id}`)} style={{ cursor: 'pointer' }}>
-            <td><div style={{ color: 'var(--text-strong)', fontWeight: 650 }}>{s.name}</div><div className="muted mono" style={{ fontSize: 11 }}>{s.id}</div></td>
+            <td><div style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</div><div className="muted mono" style={{ fontSize: 11 }}>{s.id}</div></td>
             <td><StatusBadge status={s.status} /></td>
             <td className="muted">{formatRelative(s.updated_at)}</td>
             <td>{formatNumber(s.message_count)}</td>
@@ -71,10 +74,10 @@ export default function SessionsPage() {
       {!isLoading && sessions.length === 0 && <EmptyState title="No sessions found" detail="Create a session below to start a Vivado debug run." />}
     </section>
 
-    <div className="panel" style={{ marginTop: 12 }}>
+    <div className="panel" style={{ marginTop: 16 }}>
       <div className="panel-body" style={{ display: 'flex', gap: 8 }}>
         <input className="input" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') createNow() }} placeholder="New session name (optional)" />
-        <Button className="primary" onClick={createNow} disabled={create.isPending}><Plus size={15} /> Create New Session</Button>
+        <Button className="primary" onClick={createNow} disabled={create.isPending}><Plus size={15} /> Create Session</Button>
       </div>
     </div>
   </div>

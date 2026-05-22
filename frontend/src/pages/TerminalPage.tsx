@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bug, CheckCircle2, Database, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
+import { ArrowLeft, Bug, Database, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { listEvents } from '../api/events'
@@ -90,16 +90,16 @@ export default function TerminalPage() {
   return <div className="page terminal-page">
     <div className="terminal-shell">
       <header className="terminal-header">
-        <Link to="/" className="btn ghost"><ArrowLeft size={15} /> Back to Sessions</Link>
+        <Link to="/" className="btn ghost"><ArrowLeft size={15} /> Sessions</Link>
         <div className="terminal-title">{session?.name || 'Session'} {(running || stopping) && <span className="terminal-status-dot" />}</div>
-        <label className="approval-toggle"><span>Approve patches</span><input type="checkbox" checked={Boolean(approvalQ.data?.approved)} onChange={(e) => approve.mutate(e.target.checked)} /></label>
-        {(running || stopping) && <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop Session</Button>}
+        <label className="approval-toggle"><span>Auto-approve</span><input type="checkbox" checked={Boolean(approvalQ.data?.approved)} onChange={(e) => approve.mutate(e.target.checked)} /></label>
+        {(running || stopping) && <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop</Button>}
       </header>
       <div className="terminal-layout">
         <aside className="terminal-side">
           <div className="side-section">
-            <div className="side-title">Session Info</div>
-            <div className="kv"><span>Session ID</span><span className="mono">{sessionId}</span></div>
+            <div className="side-title">Session</div>
+            <div className="kv"><span>ID</span><span className="mono">{sessionId}</span></div>
             <div className="kv"><span>Status</span><span><StatusBadge status={activeTask?.state || session?.status} /></span></div>
             <div className="kv"><span>Created</span><span>{formatTime(session?.created_at)}</span></div>
             <div className="kv"><span>Updated</span><span>{formatRelative(session?.updated_at)}</span></div>
@@ -119,7 +119,7 @@ export default function TerminalPage() {
             <button className={`tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}>Chat</button>
             <button className={`tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>Timeline</button>
             <span style={{ flex: 1 }} />
-            <Button className="ghost" onClick={() => setDebugOpen(!debugOpen)}>{debugOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />} Debug</Button>
+            <Button className="ghost" onClick={() => setDebugOpen(!debugOpen)}>{debugOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}</Button>
           </div>
           <div className={view === 'chat' ? 'message-list' : 'timeline-view'} ref={scrollRef}>
             {view === 'chat' ? <MessageList turns={runtime.turns} /> : <TimelineView items={runtime.timeline} />}
@@ -128,10 +128,25 @@ export default function TerminalPage() {
         </section>
 
         {debugOpen && <aside className="debug-drawer">
-          <div className="drawer-header"><strong>Debug Drawer</strong><Button className="ghost icon-btn" onClick={() => setDebugOpen(false)}>×</Button></div>
-          <div className="drawer-section"><div className="side-title"><FileText size={14} /> Context</div><div className="drawer-list"><span><Database size={13} /> files and retrieval audit pending</span><span><Shield size={13} /> patch approval: {approvalQ.data?.approved ? 'on' : 'off'}</span></div></div>
-          <div className="drawer-section"><div className="side-title"><Bug size={14} /> Events</div><div className="drawer-list"><span>{runtime.timeline.length} timeline events</span><span>{problemCount} problems</span></div></div>
-          <div className="drawer-section"><div className="side-title"><Wrench size={14} /> Tool Calls</div><div className="drawer-list">{runtime.tools.slice(-8).map((t) => <span key={t.id}>› {t.name} — {t.state}</span>)}</div></div>
+          <div className="drawer-header"><span>Debug</span><Button className="ghost icon-btn" onClick={() => setDebugOpen(false)}>×</Button></div>
+          <div className="drawer-section">
+            <div className="side-title"><FileText size={13} /> Context</div>
+            <div className="drawer-list">
+              <span><Database size={13} /> Retrieval audit pending</span>
+              <span><Shield size={13} /> Patch: {approvalQ.data?.approved ? 'auto' : 'manual'}</span>
+            </div>
+          </div>
+          <div className="drawer-section">
+            <div className="side-title"><Bug size={13} /> Events</div>
+            <div className="drawer-list">
+              <span>{runtime.timeline.length} events</span>
+              <span>{problemCount} problems</span>
+            </div>
+          </div>
+          <div className="drawer-section">
+            <div className="side-title"><Wrench size={13} /> Tools</div>
+            <div className="drawer-list">{runtime.tools.slice(-8).map((t) => <span key={t.id}>{t.name} — {t.state}</span>)}</div>
+          </div>
         </aside>}
       </div>
     </div>

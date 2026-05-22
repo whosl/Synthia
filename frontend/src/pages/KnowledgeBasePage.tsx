@@ -17,12 +17,12 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
       <div className="page-header">
         <div>
           <h1 className="page-title">Knowledge Base</h1>
-          <p className="page-subtitle">Error KB sources, candidate review, and retrieval audit access</p>
+          <p className="page-subtitle">Error KB sources, candidate review, and retrieval audit</p>
         </div>
         <Button className="ghost" onClick={() => kbCasesQ.refetch()}><RefreshCw size={14} /> Refresh</Button>
       </div>
-      <div style={{ display: 'grid', gap: 12 }}>
-        <Panel title="Error KB Sources" actions={<span className="muted">{cases.length} patterns loaded</span>}>
+      <div style={{ display: 'grid', gap: 16 }}>
+        <Panel title="Error KB Sources" actions={<span className="muted" style={{ fontSize: 12 }}>{cases.length} patterns</span>}>
           {cases.length > 0
             ? <table className="table"><thead><tr><th>Category</th><th>Pattern</th><th>Type</th></tr></thead>
               <tbody>{cases.slice(0, 20).map((c, i) => <tr key={i}><td>{c.category}</td><td className="mono" style={{ fontSize: 12 }}>{c.pattern}</td><td className="muted">built-in</td></tr>)}</tbody></table>
@@ -31,8 +31,8 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
         <Panel title="Actions">
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <Button className="primary" onClick={() => navigate('/kb')}>Review Candidates</Button>
-            <Button className="ghost" disabled title="Reindex requires Phase 2A backend (vector store + embedding)">Reindex Sources</Button>
-            <Button className="ghost" onClick={() => navigate('/monitor')}>View Retrieval Audits</Button>
+            <Button className="ghost" disabled title="Requires Phase 2A backend">Reindex Sources</Button>
+            <Button className="ghost" onClick={() => navigate('/monitor')}>Retrieval Audits</Button>
           </div>
         </Panel>
       </div>
@@ -43,15 +43,35 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
   const candidatesQ = useQuery({ queryKey: ['kb-candidates'], queryFn: listKbCandidates })
 
   return <div className="page">
-    <div className="page-header"><div><h1 className="page-title">Error KB Review</h1><p className="page-subtitle">Built-in cases, user cases, and pending candidates from failed runs</p></div></div>
+    <div className="page-header">
+      <div>
+        <h1 className="page-title">Error KB Review</h1>
+        <p className="page-subtitle">Built-in cases, user cases, and pending candidates</p>
+      </div>
+    </div>
     <div className="dashboard-grid">
       <Panel title="KB Candidates">
         {(candidatesQ.data?.candidates ?? []).length > 0
-          ? <table className="table"><thead><tr><th>ID</th><th>Title</th><th>Source</th><th>Confidence</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}><td className="mono">{c.id}</td><td>{c.title}</td><td className="mono muted">{c.source_run_id || c.source_session_id || 'problem'}</td><td>{c.confidence}</td><td><Button className="success" onClick={() => approveKbCandidate(c.id)}><CheckCircle2 size={13} /> Approve</Button> <Button className="danger" onClick={() => rejectKbCandidate(c.id)}><XCircle size={13} /> Reject</Button> <Button className="ghost" onClick={() => mergeKbCandidate(c.id)}><GitMerge size={13} /> Merge</Button></td></tr>)}</tbody></table>
-          : <EmptyState title="No pending candidates" detail="Candidates are auto-generated from failed Vivado runs." />}
+          ? <table className="table"><thead><tr><th>ID</th><th>Title</th><th>Source</th><th>Score</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}>
+            <td className="mono" style={{ fontSize: 11 }}>{c.id}</td>
+            <td>{c.title}</td>
+            <td className="mono muted" style={{ fontSize: 11 }}>{c.source_run_id || c.source_session_id || '—'}</td>
+            <td>{c.confidence}</td>
+            <td style={{ whiteSpace: 'nowrap' }}>
+              <Button className="success" onClick={() => approveKbCandidate(c.id)}><CheckCircle2 size={13} /></Button>{' '}
+              <Button className="danger" onClick={() => rejectKbCandidate(c.id)}><XCircle size={13} /></Button>{' '}
+              <Button className="ghost" onClick={() => mergeKbCandidate(c.id)}><GitMerge size={13} /></Button>
+            </td>
+          </tr>)}</tbody></table>
+          : <EmptyState title="No pending candidates" detail="Candidates are auto-generated from failed runs." />}
       </Panel>
       <Panel title="Built-in Error KB">
-        {data?.cases?.length ? <div style={{ display: 'grid', gap: 10 }}>{data.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}><strong>{c.category}</strong><div className="muted mono" style={{ fontSize: 12, marginTop: 4 }}>{c.pattern}</div></div>)}</div> : <EmptyState title="KB cases unavailable" detail="KB API will populate this panel when backend is running." />}
+        {data?.cases?.length
+          ? <div style={{ display: 'grid', gap: 10 }}>{data.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>{c.category}</div>
+            <div className="muted mono" style={{ fontSize: 11, marginTop: 4 }}>{c.pattern}</div>
+          </div>)}</div>
+          : <EmptyState title="KB unavailable" detail="KB API returns data when backend is running." />}
       </Panel>
     </div>
   </div>

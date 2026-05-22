@@ -164,9 +164,12 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
     case 'message.assistant.delta': {
       if (options.appendAssistantDelta && text) {
         const turn = assistantTurn(next, taskId)
-        turn.content += text
         const tb = ensureTextBlock(turn)
-        tb.text = turn.content
+        tb.text += text
+        turn.content = turn.blocks
+          .filter((block): block is { kind: 'text'; data: TextBlockState } => block.kind === 'text')
+          .map((block) => block.data.text)
+          .join('')
       }
       break
     }
@@ -235,19 +238,15 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
 }
 
 export function rebuildTerminalState(messages: Message[], events: SessionEvent[], activeTask?: Task | null) {
-  let state = stateFromMessages(messages)
-  const savedAssistantTasks = new Set(
-    messages.filter((m) => m.role === 'assistant' && m.task_id).map((m) => m.task_id),
+  const replayableAssistantTasks = new Set(
+    events
+      .filter((evt) => evt.task_id && evt.event_type === 'message.assistant.delta')
+      .map((evt) => evt.task_id),
+  )
+  let state = stateFromMessages(
+    messages.filter((m) => !(m.role === 'assistant' && m.task_id && replayableAssistantTasks.has(m.task_id))),
   )
   for (const evt of events) {
-    // Skip delta events for tasks that already have a saved assistant message
-    // (the message content is already in stateFromMessages)
-    const isDelta = evt.event_type === 'message.assistant.delta'
-    const skip = isDelta && evt.task_id && savedAssistantTasks.has(evt.task_id)
-    if (skip) {
-      if (evt.seq) state.lastSeq = Math.max(state.lastSeq, evt.seq)
-      continue
-    }
     state = applyEvent(state, evt, { appendAssistantDelta: true })
   }
   if (activeTask) {

@@ -29,16 +29,25 @@ export default function RunDetailPage() {
   }
 
   return <div className="page">
-    <div className="page-header"><div><h1 className="page-title">Run Detail</h1><p className="page-subtitle mono">{runId}</p></div><div><Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> Refresh</Button> <Button className="ghost" onClick={handleExport}><Download size={14} /> Export</Button></div></div>
+    <div className="page-header">
+      <div>
+        <h1 className="page-title">Run Detail</h1>
+        <p className="page-subtitle mono">{runId}</p>
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> Refresh</Button>
+        <Button className="ghost" onClick={handleExport}><Download size={14} /> Export</Button>
+      </div>
+    </div>
     <div className="run-detail-grid">
-      <div style={{ display: 'grid', gap: 12 }}>
-        <Panel title="Run Overview">
+      <div style={{ display: 'grid', gap: 16 }}>
+        <Panel title="Overview">
           <div className="kv"><span>Session</span><span className="mono">{run?.session_id || '—'}</span></div>
           <div className="kv"><span>Run ID</span><span className="mono">{run?.id || runId}</span></div>
           <div className="kv"><span>Status</span><span><StatusBadge status={run?.state} /></span></div>
           <div className="kv"><span>Started</span><span>{formatTime(run?.started_at)}</span></div>
           <div className="kv"><span>Duration</span><span>{formatDuration(run?.elapsed_ms)}</span></div>
-          <div className="kv"><span>Type</span><span>{run?.run_type || '—'}</span></div>
+          <div className="kv"><span>Type</span><span className="mono">{run?.run_type || '—'}</span></div>
         </Panel>
         <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
           <div className="metric-card"><div className="metric-label">Tool Calls</div><div className="metric-value">{toolcalls.length}</div></div>
@@ -47,15 +56,17 @@ export default function RunDetailPage() {
           <div className="metric-card"><div className="metric-label">Output</div><div className="metric-value">{formatNumber(totalOut)}</div></div>
         </div>
       </div>
-      <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'grid', gap: 16 }}>
         <Panel title="Tool Call Timeline">
-          <div className="timeline-bars">{toolcalls.map((t) => <div className="timeline-bar" key={t.id}>
-            <span className="mono">{t.tool_name}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(8, ((t.elapsed_ms || 250) / longest) * 100)}%` }}>{formatDuration(t.elapsed_ms)}</div></div><StatusBadge status={t.state} />
-          </div>) || <span className="muted">No tool calls</span>}</div>
+          <div className="timeline-bars">{toolcalls.length ? toolcalls.map((t) => <div className="timeline-bar" key={t.id}>
+            <span className="mono">{t.tool_name}</span>
+            <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(8, ((t.elapsed_ms || 250) / longest) * 100)}%` }}>{formatDuration(t.elapsed_ms)}</div></div>
+            <StatusBadge status={t.state} />
+          </div>) : <div className="muted" style={{ padding: 12 }}>No tool calls</div>}</div>
         </Panel>
         <div className="dashboard-grid">
-          <Panel title="Event Timeline">{(eventsQ.data?.events ?? []).slice(0, 8).map((e) => <div className="event-row" key={e.id}><span className="mono">#{e.seq}</span><span>{e.event_type}</span><span className="muted">{formatTime(e.created_at)}</span></div>)}</Panel>
-          <Panel title="Problems">{(problemsQ.data?.problems ?? []).length ? problemsQ.data!.problems.map((p) => <div className="problem-row" key={p.id}><span className={`status ${p.severity || 'warning'}`}>{p.severity || 'INFO'}</span><span>{p.message}</span><span className="muted">{p.source}</span></div>) : <div className="problem-row"><span className="status idle">INFO</span><span>No problems recorded for this run.</span><span className="muted">—</span></div>}</Panel>
+          <Panel title="Events">{(eventsQ.data?.events ?? []).slice(0, 8).map((e) => <div className="event-row" key={e.id}><span className="mono muted">#{e.seq}</span><span>{e.event_type}</span><span className="muted">{formatTime(e.created_at)}</span></div>)}</Panel>
+          <Panel title="Problems">{(problemsQ.data?.problems ?? []).length ? problemsQ.data!.problems.map((p) => <div className="problem-row" key={p.id}><span className={`status ${p.severity || 'warning'}`}>{p.severity || 'INFO'}</span><span>{p.message}</span><span className="muted">{p.source}</span></div>) : <div className="problem-row"><span className="status idle">OK</span><span className="muted">No problems recorded</span><span /></div>}</Panel>
         </div>
         <div className="dashboard-grid">
           <Panel title="Context Audit">
@@ -66,7 +77,7 @@ export default function RunDetailPage() {
             </div>)}
           </Panel>
           <Panel title="Artifacts">
-            {(artifactsQ.data?.artifacts ?? []).length ? artifactsQ.data!.artifacts.map((a) => <div className="event-row" key={a.id}><span>{a.artifact_type}</span><span className="mono">{a.path}</span><span className="muted">{formatTime(a.created_at)}</span></div>) : <div className="event-row"><span>—</span><span>No artifacts recorded.</span><span /></div>}
+            {(artifactsQ.data?.artifacts ?? []).length ? artifactsQ.data!.artifacts.map((a) => <div className="event-row" key={a.id}><span>{a.artifact_type}</span><span className="mono">{a.path}</span><span className="muted">{formatTime(a.created_at)}</span></div>) : <div className="muted" style={{ padding: 8, fontSize: 12 }}>No artifacts recorded.</div>}
           </Panel>
         </div>
       </div>

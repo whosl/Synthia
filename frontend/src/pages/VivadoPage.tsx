@@ -44,43 +44,43 @@ export default function VivadoPage() {
       <Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> Refresh</Button>
     </div>
     <div className="dashboard-grid">
-      <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'grid', gap: 16 }}>
         <Panel title="Target Health" actions={<StatusBadge status={data?.reachable ? 'connected' : 'error'} />}>
-          <div className="health-row"><span>Host</span><span>{data?.host || String(target?.host || 'not configured')}</span><Server size={15} /></div>
+          <div className="health-row"><span>Host</span><span>{data?.host || String(target?.host || 'not configured')}</span><Server size={15} color="var(--muted)" /></div>
           <div className="health-row"><span>SSH</span><span>{data?.reachable ? 'Connected' : data?.error || 'Disconnected'}</span><StatusBadge status={data?.reachable ? 'connected' : 'error'} /></div>
-          <div className="health-row"><span>Vivado Path</span><span className="mono">{data?.vivado_path || 'vivado'}</span><CheckCircle2 size={15} color="var(--success)" /></div>
-          <div className="health-row"><span>Version</span><span>{data?.version || 'Unknown'}</span><span className="muted">{isFetching ? 'checking…' : 'latest check'}</span></div>
+          <div className="health-row"><span>Vivado Path</span><span className="mono" style={{ fontSize: 12 }}>{data?.vivado_path || 'vivado'}</span><CheckCircle2 size={15} color="var(--success)" /></div>
+          <div className="health-row"><span>Version</span><span>{data?.version || 'Unknown'}</span><span className="muted">{isFetching ? 'checking...' : ''}</span></div>
           <div className="health-row"><span>License</span><span>{data?.reachable ? 'Available' : 'Unknown'}</span><StatusBadge status={data?.reachable ? 'connected' : 'warning'} /></div>
         </Panel>
-        <Panel title="Tcl / Script / Flow Runner">
-          <div className="command-console">{consoleLines.join('\n')}{'\n'}Vivado% █</div>
-          <textarea className="textarea" placeholder="Enter Tcl command..." style={{ marginTop: 10 }} value={tclInput} onChange={e => setTclInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRun() } }} />
+        <Panel title="Tcl Console">
+          <div className="command-console">{consoleLines.join('\n')}</div>
+          <textarea className="textarea" placeholder="Enter Tcl command..." style={{ marginTop: 12 }} value={tclInput} onChange={e => setTclInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRun() } }} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <Button className="primary" onClick={handleRun} disabled={!tclInput.trim()}><Play size={14} /> Run</Button>
             <Button className="ghost" onClick={handleSaveScript}><Download size={14} /> Save Script</Button>
           </div>
         </Panel>
       </div>
-      <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'grid', gap: 16 }}>
         <Panel title="Command History">
           <table className="table">
             <thead><tr><th>Time</th><th>Command</th><th>Status</th></tr></thead>
             <tbody>
               {(commandsQ.data?.commands?.length
                 ? commandsQ.data.commands.slice(0, 8).map((c: Record<string, unknown>, i: number) => (
-                  <tr key={i}><td className="mono">—</td><td className="mono">{String(c.command_text || c.name || c.id)}</td><td><StatusBadge status={c.state as string || 'done'} /></td></tr>
+                  <tr key={i}><td className="mono muted">—</td><td className="mono">{String(c.command_text || c.name || c.id)}</td><td><StatusBadge status={c.state as string || 'done'} /></td></tr>
                 ))
-                : <tr><td colSpan={3} className="muted" style={{ textAlign: 'center', padding: 20 }}>No command history yet</td></tr>
+                : <tr><td colSpan={3} className="muted" style={{ textAlign: 'center', padding: 24 }}>No command history yet</td></tr>
               )}
             </tbody>
           </table>
         </Panel>
-        <Panel title="Runtime Capabilities">
+        <Panel title="Runtime">
           <div className="metric-grid">
-            <div className="metric-card"><div className="metric-label">Target</div><div className="metric-value" style={{ fontSize: '18px' }}>{data?.target || 'default-remote'}</div></div>
-            <div className="metric-card"><div className="metric-label">Vivado</div><div className="metric-value" style={{ fontSize: '18px' }}>{data?.version || '2022.1'}</div></div>
-            <div className="metric-card"><div className="metric-label">SSH</div><div className="metric-value" style={{ fontSize: '18px' }}>{data?.reachable ? 'Connected' : 'Down'}</div></div>
-            <div className="metric-card"><div className="metric-label">Work Dir</div><div className="metric-value mono" style={{ fontSize: '14px' }}>{String(data?.work_dir || '/tmp/edagent_remote')}</div></div>
+            <div className="metric-card"><div className="metric-label">Target</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.target || 'default-remote'}</div></div>
+            <div className="metric-card"><div className="metric-label">Vivado</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.version || '2022.1'}</div></div>
+            <div className="metric-card"><div className="metric-label">SSH</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.reachable ? 'Up' : 'Down'}</div></div>
+            <div className="metric-card"><div className="metric-label">Work Dir</div><div className="metric-value mono" style={{ fontSize: 13 }}>{String(data?.work_dir || '/tmp/edagent_remote')}</div></div>
           </div>
         </Panel>
       </div>

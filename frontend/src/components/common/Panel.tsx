@@ -1,9 +1,6 @@
-﻿import type { PropsWithChildren } from 'react'
-import { clsx } from 'clsx'
-
-export function Panel({ title, actions, children, className }: PropsWithChildren<{ title?: string; actions?: React.ReactNode; className?: string }>) {
-  return <section className={clsx('panel', className)}>
-    {title && <div className="panel-header"><span>{title}</span><span>{actions}</span></div>}
+﻿export function Panel({ title, actions, children }: { title?: string; actions?: React.ReactNode; children: React.ReactNode }) {
+  return <div className="panel">
+    {title && <div className="panel-header"><span>{title}</span>{actions}</div>}
     <div className="panel-body">{children}</div>
-  </section>
+  </div>
 }
