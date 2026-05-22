@@ -108,6 +108,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
         }, status_code=409)
     # Save user message
     msg = message_create(session_id, "user", req.question)
+    event_create(session_id, "message.user.created", {"message_id": msg["id"], "text": req.question})
     # Create task
     t = task_create(session_id, msg["id"])
     task_update(t["id"], state="running", updated_at=int(time.time()))

@@ -1,0 +1,3627 @@
+# EdAgent-Vivado Next Architecture Specification
+
+> 本文档是 EdAgent-Vivado 后续开发的黄金参考（source of truth）。所有 session 记忆、后台任务、React 前端、SSE 实时通信、多 Agent 协作、监控观测、错误知识库沉淀等功能，应以本文档定义的长期架构为准。
+
+配套维护文档：
+
+- `VIVADO_COMMANDS.md`：按 Vivado Runtime Adapter 分层维护需要支持的 Vivado 命令矩阵、TclPolicy 分级、模板、parser/monitor 要求与实现优先级。
+
+## 1. 目标与原则
+
+### 1.1 总目标
+
+EdAgent-Vivado 应从“单 Agent 终端聊天 + Vivado 工具调用”演进为一个可持久运行、可追踪、可恢复、可扩展到多 Agent 协作的 EDA Agent 平台。
+
+系统必须支持：
+
+- session 内完整记忆管理，不丢上下文。
+- 页面关闭、刷新、断线后，后台 agent/task 继续运行。
+- 用户重新进入 session 后，可恢复完整聊天记录、reasoning、tool call、partial response、状态与执行轨迹。
+- React/Vite/TypeScript 前端统一接管 terminal、monitor、KB 等页面。
+- 用户可停止正在运行的任务，partial response 必须保存。
+- 多 Agent 协作通过统一事件、文件 channel 和 SSE 通信扩展。
+- 监控模块强制采集 run/tool/LLM/Vivado/problem/token/cost 数据，而不是依赖 LLM 自觉上报。
+- 错误知识库支持从 run 中自动沉淀 candidate，经审核后进入用户 KB。
+- 上下文构建必须通过 Context Builder、Error KB、语义知识库、向量检索、rerank、上下文审计共同保证，而不是依赖模型“自然记住”。
+- Vivado 必须通过统一 Runtime Adapter 支持所有 Tcl/batch/project/non-project/interactive 命令能力，并纳入 stop、监控、问题收集、知识沉淀和 artifact 管理。
+
+### 1.2 架构原则
+
+1. **持久化优先**  
+   所有影响用户体验、agent 上下文、可审计性的状态都必须持久化。
+
+2. **事件驱动**  
+   session、task、agent、tool、Vivado、KB candidate、monitor 都以统一事件流连接。
+
+3. **强制观测**  
+   harness/tool wrapper 层必须强制记录事实数据；LLM 只负责摘要、归纳和解释，不负责原始事实采集。
+
+4. **SSE 统一实时通道**  
+   单 Agent、多 Agent、terminal UI、monitor timeline 均以 SSE 为主要实时事件通道。
+
+5. **UI 状态可重建**  
+   前端 UI 不应依赖浏览器内存保存关键状态；刷新后应从数据库事件与消息重建。
+
+6. **多 Agent 原生预留**  
+   数据模型、事件协议、artifact、channel、monitor trace 均应从一开始支持 `agent_id`、`run_id`、`task_id`、`channel_id`。
+
+7. **审核式知识沉淀**  
+   自动发现问题和生成 KB candidate，但知识入库必须有 pending/approved/rejected/merged 工作流。
+
+8. **可扩展 provider 与模型角色**  
+   主模型、摘要模型、多 Agent 模型、未来 embedding/rerank 模型都应通过统一 provider adapter 管理 usage/cost。
+
+9. **显式上下文注入**  
+   每次 LLM 调用前必须生成可审计的 context package，记录注入了哪些 session memory、project context、Error KB、Semantic KB、tool summary、problem summary，以及每部分 token 占比、裁剪原因与可信度。
+
+10. **Vivado 执行抽象**  
+    Agent 不应直接拼接 SSH/Vivado 命令。所有 Vivado 操作必须通过 Vivado Runtime Adapter、FileSync、PathMapper、TclPolicy、ObservedToolRunner 统一执行。
+
+---
+
+## 2. 核心概念模型
+
+### 2.1 Session
+
+Session 是用户可见的长期会话容器。
+
+一个 session 包含：
+
+- 用户和 assistant 消息。
+- 多次 task/run。
+- 完整事件流。
+- 长期记忆与摘要。
+- artifacts。
+- agent/channel 文件通信空间。
+- monitor 统计。
+- KB candidate 来源记录。
+
+### 2.2 Task
+
+Task 是一次由用户消息触发的后台 agent 执行。
+
+约束：
+
+- 同一 session 同一时间只能有一个 active task。
+- 如果 session 已有 active task，新消息请求必须被拒绝，并返回当前 task 状态。
+- task 可进入 `running`、`stopping`、`stopped`、`done`、`error` 状态。
+- stop 后 partial assistant response 必须保存，标记 `stopped=true`。
+
+### 2.3 Run
+
+Run 是可观测执行单元，使用统一模型，通过 `run_type` 区分：
+
+- `task`：一次用户消息触发的 agent 后台任务。
+- `agent`：某个 agent 的一次执行。
+- `llm`：一次模型调用。
+- `tool`：一次 tool call。
+- `eda`：一次 Vivado synth/impl/sim。
+- `summary`：一次摘要模型调用。
+- `kb_generation`：一次 KB candidate 生成。
+- `multi_agent_handoff`：一次 agent handoff 或协作子任务。
+
+Run 可以嵌套：
+
+```text
+session
+  task_run
+    agent_run
+      llm_run
+      tool_run
+        eda_run
+      summary_run
+```
+
+### 2.4 Event
+
+Event 是 UI、监控、重连和审计的统一事实流。
+
+所有事件必须具备：
+
+- `id`
+- `seq`
+- `session_id`
+- `task_id`
+- `run_id`
+- `event_type`
+- `timestamp`
+- `agent_id`
+- `payload`
+
+`seq` 在 session 内单调递增，用于 SSE reconnect：
+
+```http
+GET /api/sessions/{session_id}/events?after_seq=123
+GET /api/sessions/{session_id}/stream?after_seq=123
+```
+
+### 2.5 Message
+
+Message 是 LLM 上下文和用户可读聊天历史的核心数据。
+
+消息类型：
+
+- `user`
+- `assistant`
+- `system`
+- `tool_summary`
+- `memory_summary`
+- `agent_handoff`
+
+Reasoning 原文不默认进入 LLM 上下文；tool 原始输出不直接进入上下文。它们通过摘要或结构化 summary 进入上下文。
+
+### 2.6 Artifact
+
+Artifact 是大内容、文件、patch、报告、日志、tool 原始输入输出等实体。
+
+数据库只保存 artifact 元数据、摘要、路径、hash、MIME/type。大内容保存到 artifact store。
+
+### 2.7 Channel
+
+Channel 是未来多 Agent 文件通信的基础抽象。
+
+每个 session 可包含：
+
+```text
+channels/
+  shared/
+  agents/
+    {agent_id}/
+      inbox/
+      outbox/
+  handoffs/
+  reports/
+```
+
+Channel 支持：
+
+- Agent 写入消息。
+- Agent 读取共享状态。
+- Supervisor 进行 handoff。
+- Monitor 记录谁写入了什么文件、何时写入、由哪个 run 触发。
+
+### 2.8 Error KB 与 Semantic Knowledge Base
+
+系统区分但统一检索：
+
+- **Error KB**：结构化 Vivado/EDA 错误案例，包含 pattern、signature、category、likely causes、suggested actions、repro steps、fix patch、Vivado/FPGA/project metadata。
+- **Semantic Knowledge Base**：向量化知识库，包含仓库文档、SPEC、README、Vivado 文档、本地 PDF、历史 run 总结、历史 session 总结、用户上传文档、RTL/约束/脚本源码、项目经验。
+
+统一检索入口应同时返回：
+
+- regex/signature 匹配结果。
+- 向量相似度结果。
+- rerank 后结果。
+- 权威度/可信度评分。
+- 来源信息。
+- token budget 建议。
+
+---
+
+## 3. 持久化与存储设计
+
+### 3.1 存储选择
+
+长期目标采用 SQLite 作为核心元数据与事件存储。
+
+同时保留文件 artifact store，用于：
+
+- Vivado log/report。
+- patch/diff。
+- 大型 tool input/output。
+- reasoning 原文快照。
+- agent channel 文件。
+- exported run bundle。
+
+### 3.2 运行时目录
+
+建议默认运行时目录：
+
+```text
+.edagent/
+  edagent.db
+  artifacts/
+    sessions/
+      {session_id}/
+        tasks/
+        runs/
+        tool_calls/
+        vivado/
+        patches/
+        reports/
+        logs/
+        reasoning/
+        channels/
+  archives/
+    sessions/
+```
+
+运行时目录可由环境变量配置：
+
+```text
+EDAGENT_RUNTIME_DIR
+EDAGENT_DB_PATH
+EDAGENT_ARTIFACT_ROOT
+```
+
+### 3.3 数据库表草案
+
+#### sessions
+
+```sql
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER,
+  deleted_at INTEGER,
+  last_message_preview TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  task_count INTEGER NOT NULL DEFAULT 0,
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
+  problem_count INTEGER NOT NULL DEFAULT 0,
+  token_input INTEGER NOT NULL DEFAULT 0,
+  token_output INTEGER NOT NULL DEFAULT 0,
+  total_cost REAL,
+  metadata_json TEXT
+);
+```
+
+#### tasks
+
+```sql
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_message_id TEXT,
+  state TEXT NOT NULL,
+  stop_requested INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  error TEXT,
+  active_run_id TEXT,
+  metadata_json TEXT
+);
+```
+
+#### messages
+
+```sql
+CREATE TABLE messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  agent_id TEXT,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_summary TEXT,
+  stopped INTEGER NOT NULL DEFAULT 0,
+  partial INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  token_input INTEGER,
+  token_output INTEGER,
+  metadata_json TEXT
+);
+```
+
+#### events
+
+```sql
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  run_id TEXT,
+  parent_run_id TEXT,
+  agent_id TEXT,
+  seq INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  artifact_id TEXT,
+  visibility TEXT NOT NULL DEFAULT 'public',
+  UNIQUE(session_id, seq)
+);
+```
+
+#### runs
+
+```sql
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  task_id TEXT,
+  parent_run_id TEXT,
+  agent_id TEXT,
+  run_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  elapsed_ms INTEGER,
+  error TEXT,
+  input_summary TEXT,
+  output_summary TEXT,
+  artifact_id TEXT,
+  metadata_json TEXT
+);
+```
+
+#### tool_calls
+
+```sql
+CREATE TABLE tool_calls (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  session_id TEXT,
+  task_id TEXT,
+  agent_id TEXT,
+  tool_name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  elapsed_ms INTEGER,
+  input_summary TEXT,
+  output_summary TEXT,
+  input_artifact_id TEXT,
+  output_artifact_id TEXT,
+  error TEXT,
+  metadata_json TEXT
+);
+```
+
+#### llm_usage
+
+```sql
+CREATE TABLE llm_usage (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  session_id TEXT,
+  task_id TEXT,
+  agent_id TEXT,
+  provider TEXT,
+  model TEXT NOT NULL,
+  model_role TEXT NOT NULL,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  total_tokens INTEGER,
+  cost_input REAL,
+  cost_output REAL,
+  cost_total REAL,
+  usage_source TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+`model_role` 包括：
+
+- `primary`
+- `summary`
+- `sub_agent`
+- `kb_generation`
+- `embedding`
+- `rerank`
+
+`usage_source` 包括：
+
+- `provider`
+- `estimated`
+- `unknown`
+
+#### artifacts
+
+```sql
+CREATE TABLE artifacts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  artifact_type TEXT NOT NULL,
+  path TEXT NOT NULL,
+  mime_type TEXT,
+  size_bytes INTEGER,
+  sha256 TEXT,
+  summary TEXT,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### memory_snapshots
+
+```sql
+CREATE TABLE memory_snapshots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  summary TEXT NOT NULL,
+  summary_model TEXT,
+  source_message_until TEXT,
+  source_event_until_seq INTEGER,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### problems
+
+```sql
+CREATE TABLE problems (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  source TEXT NOT NULL,
+  severity TEXT,
+  category TEXT,
+  signature TEXT,
+  normalized_signature TEXT,
+  message TEXT NOT NULL,
+  raw_excerpt_artifact_id TEXT,
+  detected_at INTEGER NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0,
+  resolution_summary TEXT,
+  metadata_json TEXT
+);
+```
+
+#### kb_cases
+
+用户扩展 KB：
+
+```sql
+CREATE TABLE kb_cases (
+  id TEXT PRIMARY KEY,
+  pattern TEXT NOT NULL,
+  normalized_signature TEXT,
+  category TEXT NOT NULL,
+  likely_causes_json TEXT NOT NULL,
+  suggested_actions_json TEXT NOT NULL,
+  repro_steps TEXT,
+  fix_patch_artifact_id TEXT,
+  vivado_version TEXT,
+  fpga_part TEXT,
+  top_module TEXT,
+  manifest_artifact_id TEXT,
+  verified_resolution INTEGER NOT NULL DEFAULT 0,
+  source_candidate_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### kb_candidates
+
+```sql
+CREATE TABLE kb_candidates (
+  id TEXT PRIMARY KEY,
+  source_run_id TEXT,
+  source_session_id TEXT,
+  source_problem_id TEXT,
+  pattern TEXT NOT NULL,
+  normalized_signature TEXT,
+  category TEXT,
+  message_ids_json TEXT,
+  raw_log_excerpt_artifact_id TEXT,
+  likely_causes_json TEXT NOT NULL,
+  suggested_actions_json TEXT NOT NULL,
+  repro_steps TEXT,
+  fix_patch_artifact_id TEXT,
+  vivado_version TEXT,
+  fpga_part TEXT,
+  top_module TEXT,
+  manifest_artifact_id TEXT,
+  resolved INTEGER,
+  resolution_summary TEXT,
+  confidence REAL,
+  status TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  reviewed_at INTEGER,
+  reviewed_by TEXT,
+  merged_into_case_id TEXT,
+  metadata_json TEXT
+);
+```
+
+Candidate 状态：
+
+- `pending`
+- `approved`
+- `rejected`
+- `merged`
+
+#### knowledge_sources
+
+```sql
+CREATE TABLE knowledge_sources (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  source_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  uri TEXT,
+  path TEXT,
+  authority_score REAL NOT NULL DEFAULT 0.5,
+  trust_score REAL NOT NULL DEFAULT 0.5,
+  version TEXT,
+  sha256 TEXT,
+  indexed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+`scope`：
+
+- `global`
+- `project`
+
+`source_type`：
+
+- `repo_markdown`
+- `spec`
+- `vivado_doc`
+- `pdf`
+- `run_summary`
+- `session_summary`
+- `user_upload`
+- `rtl`
+- `constraint`
+- `script`
+- `kb_case`
+- `artifact`
+
+#### knowledge_chunks
+
+```sql
+CREATE TABLE knowledge_chunks (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  chunk_index INTEGER NOT NULL,
+  title TEXT,
+  content TEXT NOT NULL,
+  content_summary TEXT,
+  token_count INTEGER,
+  start_offset INTEGER,
+  end_offset INTEGER,
+  sha256 TEXT,
+  authority_score REAL NOT NULL DEFAULT 0.5,
+  trust_score REAL NOT NULL DEFAULT 0.5,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### knowledge_embeddings
+
+向量存储通过接口抽象，不绑定具体数据库。SQLite 仅保存 embedding 元数据与索引状态；实际向量可存储于 sqlite-vec/sqlite-vss、Chroma、Qdrant、LanceDB 或其他实现。
+
+```sql
+CREATE TABLE knowledge_embeddings (
+  id TEXT PRIMARY KEY,
+  chunk_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dimension INTEGER,
+  vector_store TEXT NOT NULL,
+  vector_ref TEXT NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### retrieval_audits
+
+```sql
+CREATE TABLE retrieval_audits (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  agent_id TEXT,
+  query TEXT NOT NULL,
+  rewritten_query TEXT,
+  intent_json TEXT,
+  filters_json TEXT,
+  candidate_count INTEGER,
+  selected_count INTEGER,
+  rejected_count INTEGER,
+  token_budget INTEGER,
+  token_used INTEGER,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### retrieval_audit_items
+
+```sql
+CREATE TABLE retrieval_audit_items (
+  id TEXT PRIMARY KEY,
+  retrieval_audit_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT,
+  chunk_id TEXT,
+  kb_case_id TEXT,
+  problem_id TEXT,
+  artifact_id TEXT,
+  title TEXT,
+  excerpt TEXT,
+  vector_score REAL,
+  rerank_score REAL,
+  authority_score REAL,
+  trust_score REAL,
+  final_score REAL,
+  selected INTEGER NOT NULL,
+  rejection_reason TEXT,
+  token_count INTEGER,
+  metadata_json TEXT
+);
+```
+
+#### context_packages
+
+每次 LLM 调用前必须持久化 context package，用于证明模型实际收到了哪些上下文。
+
+```sql
+CREATE TABLE context_packages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  run_id TEXT,
+  agent_id TEXT,
+  model TEXT,
+  max_context_tokens INTEGER,
+  total_tokens INTEGER,
+  system_tokens INTEGER,
+  question_tokens INTEGER,
+  memory_tokens INTEGER,
+  recent_message_tokens INTEGER,
+  project_context_tokens INTEGER,
+  error_kb_tokens INTEGER,
+  semantic_kb_tokens INTEGER,
+  tool_summary_tokens INTEGER,
+  problem_summary_tokens INTEGER,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  artifact_id TEXT,
+  metadata_json TEXT
+);
+```
+
+#### context_package_items
+
+```sql
+CREATE TABLE context_package_items (
+  id TEXT PRIMARY KEY,
+  context_package_id TEXT NOT NULL,
+  item_type TEXT NOT NULL,
+  source_id TEXT,
+  source_type TEXT,
+  title TEXT,
+  content_summary TEXT,
+  token_count INTEGER,
+  priority INTEGER NOT NULL,
+  included INTEGER NOT NULL,
+  truncation_reason TEXT,
+  authority_score REAL,
+  trust_score REAL,
+  relevance_score REAL,
+  metadata_json TEXT
+);
+```
+
+#### channels
+
+```sql
+CREATE TABLE channels (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  channel_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT,
+  UNIQUE(session_id, name)
+);
+```
+
+#### channel_messages
+
+```sql
+CREATE TABLE channel_messages (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  run_id TEXT,
+  from_agent_id TEXT,
+  to_agent_id TEXT,
+  message_type TEXT NOT NULL,
+  content TEXT,
+  artifact_id TEXT,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+#### vivado_targets
+
+```sql
+CREATE TABLE vivado_targets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  host TEXT,
+  ssh_user TEXT,
+  ssh_key_path TEXT,
+  vivado_path TEXT NOT NULL,
+  settings_path TEXT,
+  remote_work_root TEXT,
+  vivado_version TEXT,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+`target_type`：
+
+- `local`
+- `remote_ssh`
+
+#### vivado_sessions
+
+Long-lived Vivado Tcl sessions:
+
+```sql
+CREATE TABLE vivado_sessions (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  state TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  remote_pid INTEGER,
+  local_pid INTEGER,
+  started_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL,
+  idle_timeout_sec INTEGER,
+  work_dir TEXT,
+  log_artifact_id TEXT,
+  error TEXT,
+  metadata_json TEXT
+);
+```
+
+`mode`：
+
+- `batch`
+- `tcl`
+- `project`
+- `non_project`
+
+#### vivado_commands
+
+```sql
+CREATE TABLE vivado_commands (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  vivado_session_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  command_type TEXT NOT NULL,
+  command_text TEXT,
+  script_artifact_id TEXT,
+  project_id TEXT,
+  work_dir TEXT,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  elapsed_ms INTEGER,
+  exit_code INTEGER,
+  log_artifact_id TEXT,
+  stdout_artifact_id TEXT,
+  stderr_artifact_id TEXT,
+  parsed_summary_json TEXT,
+  problem_count INTEGER NOT NULL DEFAULT 0,
+  stopped INTEGER NOT NULL DEFAULT 0,
+  killed INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  metadata_json TEXT
+);
+```
+
+`command_type`：
+
+- `raw_tcl`
+- `script`
+- `flow`
+- `query`
+- `project_open`
+- `project_create`
+- `interactive`
+
+#### file_sync_records
+
+```sql
+CREATE TABLE file_sync_records (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  local_path TEXT,
+  remote_path TEXT,
+  direction TEXT NOT NULL,
+  method TEXT NOT NULL,
+  sha256 TEXT,
+  size_bytes INTEGER,
+  state TEXT NOT NULL,
+  synced_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+`direction`：
+
+- `upload`
+- `download`
+
+`method`：
+
+- `scp`
+- `sftp`
+- `rsync`
+- `local_copy`
+
+#### path_mappings
+
+```sql
+CREATE TABLE path_mappings (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  project_id TEXT,
+  local_root TEXT NOT NULL,
+  remote_root TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+```
+
+### 3.4 删除与归档
+
+Session 删除语义：
+
+- 默认归档，不物理删除数据。
+- 支持 hard delete。
+
+API：
+
+```http
+DELETE /api/sessions/{session_id}
+DELETE /api/sessions/{session_id}?hard=true
+```
+
+默认归档时：
+
+- `sessions.archived_at` 写入时间。
+- artifacts 可移动到 `.edagent/archives/sessions/{session_id}` 或保留原路径并标记 archived。
+
+Hard delete 时：
+
+- 删除数据库中该 session 关联记录。
+- 删除 artifact 目录。
+- 删除 channel 文件。
+
+---
+
+## 4. 记忆管理设计
+
+### 4.1 记忆目标
+
+Agent 在 session 内不得忘记上下文。服务重启后也应恢复可用上下文。
+
+系统应保存：
+
+- user 消息。
+- assistant 消息，包括 stopped partial response。
+- tool 调用摘要。
+- 关键 Vivado/log/report 结果摘要。
+- session memory summary。
+- agent handoff summary。
+- KB/problem summary。
+- reasoning 原文事件与摘要。
+
+### 4.2 上下文构造
+
+每次 agent 执行前，构造模型输入：
+
+```text
+System Prompt
+Session Memory Summary
+Project / Manifest Context
+Recent User/Assistant Messages
+Matched Error KB
+Retrieved Semantic Knowledge
+Relevant Tool Summaries
+Relevant Problems / KB Matches
+Current User Question
+```
+
+Context Builder 是唯一负责构造 LLM 输入上下文的模块。任何 agent 调用模型前都必须通过 Context Builder 生成 context package，并写入 `context_packages` 与 `context_package_items`。
+
+上下文注入优先级：
+
+```text
+1 current user question
+2 system prompt
+3 project context
+4 session memory summary
+5 recent conversation
+6 active problem / matched Error KB
+7 relevant tool summaries
+8 semantic Knowledge Base snippets
+```
+
+当 token budget 不足时，应按优先级裁剪，并在 context audit 中记录被裁剪项与原因。
+
+### 4.3 Reasoning 策略
+
+Reasoning 原文：
+
+- 保存为 event。
+- 可保存到 artifact。
+- 默认不直接注入 LLM 上下文。
+
+Reasoning 摘要：
+
+- 可由摘要模型生成。
+- 可写入 memory snapshot。
+- 可在 UI 默认折叠显示。
+
+### 4.4 Tool 结果策略
+
+Tool 原始输入输出：
+
+- 保存 artifact。
+- 记录裁剪后的 input/output summary。
+- 超长内容必须截断、脱敏、落盘。
+
+Tool 摘要：
+
+- 进入消息上下文或 memory。
+- 包含工具名、状态、关键发现、artifact 链接、问题签名。
+
+### 4.5 摘要模型接口
+
+需要预留次级模型摘要接口：
+
+```python
+class SummaryModel:
+    async def summarize_session(...)
+    async def summarize_tool_result(...)
+    async def summarize_reasoning(...)
+    async def generate_kb_candidate(...)
+```
+
+摘要模型应记录：
+
+- provider
+- model
+- input/output token
+- cost
+- source run
+- summary artifact/message
+
+### 4.6 长上下文裁剪
+
+上下文策略：
+
+- 保留最近 N 轮完整消息。
+- 保留关键 tool/EDA 摘要。
+- 使用 session memory summary 压缩长期历史。
+- 根据任务类型检索相关 KB/problem/artifact summary。
+- 不将大 log、完整 tool output、完整 reasoning 直接塞入模型。
+
+### 4.7 上下文审计
+
+每次 LLM 调用必须记录：
+
+- 注入了哪些 session memory。
+- 注入了哪些 recent messages。
+- 注入了哪些 project context。
+- 注入了哪些 Error KB。
+- 注入了哪些 Semantic KB snippets。
+- 注入了哪些 tool summaries。
+- 每部分 token 数。
+- 每个知识片段的来源、相关度、权威度、可信度。
+- 哪些候选被裁剪，裁剪原因。
+
+Monitor run detail 和 Terminal debug panel 都应可查看 context audit。
+
+---
+
+## 5. 后台任务与 Stop 设计
+
+### 5.1 Task 生命周期
+
+状态机：
+
+```text
+created -> running -> done
+                 \-> stopping -> stopped
+                 \-> error
+```
+
+### 5.2 并发约束
+
+同一 session 只能有一个 active task。
+
+如果用户在 active task 期间发送新消息：
+
+```json
+{
+  "error": "session_task_running",
+  "session_id": "...",
+  "task_id": "...",
+  "state": "running"
+}
+```
+
+### 5.3 Stop API
+
+Session 级：
+
+```http
+POST /api/sessions/{session_id}/stop
+```
+
+Task 级：
+
+```http
+POST /api/tasks/{task_id}/stop
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "session_id": "...",
+  "task_id": "...",
+  "state": "stopping"
+}
+```
+
+### 5.4 Stop 语义
+
+Stop 必须：
+
+- 标记 `stop_requested=true`。
+- 尽力取消 LLM/agent 后续执行。
+- 当前已启动 tool 进入安全停止流程。
+- 不丢弃已产生事件。
+- 保存 partial assistant response，标记：
+
+```json
+{
+  "role": "assistant",
+  "partial": true,
+  "stopped": true
+}
+```
+
+Vivado/SSH/subprocess 强制终止能力应纳入 harness lifecycle 管理：
+
+- 每个外部命令必须有 process handle 或 remote job handle。
+- Stop 时触发 graceful stop。
+- 超时后可 escalated kill。
+- 所有 stop/kill 行为必须记录事件和 monitor run。
+
+### 5.5 Vivado Job Stop
+
+Vivado job stop 必须由 Vivado Runtime Adapter 执行：
+
+1. 标记 command/session stop requested。
+2. 对 interactive Tcl session 尝试发送 Ctrl-C/SIGINT。
+3. 对 batch process 尝试 graceful terminate。
+4. 超时后 kill 本地 PID 或远程 PID。
+5. 远程 SSH target 必须能查询并 kill Vivado 进程。
+6. Stop/kill/stdout/stderr/log tail 必须写入事件和 artifacts。
+
+事件：
+
+```text
+vivado.stop_requested
+vivado.interrupt_sent
+vivado.terminate_sent
+vivado.kill_sent
+vivado.stopped
+vivado.killed
+vivado.stop_error
+```
+
+---
+
+## 6. SSE 实时通信协议
+
+### 6.1 统一使用 SSE
+
+系统统一使用 SSE 承载：
+
+- terminal 实时输出。
+- session event reconnect。
+- monitor timeline。
+- 多 Agent 通信事件展示。
+- channel/file communication viewer 更新。
+
+### 6.2 事件读取 API
+
+历史事件：
+
+```http
+GET /api/sessions/{session_id}/events?after_seq=0&limit=500
+```
+
+实时事件：
+
+```http
+GET /api/sessions/{session_id}/stream?after_seq=0
+```
+
+全局 monitor stream：
+
+```http
+GET /api/monitor/stream?after_event_id=...
+```
+
+Run stream：
+
+```http
+GET /api/monitor/runs/{run_id}/stream?after_seq=...
+```
+
+### 6.3 SSE 格式
+
+```text
+id: {session_id}:{seq}
+event: {event_type}
+data: {"id":"...","seq":123,"payload":{...}}
+```
+
+### 6.4 Reconnect
+
+前端必须记录最后处理的 `seq`。断线后：
+
+1. 调用 `/events?after_seq=last_seq` 补齐。
+2. 重新连接 `/stream?after_seq=latest_seq`。
+3. UI 根据事件 reducer 重建状态。
+
+### 6.5 事件类型
+
+核心事件：
+
+```text
+session.created
+session.updated
+session.archived
+
+task.created
+task.started
+task.stopping
+task.stopped
+task.done
+task.error
+
+message.user.created
+message.assistant.delta
+message.assistant.completed
+message.assistant.stopped
+
+reasoning.delta
+reasoning.summary
+
+tool.started
+tool.delta
+tool.completed
+tool.error
+
+llm.started
+llm.usage
+llm.completed
+llm.error
+
+eda.started
+eda.log
+eda.problem_detected
+eda.completed
+eda.error
+
+vivado.target.checked
+vivado.session.started
+vivado.session.ready
+vivado.session.idle_timeout
+vivado.session.closed
+vivado.command.started
+vivado.command.stdout
+vivado.command.stderr
+vivado.command.log
+vivado.command.completed
+vivado.command.error
+vivado.command.stopped
+vivado.file.uploaded
+vivado.file.downloaded
+vivado.path.mapped
+
+problem.detected
+kb.candidate.created
+kb.candidate.updated
+
+agent.started
+agent.completed
+agent.handoff
+agent.message
+
+channel.message.created
+artifact.created
+```
+
+---
+
+## 7. API Specification
+
+### 7.1 Session API
+
+```http
+GET    /api/sessions
+POST   /api/sessions
+GET    /api/sessions/{session_id}
+PATCH  /api/sessions/{session_id}
+DELETE /api/sessions/{session_id}
+```
+
+Create session:
+
+```json
+{
+  "name": "Timing debug",
+  "manifest_path": "examples/uart_full/manifest.yaml",
+  "metadata": {}
+}
+```
+
+List response:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "...",
+      "name": "...",
+      "status": "idle|running|stopping|stopped|error|archived",
+      "created_at": 123,
+      "updated_at": 456,
+      "message_count": 12,
+      "tool_call_count": 8,
+      "problem_count": 2,
+      "token_input": 1000,
+      "token_output": 500,
+      "last_message_preview": "..."
+    }
+  ]
+}
+```
+
+### 7.2 Message API
+
+```http
+GET /api/sessions/{session_id}/messages
+```
+
+Supports pagination:
+
+```http
+GET /api/sessions/{session_id}/messages?before=...&limit=100
+```
+
+### 7.3 Chat / Task API
+
+Start task:
+
+```http
+POST /api/sessions/{session_id}/tasks
+```
+
+Request:
+
+```json
+{
+  "question": "...",
+  "manifest_path": "...",
+  "agent_mode": "single|multi",
+  "metadata": {}
+}
+```
+
+Response:
+
+```json
+{
+  "task_id": "...",
+  "session_id": "...",
+  "state": "running",
+  "stream_url": "/api/sessions/{session_id}/stream?after_seq=..."
+}
+```
+
+Task status:
+
+```http
+GET /api/tasks/{task_id}
+GET /api/sessions/{session_id}/active-task
+```
+
+Stop:
+
+```http
+POST /api/tasks/{task_id}/stop
+POST /api/sessions/{session_id}/stop
+```
+
+### 7.4 Event API
+
+```http
+GET /api/sessions/{session_id}/events
+GET /api/sessions/{session_id}/stream
+```
+
+### 7.5 Approval API
+
+Patch approval remains a first-class setting:
+
+```http
+GET  /api/settings/patch-approval
+POST /api/settings/patch-approval
+```
+
+Response:
+
+```json
+{
+  "approved": true
+}
+```
+
+### 7.6 Monitor API
+
+Phase 1 APIs:
+
+```http
+GET /api/monitor/runs
+GET /api/monitor/runs/{run_id}
+GET /api/monitor/runs/{run_id}/toolcalls
+GET /api/monitor/runs/{run_id}/usage
+GET /api/monitor/sessions/{session_id}/runs
+```
+
+Full monitor APIs:
+
+```http
+GET /api/monitor/runs/{run_id}/events
+GET /api/monitor/runs/{run_id}/artifacts
+GET /api/monitor/runs/{run_id}/problems
+GET /api/monitor/runs/{run_id}/stream
+GET /api/monitor/toolcalls
+GET /api/monitor/usage
+GET /api/monitor/problems
+GET /api/monitor/agents
+GET /api/monitor/channels
+GET /api/monitor/stream
+```
+
+### 7.7 KB API
+
+Read built-in and user KB:
+
+```http
+GET /api/kb/cases
+GET /api/kb/cases/{case_id}
+```
+
+Candidate workflow:
+
+```http
+GET   /api/kb/candidates
+POST  /api/kb/candidates
+GET   /api/kb/candidates/{id}
+PATCH /api/kb/candidates/{id}
+POST  /api/kb/candidates/{id}/approve
+POST  /api/kb/candidates/{id}/reject
+POST  /api/kb/candidates/{id}/merge
+```
+
+Generate candidate from run/problem:
+
+```http
+POST /api/monitor/runs/{run_id}/kb-candidates
+POST /api/monitor/problems/{problem_id}/kb-candidates
+```
+
+### 7.8 Semantic Knowledge Base API
+
+知识库分为全局知识库和项目知识库：
+
+```http
+GET    /api/knowledge/sources
+POST   /api/knowledge/sources
+GET    /api/knowledge/sources/{source_id}
+PATCH  /api/knowledge/sources/{source_id}
+DELETE /api/knowledge/sources/{source_id}
+
+POST   /api/knowledge/sources/{source_id}/reindex
+POST   /api/knowledge/reindex
+
+GET    /api/knowledge/chunks
+GET    /api/knowledge/chunks/{chunk_id}
+
+POST   /api/knowledge/search
+POST   /api/knowledge/error-search
+POST   /api/knowledge/context-preview
+
+GET    /api/knowledge/retrieval-audits/{audit_id}
+GET    /api/monitor/runs/{run_id}/context
+```
+
+Search request:
+
+```json
+{
+  "query": "...",
+  "scope": "global|project|both",
+  "project_id": "...",
+  "top_k": 12,
+  "filters": {
+    "source_type": ["vivado_doc", "run_summary", "rtl"],
+    "fpga_part": "...",
+    "tool": "vivado",
+    "category": "timing"
+  },
+  "use_query_rewrite": true,
+  "use_rerank": true,
+  "min_score": 0.3
+}
+```
+
+Search response:
+
+```json
+{
+  "audit_id": "...",
+  "results": [
+    {
+      "source_type": "doc|kb|run|session|artifact|rtl|constraint",
+      "source_id": "...",
+      "chunk_id": "...",
+      "title": "...",
+      "path": "...",
+      "excerpt": "...",
+      "vector_score": 0.82,
+      "rerank_score": 0.76,
+      "authority_score": 0.9,
+      "trust_score": 0.85,
+      "final_score": 0.8
+    }
+  ]
+}
+```
+
+### 7.9 Artifact API
+
+```http
+GET /api/artifacts/{artifact_id}
+GET /api/artifacts/{artifact_id}/download
+GET /api/sessions/{session_id}/artifacts
+```
+
+### 7.10 Multi-Agent / Channel API
+
+```http
+GET  /api/sessions/{session_id}/agents
+GET  /api/sessions/{session_id}/channels
+POST /api/sessions/{session_id}/channels
+GET  /api/channels/{channel_id}/messages
+POST /api/channels/{channel_id}/messages
+```
+
+### 7.11 Vivado Runtime API
+
+Targets:
+
+```http
+GET    /api/vivado/targets
+POST   /api/vivado/targets
+GET    /api/vivado/targets/{target_id}
+PATCH  /api/vivado/targets/{target_id}
+DELETE /api/vivado/targets/{target_id}
+POST   /api/vivado/targets/{target_id}/health
+GET    /api/health/vivado
+```
+
+Commands:
+
+```http
+POST /api/vivado/commands/tcl
+POST /api/vivado/commands/script
+POST /api/vivado/commands/flow
+POST /api/vivado/commands/query
+GET  /api/vivado/commands/{command_id}
+POST /api/vivado/commands/{command_id}/stop
+GET  /api/vivado/commands/{command_id}/log
+GET  /api/vivado/commands/{command_id}/artifacts
+```
+
+Long-lived sessions:
+
+```http
+POST /api/vivado/sessions
+GET  /api/vivado/sessions
+GET  /api/vivado/sessions/{vivado_session_id}
+POST /api/vivado/sessions/{vivado_session_id}/command
+POST /api/vivado/sessions/{vivado_session_id}/stop
+DELETE /api/vivado/sessions/{vivado_session_id}
+```
+
+File sync:
+
+```http
+POST /api/vivado/sync/upload
+POST /api/vivado/sync/download
+GET  /api/vivado/sync/records
+```
+
+Example Tcl request:
+
+```json
+{
+  "target_id": "default-remote",
+  "session_id": "...",
+  "task_id": "...",
+  "project_id": "uart_full",
+  "mode": "batch|interactive",
+  "command": "report_timing_summary -file timing.rpt",
+  "approval_token": "..."
+}
+```
+
+Example flow request:
+
+```json
+{
+  "target_id": "default-remote",
+  "flow": "synth|impl|sim|bitstream|report|ip",
+  "manifest_path": "examples/uart_full/manifest.yaml",
+  "options": {
+    "top": "uart_top",
+    "part": "xc7a35tcpg236-1",
+    "reports": ["timing", "utilization", "drc", "methodology"]
+  }
+}
+```
+
+---
+
+## 8. Agent 与 LangGraph 集成
+
+### 8.1 Checkpointer
+
+Agent graph 必须使用持久化 checkpointer。
+
+目标：
+
+- 服务重启后恢复 LangGraph thread state。
+- 与产品级 `messages/events` 双轨保存。
+- 允许根据 session/task/thread_id 查询状态。
+
+### 8.2 Thread ID
+
+Thread ID 应稳定映射到 session：
+
+```text
+thread_id = session:{session_id}
+```
+
+Multi-agent 可扩展：
+
+```text
+thread_id = session:{session_id}:agent:{agent_id}
+```
+
+### 8.3 Agent 输入
+
+Agent 不应直接读取全部数据库事件。应通过 ContextBuilder 生成上下文：
+
+```python
+class AgentContextBuilder:
+    async def build(session_id, task_id, question) -> AgentContext:
+        ...
+```
+
+ContextBuilder 负责：
+
+- 读取 memory summary。
+- 读取 recent messages。
+- 读取相关 tool summary。
+- 读取 project/manifest context。
+- 注入 relevant KB/problem。
+- 调用 Error KB 与 Semantic Knowledge Base 统一检索。
+- 执行 query rewrite、intent detection、entity extraction、rerank。
+- 计算知识片段相关度、权威度、可信度。
+- 控制 token budget。
+- 写入 context package 与 retrieval audit。
+
+### 8.3.1 Context Builder Pipeline
+
+```text
+User Question
+  -> intent detection
+  -> entity extraction
+  -> query rewrite
+  -> Error KB regex/signature search
+  -> Semantic KB vector search
+  -> metadata filtering
+  -> rerank
+  -> authority/trust scoring
+  -> token budgeting
+  -> context package assembly
+  -> context audit persistence
+  -> LLM call
+```
+
+语义识别必须覆盖：
+
+- 向量相似度检索。
+- query rewrite。
+- rerank。
+- intent detection。
+- entity extraction。
+- error code / Vivado message ID 识别。
+- top module、FPGA part、文件路径、约束名、tool name 识别。
+
+### 8.3.2 Knowledge Injection Tools
+
+除 Context Builder 自动注入外，agent 和多 Agent 均可主动调用知识库工具：
+
+```python
+search_knowledge_base(query: str, filters: dict | None = None) -> str
+search_error_kb(error_signature: str, context: dict | None = None) -> str
+```
+
+工具返回必须包含来源、相关度、权威度、可信度、artifact/source id。Agent 回答时应优先基于高可信来源。
+
+### 8.4 Tool 包装器
+
+所有 tool 必须通过统一 wrapper 运行：
+
+```python
+class ObservedToolRunner:
+    async def run(tool_name, args, context):
+        emit(tool.started)
+        create_run(run_type="tool")
+        try:
+            result = await call_tool(...)
+            collect_problem_if_any(...)
+            summarize_result(...)
+            emit(tool.completed)
+        except Exception:
+            emit(tool.error)
+            record_problem(source="tool_exception")
+            raise
+```
+
+---
+
+## 9. Harness 强制观测模块
+
+### 9.1 原则
+
+Problem detection 必须在 harness/tool/parser 层强制采集，不依赖 LLM 自觉。
+
+采集来源：
+
+- Vivado log parser 解析 errors/critical warnings。
+- tool call 异常。
+- command_runner/subprocess 失败。
+- remote_runner/SSH 失败。
+- timing/utilization/parser 异常。
+- patch apply/test 失败。
+- 用户手动标记。
+- agent/sub-agent 上报 problem event。
+- 多 Agent handoff 失败或 channel 协议异常。
+
+### 9.2 Harness Event Sink
+
+所有 harness 模块应接受统一 context：
+
+```python
+@dataclass
+class RunContext:
+    session_id: str
+    task_id: str
+    run_id: str
+    agent_id: str | None
+    event_sink: EventSink
+    artifact_store: ArtifactStore
+    problem_collector: ProblemCollector
+```
+
+### 9.3 Problem Collector
+
+ProblemCollector 负责：
+
+- 从 log summary 提取问题。
+- 生成 normalized signature。
+- 做 KB match。
+- 写入 `problems` 表。
+- 触发 `problem.detected` event。
+- 触发 KB candidate generation policy。
+
+### 9.4 Token 与 Cost Collector
+
+每次 LLM 调用必须记录 usage：
+
+- provider 返回 usage 时采用 provider usage。
+- provider 未返回时可标记 unknown。
+- 支持 estimated usage。
+- 支持多 provider adapter。
+
+Cost 必须支持：
+
+- 主模型。
+- 摘要模型。
+- sub-agent 模型。
+- KB generation 模型。
+- embedding/rerank 模型。
+
+模型单价通过配置管理：
+
+```yaml
+models:
+  deepseek-v4-flash:
+    input_per_1m: 0.0
+    output_per_1m: 0.0
+  glm-5-turbo:
+    input_per_1m: 0.0
+    output_per_1m: 0.0
+```
+
+### 9.5 Trace / Span 模型
+
+内部 run model 应兼容 trace/span：
+
+- `run_id`
+- `parent_run_id`
+- `run_type`
+- `started_at`
+- `finished_at`
+- `attributes`
+- `events`
+- `status`
+
+未来可导出到 LangSmith 或 OpenTelemetry。
+
+---
+
+## 9A. Vivado Runtime Adapter
+
+### 9A.1 目标
+
+Vivado Runtime Adapter 是所有 Vivado 执行能力的唯一入口。它必须支持：
+
+- 任意 Vivado Tcl 命令。
+- 完整 Tcl script。
+- batch 模式。
+- interactive Tcl session。
+- project mode。
+- non-project mode。
+- 常用高级 flow：synth、impl、sim、bitstream、report、IP。
+- 本地 Vivado。
+- 远程 SSH Vivado。
+- 文件同步。
+- 路径映射。
+- Stop/kill。
+- SSE 实时 log。
+- harness 强制 problem collection。
+- monitor/toolcall/run/usage/artifact 记录。
+
+### 9A.2 默认远程 Target
+
+当前默认远程 Vivado target：
+
+```text
+SSH: ssh -i E:/dev/id_192.168.31.150 root@192.168.31.150
+Vivado: /home/xilinx/vivado/Vivado/2022.1/bin/vivado
+Settings: /home/xilinx/vivado/Vivado/2022.1/settings64.sh
+Remote work root: /tmp/edagent_remote
+```
+
+`.env`：
+
+```text
+VIVADO_REMOTE_HOST=root@192.168.31.150
+VIVADO_REMOTE_KEY=E:/dev/id_192.168.31.150
+VIVADO_REMOTE_PATH=/home/xilinx/vivado/Vivado/2022.1/bin/vivado
+VIVADO_REMOTE_ENV=/home/xilinx/vivado/Vivado/2022.1/settings64.sh
+VIVADO_REMOTE_WORK=/tmp/edagent_remote
+```
+
+Manual command equivalent:
+
+```bash
+ssh -i E:/dev/id_192.168.31.150 root@192.168.31.150
+source /home/xilinx/vivado/Vivado/2022.1/settings64.sh
+vivado -mode batch -source your_script
+```
+
+This target must be represented as a configurable `vivado_target`, not hard-coded.
+
+### 9A.3 Execution Layers
+
+Runtime Adapter exposes layered APIs:
+
+```text
+Raw Tcl Command
+  -> Tcl Script Runner
+  -> Vivado Batch Job
+  -> High-level EDA Flow
+  -> Long-lived Tcl Session
+```
+
+Agent tools may use any layer, but all layers must pass through:
+
+- TclPolicy.
+- Approval gate.
+- ObservedToolRunner.
+- EventSink.
+- ArtifactStore.
+- ProblemCollector.
+- VivadoTarget.
+
+### 9A.4 Local and Remote Executors
+
+Executors:
+
+```python
+class VivadoExecutor:
+    async def run_batch(script: VivadoScript, ctx: RunContext) -> VivadoResult: ...
+    async def run_tcl(command: str, ctx: RunContext) -> VivadoResult: ...
+    async def open_session(ctx: RunContext) -> VivadoSession: ...
+```
+
+Remote execution must be abstracted:
+
+```python
+class RemoteExecutor:
+    async def run(command: str, cwd: str | None, env: dict) -> RemoteResult: ...
+    async def upload(local: str, remote: str) -> None: ...
+    async def download(remote: str, local: str) -> None: ...
+    async def kill(pid: int) -> None: ...
+```
+
+Supported implementations:
+
+- command-line ssh/scp.
+- paramiko SSH/SFTP.
+- local subprocess.
+
+System must support local/remote auto selection based on target configuration.
+
+### 9A.5 Remote Directory Layout
+
+Remote work root:
+
+```text
+/tmp/edagent_remote/
+  projects/
+    {project_id}/
+      sources/
+      constraints/
+      scripts/
+      runs/
+        {run_id}/
+          run.tcl
+          vivado.log
+          reports/
+          artifacts/
+```
+
+Each project has a stable remote workspace. Each run has an isolated run directory.
+
+### 9A.6 FileSync
+
+FileSync must support multiple strategies:
+
+- scp.
+- SFTP.
+- rsync.
+- hash-based incremental sync.
+- local copy.
+
+Interface:
+
+```python
+class FileSync:
+    async def sync_project(manifest, target, project_id) -> SyncResult: ...
+    async def upload(local_path, remote_path) -> SyncRecord: ...
+    async def download(remote_path, local_path) -> SyncRecord: ...
+```
+
+Requirements:
+
+- Use sha256/hash to avoid unnecessary uploads.
+- Record all sync operations in `file_sync_records`.
+- Emit SSE events for upload/download.
+- Download logs/reports/patches into artifact store.
+
+### 9A.7 PathMapper
+
+PathMapper maps local Windows paths to remote Linux paths and back.
+
+Requirements:
+
+- Manifest paths must be normalized and mapped before Tcl generation.
+- Tcl scripts must use remote paths.
+- Tool output/log paths must be mapped back to local artifact references when displayed.
+- Path mappings must be stored in `path_mappings`.
+
+Example:
+
+```text
+Local:  E:\dev\edagent-vivado\examples\uart_full
+Remote: /tmp/edagent_remote/projects/uart_full
+```
+
+### 9A.8 Tcl Policy and Approval
+
+Supporting all Vivado commands does not mean blindly executing unsafe Tcl.
+
+Policy must include:
+
+- allowlist for known Vivado commands.
+- denylist for dangerous Tcl/system commands.
+- approval requirement for raw Tcl.
+- approval requirement for dangerous file operations.
+- script artifact saving before execution.
+
+Dangerous patterns include:
+
+```text
+exec
+file delete
+file rename
+open "|"
+rm -rf
+shutdown
+```
+
+Policy result:
+
+```json
+{
+  "allowed": false,
+  "requires_approval": true,
+  "reason": "raw_tcl_contains_exec",
+  "matched_rules": ["deny_exec"]
+}
+```
+
+### 9A.9 Tcl Script Generation
+
+Long-term strategy:
+
+- Prefer templates for common flows.
+- LLM fills parameters and explains intent.
+- Raw Tcl requires approval.
+- Every generated Tcl script is saved as artifact.
+- Script text is included in monitor run detail.
+- Script summary enters context memory/tool summary.
+
+Templates must cover:
+
+- synth.
+- impl.
+- sim.
+- timing report.
+- utilization report.
+- power report.
+- DRC report.
+- methodology report.
+- bitstream generation.
+- IP generation.
+
+### 9A.10 Project and Non-Project Mode
+
+Both project and non-project mode must be supported.
+
+Manifest decides default mode, but user/agent may request either mode.
+
+Non-project example:
+
+```tcl
+read_verilog ...
+read_xdc ...
+synth_design -top ... -part ...
+report_timing_summary -file ...
+```
+
+Project mode example:
+
+```tcl
+create_project ...
+add_files ...
+add_files -fileset constrs_1 ...
+launch_runs synth_1
+wait_on_run synth_1
+open_run synth_1
+report_timing_summary -file ...
+```
+
+### 9A.11 Long-lived Vivado Tcl Session
+
+System must support long-lived Vivado Tcl sessions locally and remotely:
+
+```bash
+source /home/xilinx/vivado/Vivado/2022.1/settings64.sh
+vivado -mode tcl
+```
+
+Requirements:
+
+- Per project session recommended.
+- Configurable idle timeout.
+- Prompt detection.
+- Command timeout.
+- stdout/stderr/log capture.
+- Stop/interruption.
+- Session cleanup.
+- State recorded in `vivado_sessions`.
+
+### 9A.12 Command Output and Parsing
+
+Every Vivado command must:
+
+- Save full log as artifact.
+- Stream selected stdout/log lines through SSE.
+- Parse errors, critical warnings, warnings, message IDs.
+- Feed parsed problems into ProblemCollector.
+- Generate tool summary.
+- Generate run summary.
+- Optionally generate KB candidate on failure.
+
+### 9A.13 Vivado Health Check
+
+Health check must validate:
+
+- SSH connectivity.
+- SSH key readability.
+- remote settings64.sh exists.
+- remote vivado path exists.
+- remote work directory writable.
+- Vivado version.
+- license availability if detectable.
+- local Vivado availability for local targets.
+
+APIs:
+
+```http
+GET /api/health/vivado
+POST /api/vivado/targets/{target_id}/health
+```
+
+CLI:
+
+```bash
+edagent vivado health
+```
+
+### 9A.14 Multi-target and Multi-version
+
+System must support:
+
+- multiple remote hosts.
+- multiple Vivado versions.
+- local and remote targets.
+- default target.
+- session/project target selection.
+
+Current `192.168.31.150` Vivado 2022.1 target is the default target, not the only target.
+
+### 9A.15 Agent Tools
+
+Agent-facing tools:
+
+```python
+vivado_run_tcl(command: str, target_id: str | None = None, mode: str = "batch")
+vivado_run_script(script: str, target_id: str | None = None, mode: str = "batch")
+vivado_run_flow(flow: str, options: dict, target_id: str | None = None)
+vivado_open_project(project_path: str, target_id: str | None = None)
+vivado_create_project(options: dict, target_id: str | None = None)
+vivado_query(command: str, target_id: str | None = None)
+```
+
+All tools must return structured summaries with artifact references.
+
+### 9A.16 CLI
+
+CLI must include:
+
+```bash
+edagent vivado tcl
+edagent vivado script
+edagent vivado health
+edagent vivado session
+edagent vivado targets
+```
+
+Existing CLI flows should be implemented on top of Vivado Runtime Adapter:
+
+```bash
+edagent run-synth
+edagent run-impl
+edagent run-sim
+```
+
+### 9A.17 Vivado Context Injection
+
+Vivado command summaries should enter session context:
+
+- failed command summary.
+- successful QoR/report summary.
+- timing/utilization/power/drc/methodology summaries.
+- command script summary.
+- relevant artifacts.
+
+Raw full logs stay as artifacts and are retrieved only when needed.
+
+---
+
+## 10. 错误知识库设计
+
+### 10.1 KB 分层
+
+KB 来源：
+
+1. Built-in KB：源码内 YAML，例如当前 `error_cases.yaml`。
+2. User KB：SQLite `kb_cases`。
+3. Candidate KB：SQLite `kb_candidates`。
+
+查询时合并 built-in + user KB。
+
+### 10.2 Candidate 自动生成
+
+当 run 失败或 Vivado/parser/tool 产生 problem 时：
+
+- 自动生成 candidate。
+- 状态为 `pending`。
+- 不自动进入 approved KB。
+
+成功 run 一般不生成 candidate，除非用户手动触发。
+
+### 10.3 Candidate 字段
+
+Candidate 必须支持：
+
+- 来源 session/run/problem。
+- pattern。
+- normalized signature。
+- category。
+- message IDs。
+- raw log excerpt artifact。
+- likely causes。
+- suggested actions。
+- confidence。
+- repro steps。
+- fix patch/diff artifact。
+- Vivado version。
+- FPGA part。
+- top module。
+- manifest artifact。
+- final resolved status。
+- resolution summary。
+- created_by：`parser|harness|agent|user|summary_model`。
+
+### 10.4 去重与合并
+
+去重策略：
+
+1. normalized signature。
+2. regex/pattern match。
+3. embedding similarity。
+4. agent/summary model assisted merge decision。
+
+Agent-assisted merge 写入 spec，但实现时应作为审核辅助，不应自动覆盖用户 KB。
+
+---
+
+## 10A. Semantic Knowledge Base 与向量检索
+
+### 10A.1 知识库范围
+
+Semantic Knowledge Base 包含两层：
+
+- Global KB：跨项目通用知识，例如 Vivado 文档、通用 EDA 经验、仓库 SPEC、README、架构文档、通用历史案例。
+- Project KB：绑定某个 manifest/project 的知识，例如项目 README、RTL、XDC、Tcl、历史 run/session summary、项目特定 patch 和调试经验。
+
+不设置独立 session KB。Session 内长期记忆进入 memory snapshots；当 session 经验需要沉淀时，应生成 project/global KB candidate。
+
+### 10A.2 知识来源
+
+必须支持：
+
+- 仓库内 Markdown、README、arch.md、SPEC.md。
+- Vivado 官方文档或本地 PDF。
+- 历史 run 总结。
+- 历史 session 总结。
+- 用户手动上传文档。
+- RTL 源码。
+- XDC 约束。
+- Tcl/Python/shell 脚本。
+- Error KB approved case。
+- 已验证 patch 和解决方案。
+
+### 10A.3 向量库抽象
+
+向量数据库必须通过接口抽象：
+
+```python
+class VectorStore:
+    async def upsert(chunks: list[KnowledgeChunk]) -> None: ...
+    async def delete(chunk_ids: list[str]) -> None: ...
+    async def search(query_embedding, filters, top_k: int) -> list[VectorHit]: ...
+```
+
+可选后端：
+
+- sqlite-vec/sqlite-vss。
+- Chroma。
+- Qdrant。
+- LanceDB。
+- 其他兼容实现。
+
+Spec 不绑定具体后端。
+
+### 10A.4 Embedding Provider
+
+Embedding 模型通过 provider adapter 配置：
+
+```python
+class EmbeddingProvider:
+    async def embed_documents(texts: list[str]) -> list[list[float]]: ...
+    async def embed_query(text: str) -> list[float]: ...
+```
+
+要求：
+
+- 支持 API embedding 模型。
+- 支持本地 embedding 模型。
+- 支持与当前 LLM provider 同源的 embedding。
+- usage/cost 进入 `llm_usage` 或 embedding usage 记录。
+
+### 10A.5 Ingestion Pipeline
+
+```text
+source discovery
+  -> hash change detection
+  -> parsing
+  -> chunking
+  -> metadata extraction
+  -> authority/trust score assignment
+  -> embedding
+  -> vector upsert
+  -> index audit
+```
+
+文件变化策略：
+
+- 通过 sha256/hash 识别变化。
+- 支持增量 reindex。
+- 支持 UI 手动 reindex。
+
+### 10A.6 Retrieval Pipeline
+
+```text
+query
+  -> intent detection
+  -> entity extraction
+  -> query rewrite
+  -> metadata filters
+  -> vector search
+  -> Error KB match
+  -> rerank
+  -> min score threshold
+  -> authority/trust scoring
+  -> token budget selection
+  -> retrieval audit
+```
+
+### 10A.7 可信度与权威度评分
+
+每个知识片段必须具备：
+
+- `vector_score`：语义相似度。
+- `rerank_score`：重排得分。
+- `authority_score`：来源权威度。
+- `trust_score`：内容可信度。
+- `final_score`：综合分。
+
+权威度示例：
+
+```text
+Vivado official docs > verified user KB > approved KB case > project README > historical run summary > raw session summary > unreviewed candidate
+```
+
+可信度可由以下因素影响：
+
+- 是否人工审核。
+- 是否被成功 run 验证。
+- 是否来自官方文档。
+- 是否与当前 project/part/top/tool 匹配。
+- 是否近期过期。
+- 是否与其他来源一致。
+
+### 10A.8 上下文污染防护
+
+为防止语义检索污染上下文，必须使用：
+
+- rerank。
+- metadata filter。
+- minimum score threshold。
+- authority/trust score。
+- retrieval audit。
+- token budget limit。
+- source attribution。
+
+低分或低可信结果不得进入高优先级上下文区。
+
+### 10A.9 写回策略
+
+模型不得自动直接写入全局/项目知识库。
+
+允许：
+
+- 写入 session memory。
+- 生成 project KB candidate。
+- 生成 global KB candidate。
+- 生成 Error KB candidate。
+
+所有 KB candidate 必须审核后才能进入 approved KB。
+
+---
+
+## 11. 多 Agent 协作设计
+
+### 11.1 Agent Identity
+
+每个 agent 必须有：
+
+- `agent_id`
+- `agent_type`
+- `name`
+- `role`
+- `model`
+- `capabilities`
+
+### 11.2 Agent Run
+
+每个 agent 执行作为独立 run：
+
+```text
+run_type = agent
+agent_id = synth_agent
+parent_run_id = task_run
+```
+
+### 11.3 Agent 间通信
+
+通信方式：
+
+- 文件 channel。
+- channel_messages 表。
+- SSE event 广播。
+
+事件类型：
+
+```text
+agent.message
+agent.handoff
+channel.message.created
+artifact.created
+```
+
+### 11.4 文件通信规范
+
+Artifact/channel 文件必须记录：
+
+- writer agent。
+- reader agent 或 target channel。
+- run/task/session。
+- content summary。
+- artifact id/path/hash。
+
+### 11.5 多 Agent 监控
+
+Monitor 必须支持：
+
+- 每个 agent 独立 token/tool/time。
+- agent 间消息流图。
+- 文件通信记录。
+- SSE 消息记录。
+- supervisor 分配任务与 handoff 记录。
+
+### 11.6 多 Agent 知识库使用
+
+多 Agent 共享 Global KB 和 Project KB，但每个 Agent 可以拥有自己的 retrieval profile。
+
+示例：
+
+- `synth_agent` 优先检索 synthesis、Vivado log、RTL 相关知识。
+- `timing_agent` 优先检索 timing closure、XDC、clock、path analysis 相关知识。
+- `patch_agent` 优先检索历史 patch、代码结构、已验证解决方案。
+- `supervisor_agent` 可检索全局知识并把检索结果作为 handoff context。
+
+Supervisor handoff 必须记录：
+
+- 检索 query。
+- 检索结果。
+- 注入给目标 agent 的上下文。
+- retrieval audit id。
+
+---
+
+## 12. React 前端规范
+
+### 12.1 工程结构
+
+采用独立 Vite + React + TypeScript 工程：
+
+```text
+frontend/
+  package.json
+  vite.config.ts
+  tsconfig.json
+  src/
+    main.tsx
+    app/
+      App.tsx
+      router.tsx
+    pages/
+      SessionsPage.tsx
+      TerminalPage.tsx
+      MonitorRunsPage.tsx
+      MonitorRunDetailPage.tsx
+      KnowledgeBasePage.tsx
+    components/
+      terminal/
+      monitor/
+      kb/
+      markdown/
+      layout/
+    api/
+      client.ts
+      types.ts
+      sessions.ts
+      tasks.ts
+      events.ts
+      monitor.ts
+      kb.ts
+      knowledge.ts
+    stores/
+      sessionStore.ts
+      streamStore.ts
+      terminalStore.ts
+    styles/
+```
+
+构建产物可由 FastAPI 托管。
+
+### 12.2 页面路由
+
+React 接管：
+
+```http
+GET /
+GET /term
+GET /monitor
+GET /monitor/runs/:runId
+GET /kb
+```
+
+### 12.3 UI 风格
+
+- Terminal 页面保持终端风暗色体验。
+- Monitor 页面采用 dashboard 风格。
+- KB 页面支持审核工作流。
+
+### 12.4 状态管理
+
+采用：
+
+- TanStack Query：API cache、列表、详情、刷新。
+- Zustand：实时 stream、active session/task、未提交输入、UI 展开折叠状态。
+
+### 12.5 API Client
+
+采用 OpenAPI 生成的类型化 API client。
+
+要求：
+
+- 所有 API 类型集中维护。
+- 错误响应结构统一。
+- SSE client 独立封装。
+
+### 12.6 SSE Client
+
+前端提供：
+
+```ts
+class SessionEventStream {
+  connect(sessionId: string, afterSeq: number): void
+  disconnect(): void
+  onEvent(event: SessionEvent): void
+}
+```
+
+能力：
+
+- 自动 reconnect。
+- 使用 `after_seq` 补齐事件。
+- 防重复处理。
+- backoff 重连。
+- 页面隐藏/恢复后状态同步。
+
+### 12.7 Terminal UI
+
+必须支持：
+
+- session 列表页。
+- 新建、重命名、删除、归档 session。
+- 搜索 session。
+- 按 updated/created/name/status 排序。
+- 显示 running/stopped/error 状态。
+- 显示 token/toolcall/problem count 摘要。
+- 聊天页返回按钮。
+- approve patches 开关。
+- Stop 按钮。
+- 输入框旁 Stop。
+- Stop 后按钮显示 `Stopping`，结束后显示 `Stopped`。
+- 聊天视图与 timeline 视图切换。
+- assistant turn 内展示 reasoning/tool/response 子块。
+
+### 12.8 Reasoning UI
+
+Reasoning：
+
+- 默认折叠。
+- 可配置显示/隐藏。
+- 显示摘要和耗时。
+- 可展开查看原文。
+- 长 reasoning 使用虚拟列表或分段加载。
+
+### 12.9 Tool Call UI
+
+Tool block 必须显示：
+
+- tool 名称。
+- 状态。
+- 耗时。
+- 输入摘要。
+- 输出摘要。
+- artifact 链接。
+- 错误/异常标红。
+- 若该 tool/subagent 涉及 LLM，显示 token 和费用。
+
+### 12.10 Response Markdown
+
+使用：
+
+- `react-markdown`
+- `remark-gfm`
+
+代码块增强：
+
+- 代码高亮。
+- 一键复制。
+- diff 渲染。
+- 文件路径/artifact 可点击。
+
+### 12.11 Monitor UI
+
+Phase 1：
+
+- `/monitor/runs`
+- run 列表。
+- run detail。
+- toolcall timeline。
+- usage summary。
+
+Phase 2：
+
+- charts。
+- token/cost 趋势。
+- tool error rate。
+- agent 对比。
+
+Phase 3：
+
+- multi-agent message graph。
+- channel/file communication viewer。
+- KB candidate workflow。
+
+Monitor run detail must also show Vivado-specific details:
+
+- target host/version。
+- execution mode：batch/interactive/project/non-project。
+- generated Tcl script。
+- command timeline。
+- stdout/stderr/log tail。
+- reports/artifacts。
+- parsed Vivado errors/warnings/message IDs。
+- stop/interrupt/kill events。
+
+### 12.11A Vivado UI
+
+React UI should include Vivado management views:
+
+- Vivado targets list。
+- target health check。
+- target version/license/workdir status。
+- command history。
+- long-lived Tcl session status。
+- run Tcl/script/flow form。
+- artifact/report browser。
+- path mapping and file sync debug view。
+
+### 12.12 KB UI
+
+KB 页面必须覆盖：
+
+- 查看 built-in YAML KB。
+- 查看 user KB。
+- 查看 pending candidates。
+- approve/reject/merge。
+- 从 run detail 一键生成 candidate。
+
+### 12.13 Context / Retrieval Audit UI
+
+Terminal debug panel 与 Monitor run detail 必须展示：
+
+- 实际注入模型的 context package。
+- session memory 注入项。
+- recent messages 注入项。
+- Error KB 注入项。
+- Semantic KB 注入项。
+- project context 注入项。
+- tool/problem summary 注入项。
+- 每项 token 数。
+- 每项来源、路径、source id、artifact id。
+- 相关度、权威度、可信度。
+- 被裁剪项与裁剪原因。
+
+### 12.14 Knowledge Base UI
+
+Knowledge Base 页面必须支持：
+
+- Global KB sources。
+- Project KB sources。
+- 文档上传。
+- source reindex。
+- 全量 reindex。
+- semantic search 调试。
+- retrieval audit 查看。
+- candidate 审核入口。
+
+### 12.15 Frontend Refactor Design
+
+React 前端的长期目标是一个可扩展的 EDA Agent Engineering Console，而不是仅为当前 API 写死的页面集合。
+
+设计方向：
+
+```text
+Terminal Core + Engineering Dashboard + Vivado Cockpit + Knowledge Console
+```
+
+要求：
+
+- 保持 terminal 暗色工程感。
+- Monitor/Vivado/KB 页面采用生产级 dashboard 信息架构。
+- UI 质量目标为 production-grade，不以临时 demo 为目标。
+- 所有页面、导航、事件处理、API client、面板都应通过模块化扩展，而不是在单个组件中硬编码。
+- 不在前端写死 Vivado target、host、路径、模型、agent 名称、event type 全量集合或后端 feature 开关。
+
+当前技术栈：
+
+```text
+React
+Vite
+TypeScript
+React Router
+TanStack Query
+Zustand
+SSE EventSource
+CSS design tokens
+```
+
+允许新增的基础依赖：
+
+```text
+react-markdown
+remark-gfm
+lucide-react
+clsx
+```
+
+### 12.16 Visual Design Gate
+
+正式重构 UI 前应先形成视觉设计方案，再进入实现。
+
+流程：
+
+1. 产出 Terminal、Monitor、Vivado、KB 至少一组核心界面设计概念。
+2. 从设计概念抽取 design tokens、布局密度、状态颜色、组件族、字体规则。
+3. 实现时保持设计一致性。
+4. 浏览器验证时检查 terminal、dashboard、responsive、交互状态。
+
+设计系统必须包含：
+
+- color tokens。
+- typography tokens。
+- spacing scale。
+- radius/elevation。
+- status colors：running/done/error/stopped/stopping/warning。
+- terminal block variants。
+- dashboard panel variants。
+- table/timeline/card/form/button/badge primitives。
+
+### 12.17 Extensible Frontend Module System
+
+前端应按 feature module 扩展。
+
+每个 feature module 可声明：
+
+```ts
+export interface FrontendModule {
+  id: string
+  routes: AppRoute[]
+  navItems?: NavItem[]
+  queryKeys?: Record<string, unknown>
+  eventReducers?: EventReducer[]
+  panels?: PanelContribution[]
+  settingsSections?: SettingsSection[]
+}
+```
+
+核心模块：
+
+- `sessions`
+- `terminal`
+- `monitor`
+- `vivado`
+- `kb`
+- `knowledge`
+- `settings`
+
+长期可新增：
+
+- `multiAgent`
+- `contextAudit`
+- `artifacts`
+- `reports`
+- `admin`
+
+模块化目标：
+
+- 新增页面不需要改动根组件的大量 switch。
+- 新增事件类型可以注册 reducer 或 timeline renderer。
+- 新增 monitor panel 可以注册到 run detail。
+- 新增 Vivado target/command 能力可以通过 API metadata 渲染。
+
+### 12.18 Directory Architecture
+
+推荐目录：
+
+```text
+frontend/src/
+  app/
+    App.tsx
+    router.tsx
+    providers.tsx
+    modules.ts
+
+  api/
+    generated/
+    client.ts
+    types.ts
+    sessions.ts
+    tasks.ts
+    events.ts
+    monitor.ts
+    settings.ts
+    vivado.ts
+    kb.ts
+    knowledge.ts
+
+  lib/
+    sse.ts
+    eventReducer.ts
+    markdown.ts
+    time.ts
+    format.ts
+    errors.ts
+    capability.ts
+
+  stores/
+    terminalStore.ts
+    streamStore.ts
+    uiStore.ts
+    moduleStore.ts
+
+  components/
+    layout/
+    terminal/
+    monitor/
+    vivado/
+    kb/
+    knowledge/
+    common/
+
+  pages/
+    SessionsPage.tsx
+    TerminalPage.tsx
+    MonitorPage.tsx
+    RunDetailPage.tsx
+    VivadoPage.tsx
+    KnowledgeBasePage.tsx
+    SettingsPage.tsx
+
+  styles/
+    tokens.css
+    global.css
+    terminal.css
+    monitor.css
+    vivado.css
+```
+
+目录是推荐组织方式，不应成为限制。后续可以按功能增长拆分，只要保持 module boundary 清晰。
+
+### 12.19 Routing and Navigation
+
+长期路由：
+
+```text
+/                         sessions
+/term?session={id}         terminal
+/monitor                   run list
+/monitor/runs/:runId       run detail
+/vivado                    targets / health / commands
+/kb                        error KB / candidates
+/knowledge                 semantic knowledge
+/settings                  settings
+```
+
+路由和导航必须数据驱动：
+
+```ts
+const routes = modules.flatMap(m => m.routes)
+const navItems = modules.flatMap(m => m.navItems ?? [])
+```
+
+不应在多个页面中散落硬编码链接。
+
+### 12.20 API Client Strategy
+
+长期采用 OpenAPI 生成的类型化 client。
+
+要求：
+
+- 构建流程可生成 `frontend/src/api/generated`。
+- feature API wrapper 只封装业务语义，不重复定义后端 schema。
+- API base path 可配置。
+- 新前端只依赖 `/api/v1` 长期接口，不兼容旧 `/api/terminal/*`。
+- 错误结构统一包装为 `ApiError`。
+
+API client 层级：
+
+```text
+generated OpenAPI client
+  -> feature API wrappers
+  -> TanStack Query hooks
+  -> page/components
+```
+
+### 12.21 Data Fetching and State
+
+使用 TanStack Query 管理 server state：
+
+- session list/detail。
+- messages。
+- active task。
+- monitor runs/detail。
+- toolcalls/usage/events。
+- Vivado health/targets/commands。
+- KB cases/candidates。
+- knowledge sources/search。
+- patch approval。
+
+使用 Zustand 管理 client/runtime UI state：
+
+- active stream connection。
+- last processed seq per session。
+- terminal view mode。
+- collapsed block ids。
+- debug drawer state。
+- selected timeline filters。
+- local UI preferences。
+
+浏览器不是权威状态来源。刷新后必须能通过 API + events 重建 UI。
+
+### 12.22 SSE and Event Reducer
+
+Terminal 的权威实时来源是 messages + events：
+
+1. 拉取 messages。
+2. 拉取 events。
+3. 使用统一 reducer 合并为 turns/timeline/tool state。
+4. 连接 SSE stream。
+5. 断线后使用 `after_seq` 补齐。
+
+SSE client 必须封装：
+
+- connect/disconnect。
+- heartbeat timeout。
+- backoff reconnect。
+- replay `after_seq`。
+- duplicate event guard。
+- unknown event fallback。
+
+事件 reducer 必须可扩展：
+
+```ts
+export interface EventReducer {
+  eventTypes: string[] | "*"
+  reduce(state: TerminalRuntimeState, event: SessionEvent): TerminalRuntimeState
+}
+```
+
+未知事件不得导致 UI 崩溃，应进入 generic timeline。
+
+### 12.23 Terminal Experience
+
+Terminal 页面采用：
+
+- 左侧/可折叠 session-run 信息区。
+- 中央聊天区。
+- chat/timeline 视图切换。
+- 右侧 debug drawer：context、events、toolcalls、retrieval audit。
+- composer + Stop。
+
+默认展示：
+
+- user message。
+- assistant turn。
+- reasoning 折叠块。
+- tool call block。
+- response markdown。
+
+Stop 行为：
+
+- active task running/stopping 时启用。
+- 点击后显示 `Stopping...`。
+- 结束后显示 `Stopped`。
+- partial response 保留。
+
+### 12.24 Monitor Experience
+
+Monitor Phase 1 UI 必须包含：
+
+- run list。
+- run detail。
+- toolcall timeline。
+- usage summary。
+- event timeline。
+
+Run detail 面板应通过 panel contribution 扩展：
+
+- metadata。
+- events。
+- toolcalls。
+- usage。
+- artifacts。
+- problems。
+- context audit。
+- Vivado command。
+- agent handoff。
+
+### 12.25 Vivado Experience
+
+Vivado 页面必须以 capability-driven 方式渲染，不写死单一远程机器。
+
+第一版包含：
+
+- target list。
+- default target。
+- health panel。
+- SSH/Vivado/settings/workdir/version/license 状态。
+- command history 框架。
+- Tcl/script/flow command runner 框架。
+
+后续扩展：
+
+- multi-target。
+- command log viewer。
+- artifact/report browser。
+- long-lived Tcl session panel。
+- path mapping/file sync debug view。
+
+### 12.26 KB Experience
+
+KB 页面第一版包含：
+
+- built-in KB cases。
+- user KB cases。
+- pending candidates。
+- approve/reject/merge 操作。
+
+KB 页面应为后续 semantic knowledge UI 预留入口：
+
+- source list。
+- reindex。
+- semantic search。
+- retrieval audit。
+- candidate generation from run/problem。
+
+### 12.27 Markdown and Code Rendering
+
+Markdown 使用：
+
+```text
+react-markdown
+remark-gfm
+```
+
+不得使用不受控的 `dangerouslySetInnerHTML` 渲染模型输出。
+
+代码块能力：
+
+- syntax highlight extension point。
+- copy button。
+- diff rendering。
+- artifact/file path links。
+
+### 12.28 Frontend Quality Gates
+
+重构验收至少包括：
+
+- `npm run build` 通过。
+- TypeScript 无关键错误。
+- Browser 手动验证 sessions/terminal/monitor/vivado/kb 主路径。
+- SSE reconnect 手动验证。
+- Stop 手动验证。
+- terminal markdown 渲染验证。
+- responsive 基础验证。
+
+后续必须加入：
+
+- Playwright e2e。
+- component tests。
+- API mock tests。
+
+---
+
+## 13. FastAPI 静态资源与开发模式
+
+### 13.1 开发模式
+
+后端：
+
+```bash
+edagent web --host 127.0.0.1 --port 8000
+```
+
+前端：
+
+```bash
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Vite dev server 代理：
+
+```text
+/api -> http://127.0.0.1:8000
+```
+
+### 13.2 构建模式
+
+```bash
+cd frontend
+npm run build
+```
+
+FastAPI 服务构建产物：
+
+```text
+src/edagent_vivado/web/static/
+```
+
+### 13.3 发布策略
+
+打包发布方式后续确定。Spec 只要求架构支持：
+
+- 开发模式前后端分离。
+- 构建模式 FastAPI 托管 React 静态资源。
+- Python package 可包含已构建静态资源。
+
+---
+
+## 14. 旧 Dashboard/API 迁移
+
+### 14.1 UI
+
+React 应统一接管所有页面。
+
+旧 dashboard HTML 页面不作为长期 UI 入口。
+
+### 14.2 API
+
+新的 terminal/monitor/KB API 是长期接口。
+
+旧 API 可保留过渡：
+
+```text
+/api/runs
+/api/runs/{id}
+/api/runs/{id}/log
+/api/chat
+/api/chat/stream
+/api/chat/multi
+/api/errors/kb
+```
+
+但新 React terminal 不依赖旧 terminal API。
+
+---
+
+## 15. 数据裁剪、脱敏与保留策略
+
+### 15.1 裁剪
+
+必须对以下内容裁剪：
+
+- tool input。
+- tool output。
+- reasoning。
+- Vivado log excerpt。
+- stack trace。
+- model raw response。
+
+长内容落 artifact，数据库保存 summary 和 artifact id。
+
+### 15.2 脱敏
+
+记录前必须做基础脱敏：
+
+- API key。
+- token。
+- password。
+- secret。
+- authorization header。
+- 可选隐藏绝对路径。
+
+Tool input/output 支持 whitelist/blacklist。
+
+### 15.3 保留策略
+
+支持：
+
+- 全局 retention，例如 30/90 天。
+- session 手动清理。
+- artifact 单独保留。
+- 数据库只存路径/摘要/hash。
+
+---
+
+## 16. 验收标准
+
+### 16.1 Session 与记忆
+
+- 创建 session 后可连续多轮对话，agent 能引用前文。
+- 服务重启后 session 消息和摘要仍可恢复。
+- 长 session 通过 memory summary 继续保持上下文。
+- reasoning/tool 原文不直接污染 LLM 上下文。
+- 每次 LLM 调用前都会生成 context package。
+- Monitor/Terminal 可查看本次调用注入了哪些 memory、Error KB、Semantic KB、tool summary。
+
+### 16.1A Semantic KB 与上下文注入
+
+- Global KB 和 Project KB 可分别索引。
+- 仓库文档、Vivado 文档、历史 run/session summary、用户上传文档、RTL、XDC、脚本均可进入知识库。
+- 文件 hash 变化后支持增量 reindex。
+- UI 支持手动 reindex。
+- 知识检索使用 query rewrite、entity extraction、metadata filter、vector search、rerank、min score threshold。
+- 检索结果包含来源、相关度、权威度、可信度。
+- Context Builder 按优先级注入知识。
+- 低可信或低相关知识不会进入高优先级上下文。
+- Agent 和多 Agent 可主动调用 knowledge search tool。
+- 模型不能直接写入 approved KB，只能生成 candidate 或 session memory。
+
+### 16.2 后台运行与重连
+
+- 用户关闭页面后 task 继续执行。
+- 重新打开 session 后，历史事件完整恢复。
+- active task 可继续通过 SSE 接收后续事件。
+- 已完成 task 显示完整 response/tool/reasoning。
+
+### 16.3 Stop
+
+- Running task 时 Stop 按钮可用。
+- Stop 后 task 进入 stopping/stopped。
+- partial assistant response 保存并标记 stopped。
+- 后续同 session 可继续发送新消息。
+
+### 16.4 React UI
+
+- Session list 支持新建/重命名/删除/归档/搜索/排序。
+- Terminal 支持聊天视图和 timeline 视图。
+- Reasoning 默认折叠，可展开。
+- Tool block 显示状态、耗时、输入输出摘要、artifact、错误、token/cost。
+- Markdown 支持 GFM 表格、代码块、diff、复制。
+
+### 16.5 Monitor
+
+- 每个 task/tool/LLM/Vivado run 被记录。
+- Toolcall 数量、耗时、状态可查询。
+- Usage/cost 可查询。
+- Run detail 可查看 timeline、toolcalls、usage、artifacts、problems。
+- Run detail 可查看 retrieval audit 与 context package。
+
+### 16.5A Vivado Runtime
+
+- 默认远程 target 可通过配置加载。
+- `/api/health/vivado` 可检测 SSH、settings、vivado path、workdir、version、license。
+- Agent 可执行 raw Tcl、Tcl script、flow、query、project open/create。
+- batch 和 long-lived Tcl session 均可用。
+- project mode 与 non-project mode 均可用。
+- Vivado command 全量 log 保存为 artifact。
+- stdout/log 可通过 SSE 实时展示。
+- Vivado errors/warnings/critical warnings/message IDs 被强制解析并进入 ProblemCollector。
+- Stop 可 interrupt/terminate/kill Vivado job，并记录事件。
+- 本地/远程路径映射正确。
+- 文件同步记录可查询。
+- 生成的 Tcl script 均保存 artifact 并可在 Monitor 中查看。
+
+### 16.6 KB
+
+- Vivado/parser/tool 问题被 harness 强制收集。
+- 失败 run 自动生成 pending KB candidate。
+- 用户可 approve/reject/merge candidate。
+- Built-in YAML KB 与 user SQLite KB 合并查询。
+
+### 16.7 多 Agent 扩展
+
+- 事件、run、artifact、channel 数据结构支持 agent_id。
+- Agent 间 channel message 可记录。
+- Monitor 可按 agent 展示 token/tool/time。
+
+### 16.8 测试
+
+必须覆盖：
+
+- 后端 pytest。
+- 前端 unit tests。
+- Playwright e2e。
+- 手动验收 checklist。
+
+重点测试：
+
+- SSE reconnect。
+- Stop partial 保存。
+- 服务重启恢复。
+- tool error problem collection。
+- KB candidate workflow。
+- Semantic KB indexing/reindex。
+- Context Builder token budget 与注入优先级。
+- Retrieval audit 可回放。
+- Vivado remote health。
+- Vivado Tcl policy approval。
+- Vivado file sync/path mapping。
+- Vivado stop/kill。
+- session archive/hard delete。
+
+---
+
+## 17. 分阶段实施计划
+
+分阶段实施是为了降低工程风险；每个阶段均必须服从本文档的长期架构，不引入与目标架构冲突的临时设计。
+
+### Phase 1：核心持久化与 React Terminal
+
+目标：
+
+- SQLite repository。
+- sessions/tasks/messages/events/runs/tool_calls/llm_usage/artifacts 基础表。
+- 新 session/task/event API。
+- SSE stream + reconnect。
+- Stop API。
+- React/Vite/TS terminal。
+- OpenAPI 类型化 client。
+- Monitor Phase 1 API：runs/toolcalls/usage。
+- Vivado target schema 与默认远程 target 配置读取。
+- Vivado health check。
+
+### Phase 1F：React Frontend Refactor
+
+目标：
+
+- 以 visual design gate 先确定 Terminal/Monitor/Vivado/KB 的生产级设计方向。
+- 用可扩展 module system 重构当前 `frontend/src`。
+- 新前端只依赖 `/api/v1`。
+- 接入 OpenAPI generated client。
+- 使用普通 CSS + design tokens 替代大面积 inline style。
+- 使用 `react-markdown` + `remark-gfm` 渲染模型输出。
+- 使用 `lucide-react` 和 `clsx` 构建统一 UI primitives。
+- Terminal 使用 messages + events + SSE reducer 作为权威 UI 状态来源。
+- 实现 session dashboard、terminal chat/timeline/debug drawer。
+- 实现 monitor run list + run detail + toolcalls/usage/events。
+- 实现 Vivado target/health/command history 框架。
+- 实现 KB cases/candidates 审核界面。
+- `npm run build` 与浏览器主流程验证通过。
+
+### Phase 2：记忆与摘要
+
+目标：
+
+- 持久化 LangGraph checkpointer。
+- AgentContextBuilder。
+- memory_snapshots。
+- 摘要模型接口。
+- reasoning/tool summary。
+- token budget 裁剪。
+- context package 与 context audit。
+- Error KB + Semantic KB 统一注入。
+- retrieval audit。
+
+### Phase 2A：Semantic KB 与向量检索
+
+目标：
+
+- Global KB / Project KB。
+- knowledge source/chunk/embedding schema。
+- VectorStore 抽象。
+- EmbeddingProvider 抽象。
+- 文档/RTL/XDC/script/run/session summary ingestion。
+- hash 增量 reindex。
+- 手动 reindex API/UI。
+- query rewrite、entity extraction、metadata filter、vector search、rerank、min score threshold。
+- 权威度/可信度评分。
+- knowledge search tools。
+
+### Phase 3：Harness 强制观测与 KB Candidate
+
+目标：
+
+- ObservedToolRunner。
+- harness RunContext/EventSink。
+- ProblemCollector。
+- Vivado/parser/tool 强制 problem collection。
+- KB candidate 自动生成。
+- KB API 与审核 UI。
+- Vivado Runtime Adapter 接入 ObservedToolRunner。
+- Vivado log/report 强制 problem collection。
+
+### Phase 3A：Vivado 全命令 Runtime
+
+目标：
+
+- VivadoTarget local/remote。
+- RemoteExecutor：ssh/scp 与 paramiko 抽象。
+- FileSync：hash 增量同步、SFTP/SCP/rsync 抽象。
+- PathMapper：Windows local path <-> remote Linux path。
+- TclPolicy：allowlist/denylist/approval。
+- Raw Tcl/script/flow/query/project tools。
+- Batch mode。
+- Long-lived Tcl session。
+- Project/non-project mode。
+- Stop/interrupt/kill。
+- Vivado command artifacts/log parser/problem collector。
+- CLI：`edagent vivado tcl/script/health/session/targets`。
+
+### Phase 4：Monitor Dashboard 完整化
+
+目标：
+
+- charts。
+- token/cost 趋势。
+- tool error rate。
+- run detail artifacts/problems/events。
+- retention/cleanup。
+- LangSmith/OTel export adapter。
+
+### Phase 5：多 Agent 协作
+
+目标：
+
+- agent identity。
+- agent runs。
+- channel store。
+- file communication protocol。
+- handoff events。
+- multi-agent monitor graph。
+- SSE 展示多 Agent 消息流。
+
+---
+
+## 18. 配置项
+
+建议配置：
+
+```yaml
+runtime:
+  dir: .edagent
+  db_path: .edagent/edagent.db
+  artifact_root: .edagent/artifacts
+
+sse:
+  heartbeat_seconds: 15
+  reconnect_backoff_ms: 1000
+  max_replay_events: 1000
+
+memory:
+  recent_message_limit: 20
+  max_context_tokens: 64000
+  summary_model: ""
+  summarize_after_messages: 20
+
+knowledge:
+  vector_store: ""
+  embedding_provider: ""
+  embedding_model: ""
+  rerank_model: ""
+  default_top_k: 12
+  min_score: 0.3
+  enable_query_rewrite: true
+  enable_rerank: true
+  global_kb_enabled: true
+  project_kb_enabled: true
+  auto_reindex_on_hash_change: true
+  authority_weights:
+    official_doc: 1.0
+    verified_user_kb: 0.9
+    approved_case: 0.85
+    project_doc: 0.75
+    historical_run_summary: 0.65
+    session_summary: 0.55
+    pending_candidate: 0.3
+
+vivado:
+  default_target: default-remote
+  targets:
+    default-remote:
+      type: remote_ssh
+      host: root@192.168.31.150
+      ssh_key: E:/dev/id_192.168.31.150
+      vivado_path: /home/xilinx/vivado/Vivado/2022.1/bin/vivado
+      settings_path: /home/xilinx/vivado/Vivado/2022.1/settings64.sh
+      remote_work_root: /tmp/edagent_remote
+      version: "2022.1"
+  file_sync:
+    method: sftp
+    use_hash_incremental: true
+  tcl_policy:
+    require_approval_for_raw_tcl: true
+    require_approval_for_dangerous_commands: true
+    deny_patterns:
+      - exec
+      - file delete
+      - open "|"
+      - rm -rf
+  session:
+    enable_long_lived: true
+    idle_timeout_sec: 1800
+    command_timeout_sec: 3600
+  stop:
+    interrupt_timeout_sec: 10
+    terminate_timeout_sec: 20
+    kill_after_timeout: true
+
+monitor:
+  retention_days: 90
+  redact_paths: false
+  collect_token_usage: true
+  collect_cost: true
+
+kb:
+  auto_generate_candidates_on_failed_run: true
+  auto_approve: false
+
+models:
+  primary:
+    provider: anthropic_compatible
+    name: ""
+  summary:
+    provider: anthropic_compatible
+    name: ""
+```
+
+---
+
+## 19. 关键实现边界
+
+### 19.1 LLM 不负责事实采集
+
+LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
+
+- harness。
+- parser。
+- tool wrapper。
+- command runner。
+- event sink。
+- artifact store。
+
+### 19.2 前端不保存权威状态
+
+浏览器只保存 UI 偏好和 last seq。权威状态来自 API/SQLite。
+
+### 19.3 大内容不直接进数据库
+
+数据库保存摘要、路径、hash、引用；大内容进入 artifact store。
+
+### 19.4 SSE 是长期实时协议
+
+多 Agent 也使用 SSE 进行前端实时展示。Agent 间通信通过文件 channel 和持久化事件表达。
+
+---
+
+## 20. 术语表
+
+- **Session**：用户长期会话。
+- **Task**：一次用户消息触发的后台执行。
+- **Run**：可观测执行单元。
+- **Event**：持久化事实事件。
+- **Message**：LLM 上下文与聊天记录。
+- **Artifact**：大文件或外部产物。
+- **Channel**：多 Agent 文件通信通道。
+- **Problem**：从工具、Vivado、parser、用户或 agent 检测到的问题。
+- **KB Candidate**：待审核知识库条目。
+- **Memory Snapshot**：session 长期记忆摘要。
+- **Usage**：token/cost 记录。
+- **Error KB**：结构化错误知识库，用于 pattern/signature/category 匹配。
+- **Semantic Knowledge Base**：面向文档、代码、历史 run/session 的语义知识库。
+- **Vector Store**：存储知识片段 embedding 的可替换向量数据库后端。
+- **Context Package**：一次 LLM 调用前实际注入模型的上下文包。
+- **Retrieval Audit**：一次知识检索与上下文选择过程的审计记录。
+- **Authority Score**：来源权威度评分。
+- **Trust Score**：内容可信度评分。
+- **Vivado Target**：一个本地或远程 Vivado 执行环境。
+- **Vivado Runtime Adapter**：封装 Vivado Tcl/script/flow/session 执行的统一运行层。
+- **FileSync**：本地与远程 Vivado 工作区之间的文件同步抽象。
+- **PathMapper**：本地路径与远程路径互相转换的映射层。
+- **TclPolicy**：Vivado Tcl 命令安全策略与审批层。
+- **Long-lived Tcl Session**：持续运行的 `vivado -mode tcl` 进程，可连续执行命令。

@@ -7,9 +7,6 @@ import os as _os
 import sqlite3
 from typing import Any, Iterator
 
-# Force local/mock mode
-_os.environ.pop("VIVADO_REMOTE_HOST", None)
-
 from langchain.agents import create_agent as langchain_create_agent
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
