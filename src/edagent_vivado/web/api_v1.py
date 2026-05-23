@@ -442,91 +442,59 @@ async def api_vivado_health():
 
 @router.get("/vivado/targets")
 async def api_vivado_targets():
-    targets = vivado_target_list()
-    if not targets:
-        host = _os.environ.get("VIVADO_REMOTE_HOST", "")
-        if host:
-            targets = [{"id": "default-remote", "name": "default-remote",
-                "target_type": "remote_ssh", "host": host,
-                "ssh_key_path": _os.environ.get("VIVADO_REMOTE_KEY", ""),
-                "vivado_path": _os.environ.get("VIVADO_REMOTE_PATH", "vivado"),
-                "settings_path": _os.environ.get("VIVADO_REMOTE_ENV", ""),
-                "remote_work_root": _os.environ.get("VIVADO_REMOTE_WORK", "/tmp/edagent_remote"),
-                "is_default": True, "enabled": True}]
-    return {"targets": targets}
-
-@router.post("/vivado/targets")
-async def api_vivado_target_create(request: Request):
-    body = await request.json()
-    target = vivado_target_create(
-        name=body.get("name", ""),
-        target_type=body.get("target_type", "remote_ssh"),
-        vivado_path=body.get("vivado_path", "vivado"),
-        host=body.get("host", ""),
-        ssh_key_path=body.get("ssh_key_path", ""),
-        settings_path=body.get("settings_path", ""),
-        remote_work_root=body.get("remote_work_root", ""),
-        vivado_version=body.get("vivado_version", ""),
-        is_default=body.get("is_default", False),
-    )
-    return target
-
-@router.get("/vivado/targets/{target_id}")
-async def api_vivado_target_detail(target_id: str):
-    target = vivado_target_get(target_id)
-    if not target:
-        raise HTTPException(404, "Target not found")
-    return target
-
-@router.patch("/vivado/targets/{target_id}")
-async def api_vivado_target_patch(target_id: str, request: Request):
-    body = await request.json()
-    target = vivado_target_update(target_id, **body)
-    if not target:
-        raise HTTPException(404, "Target not found")
-    return target
-
-@router.delete("/vivado/targets/{target_id}")
-async def api_vivado_target_remove(target_id: str):
-    vivado_target_delete(target_id)
-    return {"ok": True}
-
-@router.post("/vivado/targets/{target_id}/health")
-async def api_vivado_target_health(target_id: str):
-    target = vivado_target_get(target_id)
-    if not target:
-        raise HTTPException(404, "Target not found")
-    result = {"target_id": target_id, "host": target.get("host"), "reachable": False,
-              "vivado_path": target.get("vivado_path"), "version": None}
-    if target.get("target_type") == "local":
-        import shutil
-        vp = target.get("vivado_path", "vivado")
-        result["reachable"] = shutil.which(vp) is not None
-        return result
-    host = target.get("host", "")
-    key = target.get("ssh_key_path", "")
-    if not host:
-        result["error"] = "No host configured"
-        return result
-    import subprocess
-    ssh = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
-    if key: ssh += ["-i", key]
-    ssh.append(host)
-    try:
-        p = subprocess.run(ssh + ["echo OK"], capture_output=True, text=True, timeout=15)
-        result["reachable"] = "OK" in p.stdout
-    except: pass
-    return result
+    return {"targets": [{
+        "id": "default-remote",
+        "name": "default-remote",
+        "target_type": "remote_ssh",
+        "host": _os.environ.get("VIVADO_REMOTE_HOST", ""),
+        "ssh_key_path": _os.environ.get("VIVADO_REMOTE_KEY", ""),
+        "vivado_path": _os.environ.get("VIVADO_REMOTE_PATH", "vivado"),
+        "settings_path": _os.environ.get("VIVADO_REMOTE_ENV", ""),
+        "remote_work_root": _os.environ.get("VIVADO_REMOTE_WORK", "/tmp/edagent_remote"),
+        "is_default": True,
+        "enabled": True,
+    }]}
 
 @router.get("/vivado/commands")
 async def api_vivado_commands(limit: int = 50):
     return {"commands": []}
 
-# ── Artifact API ──────────────────────────────────────────────
+@router.post("/vivado/commands/tcl")
+async def api_vivado_run_tcl(request: Request):
+    body = await request.json()
+    command = body.get("command", "")
+    target_id = body.get("target_id")
+    auto_approved = body.get("auto_approved", False)
+    if not command:
+        raise HTTPException(400, "command is required")
+    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter, get_target
+    target = get_target(target_id)
+    adapter = VivadoRuntimeAdapter(target)
+    policy = adapter.check_policy(command, auto_approved=auto_approved)
+    if not policy.allowed:
+        return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
+    if policy.requires_approval:
+        return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
+    result = adapter.run_tcl(command, auto_approved=True)
+    return {"ok": result.success, "exit_code": result.exit_code, "stdout": result.stdout[:5000],
+            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error}
 
-@router.get("/artifacts/{artifact_id}")
-async def api_artifact_detail(artifact_id: str):
-    art = artifact_get(artifact_id)
-    if not art:
-        raise HTTPException(404, "Artifact not found")
-    return art
+@router.post("/vivado/commands/script")
+async def api_vivado_run_script(request: Request):
+    body = await request.json()
+    script = body.get("script", "")
+    target_id = body.get("target_id")
+    auto_approved = body.get("auto_approved", False)
+    if not script:
+        raise HTTPException(400, "script is required")
+    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter, get_target
+    target = get_target(target_id)
+    adapter = VivadoRuntimeAdapter(target)
+    policy = adapter.check_script_policy(script, auto_approved=auto_approved)
+    if not policy.allowed:
+        return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
+    if policy.requires_approval:
+        return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
+    result = adapter.run_script(script, auto_approved=True)
+    return {"ok": result.success, "exit_code": result.exit_code, "stdout": result.stdout[:5000],
+            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error}
