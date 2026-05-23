@@ -1,0 +1,25 @@
+{
+  "timing": null,
+  "utilization": null,
+  "qor_passed": false,
+  "qor_checks": [
+    {
+      "check": "wns",
+      "passed": true,
+      "detail": "Synthesis failed \u2014 no timing data available",
+      "skipped": true
+    },
+    {
+      "check": "tns",
+      "passed": true,
+      "detail": "Synthesis failed \u2014 no timing data available",
+      "skipped": true
+    },
+    {
+      "check": "whs",
+      "passed": true,
+      "detail": "Synthesis failed \u2014 no timing data available",
+      "skipped": true
+    }
+  ]
+}

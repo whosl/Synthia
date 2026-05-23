@@ -145,12 +145,14 @@ export interface ContextPackage {
   task_id?: ID | null
   run_id?: ID | null
   model?: string | null
+  max_context_tokens?: number
   total_tokens?: number
   memory_tokens?: number
   recent_message_tokens?: number
   error_kb_tokens?: number
   semantic_kb_tokens?: number
   tool_summary_tokens?: number
+  truncated?: number | boolean
   created_at?: number
 }
 
@@ -163,6 +165,7 @@ export interface ContextPackageItem {
   token_count?: number
   priority?: number
   included?: number | boolean
+  truncation_reason?: string | null
   authority_score?: number | null
   trust_score?: number | null
   relevance_score?: number | null

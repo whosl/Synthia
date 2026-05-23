@@ -38,10 +38,15 @@ def _find_vivado() -> str | None:
 def _remote_config() -> dict | None:
     h = os.environ.get("VIVADO_REMOTE_HOST", "")
     if h:
-        return {"host": h, "key": os.environ.get("VIVADO_REMOTE_KEY", ""),
+        port = os.environ.get("VIVADO_REMOTE_PORT", "")
+        return {
+            "host": h,
+            "key": os.environ.get("VIVADO_REMOTE_KEY", ""),
             "vivado_path": os.environ.get("VIVADO_REMOTE_PATH", "vivado"),
             "env_script": os.environ.get("VIVADO_REMOTE_ENV", ""),
-            "work_dir": os.environ.get("VIVADO_REMOTE_WORK", "/tmp/edagent_remote")}
+            "work_dir": os.environ.get("VIVADO_REMOTE_WORK", "/tmp/edagent_remote"),
+            "port": port,
+        }
     return None
 
 class VivadoRunner:
@@ -107,8 +112,12 @@ class VivadoRunner:
         if not cfg: return {"step": step, "success": False, "error": "No remote config"}
         t0 = time.time(); rd = f"{cfg['work_dir']}/{self._workspace.root.name}"
         h = cfg["host"]; v = cfg["vivado_path"]; e = cfg["env_script"]
-        ssh = ["ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no", h]
+        port = cfg.get("port", "")
+        ssh = ["ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
+        if port: ssh += ["-p", str(port)]
+        ssh.append(h)
         scp = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
+        if port: scp += ["-P", str(port)]
         tc = tcl_path.read_text(errors="replace")
         for rp in self._manifest.rtl_paths(): tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
         for xp in self._manifest.xdc_paths(): tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
@@ -125,7 +134,20 @@ class VivadoRunner:
             cmd = f"cd {rd} && source {e} && {v} -mode batch -source scripts/{step}.tcl -log vivado_{step}.log"
             proc = subprocess.run(ssh + [cmd], capture_output=True, text=True, timeout=7200)
             for fn in [f"vivado_{step}.log"]: subprocess.run(scp + [f"{h}:{rd}/{fn}", str(self._workspace.root / fn)], capture_output=True, timeout=60)
-            return {"step": step, "success": proc.returncode == 0, "return_code": proc.returncode, "log": str(self._workspace.root / f"vivado_{step}.log"), "elapsed_sec": round(time.time() - t0, 2), "timed_out": False, "remote": True, "host": h}
+            out = {
+                "step": step,
+                "success": proc.returncode == 0,
+                "return_code": proc.returncode,
+                "log": str(self._workspace.root / f"vivado_{step}.log"),
+                "elapsed_sec": round(time.time() - t0, 2),
+                "timed_out": False,
+                "remote": True,
+                "mock": False,
+                "host": h,
+            }
+            if proc.returncode != 0:
+                out["error"] = (proc.stderr or proc.stdout or f"Remote {step} failed").strip()[:2000]
+            return out
         except subprocess.TimeoutExpired: return {"step": step, "success": False, "error": "Timeout", "remote": True}
         except Exception as ex: return {"step": step, "success": False, "error": str(ex), "remote": True}
 

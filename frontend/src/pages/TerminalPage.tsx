@@ -1,19 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bug, Database, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Bug, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { listEvents } from '../api/events'
 import { listMessages } from '../api/messages'
 import { getSession } from '../api/sessions'
 import { getPatchApproval, setPatchApproval } from '../api/settings'
 import { getActiveTask, startTask, stopSessionTask } from '../api/tasks'
+import { request } from '../api/client'
 import type { SessionEvent } from '../api/types'
 import { Button } from '../components/common/Button'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { ContextDebugPanel } from '../components/terminal/ContextDebugPanel'
 import { Composer } from '../components/terminal/Composer'
 import { MessageList } from '../components/terminal/MessageList'
 import { TimelineView } from '../components/terminal/TimelineView'
-import { applyEvent, rebuildTerminalState, type TerminalRuntimeState } from '../lib/eventReducer'
+import { applyEvent, mergePendingInteractions, rebuildTerminalState, type TerminalRuntimeState } from '../lib/eventReducer'
 import { SessionEventStream } from '../lib/sse'
 import { formatNumber, formatRelative, formatTime } from '../lib/time'
 import { useStreamStore } from '../stores/streamStore'
@@ -36,40 +38,73 @@ export default function TerminalPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const sessionQ = useQuery({ queryKey: ['session', sessionId], queryFn: () => getSession(sessionId), enabled: Boolean(sessionId) })
-  const messagesQ = useQuery({ queryKey: ['messages', sessionId], queryFn: () => listMessages(sessionId), enabled: Boolean(sessionId) })
+  const messagesQ = useQuery({ queryKey: ['messages', sessionId], queryFn: () => listMessages(sessionId, 500), enabled: Boolean(sessionId) })
   const activeQ = useQuery({ queryKey: ['active-task', sessionId], queryFn: () => getActiveTask(sessionId), enabled: Boolean(sessionId), refetchInterval: 3000 })
   const approvalQ = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
-  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 500), enabled: Boolean(sessionId) })
+  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 5000), enabled: Boolean(sessionId) })
+  const pendingInteractionsQ = useQuery({
+    queryKey: ['interactions', sessionId],
+    queryFn: () => request<{ interactions: Record<string, unknown>[] }>(`/sessions/${sessionId}/interactions`),
+    enabled: Boolean(sessionId),
+    refetchInterval: 3000,
+  })
 
   const activeTask = activeQ.data?.task
   const running = activeTask?.state === 'running'
   const stopping = activeTask?.state === 'stopping'
+  const taskActive = running || stopping
+  const liveSeq = useStreamStore((s) => s.lastSeqBySession[sessionId] || 0)
 
+  // Reset UI when switching sessions
+  useEffect(() => {
+    setRuntime({ turns: [], timeline: [], tools: [], lastSeq: 0 })
+    setLastSeq(sessionId, 0)
+  }, [sessionId, setLastSeq])
+
+  // Rebuild from DB when idle/reloading — never clobber live SSE state during an active task
   useEffect(() => {
     if (!messagesQ.data || !eventsQ.data) return
-    const next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
-    setRuntime(next)
-    setLastSeq(sessionId, next.lastSeq)
-  }, [messagesQ.data, eventsQ.data, activeTask?.id, activeTask?.state, sessionId, setLastSeq])
+    if (taskActive && liveSeq > 0) return
 
-  const onStreamEvent = useCallback((event: SessionEvent) => {
+    const pending = pendingInteractionsQ.data?.interactions || []
+    let next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
+    next = mergePendingInteractions(next, pending)
+    setRuntime(next)
+    if (next.lastSeq > 0) setLastSeq(sessionId, next.lastSeq)
+  }, [messagesQ.data, eventsQ.data, pendingInteractionsQ.data, sessionId, setLastSeq, activeTask, taskActive, liveSeq])
+
+  // SSE stream event handler — stable ref to avoid stream reconnects
+  const onStreamEventRef = useRef<(event: SessionEvent) => void>(() => {})
+  onStreamEventRef.current = (event: SessionEvent) => {
     setRuntime((prev) => applyEvent(prev, event, { appendAssistantDelta: event.event_type === 'message.assistant.delta' }))
     setLastSeq(sessionId, event.seq)
+    if (event.event_type === 'context.package.created') {
+      queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
+    }
     if (event.event_type === 'task.done' || event.event_type === 'task.error' || event.event_type === 'task.stopped') {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
     }
-  }, [queryClient, sessionId, setLastSeq])
+  }
 
+  // SSE connection — only reconnects when sessionId changes
   useEffect(() => {
     if (!sessionId) return
     streamRef.current?.disconnect()
-    const stream = new SessionEventStream(sessionId, getLastSeq(sessionId), onStreamEvent, (status) => setStreamStatus(sessionId, status))
+    const stream = new SessionEventStream(
+      sessionId,
+      getLastSeq(sessionId),
+      (evt) => onStreamEventRef.current(evt),
+      (status) => setStreamStatus(sessionId, status),
+    )
     streamRef.current = stream
     stream.connect()
     return () => stream.disconnect()
-  }, [sessionId, onStreamEvent, getLastSeq, setStreamStatus])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }) }, [runtime.turns, runtime.timeline, view])
 
@@ -77,6 +112,8 @@ export default function TerminalPage() {
     mutationFn: (question: string) => startTask(sessionId, { question }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
     },
   })
@@ -86,6 +123,14 @@ export default function TerminalPage() {
   const toolCount = runtime.tools.length
   const problemCount = useMemo(() => runtime.timeline.filter((t) => t.type.includes('problem') || t.state === 'error').length, [runtime.timeline])
   const session = sessionQ.data?.session
+
+  const handleInteractionRespond = async (interactionId: string, response: Record<string, any>) => {
+    await request(`/interactions/${interactionId}/respond`, { method: 'POST', body: JSON.stringify(response), headers: { 'Content-Type': 'application/json' } })
+    queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['interactions', sessionId] })
+  }
 
   return <div className="page terminal-page">
     <div className="terminal-shell">
@@ -122,7 +167,7 @@ export default function TerminalPage() {
             <Button className="ghost" onClick={() => setDebugOpen(!debugOpen)}>{debugOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}</Button>
           </div>
           <div className={view === 'chat' ? 'message-list' : 'timeline-view'} ref={scrollRef}>
-            {view === 'chat' ? <MessageList turns={runtime.turns} /> : <TimelineView items={runtime.timeline} />}
+            {view === 'chat' ? <MessageList turns={runtime.turns} onInteractionRespond={handleInteractionRespond} /> : <TimelineView items={runtime.timeline} />}
           </div>
           <Composer running={running} stopping={stopping} disabled={stopping || start.isPending} onSend={(q) => start.mutate(q)} onStop={() => stop.mutate()} />
         </section>
@@ -131,8 +176,8 @@ export default function TerminalPage() {
           <div className="drawer-header"><span>Debug</span><Button className="ghost icon-btn" onClick={() => setDebugOpen(false)}>×</Button></div>
           <div className="drawer-section">
             <div className="side-title"><FileText size={13} /> Context</div>
-            <div className="drawer-list">
-              <span><Database size={13} /> Retrieval audit pending</span>
+            <ContextDebugPanel sessionId={sessionId} taskId={activeTask?.id} />
+            <div className="drawer-list" style={{ marginTop: 8 }}>
               <span><Shield size={13} /> Patch: {approvalQ.data?.approved ? 'auto' : 'manual'}</span>
             </div>
           </div>

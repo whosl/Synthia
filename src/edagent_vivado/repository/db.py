@@ -135,6 +135,104 @@ CREATE TABLE IF NOT EXISTS problems (
     resolved INTEGER NOT NULL DEFAULT 0, resolution_summary TEXT,
     metadata_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS kb_cases (
+    id TEXT PRIMARY KEY, pattern TEXT NOT NULL, normalized_signature TEXT,
+    category TEXT NOT NULL, likely_causes_json TEXT NOT NULL,
+    suggested_actions_json TEXT NOT NULL, repro_steps TEXT,
+    fix_patch_artifact_id TEXT, vivado_version TEXT, fpga_part TEXT,
+    top_module TEXT, manifest_artifact_id TEXT,
+    verified_resolution INTEGER NOT NULL DEFAULT 0,
+    source_candidate_id TEXT, created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kb_candidates (
+    id TEXT PRIMARY KEY, source_run_id TEXT, source_session_id TEXT,
+    source_problem_id TEXT, pattern TEXT NOT NULL, normalized_signature TEXT,
+    category TEXT, message_ids_json TEXT, raw_log_excerpt_artifact_id TEXT,
+    likely_causes_json TEXT NOT NULL, suggested_actions_json TEXT NOT NULL,
+    repro_steps TEXT, fix_patch_artifact_id TEXT, vivado_version TEXT,
+    fpga_part TEXT, top_module TEXT, manifest_artifact_id TEXT,
+    resolved INTEGER, resolution_summary TEXT, confidence REAL,
+    status TEXT NOT NULL DEFAULT 'pending', created_by TEXT NOT NULL DEFAULT 'harness',
+    created_at INTEGER NOT NULL, reviewed_at INTEGER, reviewed_by TEXT,
+    merged_into_case_id TEXT, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS channels (
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
+    channel_type TEXT NOT NULL, created_at INTEGER NOT NULL,
+    metadata_json TEXT, UNIQUE(session_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS channel_messages (
+    id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    task_id TEXT, run_id TEXT, from_agent_id TEXT, to_agent_id TEXT,
+    message_type TEXT NOT NULL, content TEXT, artifact_id TEXT,
+    created_at INTEGER NOT NULL, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS vivado_sessions (
+    id TEXT PRIMARY KEY, target_id TEXT NOT NULL, project_id TEXT,
+    session_id TEXT, task_id TEXT, run_id TEXT,
+    state TEXT NOT NULL DEFAULT 'starting', mode TEXT NOT NULL DEFAULT 'batch',
+    remote_pid INTEGER, local_pid INTEGER,
+    started_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
+    idle_timeout_sec INTEGER, work_dir TEXT, log_artifact_id TEXT,
+    error TEXT, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS vivado_commands (
+    id TEXT PRIMARY KEY, target_id TEXT NOT NULL, vivado_session_id TEXT,
+    session_id TEXT, task_id TEXT, run_id TEXT,
+    command_type TEXT NOT NULL, command_text TEXT, script_artifact_id TEXT,
+    project_id TEXT, work_dir TEXT, state TEXT NOT NULL DEFAULT 'pending',
+    started_at INTEGER NOT NULL, finished_at INTEGER, elapsed_ms INTEGER,
+    exit_code INTEGER, log_artifact_id TEXT, stdout_artifact_id TEXT,
+    stderr_artifact_id TEXT, parsed_summary_json TEXT,
+    problem_count INTEGER NOT NULL DEFAULT 0,
+    stopped INTEGER NOT NULL DEFAULT 0, killed INTEGER NOT NULL DEFAULT 0,
+    error TEXT, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS file_sync_records (
+    id TEXT PRIMARY KEY, target_id TEXT NOT NULL, project_id TEXT,
+    session_id TEXT, task_id TEXT, run_id TEXT,
+    local_path TEXT, remote_path TEXT, direction TEXT NOT NULL,
+    method TEXT NOT NULL DEFAULT 'scp', sha256 TEXT, size_bytes INTEGER,
+    state TEXT NOT NULL DEFAULT 'pending', synced_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS path_mappings (
+    id TEXT PRIMARY KEY, target_id TEXT NOT NULL, project_id TEXT,
+    local_root TEXT NOT NULL, remote_root TEXT NOT NULL,
+    created_at INTEGER NOT NULL, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+    id TEXT PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'global', project_id TEXT,
+    source_type TEXT NOT NULL, title TEXT NOT NULL, uri TEXT, path TEXT,
+    authority_score REAL NOT NULL DEFAULT 0.5, trust_score REAL NOT NULL DEFAULT 0.5,
+    version TEXT, sha256 TEXT, indexed_at INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id TEXT PRIMARY KEY, source_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'global',
+    project_id TEXT, chunk_index INTEGER NOT NULL, title TEXT,
+    content TEXT NOT NULL, content_summary TEXT, token_count INTEGER,
+    start_offset INTEGER, end_offset INTEGER, sha256 TEXT,
+    authority_score REAL NOT NULL DEFAULT 0.5, trust_score REAL NOT NULL DEFAULT 0.5,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+    id TEXT PRIMARY KEY, chunk_id TEXT NOT NULL, provider TEXT NOT NULL,
+    model TEXT NOT NULL, dimension INTEGER, vector_store TEXT NOT NULL,
+    vector_ref TEXT NOT NULL, indexed_at INTEGER NOT NULL, metadata_json TEXT
+);
 """
 
 

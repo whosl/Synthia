@@ -1,0 +1,34 @@
+"""Tests for partial file approval application."""
+
+import json
+
+from edagent_vivado.harness.approval_apply import apply_approved_files, format_approval_tool_output
+from edagent_vivado.harness.approval_outcomes import OUTCOME_APPROVED, OUTCOME_PARTIALLY_APPROVED
+from edagent_vivado.harness.interaction import FileItem
+
+
+def test_partial_approval_applies_subset(tmp_path):
+    a = tmp_path / "a.v"
+    b = tmp_path / "b.v"
+    files = [
+        FileItem(path=str(a), content="module a;", action="create"),
+        FileItem(path=str(b), content="module b;", action="create"),
+    ]
+    applied, skipped = apply_approved_files(files, [str(a)])
+    assert applied == [str(a)]
+    assert skipped == [str(b)]
+    assert a.read_text() == "module a;"
+    assert not b.exists()
+
+
+def test_format_partial_output():
+    out = format_approval_tool_output(["/a.v"], ["/b.v"])
+    data = json.loads(out)
+    assert data["edagent_outcome"] == OUTCOME_PARTIALLY_APPROVED
+    assert "/a.v" in data["applied_files"]
+
+
+def test_format_full_output():
+    out = format_approval_tool_output(["/a.v"], [])
+    data = json.loads(out)
+    assert data["edagent_outcome"] == OUTCOME_APPROVED

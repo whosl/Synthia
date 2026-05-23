@@ -4,8 +4,15 @@ import type { TerminalTurn } from '../../lib/eventReducer'
 import { formatTime } from '../../lib/time'
 import { ReasoningBlock } from './ReasoningBlock'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ApprovalBlock } from './ApprovalBlock'
+import { InputRequestBlock } from './InputRequestBlock'
 
-export function MessageTurn({ turn }: { turn: TerminalTurn }) {
+interface MessageTurnProps {
+  turn: TerminalTurn
+  onInteractionRespond?: (interactionId: string, response: Record<string, any>) => void
+}
+
+export function MessageTurn({ turn, onInteractionRespond }: MessageTurnProps) {
   if (turn.role === 'user') {
     return <div className="message-turn user"><div className="message-bubble">
       <div className="message-meta"><User size={14} /> You {turn.createdAt && <span>{formatTime(turn.createdAt)}</span>}</div>
@@ -14,7 +21,7 @@ export function MessageTurn({ turn }: { turn: TerminalTurn }) {
   }
 
   return <div className="message-turn assistant"><div className="assistant-stack">
-    <div className="message-meta assistant-meta"><Bot size={15} color="var(--accent)" /> EdAgent {turn.partial && <span className="status stopped">partial</span>}</div>
+    <div className="message-meta assistant-meta"><Bot size={15} color="var(--accent)" /> EdAgent {turn.stopped && <span className="status stopped">stopped</span>}{turn.partial && !turn.stopped && <span className="status stopped">partial</span>}</div>
     <div className="assistant-blocks">
       {turn.blocks.map((block) => {
         switch (block.kind) {
@@ -26,9 +33,33 @@ export function MessageTurn({ turn }: { turn: TerminalTurn }) {
             return <ReasoningBlock key={block.data.id} {...block.data} />
           case 'tool':
             return <ToolCallBlock key={block.data.id} tool={block.data} />
+          case 'interaction':
+            if (block.data.interaction_type === 'approval') {
+              return <ApprovalBlock
+                key={block.data.id}
+                id={block.data.id}
+                title={block.data.title}
+                message={block.data.message}
+                files={block.data.files || []}
+                status={block.data.status as 'pending' | 'approved' | 'rejected'}
+                response={block.data.response}
+                onApprove={(id, files) => onInteractionRespond?.(id, { approved: true, approved_files: files })}
+                onReject={(id) => onInteractionRespond?.(id, { approved: false })}
+              />
+            }
+            return <InputRequestBlock
+              key={block.data.id}
+              id={block.data.id}
+              title={block.data.title}
+              message={block.data.message}
+              fields={(block.data.fields || []) as any}
+              status={block.data.status === 'responded' ? 'responded' : 'pending'}
+              response={block.data.response}
+              onSubmit={(id, values) => onInteractionRespond?.(id, values)}
+            />
         }
       })}
-      {turn.blocks.length === 0 && !turn.content && <div className="message-bubble"><span className="muted">Waiting for response…</span></div>}
+      {turn.blocks.length === 0 && !turn.content && <div className="working-indicator"><span className="working-dot" /><span className="working-text">Working...</span></div>}
     </div>
   </div></div>
 }

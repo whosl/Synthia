@@ -1,4 +1,6 @@
-﻿export interface KnowledgeSource {
+﻿import { request } from './client'
+
+export interface KnowledgeSource {
   id: string
   title: string
   scope: 'global' | 'project'
@@ -7,7 +9,25 @@
   trust_score?: number
 }
 
-export const knowledgeSources: KnowledgeSource[] = [
-  { id: 'spec', title: 'SPEC.md', scope: 'global', source_type: 'spec', trust_score: 0.9 },
-  { id: 'vivado-commands', title: 'VIVADO_COMMANDS.md', scope: 'global', source_type: 'doc', trust_score: 0.85 },
-]
+export interface KnowledgeSearchHit {
+  source_type: string
+  source_id: string
+  chunk_id: string
+  title: string
+  excerpt: string
+  score: number
+  authority_score?: number
+  trust_score?: number
+}
+
+export function reindexKnowledge() {
+  return request<{ indexed_sources: number; chunks: number; root: string }>('/knowledge/reindex', { method: 'POST' })
+}
+
+export function searchKnowledge(query: string, topK = 12) {
+  return request<{ query: string; results: KnowledgeSearchHit[]; formatted: string }>('/knowledge/search', {
+    method: 'POST',
+    body: JSON.stringify({ query, top_k: topK }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+}

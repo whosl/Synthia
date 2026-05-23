@@ -12,3 +12,19 @@ export function listVivadoTargets() {
 export function listVivadoCommands() {
   return request<{ commands: Array<Record<string, unknown>> }>('/vivado/commands')
 }
+
+export function runVivadoTcl(command: string, autoApproved = true) {
+  return request<{
+    ok: boolean
+    exit_code?: number
+    stdout?: string
+    stderr?: string
+    elapsed_sec?: number
+    error?: string
+    requires_approval?: boolean
+  }>('/vivado/commands/tcl', {
+    method: 'POST',
+    body: JSON.stringify({ command, auto_approved: autoApproved }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
