@@ -4,6 +4,7 @@ import { listRuns } from '../api/monitor'
 import { EmptyState } from '../components/common/EmptyState'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { MonitorOverviewPanel } from '../components/monitor/MonitorOverviewPanel'
 import { formatDuration, formatTime } from '../lib/time'
 
 export default function MonitorPage() {
@@ -12,11 +13,12 @@ export default function MonitorPage() {
   return <div className="page">
     <div className="page-header">
       <div>
-        <h1 className="page-title">Runs</h1>
-        <p className="page-subtitle">Trace task, tool, LLM, and Vivado execution history</p>
+        <h1 className="page-title">Monitor</h1>
+        <p className="page-subtitle">Usage trends, tool reliability, and run traces (Phase 4)</p>
       </div>
     </div>
-    <Panel>
+    <MonitorOverviewPanel />
+    <Panel title="Recent runs">
       <table className="table">
         <thead><tr><th>Run</th><th>Type</th><th>Status</th><th>Started</th><th>Elapsed</th><th>Session</th></tr></thead>
         <tbody>{runs.map((r) => <tr key={r.id}>

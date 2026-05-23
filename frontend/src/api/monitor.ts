@@ -42,3 +42,46 @@ export function getRunContext(runId: string) {
 export function listSessionRuns(sessionId: string, limit = 50) {
   return request<{ runs: Run[] }>(`/monitor/sessions/${sessionId}/runs?limit=${limit}`)
 }
+
+export interface MonitorTokenDay {
+  day: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cost_total: number
+  records: number
+}
+
+export interface MonitorModelUsage {
+  model: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  records: number
+}
+
+export interface MonitorOverview {
+  days: number
+  since: number
+  until: number
+  runs_by_state: Record<string, number>
+  run_count: number
+  tool_calls: { total: number; errors: number; error_rate: number }
+  problems: number
+  usage_totals: { input_tokens: number; output_tokens: number; cost_total: number; records: number }
+  token_series: MonitorTokenDay[]
+  by_model: MonitorModelUsage[]
+}
+
+export function getMonitorOverview(days = 14) {
+  return request<MonitorOverview>(`/monitor/overview?days=${days}`)
+}
+
+export function runMonitorCleanup(body: { retention_days?: number; dry_run?: boolean }) {
+  return request<{
+    retention_days: number
+    cutoff: number
+    dry_run: boolean
+    deleted: Record<string, number>
+  }>('/monitor/cleanup', { method: 'POST', body: JSON.stringify(body) })
+}

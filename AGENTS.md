@@ -26,6 +26,10 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 5. **Pre-existing test failures (3):** `test_e2e_cases.py::test_case6_remote_runner_check` (missing class export), `test_integration.py::test_vivado_runner_mock_synth_with_parse` and `test_vivado_runner_mock_synth_failure_parse` (tests expect keys not present in runner return dict). These are code issues, not env issues.
 
+### Active development branch
+
+- **`cursor/phase-4-monitor`** — Monitor Dashboard (Phase 4): overview API, token/tool charts, retention cleanup dry-run. Prior work on `master` includes timeline chat + Vivado HITL (Phase 3/3A).
+
 ### Standard Commands
 
 | Task | Command |

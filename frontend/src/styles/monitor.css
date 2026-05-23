@@ -1,4 +1,56 @@
 ﻿/* ========== MONITOR / DASHBOARD LAYOUTS ========== */
+.monitor-overview {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.bar-chart {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.bar-chart-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 56px;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-size-xs);
+}
+
+.bar-chart-label {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-chart-track {
+  height: 18px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.bar-chart-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.85), rgba(99, 102, 241, 0.55));
+  border-radius: 3px;
+  min-width: 2px;
+}
+
+.bar-chart-value {
+  text-align: right;
+  color: var(--text-secondary);
+}
+
+.chart-empty {
+  padding: 16px;
+  font-size: var(--font-size-sm);
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: 1.1fr 1.5fr;

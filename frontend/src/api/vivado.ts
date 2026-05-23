@@ -64,19 +64,3 @@ export function formatVivadoTime(ts?: number) {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleString()
 }
-
-export function runVivadoTcl(command: string, autoApproved = true) {
-  return request<{
-    ok: boolean
-    exit_code?: number
-    stdout?: string
-    stderr?: string
-    elapsed_sec?: number
-    error?: string
-    requires_approval?: boolean
-  }>('/vivado/commands/tcl', {
-    method: 'POST',
-    body: JSON.stringify({ command, auto_approved: autoApproved }),
-    headers: { 'Content-Type': 'application/json' },
-  })
-}

@@ -604,6 +604,136 @@ def usage_totals_for_session(session_id: str) -> dict:
         "session_token_output": int(sess.get("token_output") or 0),
     }
 
+
+def monitor_overview(days: int = 14) -> dict:
+    """Aggregate monitor metrics for dashboard charts (Phase 4)."""
+    days = max(1, min(int(days), 90))
+    now = _now()
+    since = now - days * 86400
+    db = get_db()
+
+    runs_by_state: dict[str, int] = {}
+    for row in db.execute(
+        "SELECT state, COUNT(*) AS cnt FROM runs WHERE started_at >= ? GROUP BY state",
+        (since,),
+    ):
+        runs_by_state[str(row["state"])] = int(row["cnt"])
+
+    tool_row = db.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN state IN ('error','failed') OR (error IS NOT NULL AND error != '') THEN 1 ELSE 0 END) AS errors
+           FROM tool_calls WHERE started_at >= ?""",
+        (since,),
+    ).fetchone()
+    tool_total = int(tool_row["total"]) if tool_row else 0
+    tool_errors = int(tool_row["errors"] or 0) if tool_row else 0
+
+    token_series = []
+    for row in db.execute(
+        """SELECT date(created_at, 'unixepoch') AS day,
+                  COALESCE(SUM(input_tokens),0) AS input_tokens,
+                  COALESCE(SUM(output_tokens),0) AS output_tokens,
+                  COALESCE(SUM(total_tokens),0) AS total_tokens,
+                  COALESCE(SUM(cost_total),0) AS cost_total,
+                  COUNT(*) AS records
+           FROM llm_usage WHERE created_at >= ?
+           GROUP BY day ORDER BY day ASC""",
+        (since,),
+    ):
+        token_series.append({
+            "day": row["day"],
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "total_tokens": int(row["total_tokens"]),
+            "cost_total": float(row["cost_total"] or 0),
+            "records": int(row["records"]),
+        })
+
+    by_model = []
+    for row in db.execute(
+        """SELECT model,
+                  COALESCE(SUM(input_tokens),0) AS input_tokens,
+                  COALESCE(SUM(output_tokens),0) AS output_tokens,
+                  COALESCE(SUM(total_tokens),0) AS total_tokens,
+                  COUNT(*) AS records
+           FROM llm_usage WHERE created_at >= ?
+           GROUP BY model ORDER BY total_tokens DESC LIMIT 12""",
+        (since,),
+    ):
+        by_model.append({
+            "model": row["model"],
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "total_tokens": int(row["total_tokens"]),
+            "records": int(row["records"]),
+        })
+
+    prob_row = db.execute(
+        "SELECT COUNT(*) AS cnt FROM problems WHERE detected_at >= ?",
+        (since,),
+    ).fetchone()
+    usage_row = db.execute(
+        """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                  COALESCE(SUM(output_tokens),0) AS output_tokens,
+                  COALESCE(SUM(cost_total),0) AS cost_total,
+                  COUNT(*) AS records
+           FROM llm_usage WHERE created_at >= ?""",
+        (since,),
+    ).fetchone()
+
+    return {
+        "days": days,
+        "since": since,
+        "until": now,
+        "runs_by_state": runs_by_state,
+        "run_count": sum(runs_by_state.values()),
+        "tool_calls": {
+            "total": tool_total,
+            "errors": tool_errors,
+            "error_rate": round(tool_errors / tool_total, 4) if tool_total else 0.0,
+        },
+        "problems": int(prob_row["cnt"]) if prob_row else 0,
+        "usage_totals": {
+            "input_tokens": int(usage_row["input_tokens"]) if usage_row else 0,
+            "output_tokens": int(usage_row["output_tokens"]) if usage_row else 0,
+            "cost_total": float(usage_row["cost_total"] or 0) if usage_row else 0.0,
+            "records": int(usage_row["records"]) if usage_row else 0,
+        },
+        "token_series": token_series,
+        "by_model": by_model,
+    }
+
+
+def monitor_retention_cleanup(retention_days: int = 90, dry_run: bool = False) -> dict:
+    """Delete monitor telemetry older than retention window (Phase 4)."""
+    retention_days = max(1, min(int(retention_days), 3650))
+    cutoff = _now() - retention_days * 86400
+    db = get_db()
+    tables = (
+        ("events", "created_at"),
+        ("llm_usage", "created_at"),
+        ("tool_calls", "started_at"),
+        ("problems", "detected_at"),
+    )
+    deleted: dict[str, int] = {}
+    for table, col in tables:
+        row = db.execute(
+            f"SELECT COUNT(*) AS cnt FROM {table} WHERE {col} < ?",
+            (cutoff,),
+        ).fetchone()
+        count = int(row["cnt"]) if row else 0
+        deleted[table] = count
+        if not dry_run and count:
+            db.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+    if not dry_run:
+        db.commit()
+    return {
+        "retention_days": retention_days,
+        "cutoff": cutoff,
+        "dry_run": dry_run,
+        "deleted": deleted,
+    }
+
 # ── Vivado commands ───────────────────────────────────────────
 
 def vivado_command_create(

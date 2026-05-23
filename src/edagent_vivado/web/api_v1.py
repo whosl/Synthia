@@ -19,6 +19,7 @@ from edagent_vivado.repository.store import (
     context_packages_for_run, context_packages_for_session,
     retrieval_audits_for_run, retrieval_audits_for_session,
     retrieval_audit_get, retrieval_audit_items, usage_create, usage_totals_for_session,
+    monitor_overview, monitor_retention_cleanup,
     kb_candidate_list, kb_candidate_get, kb_candidate_approve, kb_candidate_reject, kb_candidate_merge,
     vivado_command_list, knowledge_source_list,
 )
@@ -706,6 +707,21 @@ async def api_monitor_session_runs(session_id: str, limit: int = 50):
 @router.get("/monitor/sessions/{session_id}/usage")
 async def api_monitor_session_usage(session_id: str):
     return usage_totals_for_session(session_id)
+
+@router.get("/monitor/overview")
+async def api_monitor_overview(days: int = Query(14, ge=1, le=90)):
+    return monitor_overview(days=days)
+
+class MonitorCleanupBody(BaseModel):
+    retention_days: int = 90
+    dry_run: bool = True
+
+@router.post("/monitor/cleanup")
+async def api_monitor_cleanup(body: MonitorCleanupBody):
+    return monitor_retention_cleanup(
+        retention_days=body.retention_days,
+        dry_run=body.dry_run,
+    )
 
 @router.get("/sessions/{session_id}/memory")
 async def api_session_memory(session_id: str, limit: int = 20):
