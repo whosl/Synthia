@@ -43,6 +43,10 @@ def _gate_or_reject(tool_name: str) -> str | None:
     if not spec:
         return None
     task_id = get_agent_task_id()
+    from edagent_vivado.harness.vivado_run_gate import is_vivado_gate_rejected
+
+    if task_id and is_vivado_gate_rejected(task_id, spec.operation):
+        return format_user_rejection(spec.scope, tool_name=tool_name)
     if not wait_vivado_gate_allowed(task_id, spec.operation):
         return format_user_rejection(spec.scope, tool_name=tool_name)
     return None

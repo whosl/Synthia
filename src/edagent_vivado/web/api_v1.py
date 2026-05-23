@@ -599,7 +599,16 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     continuation_prompt,
                 )
                 follow_up = flush_output or (inline_approval_results[-1] if inline_approval_results else "")
-                if follow_up and should_continue_after_approval(follow_up) and approval_round < max_approval_rounds - 1:
+                from edagent_vivado.harness.approval_outcomes import parse_tool_outcome, OUTCOME_USER_REJECTED
+
+                follow_parsed = parse_tool_outcome(follow_up) if follow_up else {}
+                is_user_reject = follow_parsed.get("edagent_outcome") == OUTCOME_USER_REJECTED
+                if (
+                    follow_up
+                    and should_continue_after_approval(follow_up)
+                    and approval_round < max_approval_rounds - 1
+                    and not (is_user_reject and full_response.strip())
+                ):
                     continuation_msg = HumanMessage(content=continuation_prompt(follow_up))
                     approval_round += 1
                     event_create(
