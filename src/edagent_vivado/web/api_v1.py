@@ -44,9 +44,14 @@ _store_event_create = event_create
 
 # Tool runs rejected at Vivado approval gate (langgraph run_id -> outcome scope)
 _blocked_tool_runs: dict[str, str] = {}
-# tool.completed already emitted in on_tool_start after Vivado approval reject
+# Vivado approval rejected before/during langgraph tool invocation
 _early_blocked_tool_runs: set[str] = set()
 _early_completed_toolcall_ids: set[str] = set()
+_vivado_reject_run_keys: set[str] = set()
+
+
+def _langgraph_tool_run_key(evt: dict) -> str:
+    return str(evt.get("run_id") or (evt.get("data") or {}).get("run_id") or "")
 
 def event_create(session_id: str, event_type: str, payload: dict, **kwargs) -> dict:  # type: ignore[no-redef]
     """Persist an event and publish it to live SSE subscribers."""
@@ -302,11 +307,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                             )
                             from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
 
-                            run_key = str(
-                                evt.get("run_id")
-                                or (evt.get("data") or {}).get("run_id")
-                                or ""
-                            )
+                            run_key = _langgraph_tool_run_key(evt)
                             vivado_blocked_early = False
                             if is_vivado_execution_tool(tool_name_start):
                                 approved = await request_vivado_tool_approval(
@@ -319,34 +320,34 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 )
                                 if not approved:
                                     spec = vivado_tool_spec(tool_name_start)
-                                    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_SYNTH
+                                    from edagent_vivado.harness.approval_outcomes import (
+                                        SCOPE_VIVADO_SYNTH,
+                                        format_user_rejection,
+                                    )
 
                                     blocked_scope = spec.scope if spec else SCOPE_VIVADO_SYNTH
                                     lg_key = run_key or f"vivado-reject:{t['id']}:{tool_name_start}"
-                                    _blocked_tool_runs[lg_key] = blocked_scope
-                                    if run_key:
-                                        _blocked_tool_runs[run_key] = blocked_scope
                                     from edagent_vivado.harness.run_context import set_tool_thread_context
 
                                     set_tool_thread_context(session_id, t["id"], run["id"])
-                                    tool_runner.on_tool_start(lg_key, tool_name_start, tool_input)
-                                    tcid = tool_runner.tool_ids.get(lg_key, "")
-                                    tool_runner.on_tool_end(
+                                    tcid = tool_runner.on_tool_rejected(
                                         lg_key,
                                         tool_name_start,
-                                        "",
-                                        blocked=True,
+                                        tool_input,
                                         blocked_scope=blocked_scope,
                                     )
-                                    if tcid:
-                                        _early_completed_toolcall_ids.add(tcid)
-                                    _early_blocked_tool_runs.add(lg_key)
+                                    _early_completed_toolcall_ids.add(tcid)
+                                    _blocked_tool_runs[lg_key] = blocked_scope
                                     if run_key:
-                                        _early_blocked_tool_runs.add(run_key)
-                                    _blocked_tool_runs.pop(lg_key, None)
+                                        _blocked_tool_runs[run_key] = blocked_scope
+                                        tool_runner.tool_ids[run_key] = tcid
+                                    _vivado_reject_run_keys.add(lg_key)
                                     if run_key:
-                                        _blocked_tool_runs.pop(run_key, None)
+                                        _vivado_reject_run_keys.add(run_key)
                                     vivado_blocked_early = True
+                                    inline_approval_results.append(
+                                        format_user_rejection(blocked_scope, tool_name=tool_name_start)
+                                    )
                             if not vivado_blocked_early:
                                 from edagent_vivado.harness.run_context import set_tool_thread_context
 
@@ -359,25 +360,33 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                             tool_runner.on_tool_start(str(evt.get("run_id", "")), evt.get("name", ""), tool_input)
                     elif kind == "on_tool_end":
                         output = str(evt.get("data", {}).get("output", ""))[:2500]
-                        run_key = str(evt.get("run_id", ""))
+                        run_key = _langgraph_tool_run_key(evt)
                         tool_name = evt.get("name", "")
                         from edagent_vivado.harness.run_context import clear_tool_thread_context
+                        from edagent_vivado.harness.vivado_agent_registry import is_vivado_execution_tool
 
                         tcid_early = tool_runner.tool_ids.get(run_key, "")
-                        if run_key in _early_blocked_tool_runs or tcid_early in _early_completed_toolcall_ids:
-                            _early_blocked_tool_runs.discard(run_key)
+                        is_vivado_reject = (
+                            run_key in _vivado_reject_run_keys
+                            or tcid_early in _early_completed_toolcall_ids
+                        )
+                        if is_vivado_reject:
+                            _vivado_reject_run_keys.discard(run_key)
                             if tcid_early:
                                 _early_completed_toolcall_ids.discard(tcid_early)
-                            if output:
-                                from edagent_vivado.harness.approval_apply import should_continue_after_approval
-
-                                if should_continue_after_approval(output):
-                                    inline_approval_results.append(output)
+                            _blocked_tool_runs.pop(run_key, None)
                             clear_tool_thread_context()
                             continue
                         blocked_scope = _blocked_tool_runs.pop(run_key, None)
                         was_blocked = blocked_scope is not None
                         tcid = tool_runner.tool_ids.get(run_key, "")
+                        if was_blocked and is_vivado_execution_tool(tool_name):
+                            from edagent_vivado.harness.approval_outcomes import format_user_rejection
+
+                            output = format_user_rejection(
+                                blocked_scope or "",
+                                tool_name=tool_name,
+                            )
                         # Intercept interaction tools — create interaction and wait for user
                         if (
                             not was_blocked

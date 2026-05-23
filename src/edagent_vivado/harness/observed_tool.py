@@ -29,6 +29,56 @@ class ObservedToolRunner:
     event_sink: EventSink
     tool_ids: dict[str, str] = field(default_factory=dict)
 
+    def on_tool_rejected(
+        self,
+        langgraph_run_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        blocked_scope: str | None = None,
+    ) -> str:
+        """Record a user-rejected Vivado tool without emitting tool.started (no running UI)."""
+        args_str = json.dumps(tool_input, ensure_ascii=False, default=str)[:1500]
+        tc = toolcall_create(
+            run_id=self.run_id,
+            tool_name=tool_name,
+            session_id=self.session_id,
+            task_id=self.task_id,
+            input_summary=args_str,
+        )
+        tcid = tc["id"]
+        key = str(langgraph_run_id or tcid)
+        self.tool_ids[key] = tcid
+        spec = vivado_tool_spec(tool_name)
+        scope = blocked_scope or (spec.scope if spec else SCOPE_VIVADO_SYNTH)
+        output = format_user_rejection(scope, tool_name=tool_name)
+        ui_state = tool_ui_state_from_output(output)
+        finished_at = int(time.time())
+        started_at = int(tc.get("started_at") or finished_at)
+        elapsed_ms = max(0, (finished_at - started_at) * 1000)
+        toolcall_update(
+            tcid,
+            state="rejected",
+            finished_at=finished_at,
+            elapsed_ms=elapsed_ms,
+            output_summary=output[:500],
+        )
+        self.event_sink(
+            self.session_id,
+            "tool.completed",
+            {
+                "tool_name": tool_name,
+                "toolcall_id": tcid,
+                "result": output[:500],
+                "state": ui_state,
+                "started_at": started_at,
+                "elapsed_ms": elapsed_ms,
+            },
+            task_id=self.task_id,
+            run_id=self.run_id,
+        )
+        return tcid
+
     def on_tool_start(self, langgraph_run_id: str, tool_name: str, tool_input: dict[str, Any]) -> str:
         args_str = json.dumps(tool_input, ensure_ascii=False, default=str)[:1500]
         tc = toolcall_create(

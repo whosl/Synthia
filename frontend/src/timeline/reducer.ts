@@ -317,10 +317,31 @@ export function applyTimelineEvent(
         result,
         elapsedMs: elapsedMs ?? p.elapsedMs,
       })
+      const startedAt = Number(payload.started_at || event.created_at || 0) || undefined
       if (key && next.indexByKey[key] !== undefined) {
         next = updateEntry(next, key, (e) => ({ ...e, payload: patch(e.payload as ToolEntryPayload) }))
         const updated = next.entries[next.indexByKey[key]].payload as ToolEntryPayload
         next.tools = upsertToolList(next.tools, updated)
+      } else if (key && tcid) {
+        const toolPayload: ToolEntryPayload = {
+          toolcallId: tcid,
+          name,
+          state: endState,
+          result,
+          startedAt,
+          elapsedMs,
+        }
+        const entry: TimelineEntry = {
+          key,
+          id: key,
+          seq: event.seq || next.lastSeq,
+          kind: 'tool',
+          taskId,
+          createdAt: event.created_at,
+          payload: toolPayload,
+        }
+        next = insertEntry(next, entry)
+        next.tools = upsertToolList(next.tools, toolPayload)
       } else {
         next.entries = next.entries.map((e) => {
           if (e.kind !== 'tool') return e

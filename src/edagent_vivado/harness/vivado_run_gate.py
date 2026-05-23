@@ -37,6 +37,10 @@ def wait_vivado_gate_allowed(
 ) -> bool:
     """Called inside Vivado agent tools — blocks until UI approval resolves."""
     if not task_id:
+        with _lock:
+            has_gate = any(k.endswith(f":{operation}") for k in _gates)
+        if has_gate:
+            return False
         return True
     key = _gate_key(task_id, operation)
     with _lock:
