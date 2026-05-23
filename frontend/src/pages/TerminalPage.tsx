@@ -1,9 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { ArrowLeft, PanelRightClose, PanelRightOpen, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getSession } from '../api/sessions'
-import { getApprovals, setPatchApproval, setVivadoApproval } from '../api/settings'
 import { stopSessionTask } from '../api/tasks'
 import { request } from '../api/client'
 import { Button } from '../components/common/Button'
@@ -41,7 +40,6 @@ export default function TerminalPage() {
     queryFn: () => getSession(sessionId),
     enabled: Boolean(sessionId),
   })
-  const approvalsQ = useQuery({ queryKey: ['approvals'], queryFn: getApprovals })
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -49,15 +47,13 @@ export default function TerminalPage() {
 
   const stop = useMutation({
     mutationFn: () => stopSessionTask(sessionId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] }),
-  })
-  const patchApprove = useMutation({
-    mutationFn: setPatchApproval,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
-  })
-  const vivadoApprove = useMutation({
-    mutationFn: setVivadoApproval,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] }),
+        queryClient.invalidateQueries({ queryKey: ['session', sessionId] }),
+        queryClient.refetchQueries({ queryKey: ['events', sessionId] }),
+      ])
+    },
   })
 
   const problemCount = useMemo(
@@ -82,26 +78,21 @@ export default function TerminalPage() {
     <div className="page terminal-page">
       <div className="terminal-shell">
         <header className="terminal-header">
-          <Link to="/" className="btn ghost"><ArrowLeft size={15} /> Sessions</Link>
+          <Link to="/" className="btn ghost terminal-back-link"><ArrowLeft size={15} /> Sessions</Link>
           <div className="terminal-title">
             {session?.name || 'Session'} {(running || stopping) && <span className="terminal-status-dot" />}
           </div>
-          <label className="approval-toggle" title="Auto-approve file patches">
-            <span>Patches</span>
-            <input
-              type="checkbox"
-              checked={Boolean(approvalsQ.data?.patch_approved)}
-              onChange={(e) => patchApprove.mutate(e.target.checked)}
-            />
-          </label>
-          <label className="approval-toggle" title="Auto-approve Vivado synth/impl/Tcl">
-            <span>Vivado</span>
-            <input
-              type="checkbox"
-              checked={Boolean(approvalsQ.data?.vivado_execution_approved)}
-              onChange={(e) => vivadoApprove.mutate(e.target.checked)}
-            />
-          </label>
+          <Button
+            className="ghost terminal-controls-button"
+            onClick={() => {
+              setRightPanelTab('run')
+              setRightPanelOpen(true)
+            }}
+            aria-label="Open run controls"
+          >
+            <SlidersHorizontal size={15} />
+            <span>Controls</span>
+          </Button>
           {(running || stopping) && (
             <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop</Button>
           )}
@@ -137,6 +128,15 @@ export default function TerminalPage() {
           </section>
 
           {rightPanelOpen && (
+            <button
+              type="button"
+              className="right-panel-backdrop"
+              aria-label="Close side panel"
+              onClick={() => setRightPanelOpen(false)}
+            />
+          )}
+
+          {rightPanelOpen && (
             <TerminalRightPanel
               sessionId={sessionId}
               session={session}
@@ -146,6 +146,7 @@ export default function TerminalPage() {
               problemCount={problemCount}
               tab={rightPanelTab}
               onTabChange={setRightPanelTab}
+              onClose={() => setRightPanelOpen(false)}
             />
           )}
         </div>

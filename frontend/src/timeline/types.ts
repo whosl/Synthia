@@ -28,7 +28,7 @@ export interface ReasoningEntryPayload {
 export interface ToolEntryPayload {
   toolcallId: string
   name: string
-  state: 'running' | 'completed' | 'error' | 'rejected'
+  state: 'running' | 'completed' | 'error' | 'rejected' | 'stopped'
   args?: string
   result?: string
   startedAt?: number

@@ -153,10 +153,24 @@ export function applyTimelineEvent(
       next.taskState = 'running'
       pushAudit(next, event, 'Task started', next.activeTaskId || undefined, 'running')
       break
-    case 'task.stopping':
+    case 'task.stopping': {
       next.taskState = 'stopping'
+      const stopMsg = 'Task stopped by user'
+      next.entries = next.entries.map((e) => {
+        if (e.kind !== 'tool') return e
+        const p = e.payload as ToolEntryPayload
+        if (p.state !== 'running') return e
+        return {
+          ...e,
+          payload: { ...p, state: 'stopped', result: stopMsg },
+        }
+      })
+      next.tools = next.tools.map((t) =>
+        t.state === 'running' ? { ...t, state: 'stopped', result: stopMsg } : t,
+      )
       pushAudit(next, event, 'Stop requested', String(payload.task_id || ''), 'stopping')
       break
+    }
     case 'task.stopped':
       next.taskState = 'stopped'
       pushAudit(next, event, 'Task stopped', String(payload.task_id || ''), 'stopped')

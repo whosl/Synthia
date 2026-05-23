@@ -1,11 +1,11 @@
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTerminalStore } from '../../stores/terminalStore'
 
 export interface ToolCallViewModel {
   id: string
   name: string
-  state: 'running' | 'completed' | 'error' | 'rejected'
+  state: 'running' | 'completed' | 'error' | 'rejected' | 'stopped'
   args?: string
   result?: string
   error?: string
@@ -45,11 +45,16 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
   const done = tool.state === 'completed'
   const rejected = tool.state === 'rejected'
   const errored = tool.state === 'error'
+  const stopped = tool.state === 'stopped'
   const icon = done ? <CheckCircle2 size={14} color="var(--success)" />
     : rejected ? <XCircle size={14} color="var(--error)" />
+    : stopped ? <Octagon size={14} color="var(--warning)" />
     : errored ? <AlertCircle size={14} color="var(--error)" />
     : <CircleDotDashed size={14} color="var(--warning)" />
-  return <div className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''}`}>
+  return (
+    <div
+      className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}`}
+    >
     <div className="trace-header" onClick={() => toggle(tool.id)}>
       {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       {icon}
@@ -64,7 +69,8 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
     {!collapsed && <div className="trace-body">
       {tool.args && <><b>Input</b>{'\n'}{tool.args}{'\n\n'}</>}
       {errored && tool.error && <><b style={{ color: 'var(--error)' }}>Error</b>{'\n'}{tool.error}{'\n\n'}</>}
-      <><b>Output</b>{'\n'}{tool.result || (errored || rejected ? '' : 'No result summary yet.')}</>
+      <><b>Output</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : 'No result summary yet.')}</>
     </div>}
-  </div>
+    </div>
+  )
 }

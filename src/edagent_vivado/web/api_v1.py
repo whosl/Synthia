@@ -665,6 +665,10 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     continue
                 break
 
+            latest_task = task_get(t["id"])
+            if latest_task and latest_task.get("stop_requested"):
+                return
+
             # Save assistant message (denormalized snapshot for search/export — not used for chat timeline)
             if full_response:
                 _emit_stream_completed(stream_mgr.current_stream_id)
@@ -734,6 +738,7 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
     task_update(task_id, stop_requested=1, state="stopping")
     sid = session_id or task_get(task_id)["session_id"]
     from edagent_vivado.harness.task_cancel import cancel_task_execution
+    from edagent_vivado.harness.task_stop_helpers import finalize_task_stop
 
     cancel_stats = cancel_task_execution(task_id)
     event_create(
@@ -742,7 +747,14 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
         {"task_id": task_id, **cancel_stats},
         task_id=task_id,
     )
-    return {"ok": True, "task_id": task_id, "state": "stopping", "cancel": cancel_stats}
+    final = finalize_task_stop(task_id, sid, event_create)
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "state": final.get("state", "stopped"),
+        "cancel": cancel_stats,
+        **final,
+    }
 
 # ── Event / Stream API ───────────────────────────────────────
 

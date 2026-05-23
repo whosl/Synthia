@@ -29,13 +29,14 @@ def sync_manifest_sources(
     executor: RemoteExecutor | None = None,
     *,
     remote_work_dir: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Upload RTL/XDC from workspace to remote src/ (skip unchanged by sha256)."""
     ex = executor or RemoteExecutor()
     rwd = remote_work_dir or ex.target.remote_work_root
     mapper = PathMapper(workspace_root, rwd)
     remote_src = mapper.remote_src_dir()
-    ex.mkdir_remote(remote_src)
+    ex.mkdir_remote(remote_src, task_id=task_id)
 
     state_path = workspace_root / "artifacts" / "file_sync_state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,9 +76,9 @@ def sync_manifest_sources(
         except ValueError:
             pass
         remote = f"{remote_src}/{rel_name}"
-        ex.mkdir_remote(str(Path(remote).parent.as_posix()).replace("\\", "/"))
-        result = ex.upload(local, remote)
-        if result.return_code != 0:
+        ex.mkdir_remote(str(Path(remote).parent.as_posix()).replace("\\", "/"), task_id=task_id)
+        result = ex.upload(local, remote, task_id=task_id)
+        if result.return_code != 0 or result.stopped:
             return {
                 "ok": False,
                 "error": result.stderr or "upload failed",

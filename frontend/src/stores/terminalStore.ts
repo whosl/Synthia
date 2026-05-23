@@ -1,7 +1,7 @@
 ﻿import { create } from 'zustand'
 
 type TerminalView = 'chat' | 'timeline'
-export type RightPanelTab = 'summary' | 'terminal' | 'files' | 'vivado'
+export type RightPanelTab = 'run' | 'artifacts' | 'vivado' | 'debug'
 
 interface TerminalStore {
   view: TerminalView
@@ -16,8 +16,8 @@ interface TerminalStore {
 
 export const useTerminalStore = create<TerminalStore>((set) => ({
   view: 'chat',
-  rightPanelOpen: true,
-  rightPanelTab: 'summary',
+  rightPanelOpen: false,
+  rightPanelTab: 'run',
   collapsed: {},
   setView: (view) => set({ view }),
   setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),

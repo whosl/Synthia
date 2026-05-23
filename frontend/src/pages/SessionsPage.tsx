@@ -3,10 +3,57 @@ import { ChevronRight, Plus, RefreshCw, Search, SlidersHorizontal, Trash2 } from
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createSession, deleteSession, listSessions } from '../api/sessions'
+import type { Session } from '../api/types'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { formatNumber, formatRelative } from '../lib/time'
+
+function SessionCard({
+  session,
+  onOpen,
+  onDelete,
+}: {
+  session: Session
+  onOpen: () => void
+  onDelete: () => void
+}) {
+  const tokens = (session.token_input || 0) + (session.token_output || 0)
+  return (
+    <article className="session-card">
+      <div className="session-card-head">
+        <div className="session-card-title">
+          <strong>{session.name || 'Untitled session'}</strong>
+          <div className="muted mono session-card-id">{session.id}</div>
+        </div>
+        <StatusBadge status={session.status} />
+      </div>
+      <dl className="session-card-meta">
+        <div><dt>Updated</dt><dd>{formatRelative(session.updated_at)}</dd></div>
+        <div><dt>Messages</dt><dd>{formatNumber(session.message_count)}</dd></div>
+        <div><dt>Tools</dt><dd>{formatNumber(session.tool_call_count)}</dd></div>
+        <div><dt>Problems</dt><dd style={{ color: (session.problem_count || 0) > 0 ? 'var(--error)' : undefined }}>{formatNumber(session.problem_count)}</dd></div>
+        {tokens > 0 && (
+          <div style={{ gridColumn: '1 / -1' }}><dt>Tokens</dt><dd>{formatNumber(tokens)}</dd></div>
+        )}
+      </dl>
+      <div className="session-card-actions">
+        <Button className="primary" onClick={onOpen}>
+          Open <ChevronRight size={14} />
+        </Button>
+        <Button
+          className="ghost danger-ghost"
+          onClick={(e) => {
+            e.stopPropagation()
+            if (confirm('Archive this session?')) onDelete()
+          }}
+        >
+          <Trash2 size={14} /> Delete
+        </Button>
+      </div>
+    </article>
+  )
+}
 
 export default function SessionsPage() {
   const navigate = useNavigate()
@@ -28,57 +75,113 @@ export default function SessionsPage() {
     })
   }, [data, query, sort])
 
-  const createNow = () => create.mutate({ name: name.trim() });
+  const createNow = () => create.mutate({ name: name.trim() })
 
-  return <div className="page">
-    <div className="page-header">
-      <div>
-        <h1 className="page-title">Sessions</h1>
-        <p className="page-subtitle">Manage and resume engineering sessions</p>
+  return (
+    <div className="page sessions-page">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Sessions</h1>
+          <p className="page-subtitle">Manage and resume engineering sessions</p>
+        </div>
+        <Button className="ghost" onClick={() => refetch()}><RefreshCw size={15} /> Refresh</Button>
       </div>
-      <Button className="ghost" onClick={() => refetch()}><RefreshCw size={15} /> Refresh</Button>
-    </div>
 
-    <div className="toolbar">
-      <div style={{ position: 'relative', flex: 1, maxWidth: 420 }}>
-        <Search size={15} style={{ position: 'absolute', left: 11, top: 10, color: 'var(--muted)' }} />
-        <input className="input" style={{ paddingLeft: 34 }} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search sessions..." />
+      <div className="toolbar sessions-toolbar">
+        <div className="sessions-search-wrap">
+          <Search size={15} className="sessions-search-icon" />
+          <input
+            className="input"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search sessions..."
+          />
+        </div>
+        <Button className="ghost" type="button" aria-label="Filters (coming soon)"><SlidersHorizontal size={15} /></Button>
+        <select className="select sessions-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+          <option value="updated">Sort: Updated desc</option>
+          <option value="name">Sort: Name</option>
+          <option value="status">Sort: Status</option>
+        </select>
       </div>
-      <Button className="ghost"><SlidersHorizontal size={15} /></Button>
-      <select className="select" style={{ width: 190 }} value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-        <option value="updated">Sort: Updated desc</option>
-        <option value="name">Sort: Name</option>
-        <option value="status">Sort: Status</option>
-      </select>
-    </div>
 
-    <section className="panel">
-      <table className="table">
-        <thead><tr><th>Session</th><th>Status</th><th>Updated</th><th>Messages</th><th>Tools</th><th>Problems</th><th>Tokens</th><th /></tr></thead>
-        <tbody>
-          {sessions.map((s) => <tr key={s.id} onClick={() => navigate(`/term?session=${s.id}`)} style={{ cursor: 'pointer' }}>
-            <td><div style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</div><div className="muted mono" style={{ fontSize: 11 }}>{s.id}</div></td>
-            <td><StatusBadge status={s.status} /></td>
-            <td className="muted">{formatRelative(s.updated_at)}</td>
-            <td>{formatNumber(s.message_count)}</td>
-            <td>{formatNumber(s.tool_call_count)}</td>
-            <td style={{ color: (s.problem_count || 0) > 0 ? 'var(--error)' : undefined }}>{formatNumber(s.problem_count)}</td>
-            <td>{formatNumber((s.token_input || 0) + (s.token_output || 0))}</td>
-            <td style={{ textAlign: 'right' }}>
-              <Button className="ghost icon-btn" onClick={(e) => { e.stopPropagation(); if (confirm('Archive this session?')) del.mutate(s.id) }}><Trash2 size={14} /></Button>
-              <ChevronRight size={16} color="var(--muted)" />
-            </td>
-          </tr>)}
-        </tbody>
-      </table>
-      {!isLoading && sessions.length === 0 && <EmptyState title="No sessions found" detail="Create a session below to start a Vivado debug run." />}
-    </section>
+      <section className="panel sessions-panel">
+        <div className="sessions-table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>Status</th>
+                <th>Updated</th>
+                <th>Messages</th>
+                <th>Tools</th>
+                <th>Problems</th>
+                <th>Tokens</th>
+                <th aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((s) => (
+                <tr key={s.id} onClick={() => navigate(`/term?session=${s.id}`)} style={{ cursor: 'pointer' }}>
+                  <td>
+                    <div style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</div>
+                    <div className="muted mono" style={{ fontSize: 11 }}>{s.id}</div>
+                  </td>
+                  <td><StatusBadge status={s.status} /></td>
+                  <td className="muted">{formatRelative(s.updated_at)}</td>
+                  <td>{formatNumber(s.message_count)}</td>
+                  <td>{formatNumber(s.tool_call_count)}</td>
+                  <td style={{ color: (s.problem_count || 0) > 0 ? 'var(--error)' : undefined }}>{formatNumber(s.problem_count)}</td>
+                  <td>{formatNumber((s.token_input || 0) + (s.token_output || 0))}</td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <Button
+                      className="ghost icon-btn"
+                      title="Archive session"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (confirm('Archive this session?')) del.mutate(s.id)
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                    <ChevronRight size={16} color="var(--muted)" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
-    <div className="panel" style={{ marginTop: 16 }}>
-      <div className="panel-body" style={{ display: 'flex', gap: 8 }}>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') createNow() }} placeholder="New session name (optional)" />
-        <Button className="primary" onClick={createNow} disabled={create.isPending}><Plus size={15} /> Create Session</Button>
-      </div>
+        <div className="sessions-mobile-list">
+          {sessions.map((s) => (
+            <SessionCard
+              key={s.id}
+              session={s}
+              onOpen={() => navigate(`/term?session=${s.id}`)}
+              onDelete={() => del.mutate(s.id)}
+            />
+          ))}
+        </div>
+
+        {!isLoading && sessions.length === 0 && (
+          <EmptyState title="No sessions found" detail="Create a session below to start a Vivado debug run." />
+        )}
+      </section>
+
+      <section className="panel session-create-panel" style={{ marginTop: 16 }}>
+        <div className="panel-body">
+          <input
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') createNow() }}
+            placeholder="New session name (optional)"
+          />
+          <Button className="primary" onClick={createNow} disabled={create.isPending}>
+            <Plus size={15} /> Create Session
+          </Button>
+        </div>
+      </section>
     </div>
-  </div>
+  )
 }

@@ -76,12 +76,15 @@ def wait_vivado_gate_allowed(
     timeout: float = 7200.0,
 ) -> bool:
     """Called inside Vivado agent tools — blocks until UI approval resolves."""
+    from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
+
+    if is_vivado_execution_approved():
+        return True
+
     if not task_id:
         with _lock:
             has_gate = any(k.endswith(f":{operation}") for k in _gates)
-        if has_gate:
-            return False
-        return True
+        return False
     from edagent_vivado.harness.task_cancel import is_task_stop_requested
 
     if is_task_stop_requested(task_id):
@@ -91,17 +94,13 @@ def wait_vivado_gate_allowed(
         with _lock:
             _rejected_keys.discard(_gate_key(task_id, operation))
         return False
-    if not _wait_gate_registered(task_id, operation, timeout=min(timeout, 120.0)):
-        with _lock:
-            has_other = any(k.endswith(f":{operation}") for k in _gates)
-        return not has_other
+    if not _wait_gate_registered(task_id, operation, timeout=2.0):
+        return False
     key = _gate_key(task_id, operation)
     with _lock:
         entry = _gates.get(key)
     if not entry:
-        with _lock:
-            has_gate = any(k.endswith(f":{operation}") for k in _gates)
-        return not has_gate
+        return False
     state, ev = entry
     if state != "pending":
         allowed = state == "approved"

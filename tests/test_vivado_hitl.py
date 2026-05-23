@@ -38,6 +38,13 @@ def test_vivado_gate_per_operation():
     assert wait_vivado_gate_allowed("task-1", "tcl") is False
 
 
+def test_vivado_gate_denied_without_registration_when_manual():
+    from edagent_vivado.harness.execution_approval import set_vivado_execution_approval
+
+    set_vivado_execution_approval(False)
+    assert wait_vivado_gate_allowed("task-2", "synth") is False
+
+
 def test_rejection_scopes_distinct():
     synth = format_user_rejection(SCOPE_VIVADO_SYNTH, tool_name="run_vivado_synth_tool")
     tcl = format_user_rejection(SCOPE_VIVADO_TCL, tool_name="run_vivado_tcl_tool")

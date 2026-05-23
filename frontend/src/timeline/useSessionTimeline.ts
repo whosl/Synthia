@@ -39,7 +39,10 @@ export function useSessionTimeline(sessionId: string) {
     queryKey: ['active-task', sessionId],
     queryFn: () => getActiveTask(sessionId),
     enabled: Boolean(sessionId),
-    refetchInterval: 3000,
+    refetchInterval: (query) => {
+      const state = query.state.data?.task?.state
+      return state === 'stopping' || state === 'running' ? 1000 : 3000
+    },
   })
   const pendingInteractionsQ = useQuery({
     queryKey: ['interactions', sessionId],
@@ -88,8 +91,15 @@ export function useSessionTimeline(sessionId: string) {
     if (event.event_type === 'context.package.created') {
       queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
     }
-    if (event.event_type === 'task.done' || event.event_type === 'task.error' || event.event_type === 'task.stopped') {
-      sendingRef.current = false
+    if (
+      event.event_type === 'task.done'
+      || event.event_type === 'task.error'
+      || event.event_type === 'task.stopped'
+      || event.event_type === 'task.stopping'
+    ) {
+      if (event.event_type !== 'task.stopping') {
+        sendingRef.current = false
+      }
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['events', sessionId] })

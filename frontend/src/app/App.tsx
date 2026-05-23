@@ -2,6 +2,7 @@
 import { Providers } from './providers'
 import { AppRouter } from './router'
 import '../styles/global.css'
+import '../styles/sessions.css'
 import '../styles/terminal.css'
 import '../styles/monitor.css'
 

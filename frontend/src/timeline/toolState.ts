@@ -2,8 +2,13 @@
 export function toolStateFromCompletion(
   result: string,
   payloadState?: unknown,
-): 'running' | 'completed' | 'error' | 'rejected' {
-  if (payloadState === 'rejected' || payloadState === 'error' || payloadState === 'completed') {
+): 'running' | 'completed' | 'error' | 'rejected' | 'stopped' {
+  if (
+    payloadState === 'rejected'
+    || payloadState === 'error'
+    || payloadState === 'completed'
+    || payloadState === 'stopped'
+  ) {
     return payloadState
   }
   const text = (result || '').trim()

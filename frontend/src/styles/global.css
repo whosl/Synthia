@@ -1,7 +1,13 @@
 ﻿@import './tokens.css';
 
 *, *::before, *::after { box-sizing: border-box; }
-html, body, #root { width: 100%; height: 100%; margin: 0; }
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
 
 body {
   background: var(--bg);
@@ -210,8 +216,17 @@ a { color: inherit; text-decoration: none; }
 .page {
   min-height: 0;
   flex: 1;
-  overflow: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 28px 32px;
+  box-sizing: border-box;
+}
+
+.sessions-page {
+  width: 100%;
+  max-width: 100%;
 }
 
 .page-header {
@@ -643,4 +658,14 @@ a { color: inherit; text-decoration: none; }
   .page { padding: 12px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page-header { flex-direction: column; align-items: stretch; }
+
+  .toolbar {
+    flex-wrap: wrap;
+  }
+
+  .input,
+  .select,
+  .textarea {
+    max-width: 100%;
+  }
 }

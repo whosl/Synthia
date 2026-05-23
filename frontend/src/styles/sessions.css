@@ -1,0 +1,167 @@
+/* Sessions list — responsive table + mobile cards */
+
+.sessions-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.sessions-search-wrap {
+  position: relative;
+  flex: 1 1 280px;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.sessions-search-wrap .input {
+  width: 100%;
+  padding-left: 34px;
+}
+
+.sessions-search-icon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.sessions-sort {
+  flex: 0 1 auto;
+  min-width: 0;
+  width: auto;
+  max-width: 100%;
+}
+
+.sessions-panel {
+  min-width: 0;
+}
+
+.sessions-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sessions-mobile-list {
+  display: none;
+}
+
+.session-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.session-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.session-card-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.session-card-title strong {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card-id {
+  margin-top: 4px;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.session-card-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  font-size: 12px;
+}
+
+.session-card-meta dt {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.session-card-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.session-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.session-card-actions .btn {
+  flex: 1;
+  justify-content: center;
+}
+
+.session-card-actions .btn.danger-ghost {
+  color: var(--error);
+  border-color: var(--error-border);
+  background: var(--error-subtle);
+}
+
+.session-create-panel .panel-body {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.session-create-panel .input {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 768px) {
+  .sessions-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sessions-search-wrap {
+    flex: 1 1 auto;
+    max-width: none;
+    width: 100%;
+  }
+
+  .sessions-sort {
+    width: 100%;
+  }
+
+  .sessions-table-wrap {
+    display: none;
+  }
+
+  .sessions-mobile-list {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .session-create-panel .panel-body {
+    flex-direction: column;
+  }
+
+  .session-create-panel .btn.primary {
+    width: 100%;
+    justify-content: center;
+  }
+}
