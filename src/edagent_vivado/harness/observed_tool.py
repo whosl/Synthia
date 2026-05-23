@@ -66,9 +66,10 @@ class ObservedToolRunner:
 
         ui_state = tool_ui_state_from_output(output)
         if tcid:
+            db_state = ui_state if ui_state in ("error", "rejected") else "completed"
             toolcall_update(
                 tcid,
-                state="completed" if ui_state != "error" else "error",
+                state=db_state,
                 finished_at=int(time.time()),
                 output_summary=output[:500],
             )

@@ -225,8 +225,8 @@
 
 .tool-block { border-color: rgba(245, 158, 11, 0.25); }
 .tool-block.completed { border-color: rgba(22, 163, 74, 0.25); }
-.tool-block.rejected { border-color: rgba(245, 158, 11, 0.45); }
-.tool-block.rejected .trace-header .tool-state { color: var(--warning); }
+.tool-block.rejected { border-color: rgba(220, 38, 38, 0.25); }
+.tool-block.rejected .trace-header .tool-state { color: var(--error); }
 .tool-state { font-size: var(--font-size-xs); color: var(--success); font-family: var(--font-mono); }
 
 /* Composer */
@@ -549,7 +549,7 @@
   border-color: var(--approval-border-strong);
 }
 .trace-block.approval-trace-block.rejected {
-  border-color: rgba(239, 68, 68, 0.45);
+  border-color: rgba(220, 38, 38, 0.25);
 }
 .trace-block.approval-trace-block .approval-status-icon.approved {
   color: var(--approval-accent);
@@ -562,6 +562,13 @@
 .trace-block.approval-trace-block .interaction-badge.approved {
   background: var(--info-subtle);
   color: var(--approval-accent);
+}
+.trace-block.approval-trace-block .interaction-badge.rejected {
+  background: var(--error-subtle);
+  color: var(--error);
+}
+.trace-block.approval-trace-block.rejected .tool-state {
+  color: var(--error);
 }
 .trace-block.approval-trace-block.completed .tool-state,
 .trace-block.approval-trace-block.status-partial .tool-state {
@@ -688,8 +695,8 @@
   50% { opacity: 1; }
 }
 
-/* Also show working for active tool calls */
-.trace-block.tool-block:not(.completed):not(.errored) .trace-header .tool-state {
+/* Running tool state pulse — not for rejected/completed/error */
+.trace-block.tool-block:not(.completed):not(.errored):not(.rejected) .trace-header .tool-state {
   animation: working-fade 2s ease-in-out infinite;
 }
 

@@ -19,7 +19,7 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
   const rejected = tool.state === 'rejected'
   const errored = tool.state === 'error'
   const icon = done ? <CheckCircle2 size={14} color="var(--success)" />
-    : rejected ? <XCircle size={14} color="var(--warning)" />
+    : rejected ? <XCircle size={14} color="var(--error)" />
     : errored ? <AlertCircle size={14} color="var(--error)" />
     : <CircleDotDashed size={14} color="var(--warning)" />
   return <div className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''}`}>

@@ -44,6 +44,8 @@ _store_event_create = event_create
 
 # Tool runs rejected at Vivado approval gate (langgraph run_id -> outcome scope)
 _blocked_tool_runs: dict[str, str] = {}
+# tool.completed already emitted in on_tool_start after Vivado approval reject
+_early_blocked_tool_runs: set[str] = set()
 
 def event_create(session_id: str, event_type: str, payload: dict, **kwargs) -> dict:  # type: ignore[no-redef]
     """Persist an event and publish it to live SSE subscribers."""
@@ -299,6 +301,8 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                             )
                             from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
 
+                            run_key = str(evt.get("run_id", ""))
+                            vivado_blocked_early = False
                             if is_vivado_execution_tool(tool_name_start):
                                 approved = await request_vivado_tool_approval(
                                     tool_name_start,
@@ -308,19 +312,51 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                     run_id=run["id"],
                                     event_create=event_create,
                                 )
-                                run_key = str(evt.get("run_id", ""))
                                 if not approved and run_key:
                                     spec = vivado_tool_spec(tool_name_start)
                                     from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_SYNTH
 
-                                    _blocked_tool_runs[run_key] = (
-                                        spec.scope if spec else SCOPE_VIVADO_SYNTH
+                                    blocked_scope = spec.scope if spec else SCOPE_VIVADO_SYNTH
+                                    _blocked_tool_runs[run_key] = blocked_scope
+                                    from edagent_vivado.harness.run_context import set_tool_thread_context
+
+                                    set_tool_thread_context(session_id, t["id"], run["id"])
+                                    tool_runner.on_tool_start(run_key, tool_name_start, tool_input)
+                                    tool_runner.on_tool_end(
+                                        run_key,
+                                        tool_name_start,
+                                        "",
+                                        blocked=True,
+                                        blocked_scope=blocked_scope,
                                     )
-                        tool_runner.on_tool_start(str(evt.get("run_id", "")), evt.get("name", ""), tool_input)
+                                    _early_blocked_tool_runs.add(run_key)
+                                    _blocked_tool_runs.pop(run_key, None)
+                                    vivado_blocked_early = True
+                            if not vivado_blocked_early:
+                                from edagent_vivado.harness.run_context import set_tool_thread_context
+
+                                set_tool_thread_context(session_id, t["id"], run["id"])
+                                tool_runner.on_tool_start(run_key or str(evt.get("run_id", "")), tool_name_start, tool_input)
+                        else:
+                            from edagent_vivado.harness.run_context import set_tool_thread_context
+
+                            set_tool_thread_context(session_id, t["id"], run["id"])
+                            tool_runner.on_tool_start(str(evt.get("run_id", "")), evt.get("name", ""), tool_input)
                     elif kind == "on_tool_end":
                         output = str(evt.get("data", {}).get("output", ""))[:2500]
                         run_key = str(evt.get("run_id", ""))
                         tool_name = evt.get("name", "")
+                        from edagent_vivado.harness.run_context import clear_tool_thread_context
+
+                        if run_key in _early_blocked_tool_runs:
+                            _early_blocked_tool_runs.discard(run_key)
+                            if output:
+                                from edagent_vivado.harness.approval_apply import should_continue_after_approval
+
+                                if should_continue_after_approval(output):
+                                    inline_approval_results.append(output)
+                            clear_tool_thread_context()
+                            continue
                         blocked_scope = _blocked_tool_runs.pop(run_key, None)
                         was_blocked = blocked_scope is not None
                         tcid = tool_runner.tool_ids.get(run_key, "")
@@ -466,6 +502,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                             from edagent_vivado.harness.approval_apply import should_continue_after_approval
                             if should_continue_after_approval(output) or output.startswith("{"):
                                 inline_approval_results.append(output)
+                        clear_tool_thread_context()
                     elif kind in ("on_chat_model_end", "on_llm_end"):
                         usage_meta = {}
                         data = evt.get("data") or {}
