@@ -60,17 +60,9 @@ export interface TerminalRuntimeState {
   activeTaskId?: string | null
 }
 
-/**
- * Find or create an assistant turn keyed by taskId.
- * Strict matching: only reuse if taskId matches exactly.
- */
 const assistantTurn = (state: TerminalRuntimeState, taskId?: string | null) => {
-  if (taskId) {
-    const existing = state.turns.find((t) => t.role === 'assistant' && t.taskId === taskId)
-    if (existing) return existing
-  }
   const last = state.turns[state.turns.length - 1]
-  if (last?.role === 'assistant' && last.taskId === taskId) return last
+  if (last?.role === 'assistant' && (!taskId || last.taskId === taskId || !last.taskId)) return last
   const turn: TerminalTurn = { id: `assistant-${taskId || Date.now()}`, role: 'assistant', taskId, content: '', reasoning: [], tools: [], blocks: [] }
   state.turns.push(turn)
   return turn
@@ -85,32 +77,26 @@ const ensureTextBlock = (turn: TerminalTurn): TextBlockState => {
   return block
 }
 
-/** Mark the latest reasoning block as done (if any is still running). */
-const closeReasoningBlock = (turn: TerminalTurn) => {
-  for (let i = turn.blocks.length - 1; i >= 0; i--) {
-    if (turn.blocks[i].kind === 'reasoning' && turn.blocks[i].data && (turn.blocks[i].data as ReasoningBlockState).state === 'running') {
-      ;(turn.blocks[i].data as ReasoningBlockState).state = 'done'
-      break
-    }
-  }
+/** Close any open text block so the next block (tool/reasoning) comes after it. */
+const closeTextBlock = (turn: TerminalTurn) => {
+  // Just ensure current text block exists; next non-text push will naturally come after
+  // No-op: the next push to blocks[] is ordered
 }
 
 export function stateFromMessages(messages: Message[]): TerminalRuntimeState {
   return {
-    turns: messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-        taskId: m.task_id,
-        createdAt: m.created_at,
-        partial: Boolean(m.partial),
-        stopped: Boolean(m.stopped),
-        reasoning: [],
-        tools: [],
-        blocks: m.content ? [{ kind: 'text' as const, data: { id: `text-${m.id}`, text: m.content } }] : [],
-      })),
+    turns: messages.map((m) => ({
+      id: m.id,
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: m.content,
+      taskId: m.task_id,
+      createdAt: m.created_at,
+      partial: Boolean(m.partial),
+      stopped: Boolean(m.stopped),
+      reasoning: [],
+      tools: [],
+      blocks: m.content ? [{ kind: 'text' as const, data: { id: `text-${m.id}`, text: m.content } }] : [],
+    })),
     timeline: [],
     tools: [],
     lastSeq: 0,
@@ -130,8 +116,8 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
   const text = String(payload.text || '')
   const taskId = event.task_id || String(payload.task_id || '') || null
 
-  const pushTimeline = (title: string, detail?: string, tState?: string) => {
-    next.timeline.push({ id: event.id, seq: event.seq, type: event.event_type, title, detail, state: tState, createdAt: event.created_at })
+  const pushTimeline = (title: string, detail?: string, state?: string) => {
+    next.timeline.push({ id: event.id, seq: event.seq, type: event.event_type, title, detail, state, createdAt: event.created_at })
   }
 
   switch (event.event_type) {
@@ -146,7 +132,7 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
           createdAt: event.created_at,
           reasoning: [],
           tools: [],
-          blocks: text ? [{ kind: 'text', data: { id: `text-${event.id}`, text } }] : [],
+          blocks: [],
         })
       }
       pushTimeline('User message', text.slice(0, 80))
@@ -179,7 +165,6 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
     case 'message.assistant.delta': {
       if (options.appendAssistantDelta && text) {
         const turn = assistantTurn(next, taskId)
-        closeReasoningBlock(turn)
         const tb = ensureTextBlock(turn)
         tb.text += text
         turn.content = turn.blocks
@@ -192,108 +177,59 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
     case 'message.assistant.completed': {
       const turn = assistantTurn(next, taskId)
       turn.partial = false
-      closeReasoningBlock(turn)
-      if (text && !turn.content) {
-        const tb = ensureTextBlock(turn)
-        tb.text = text
-        turn.content = text
-      }
-      pushTimeline('Assistant response completed', (text || turn.content || '').slice(0, 80), 'done')
+      pushTimeline('Assistant response completed', String(payload.text || ''), 'done')
       break
     }
     case 'message.assistant.stopped': {
       const turn = assistantTurn(next, taskId)
       turn.partial = true
       turn.stopped = true
-      closeReasoningBlock(turn)
-      if (text && !turn.content) {
-        const tb = ensureTextBlock(turn)
-        tb.text = text
-        turn.content = text
-      }
       pushTimeline('Assistant response stopped', undefined, 'stopped')
       break
     }
     case 'reasoning.delta': {
       const turn = assistantTurn(next, taskId)
-      const lastBlock = turn.blocks[turn.blocks.length - 1]
-      if (lastBlock && lastBlock.kind === 'reasoning' && lastBlock.data.state === 'running') {
-        lastBlock.data.text += text
+      closeTextBlock(turn)
+      const lastBlock = turn.reasoning[turn.reasoning.length - 1]
+      if (lastBlock) {
+        lastBlock.text += text
       } else {
         const block: ReasoningBlockState = { id: `reason-${event.id}`, text, state: 'running', startedAt: event.created_at }
         turn.reasoning.push(block)
         turn.blocks.push({ kind: 'reasoning', data: block })
       }
-      break
-    }
-    case 'reasoning.summary': {
-      const turn = assistantTurn(next, taskId)
-      closeReasoningBlock(turn)
-      pushTimeline('Reasoning completed', text.slice(0, 120), 'done')
+      pushTimeline('Reasoning update', text.slice(0, 120), 'running')
       break
     }
     case 'tool.started': {
       const turn = assistantTurn(next, taskId)
-      closeReasoningBlock(turn)
+      closeTextBlock(turn)
       const tool: ToolBlockState = {
         id: String(payload.toolcall_id || event.id),
         name: String(payload.tool_name || payload.name || 'tool'),
         state: 'running',
-        args: typeof payload.args === 'string' ? payload.args : (payload.args ? JSON.stringify(payload.args) : undefined),
+        args: typeof payload.args === 'string' ? payload.args : undefined,
         startedAt: event.created_at,
       }
       next.tools.push(tool)
       turn.tools.push(tool)
       turn.blocks.push({ kind: 'tool', data: tool })
-      pushTimeline(`Tool: ${tool.name}`, tool.args?.slice(0, 80), 'running')
+      pushTimeline(`Tool started: ${tool.name}`, tool.args, 'running')
       break
     }
     case 'tool.completed': {
       const tcid = String(payload.toolcall_id || '')
       const name = String(payload.tool_name || payload.name || 'tool')
-      const elapsed = payload.elapsed_ms as number | undefined
-      const update = (t: ToolBlockState): ToolBlockState => {
-        if (tcid && t.id === tcid) return { ...t, state: 'completed', result: String(payload.result || ''), elapsedMs: elapsed }
-        if (!tcid && t.name === name && t.state === 'running') return { ...t, state: 'completed', result: String(payload.result || ''), elapsedMs: elapsed }
-        return t
-      }
+      const update = (t: ToolBlockState) => (tcid && t.id === tcid) || (!tcid && t.name === name && t.state === 'running')
+        ? { ...t, state: 'completed' as const, result: String(payload.result || '') }
+        : t
       next.tools = next.tools.map(update)
-      next.turns = next.turns.map((turn) => ({
-        ...turn,
-        tools: turn.tools.map(update),
-        blocks: turn.blocks.map(b => b.kind === 'tool' ? { ...b, data: update(b.data) } : b)
-      }))
-      pushTimeline(`Tool done: ${name}`, String(payload.result || '').slice(0, 80), 'completed')
+      next.turns = next.turns.map((turn) => ({ ...turn, tools: turn.tools.map(update), blocks: turn.blocks.map(b => b.kind === 'tool' ? { ...b, data: update(b.data) } : b) }))
+      pushTimeline(`Tool completed: ${name}`, String(payload.result || ''), 'completed')
       break
     }
-    case 'tool.error': {
-      const tcid = String(payload.toolcall_id || '')
-      const name = String(payload.tool_name || payload.name || 'tool')
-      const errorText = String(payload.error || payload.message || '')
-      const update = (t: ToolBlockState): ToolBlockState => {
-        if (tcid && t.id === tcid) return { ...t, state: 'error', error: errorText }
-        if (!tcid && t.name === name && t.state === 'running') return { ...t, state: 'error', error: errorText }
-        return t
-      }
-      next.tools = next.tools.map(update)
-      next.turns = next.turns.map((turn) => ({
-        ...turn,
-        tools: turn.tools.map(update),
-        blocks: turn.blocks.map(b => b.kind === 'tool' ? { ...b, data: update(b.data) } : b)
-      }))
-      pushTimeline(`Tool error: ${name}`, errorText.slice(0, 120), 'error')
-      break
-    }
-    case 'run.started':
-    case 'run.completed':
-    case 'run.error':
-      pushTimeline(event.event_type, String(payload.name || payload.run_type || ''), String(payload.state || ''))
-      break
-    case 'memory.updated':
-      pushTimeline('Memory updated', String(payload.summary || '').slice(0, 80))
-      break
-    case 'problem.detected':
-      pushTimeline('Problem detected', String(payload.message || payload.signature || '').slice(0, 120), 'error')
+    case 'tool.error':
+      pushTimeline(`Tool error: ${String(payload.tool_name || 'tool')}`, String(payload.error || ''), 'error')
       break
     default:
       pushTimeline(event.event_type, JSON.stringify(payload).slice(0, 180), String(payload.state || ''))
