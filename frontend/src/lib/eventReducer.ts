@@ -23,10 +23,23 @@ export interface TextBlockState {
   text: string
 }
 
+export interface InteractionBlockState {
+  id: string
+  interaction_type: 'approval' | 'input_request'
+  title: string
+  message: string
+  status: 'pending' | 'approved' | 'rejected' | 'responded'
+  files?: Array<{ path: string; content: string; description?: string; action: string }>
+  fields?: Array<{ id: string; label: string; field_type: string; options?: Array<{ value: string; label: string }>; placeholder?: string; recommendations?: string[]; required?: boolean }>
+  response?: Record<string, any>
+  createdAt?: number
+}
+
 export type TurnBlock =
   | { kind: 'text'; data: TextBlockState }
   | { kind: 'reasoning'; data: ReasoningBlockState }
   | { kind: 'tool'; data: ToolBlockState }
+  | { kind: 'interaction'; data: InteractionBlockState }
 
 export interface TerminalTurn {
   id: string
@@ -236,6 +249,40 @@ export function applyEvent(state: TerminalRuntimeState, event: SessionEvent, opt
     case 'tool.error':
       pushTimeline(`Tool error: ${String(payload.tool_name || 'tool')}`, String(payload.error || ''), 'error')
       break
+    case 'interaction.requested': {
+      const turn = assistantTurn(next, taskId)
+      const block: InteractionBlockState = {
+        id: String(payload.interaction_id || event.id),
+        interaction_type: (payload.interaction_type || 'approval') as 'approval' | 'input_request',
+        title: String(payload.title || ''),
+        message: String(payload.message || ''),
+        status: 'pending',
+        files: payload.files as InteractionBlockState['files'],
+        fields: payload.fields as InteractionBlockState['fields'],
+        createdAt: event.created_at,
+      }
+      turn.blocks.push({ kind: 'interaction', data: block })
+      pushTimeline(`Interaction: ${payload.title || payload.interaction_type}`, undefined, 'pending')
+      break
+    }
+    case 'interaction.approved':
+    case 'interaction.rejected':
+    case 'interaction.responded': {
+      const iid = String(payload.interaction_id || '')
+      const newStatus = event.event_type === 'interaction.approved' ? 'approved'
+        : event.event_type === 'interaction.rejected' ? 'rejected' : 'responded'
+      next.turns = next.turns.map((turn) => ({
+        ...turn,
+        blocks: turn.blocks.map(b => {
+          if (b.kind === 'interaction' && b.data.id === iid) {
+            return { ...b, data: { ...b.data, status: newStatus, response: payload.response } as InteractionBlockState }
+          }
+          return b
+        })
+      }))
+      pushTimeline(`Interaction ${newStatus}`, String(payload.interaction_id || ''), newStatus)
+      break
+    }
     default:
       pushTimeline(event.event_type, JSON.stringify(payload).slice(0, 180), String(payload.state || ''))
   }

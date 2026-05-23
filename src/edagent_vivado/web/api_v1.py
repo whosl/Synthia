@@ -405,6 +405,43 @@ async def api_kb_candidate_reject(candidate_id: str):
 async def api_kb_candidate_merge(candidate_id: str):
     return {"ok": True, "candidate_id": candidate_id, "status": "merged"}
 
+# ── Interaction API (Human-in-the-loop) ────────────────────
+
+@router.get("/sessions/{session_id}/interactions")
+async def api_interactions(session_id: str):
+    from edagent_vivado.harness.interaction import get_pending_for_session
+    pending = get_pending_for_session(session_id)
+    return {"interactions": [i.to_dict() for i in pending]}
+
+@router.get("/interactions/{interaction_id}")
+async def api_interaction_detail(interaction_id: str):
+    from edagent_vivado.harness.interaction import get_interaction
+    interaction = get_interaction(interaction_id)
+    if not interaction:
+        raise HTTPException(404, "Interaction not found")
+    return interaction.to_dict()
+
+@router.post("/interactions/{interaction_id}/respond")
+async def api_interaction_respond(interaction_id: str, request: Request):
+    from edagent_vivado.harness.interaction import get_interaction, respond_interaction
+    body = await request.json()
+    interaction = get_interaction(interaction_id)
+    if not interaction:
+        raise HTTPException(404, "Interaction not found")
+    result = respond_interaction(interaction_id, body)
+    if not result:
+        raise HTTPException(500, "Failed to process response")
+    # Emit event
+    event_type = "interaction.approved" if result.status.value == "approved" else (
+        "interaction.rejected" if result.status.value == "rejected" else "interaction.responded"
+    )
+    event_create(interaction.session_id, event_type, {
+        "interaction_id": interaction_id,
+        "interaction_type": interaction.interaction_type.value,
+        "response": body,
+    }, task_id=interaction.task_id)
+    return {"ok": True, "interaction": result.to_dict()}
+
 # ── Vivado Health API ────────────────────────────────────────
 
 @router.get("/health/vivado")
@@ -461,6 +498,34 @@ async def api_vivado_targets():
 @router.get("/vivado/commands")
 async def api_vivado_commands(limit: int = 50):
     return {"commands": []}
+
+@router.get("/vivado/devices")
+async def api_vivado_devices():
+    """Query available FPGA devices from connected Vivado instance."""
+    import subprocess, os
+    host = _os.environ.get("VIVADO_REMOTE_HOST", "")
+    key = _os.environ.get("VIVADO_REMOTE_KEY", "")
+    port = _os.environ.get("VIVADO_REMOTE_PORT", "")
+    env_script = _os.environ.get("VIVADO_REMOTE_ENV", "")
+    vivado_path = _os.environ.get("VIVADO_REMOTE_PATH", "vivado")
+
+    tcl_cmd = "foreach p [get_parts] { puts $p }; exit"
+    if host:
+        ssh = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+        if key: ssh += ["-i", key]
+        if port: ssh += ["-p", str(port)]
+        ssh.append(host)
+        env_prefix = f"source {env_script} 2>/dev/null && " if env_script else ""
+        cmd = f'{env_prefix}{vivado_path} -mode batch -nojournal -nolog -tclargs <<< "{tcl_cmd}"'
+        try:
+            p = subprocess.run(ssh + [cmd], capture_output=True, text=True, timeout=30)
+            parts = [line.strip() for line in p.stdout.splitlines()
+                     if line.strip() and not line.startswith("***") and not line.startswith("INFO")
+                     and not line.startswith("Vivado") and "Copyright" not in line]
+            return {"devices": [{"value": part, "label": part} for part in sorted(parts) if part]}
+        except Exception as e:
+            return {"devices": [], "error": str(e)}
+    return {"devices": [], "error": "No Vivado target configured"}
 
 @router.post("/vivado/commands/tcl")
 async def api_vivado_run_tcl(request: Request):

@@ -7,6 +7,7 @@ import { listMessages } from '../api/messages'
 import { getSession } from '../api/sessions'
 import { getPatchApproval, setPatchApproval } from '../api/settings'
 import { getActiveTask, startTask, stopSessionTask } from '../api/tasks'
+import { request } from '../api/client'
 import type { SessionEvent } from '../api/types'
 import { Button } from '../components/common/Button'
 import { StatusBadge } from '../components/common/StatusBadge'
@@ -103,6 +104,12 @@ export default function TerminalPage() {
   const problemCount = useMemo(() => runtime.timeline.filter((t) => t.type.includes('problem') || t.state === 'error').length, [runtime.timeline])
   const session = sessionQ.data?.session
 
+  const handleInteractionRespond = async (interactionId: string, response: Record<string, any>) => {
+    await request(`/interactions/${interactionId}/respond`, { method: 'POST', body: JSON.stringify(response), headers: { 'Content-Type': 'application/json' } })
+    queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+  }
+
   return <div className="page terminal-page">
     <div className="terminal-shell">
       <header className="terminal-header">
@@ -138,7 +145,7 @@ export default function TerminalPage() {
             <Button className="ghost" onClick={() => setDebugOpen(!debugOpen)}>{debugOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}</Button>
           </div>
           <div className={view === 'chat' ? 'message-list' : 'timeline-view'} ref={scrollRef}>
-            {view === 'chat' ? <MessageList turns={runtime.turns} /> : <TimelineView items={runtime.timeline} />}
+            {view === 'chat' ? <MessageList turns={runtime.turns} onInteractionRespond={handleInteractionRespond} /> : <TimelineView items={runtime.timeline} />}
           </div>
           <Composer running={running} stopping={stopping} disabled={stopping || start.isPending} onSend={(q) => start.mutate(q)} onStop={() => stop.mutate()} />
         </section>

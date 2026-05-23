@@ -5,7 +5,7 @@ const EVENT_TYPES = [
   'session.created','session.updated','session.archived','task.created','task.started','task.stopping','task.stopped','task.done','task.error',
   'message.user.created','message.assistant.delta','message.assistant.completed','message.assistant.stopped','reasoning.delta','reasoning.summary',
   'tool.started','tool.delta','tool.completed','tool.error','llm.started','llm.usage','llm.completed','llm.error','eda.started','eda.log','eda.problem_detected','eda.completed','eda.error',
-  'vivado.command.started','vivado.command.stdout','vivado.command.stderr','vivado.command.log','vivado.command.completed','vivado.command.error','problem.detected','kb.candidate.created','artifact.created'
+  'vivado.command.started','vivado.command.stdout','vivado.command.stderr','vivado.command.log','vivado.command.completed','vivado.command.error','problem.detected','kb.candidate.created','artifact.created','interaction.requested','interaction.approved','interaction.rejected','interaction.responded'
 ]
 
 export class SessionEventStream {
