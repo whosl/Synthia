@@ -15,7 +15,7 @@ from edagent_vivado.harness.approval_outcomes import (
 from edagent_vivado.harness.vivado_agent_registry import vivado_tool_spec
 from edagent_vivado.harness.problem_collector import collect_from_tool_output, record_problems
 from edagent_vivado.harness.kb_candidate_policy import maybe_create_kb_candidate
-from edagent_vivado.repository.store import toolcall_create, toolcall_update
+from edagent_vivado.repository.store import toolcall_create, toolcall_get, toolcall_update
 
 
 EventSink = Callable[..., Any]
@@ -40,10 +40,16 @@ class ObservedToolRunner:
         )
         key = str(langgraph_run_id or tc["id"])
         self.tool_ids[key] = tc["id"]
+        started_at = int(tc.get("started_at") or time.time())
         self.event_sink(
             self.session_id,
             "tool.started",
-            {"tool_name": tool_name, "toolcall_id": tc["id"], "args": args_str},
+            {
+                "tool_name": tool_name,
+                "toolcall_id": tc["id"],
+                "args": args_str,
+                "started_at": started_at,
+            },
             task_id=self.task_id,
             run_id=self.run_id,
         )
@@ -65,12 +71,19 @@ class ObservedToolRunner:
             output = format_user_rejection(scope, tool_name=tool_name)
 
         ui_state = tool_ui_state_from_output(output)
+        finished_at = int(time.time())
+        elapsed_ms: int | None = None
+        started_at: int | None = None
         if tcid:
+            row = toolcall_get(tcid) or {}
+            started_at = int(row.get("started_at") or finished_at)
+            elapsed_ms = max(0, (finished_at - started_at) * 1000)
             db_state = ui_state if ui_state in ("error", "rejected") else "completed"
             toolcall_update(
                 tcid,
                 state=db_state,
-                finished_at=int(time.time()),
+                finished_at=finished_at,
+                elapsed_ms=elapsed_ms,
                 output_summary=output[:500],
             )
         self.event_sink(
@@ -81,6 +94,8 @@ class ObservedToolRunner:
                 "toolcall_id": tcid,
                 "result": output[:500],
                 "state": ui_state,
+                "started_at": started_at,
+                "elapsed_ms": elapsed_ms,
             },
             task_id=self.task_id,
             run_id=self.run_id,

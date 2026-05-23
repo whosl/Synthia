@@ -274,14 +274,20 @@ export function applyTimelineEvent(
       }
       const toolcallId = String(payload.toolcall_id || event.id)
       const key = `tool:${toolcallId}`
+      const startedAt = Number(payload.started_at || event.created_at || 0) || undefined
       const toolPayload: ToolEntryPayload = {
         toolcallId,
         name: String(payload.tool_name || payload.name || 'tool'),
         state: 'running',
         args: typeof payload.args === 'string' ? payload.args : undefined,
+        startedAt,
       }
       if (next.indexByKey[key] !== undefined) {
-        next = updateEntry(next, key, (e) => ({ ...e, payload: toolPayload }))
+        next = updateEntry(next, key, (e) => {
+          const prev = e.payload as ToolEntryPayload
+          if (prev.state !== 'running') return e
+          return { ...e, payload: { ...toolPayload, result: prev.result, elapsedMs: prev.elapsedMs } }
+        })
       } else {
         const entry: TimelineEntry = {
           key,
@@ -304,7 +310,13 @@ export function applyTimelineEvent(
       const result = String(payload.result || '')
       const endState = toolStateFromCompletion(result, payload.state)
       const key = tcid ? `tool:${tcid}` : null
-      const patch = (p: ToolEntryPayload): ToolEntryPayload => ({ ...p, state: endState, result })
+      const elapsedMs = payload.elapsed_ms != null ? Number(payload.elapsed_ms) : undefined
+      const patch = (p: ToolEntryPayload): ToolEntryPayload => ({
+        ...p,
+        state: endState,
+        result,
+        elapsedMs: elapsedMs ?? p.elapsedMs,
+      })
       if (key && next.indexByKey[key] !== undefined) {
         next = updateEntry(next, key, (e) => ({ ...e, payload: patch(e.payload as ToolEntryPayload) }))
         const updated = next.entries[next.indexByKey[key]].payload as ToolEntryPayload

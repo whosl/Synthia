@@ -31,6 +31,8 @@ export interface ToolEntryPayload {
   state: 'running' | 'completed' | 'error' | 'rejected'
   args?: string
   result?: string
+  startedAt?: number
+  elapsedMs?: number
 }
 
 export interface InteractionEntryPayload {

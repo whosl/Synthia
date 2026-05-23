@@ -73,6 +73,31 @@ describe('timeline reducer', () => {
     expect(users[0].key).toBe('user:m1')
   })
 
+  it('does not reset tool to running after rejected completed', () => {
+    let state = emptyTimelineState()
+    state = applyTimelineEvent(state, evt(1, 'tool.started', {
+      toolcall_id: 'tc1',
+      tool_name: 'run_vivado_synth_tool',
+      started_at: 1000,
+    }))
+    state = applyTimelineEvent(state, evt(2, 'tool.completed', {
+      toolcall_id: 'tc1',
+      tool_name: 'run_vivado_synth_tool',
+      state: 'rejected',
+      result: '{"edagent_outcome":"user_rejected"}',
+      elapsed_ms: 12,
+    }))
+    state = applyTimelineEvent(state, evt(3, 'tool.started', {
+      toolcall_id: 'tc1',
+      tool_name: 'run_vivado_synth_tool',
+      started_at: 1001,
+    }))
+    const tool = getChatEntries(state).find((e) => e.kind === 'tool')
+    expect(tool).toBeDefined()
+    expect((tool!.payload as { state: string }).state).toBe('rejected')
+    expect((tool!.payload as { elapsedMs?: number }).elapsedMs).toBe(12)
+  })
+
   it('legacy replay without stream_id uses segment counter on tool.started', () => {
     let state = emptyTimelineState()
     state = applyTimelineEvent(state, evt(1, 'message.assistant.delta', { text: 'A' }), { appendAssistantDelta: true })

@@ -78,7 +78,8 @@ export function TimelineEntryView({ entry, onInteractionRespond }: TimelineEntry
             state: (entry.payload as ToolEntryPayload).state,
             args: (entry.payload as ToolEntryPayload).args,
             result: (entry.payload as ToolEntryPayload).result,
-            startedAt: entry.createdAt,
+            startedAt: (entry.payload as ToolEntryPayload).startedAt ?? entry.createdAt,
+            elapsedMs: (entry.payload as ToolEntryPayload).elapsedMs,
           }}
         />
       )}

@@ -228,6 +228,20 @@
 .tool-block.rejected { border-color: rgba(220, 38, 38, 0.25); }
 .tool-block.rejected .trace-header .tool-state { color: var(--error); }
 .tool-state { font-size: var(--font-size-xs); color: var(--success); font-family: var(--font-mono); }
+.tool-elapsed {
+  font-size: var(--font-size-xs);
+  color: var(--term-muted);
+  font-family: var(--font-mono);
+  min-width: 3.2em;
+  text-align: right;
+}
+.tool-elapsed-live {
+  color: var(--term-accent);
+}
+.tool-block.rejected .tool-elapsed-live,
+.tool-block.rejected .tool-elapsed {
+  color: var(--error);
+}
 
 /* Composer */
 .composer {

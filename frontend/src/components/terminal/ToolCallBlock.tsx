@@ -1,4 +1,5 @@
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, XCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useTerminalStore } from '../../stores/terminalStore'
 
 export interface ToolCallViewModel {
@@ -12,9 +13,35 @@ export interface ToolCallViewModel {
   elapsedMs?: number
 }
 
+function formatElapsed(ms: number) {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const sec = Math.floor(ms / 1000) % 60
+  const min = Math.floor(ms / 60_000)
+  return `${min}m ${sec}s`
+}
+
+function useToolElapsed(tool: ToolCallViewModel) {
+  const [tick, setTick] = useState(() => Date.now())
+  const running = tool.state === 'running'
+
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => setTick(Date.now()), 100)
+    return () => window.clearInterval(id)
+  }, [running])
+
+  if (tool.elapsedMs != null) return tool.elapsedMs
+  if (running && tool.startedAt) {
+    return Math.max(0, tick - tool.startedAt * 1000)
+  }
+  return null
+}
+
 export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
   const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? true)
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
+  const elapsedMs = useToolElapsed(tool)
   const done = tool.state === 'completed'
   const rejected = tool.state === 'rejected'
   const errored = tool.state === 'error'
@@ -27,7 +54,11 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
       {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       {icon}
       <span>{tool.name}</span>
-      {tool.elapsedMs != null && <span className="tool-elapsed">{(tool.elapsedMs / 1000).toFixed(1)}s</span>}
+      {elapsedMs != null && (
+        <span className={`tool-elapsed${tool.state === 'running' ? ' tool-elapsed-live' : ''}`}>
+          {formatElapsed(elapsedMs)}
+        </span>
+      )}
       <span className="spacer" /><span className="tool-state">{tool.state}</span>
     </div>
     {!collapsed && <div className="trace-body">
