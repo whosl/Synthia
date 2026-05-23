@@ -14,7 +14,7 @@ export function MessageTurn({ turn }: { turn: TerminalTurn }) {
   }
 
   return <div className="message-turn assistant"><div className="assistant-stack">
-    <div className="message-meta assistant-meta"><Bot size={15} color="var(--accent)" /> EdAgent {turn.partial && <span className="status stopped">partial</span>}</div>
+    <div className="message-meta assistant-meta"><Bot size={15} color="var(--accent)" /> EdAgent {turn.stopped && <span className="status stopped">stopped</span>}{turn.partial && !turn.stopped && <span className="status stopped">partial</span>}</div>
     <div className="assistant-blocks">
       {turn.blocks.map((block) => {
         switch (block.kind) {

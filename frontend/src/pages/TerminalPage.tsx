@@ -36,40 +36,48 @@ export default function TerminalPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const sessionQ = useQuery({ queryKey: ['session', sessionId], queryFn: () => getSession(sessionId), enabled: Boolean(sessionId) })
-  const messagesQ = useQuery({ queryKey: ['messages', sessionId], queryFn: () => listMessages(sessionId), enabled: Boolean(sessionId) })
+  const messagesQ = useQuery({ queryKey: ['messages', sessionId], queryFn: () => listMessages(sessionId, 500), enabled: Boolean(sessionId) })
   const activeQ = useQuery({ queryKey: ['active-task', sessionId], queryFn: () => getActiveTask(sessionId), enabled: Boolean(sessionId), refetchInterval: 3000 })
   const approvalQ = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
-  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 500), enabled: Boolean(sessionId) })
+  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 2000), enabled: Boolean(sessionId) })
 
   const activeTask = activeQ.data?.task
   const running = activeTask?.state === 'running'
   const stopping = activeTask?.state === 'stopping'
+  const rebuildGenRef = useRef(0)
 
   useEffect(() => {
     if (!messagesQ.data || !eventsQ.data) return
+    rebuildGenRef.current++
     const next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
     setRuntime(next)
     setLastSeq(sessionId, next.lastSeq)
-  }, [messagesQ.data, eventsQ.data, activeTask?.id, activeTask?.state, sessionId, setLastSeq])
+  }, [messagesQ.data, eventsQ.data, activeTask?.id, sessionId, setLastSeq])
 
-  const onStreamEvent = useCallback((event: SessionEvent) => {
+  const onStreamEventRef = useRef<(event: SessionEvent) => void>(() => {})
+  onStreamEventRef.current = (event: SessionEvent) => {
     setRuntime((prev) => applyEvent(prev, event, { appendAssistantDelta: event.event_type === 'message.assistant.delta' }))
     setLastSeq(sessionId, event.seq)
     if (event.event_type === 'task.done' || event.event_type === 'task.error' || event.event_type === 'task.stopped') {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
     }
-  }, [queryClient, sessionId, setLastSeq])
+  }
+
+  const stableOnStreamEvent = useCallback((event: SessionEvent) => {
+    onStreamEventRef.current(event)
+  }, [])
 
   useEffect(() => {
     if (!sessionId) return
     streamRef.current?.disconnect()
-    const stream = new SessionEventStream(sessionId, getLastSeq(sessionId), onStreamEvent, (status) => setStreamStatus(sessionId, status))
+    const stream = new SessionEventStream(sessionId, getLastSeq(sessionId), stableOnStreamEvent, (status) => setStreamStatus(sessionId, status))
     streamRef.current = stream
     stream.connect()
     return () => stream.disconnect()
-  }, [sessionId, onStreamEvent, getLastSeq, setStreamStatus])
+  }, [sessionId, stableOnStreamEvent, getLastSeq, setStreamStatus])
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }) }, [runtime.turns, runtime.timeline, view])
 

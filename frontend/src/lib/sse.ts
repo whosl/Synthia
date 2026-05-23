@@ -35,12 +35,14 @@ export class SessionEventStream {
     }
     this.es.onerror = () => {
       this.onStatus?.('error')
+      this.es?.close()
+      this.es = null
       if (!this.closed && !this.retry) {
         const delay = Math.min(1500 * Math.pow(2, this.attempt), 30_000) * (0.8 + Math.random() * 0.4)
         this.attempt++
         this.retry = window.setTimeout(() => {
           this.retry = null
-          this.reconnect()
+          if (!this.closed) this.connect()
         }, delay)
       }
     }

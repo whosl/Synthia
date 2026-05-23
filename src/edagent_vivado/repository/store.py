@@ -59,13 +59,15 @@ def session_delete(sid: str, hard: bool = False) -> bool:
 
 # ── Messages ─────────────────────────────────────────────────
 
-def message_list(session_id: str, before: int | None = None, limit: int = 100) -> list[dict]:
+def message_list(session_id: str, before: int | None = None, limit: int = 200) -> list[dict]:
     db = get_db()
-    q = "SELECT * FROM messages WHERE session_id=?"
-    params = [session_id]
-    if before: q += " AND created_at < ?"; params.append(before)
-    q += " ORDER BY created_at ASC LIMIT ?"; params.append(limit)
-    return [dict(r) for r in db.execute(q, params)]
+    if before:
+        q = "SELECT * FROM messages WHERE session_id=? AND created_at < ? ORDER BY created_at DESC LIMIT ?"
+        rows = [dict(r) for r in db.execute(q, [session_id, before, limit])]
+        rows.reverse()
+        return rows
+    q = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?) sub ORDER BY created_at ASC"
+    return [dict(r) for r in db.execute(q, [session_id, limit])]
 
 def message_create(session_id: str, role: str, content: str, task_id: str = "",
                    agent_id: str = "", stopped: bool = False, partial: bool = False) -> dict:
@@ -365,176 +367,6 @@ def artifact_list(session_id: str = "", run_id: str = "", limit: int = 100) -> l
     if run_id: q += " AND run_id=?"; params.append(run_id)
     q += " ORDER BY created_at DESC LIMIT ?"; params.append(limit)
     return [dict(r) for r in get_db().execute(q, params)]
-
-def artifact_create(artifact_type: str, path: str, session_id: str = "", task_id: str = "",
-                    run_id: str = "", mime_type: str = "", size_bytes: int | None = None,
-                    sha256: str = "", summary: str = "", metadata: dict | None = None) -> dict:
-    aid = _uid(); now = _now(); db = get_db()
-    db.execute(
-        "INSERT INTO artifacts(id,session_id,task_id,run_id,artifact_type,path,mime_type,size_bytes,sha256,summary,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (aid, session_id or None, task_id or None, run_id or None, artifact_type, path,
-         mime_type or None, size_bytes, sha256 or None, summary or None, now,
-         json.dumps(metadata or {}, ensure_ascii=False)))
-    db.commit()
-    return dict(db.execute("SELECT * FROM artifacts WHERE id=?", (aid,)).fetchone())
-
-def artifact_get(aid: str) -> dict | None:
-    row = get_db().execute("SELECT * FROM artifacts WHERE id=?", (aid,)).fetchone()
-    return dict(row) if row else None
-
-# ── KB Cases ──────────────────────────────────────────────────
-
-def kb_case_list(category: str = "", limit: int = 200) -> list[dict]:
-    q = "SELECT * FROM kb_cases WHERE 1=1"; params = []
-    if category: q += " AND category=?"; params.append(category)
-    q += " ORDER BY created_at DESC LIMIT ?"; params.append(limit)
-    return [dict(r) for r in get_db().execute(q, params)]
-
-def kb_case_get(case_id: str) -> dict | None:
-    row = get_db().execute("SELECT * FROM kb_cases WHERE id=?", (case_id,)).fetchone()
-    return dict(row) if row else None
-
-def kb_case_create(pattern: str, category: str, likely_causes: list[str],
-                   suggested_actions: list[str], normalized_signature: str = "",
-                   repro_steps: str = "", vivado_version: str = "", fpga_part: str = "",
-                   top_module: str = "", source_candidate_id: str = "",
-                   metadata: dict | None = None) -> dict:
-    cid = _uid(); now = _now(); db = get_db()
-    db.execute(
-        "INSERT INTO kb_cases(id,pattern,normalized_signature,category,likely_causes_json,suggested_actions_json,repro_steps,vivado_version,fpga_part,top_module,source_candidate_id,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, pattern, normalized_signature or None, category,
-         json.dumps(likely_causes, ensure_ascii=False), json.dumps(suggested_actions, ensure_ascii=False),
-         repro_steps or None, vivado_version or None, fpga_part or None, top_module or None,
-         source_candidate_id or None, now, now, json.dumps(metadata or {}, ensure_ascii=False)))
-    db.commit()
-    return dict(db.execute("SELECT * FROM kb_cases WHERE id=?", (cid,)).fetchone())
-
-def kb_case_update(case_id: str, **fields) -> dict | None:
-    if not fields: return kb_case_get(case_id)
-    fields["updated_at"] = _now()
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [case_id]
-    get_db().execute(f"UPDATE kb_cases SET {sets} WHERE id=?", vals)
-    get_db().commit()
-    return kb_case_get(case_id)
-
-# ── KB Candidates ─────────────────────────────────────────────
-
-def kb_candidate_list(status: str = "", limit: int = 100) -> list[dict]:
-    q = "SELECT * FROM kb_candidates WHERE 1=1"; params = []
-    if status: q += " AND status=?"; params.append(status)
-    q += " ORDER BY created_at DESC LIMIT ?"; params.append(limit)
-    return [dict(r) for r in get_db().execute(q, params)]
-
-def kb_candidate_get(cand_id: str) -> dict | None:
-    row = get_db().execute("SELECT * FROM kb_candidates WHERE id=?", (cand_id,)).fetchone()
-    return dict(row) if row else None
-
-def kb_candidate_create(pattern: str, likely_causes: list[str], suggested_actions: list[str],
-                        source_run_id: str = "", source_session_id: str = "",
-                        source_problem_id: str = "", category: str = "",
-                        normalized_signature: str = "", confidence: float | None = None,
-                        created_by: str = "harness", vivado_version: str = "",
-                        fpga_part: str = "", top_module: str = "",
-                        metadata: dict | None = None) -> dict:
-    cid = _uid(); now = _now(); db = get_db()
-    db.execute(
-        "INSERT INTO kb_candidates(id,source_run_id,source_session_id,source_problem_id,pattern,normalized_signature,category,likely_causes_json,suggested_actions_json,confidence,status,created_by,vivado_version,fpga_part,top_module,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, source_run_id or None, source_session_id or None, source_problem_id or None,
-         pattern, normalized_signature or None, category or None,
-         json.dumps(likely_causes, ensure_ascii=False), json.dumps(suggested_actions, ensure_ascii=False),
-         confidence, "pending", created_by, vivado_version or None, fpga_part or None,
-         top_module or None, now, json.dumps(metadata or {}, ensure_ascii=False)))
-    db.commit()
-    return dict(db.execute("SELECT * FROM kb_candidates WHERE id=?", (cid,)).fetchone())
-
-def kb_candidate_update(cand_id: str, **fields) -> dict | None:
-    if not fields: return kb_candidate_get(cand_id)
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [cand_id]
-    get_db().execute(f"UPDATE kb_candidates SET {sets} WHERE id=?", vals)
-    get_db().commit()
-    return kb_candidate_get(cand_id)
-
-def kb_candidate_approve(cand_id: str, reviewed_by: str = "user") -> dict | None:
-    now = _now()
-    get_db().execute(
-        "UPDATE kb_candidates SET status='approved', reviewed_at=?, reviewed_by=? WHERE id=?",
-        (now, reviewed_by, cand_id))
-    get_db().commit()
-    return kb_candidate_get(cand_id)
-
-def kb_candidate_reject(cand_id: str, reviewed_by: str = "user") -> dict | None:
-    now = _now()
-    get_db().execute(
-        "UPDATE kb_candidates SET status='rejected', reviewed_at=?, reviewed_by=? WHERE id=?",
-        (now, reviewed_by, cand_id))
-    get_db().commit()
-    return kb_candidate_get(cand_id)
-
-def kb_candidate_merge(cand_id: str, reviewed_by: str = "user") -> dict | None:
-    cand = kb_candidate_get(cand_id)
-    if not cand: return None
-    case = kb_case_create(
-        pattern=cand["pattern"],
-        category=cand.get("category") or "unknown",
-        likely_causes=json.loads(cand["likely_causes_json"]) if cand.get("likely_causes_json") else [],
-        suggested_actions=json.loads(cand["suggested_actions_json"]) if cand.get("suggested_actions_json") else [],
-        normalized_signature=cand.get("normalized_signature") or "",
-        vivado_version=cand.get("vivado_version") or "",
-        fpga_part=cand.get("fpga_part") or "",
-        top_module=cand.get("top_module") or "",
-        source_candidate_id=cand_id,
-    )
-    now = _now()
-    get_db().execute(
-        "UPDATE kb_candidates SET status='merged', reviewed_at=?, reviewed_by=?, merged_into_case_id=? WHERE id=?",
-        (now, reviewed_by, case["id"], cand_id))
-    get_db().commit()
-    return kb_candidate_get(cand_id)
-
-# ── Vivado Targets ────────────────────────────────────────────
-
-def vivado_target_list(enabled_only: bool = True) -> list[dict]:
-    q = "SELECT * FROM vivado_targets"
-    if enabled_only: q += " WHERE enabled=1"
-    q += " ORDER BY is_default DESC, created_at ASC"
-    return [dict(r) for r in get_db().execute(q)]
-
-def vivado_target_get(target_id: str) -> dict | None:
-    row = get_db().execute("SELECT * FROM vivado_targets WHERE id=?", (target_id,)).fetchone()
-    return dict(row) if row else None
-
-def vivado_target_create(name: str, target_type: str, vivado_path: str,
-                         host: str = "", ssh_key_path: str = "", settings_path: str = "",
-                         remote_work_root: str = "", vivado_version: str = "",
-                         is_default: bool = False, metadata: dict | None = None) -> dict:
-    tid = _uid(); now = _now(); db = get_db()
-    if is_default:
-        db.execute("UPDATE vivado_targets SET is_default=0")
-    db.execute(
-        "INSERT INTO vivado_targets(id,name,target_type,host,ssh_key_path,vivado_path,settings_path,remote_work_root,vivado_version,is_default,enabled,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (tid, name, target_type, host or None, ssh_key_path or None, vivado_path,
-         settings_path or None, remote_work_root or None, vivado_version or None,
-         int(is_default), 1, now, now, json.dumps(metadata or {}, ensure_ascii=False)))
-    db.commit()
-    return dict(db.execute("SELECT * FROM vivado_targets WHERE id=?", (tid,)).fetchone())
-
-def vivado_target_update(target_id: str, **fields) -> dict | None:
-    if not fields: return vivado_target_get(target_id)
-    fields["updated_at"] = _now()
-    if fields.get("is_default"):
-        get_db().execute("UPDATE vivado_targets SET is_default=0")
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [target_id]
-    get_db().execute(f"UPDATE vivado_targets SET {sets} WHERE id=?", vals)
-    get_db().commit()
-    return vivado_target_get(target_id)
-
-def vivado_target_delete(target_id: str) -> bool:
-    get_db().execute("DELETE FROM vivado_targets WHERE id=?", (target_id,))
-    get_db().commit()
-    return True
 
 def event_list_for_run(run_id: str, limit: int = 500) -> list[dict]:
     return [dict(r) for r in get_db().execute(
