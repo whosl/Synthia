@@ -18,10 +18,14 @@ export interface KbCandidate {
   title: string
   source_run_id?: string
   source_session_id?: string
+  source_problem_id?: string
   pattern?: string
   category?: string
+  likely_causes?: string[]
+  suggested_actions?: string[]
   confidence?: number
   status: string
+  created_at?: number
 }
 
 export function listKbCandidates() {

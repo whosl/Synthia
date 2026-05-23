@@ -1,0 +1,23 @@
+{
+  "workspace": "/Users/wenzhuolin/dev/edagent/examples/uart_full/20260523_200205_agent_impl",
+  "synth": {
+    "step": "synth",
+    "success": true,
+    "return_code": 0,
+    "log": "/Users/wenzhuolin/dev/edagent/examples/uart_full/20260523_200205_agent_impl/vivado_synth.log",
+    "elapsed_sec": 39.55,
+    "timed_out": false,
+    "remote": true,
+    "mock": false,
+    "host": "root@6.tcp.nas.cpolar.cn"
+  },
+  "step": "impl",
+  "success": true,
+  "return_code": 0,
+  "log": "/Users/wenzhuolin/dev/edagent/examples/uart_full/20260523_200205_agent_impl/vivado_impl.log",
+  "elapsed_sec": 39.73,
+  "timed_out": false,
+  "remote": true,
+  "mock": false,
+  "host": "root@6.tcp.nas.cpolar.cn"
+}

@@ -1,5 +1,7 @@
-import { Check, ChevronDown, ChevronRight, Minus, X } from 'lucide-react'
+import { Check, CheckCircle2, ChevronDown, ChevronRight, Minus, X, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { parseApprovalPayload } from '../../lib/approvalPayload'
+import { useTerminalStore } from '../../stores/terminalStore'
 import { Button } from '../common/Button'
 
 export interface ApprovalFile {
@@ -13,6 +15,7 @@ export interface ApprovalBlockProps {
   id: string
   title: string
   message: string
+  reason?: string
   files: ApprovalFile[]
   status: 'pending' | 'approved' | 'rejected'
   response?: Record<string, unknown>
@@ -24,6 +27,7 @@ export function ApprovalBlock({
   id,
   title,
   message,
+  reason,
   files,
   status,
   response,
@@ -32,8 +36,17 @@ export function ApprovalBlock({
 }: ApprovalBlockProps) {
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(() => new Set(files.map((f) => f.path)))
+  const collapsed = useTerminalStore((s) => s.collapsed[id] ?? true)
+  const toggleCollapsed = useTerminalStore((s) => s.toggleCollapsed)
+
   const isPending = status === 'pending'
+  const isApproved = status === 'approved'
   const allPaths = files.map((f) => f.path)
+
+  const detailRows = useMemo(
+    () => parseApprovalPayload(reason, message, files),
+    [reason, message, files],
+  )
 
   const approvedSet = useMemo(() => {
     const raw = response?.approved_files
@@ -41,7 +54,7 @@ export function ApprovalBlock({
     return new Set(raw.map(String))
   }, [response])
 
-  const isPartialResult = status === 'approved' && approvedSet !== null && approvedSet.size < files.length
+  const isPartialResult = isApproved && approvedSet !== null && approvedSet.size < files.length
 
   const toggleExpand = (path: string) => {
     setExpandedFiles((prev) => {
@@ -66,17 +79,34 @@ export function ApprovalBlock({
     ? 'Approve'
     : `Approve (${selectedFiles.size}/${files.length})`
 
-  const statusBadge = status === 'approved'
+  const statusLabel = isApproved
+    ? (isPartialResult ? '部分批准' : 'approved')
+    : isPending
+      ? 'pending'
+      : 'rejected'
+
+  const statusBadge = isApproved
     ? (isPartialResult ? '✓ 部分批准' : '✓ 已批准')
     : '✗ 已拒绝'
 
-  return (
-    <div className={`interaction-block approval-block status-${status}${isPartialResult ? ' status-partial' : ''}`}>
-      <div className="interaction-header">
-        <span className="interaction-title">{title}</span>
-        {!isPending && <span className={`interaction-badge ${status}`}>{statusBadge}</span>}
-      </div>
-      {message && <div className="interaction-message">{message}</div>}
+  const headerIcon = isApproved
+    ? <CheckCircle2 size={14} color="var(--success)" />
+    : isPending
+      ? null
+      : <XCircle size={14} color="var(--warning)" />
+
+  const body = (
+    <>
+      {detailRows.length > 0 && (
+        <dl className="approval-detail-grid">
+          {detailRows.map((row) => (
+            <div key={row.key} className="approval-detail-row">
+              <dt>{row.label}</dt>
+              <dd className={row.mono ? 'mono' : undefined}>{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
 
       {files.length > 1 && isPending && (
         <div className="approval-select-bar">
@@ -139,11 +169,38 @@ export function ApprovalBlock({
         </div>
       )}
 
-      {status === 'rejected' && (
+      {status === 'rejected' && !isPending && (
         <div className="interaction-rejected-hint">
-          <span className="muted">告诉 EdAgent 该怎么做</span>
+          <span className="muted">已拒绝 — 可在对话中继续说明需求</span>
         </div>
       )}
+    </>
+  )
+
+  if (isPending) {
+    return (
+      <div className={`interaction-block approval-block status-${status}${isPartialResult ? ' status-partial' : ''}`}>
+        <div className="interaction-header">
+          <span className="interaction-title">{title}</span>
+        </div>
+        {body}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={`trace-block approval-trace-block status-${status}${isApproved ? ' completed' : ' rejected'}${isPartialResult ? ' status-partial' : ''}`}
+    >
+      <div className="trace-header" onClick={() => toggleCollapsed(id)} role="button" tabIndex={0}>
+        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+        {headerIcon}
+        <span>{title}</span>
+        <span className="spacer" />
+        <span className={`interaction-badge ${status}`}>{statusBadge}</span>
+        <span className="tool-state">{statusLabel}</span>
+      </div>
+      {!collapsed && <div className="trace-body approval-trace-body">{body}</div>}
     </div>
   )
 }

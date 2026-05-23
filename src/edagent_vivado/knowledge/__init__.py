@@ -1,5 +1,10 @@
-"""Semantic knowledge base — Phase 2A minimal keyword indexing."""
+"""Knowledge layer — semantic indexing and hybrid retrieval."""
 
-from edagent_vivado.knowledge.semantic_kb import reindex_global, search_semantic_kb
+from edagent_vivado.knowledge.semantic_kb import reindex_all, reindex_global, reindex_project, search_semantic_kb
 
-__all__ = ["reindex_global", "search_semantic_kb"]
+__all__ = [
+    "reindex_global",
+    "reindex_project",
+    "reindex_all",
+    "search_semantic_kb",
+]

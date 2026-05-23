@@ -16,6 +16,10 @@ OUTCOME_QUEUED = "queued"
 
 # Scopes — what the user was asked to approve
 SCOPE_VIVADO_SYNTH = "vivado_synth"
+SCOPE_VIVADO_IMPL = "vivado_impl"
+SCOPE_VIVADO_TCL = "vivado_tcl"
+SCOPE_VIVADO_SCRIPT = "vivado_script"
+SCOPE_VIVADO_FLOW = "vivado_flow"
 SCOPE_FILE_CHANGES = "file_changes"
 SCOPE_INPUT_REQUEST = "input_request"
 
@@ -54,6 +58,10 @@ def format_user_rejection(
     """User clicked Reject — command did NOT run (or changes were NOT applied)."""
     summary = detail or {
         SCOPE_VIVADO_SYNTH: "User declined Vivado synthesis in the approval UI. Synthesis did not run.",
+        SCOPE_VIVADO_IMPL: "User declined Vivado implementation in the approval UI. Place/route did not run.",
+        SCOPE_VIVADO_TCL: "User declined running this Vivado Tcl command. The command did not execute.",
+        SCOPE_VIVADO_SCRIPT: "User declined running this Vivado Tcl script. The script did not execute.",
+        SCOPE_VIVADO_FLOW: "User declined the full Vivado flow (synth + implementation). It did not run.",
         SCOPE_FILE_CHANGES: "User rejected the proposed file changes. No files were applied.",
         SCOPE_INPUT_REQUEST: "User declined to provide the requested information.",
     }.get(scope, "User rejected the pending approval request.")
@@ -93,15 +101,38 @@ def tag_execution_result(result: dict[str, Any], scope: str = SCOPE_VIVADO_SYNTH
     out["edagent_outcome"] = OUTCOME_EXECUTION_SUCCEEDED if ok else OUTCOME_EXECUTION_FAILED
     out["scope"] = scope
     out["ran"] = True
+    labels = {
+        SCOPE_VIVADO_SYNTH: ("Synthesis", "synthesis"),
+        SCOPE_VIVADO_IMPL: ("Implementation", "implementation"),
+        SCOPE_VIVADO_TCL: ("Tcl command", "command"),
+        SCOPE_VIVADO_SCRIPT: ("Tcl script", "script"),
+        SCOPE_VIVADO_FLOW: ("Synthesis + implementation", "flow"),
+    }
+    label, noun = labels.get(scope, ("Vivado step", "step"))
     if not ok:
         out.setdefault(
             "summary",
-            f"Synthesis ran but failed (return_code={out.get('return_code')}). "
-            "This is an execution error, NOT a user rejection.",
+            f"{label} ran but failed (return_code={out.get('return_code', out.get('exit_code'))}). "
+            f"This is an execution error, NOT a user rejection.",
         )
     else:
-        out.setdefault("summary", "Synthesis completed successfully.")
+        out.setdefault("summary", f"{label} completed successfully.")
     return json.dumps(out, indent=2, ensure_ascii=False, default=str)
+
+
+def tag_vivado_adapter_result(result: Any, scope: str) -> str:
+    """Tag VivadoResult from VivadoRuntimeAdapter as JSON tool output."""
+    payload = {
+        "success": result.success,
+        "exit_code": result.exit_code,
+        "stdout": (result.stdout or "")[:5000],
+        "stderr": (result.stderr or "")[:2000],
+        "elapsed_sec": result.elapsed_sec,
+        "error": result.error,
+        "command_type": result.command_type,
+        "target_id": result.target_id,
+    }
+    return tag_execution_result(payload, scope=scope)
 
 
 def tool_ui_state_from_output(output: str, payload_state: str | None = None) -> str:

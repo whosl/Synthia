@@ -1,0 +1,29 @@
+constraints:
+  xdc: []
+impl:
+  enabled: true
+ip: []
+project:
+  flow: non_project
+  name: unnamed
+  part: ''
+  top: top
+  vivado_version: '2022.1'
+qor_targets:
+  require_drc_clean: true
+  wns_min: 0.0
+remote:
+  host: ''
+  user: ''
+  vivado_path: ''
+  vivado_version: ''
+  work_dir: ''
+runs:
+  impl:
+    enabled: false
+  synth:
+    enabled: true
+sources:
+  include_dirs: []
+  rtl: []
+  tb: []

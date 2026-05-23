@@ -1,0 +1,30 @@
+project:
+  name: bad_syntax
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: bad_syntax
+
+sources:
+  rtl:
+    - rtl/bad_syntax.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+qor_targets:
+  wns_min: 0.0
+  require_drc_clean: true
+
+test:
+  description: "Missing semicolon and illegal assign — syntax error"
+  expected_error_class: syntax

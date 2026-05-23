@@ -126,6 +126,15 @@ def event_list(session_id: str, after_seq: int = 0, limit: int = 500) -> list[di
         "SELECT * FROM events WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
         (session_id, after_seq, limit))]
 
+
+def event_list_recent(session_id: str, limit: int = 5000) -> list[dict]:
+    """Return the most recent events (chronological), for terminal UI rebuild."""
+    rows = get_db().execute(
+        "SELECT * FROM events WHERE session_id=? ORDER BY seq DESC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
 # ── Runs ─────────────────────────────────────────────────────
 
 def run_create(run_type: str, name: str, session_id: str = "", task_id: str = "",
@@ -563,3 +572,118 @@ def event_list_for_run(run_id: str, limit: int = 500) -> list[dict]:
         "SELECT * FROM events WHERE run_id=? ORDER BY created_at ASC, seq ASC LIMIT ?",
         (run_id, limit),
     )]
+
+# ── Knowledge sources ─────────────────────────────────────────
+
+def knowledge_source_list(scope: str = "", project_id: str = "", limit: int = 100) -> list[dict]:
+    q = "SELECT * FROM knowledge_sources WHERE 1=1"
+    params: list = []
+    if scope:
+        q += " AND scope=?"
+        params.append(scope)
+    if project_id:
+        q += " AND project_id=?"
+        params.append(project_id)
+    q += " ORDER BY indexed_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]
+
+def usage_totals_for_session(session_id: str) -> dict:
+    row = get_db().execute(
+        "SELECT COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS records FROM llm_usage WHERE session_id=?",
+        (session_id,),
+    ).fetchone()
+    sess = session_get(session_id) or {}
+    return {
+        "session_id": session_id,
+        "input_tokens": int(row["input_tokens"]) if row else 0,
+        "output_tokens": int(row["output_tokens"]) if row else 0,
+        "total_tokens": int(row["total_tokens"]) if row else 0,
+        "usage_records": int(row["records"]) if row else 0,
+        "session_token_input": int(sess.get("token_input") or 0),
+        "session_token_output": int(sess.get("token_output") or 0),
+    }
+
+# ── Vivado commands ───────────────────────────────────────────
+
+def vivado_command_create(
+    target_id: str,
+    command_text: str,
+    command_type: str = "raw_tcl",
+    *,
+    session_id: str = "",
+    task_id: str = "",
+    run_id: str = "",
+    vivado_session_id: str = "",
+    project_id: str = "",
+    work_dir: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    cid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        "INSERT INTO vivado_commands(id,target_id,vivado_session_id,session_id,task_id,run_id,command_type,command_text,project_id,work_dir,state,started_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            cid,
+            target_id,
+            vivado_session_id or None,
+            session_id or None,
+            task_id or None,
+            run_id or None,
+            command_type,
+            command_text[:4000],
+            project_id or None,
+            work_dir or None,
+            "running",
+            now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM vivado_commands WHERE id=?", (cid,)).fetchone())
+
+def vivado_command_finish(
+    command_id: str,
+    *,
+    state: str = "completed",
+    exit_code: int | None = None,
+    elapsed_ms: int | None = None,
+    error: str = "",
+    parsed_summary: dict | None = None,
+    problem_count: int = 0,
+) -> dict | None:
+    now = _now()
+    get_db().execute(
+        "UPDATE vivado_commands SET state=?, finished_at=?, elapsed_ms=?, exit_code=?, error=?, parsed_summary_json=?, problem_count=? WHERE id=?",
+        (
+            state,
+            now,
+            elapsed_ms,
+            exit_code,
+            error or None,
+            json.dumps(parsed_summary or {}, ensure_ascii=False),
+            problem_count,
+            command_id,
+        ),
+    )
+    get_db().commit()
+    row = get_db().execute("SELECT * FROM vivado_commands WHERE id=?", (command_id,)).fetchone()
+    return dict(row) if row else None
+
+def vivado_command_list(
+    session_id: str = "",
+    target_id: str = "",
+    limit: int = 50,
+) -> list[dict]:
+    q = "SELECT * FROM vivado_commands WHERE 1=1"
+    params: list = []
+    if session_id:
+        q += " AND session_id=?"
+        params.append(session_id)
+    if target_id:
+        q += " AND target_id=?"
+        params.append(target_id)
+    q += " ORDER BY started_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]

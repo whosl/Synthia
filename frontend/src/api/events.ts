@@ -8,8 +8,11 @@ export function normalizeEvent(event: SessionEvent): SessionEvent {
   catch { return { ...event, payload: { raw: event.payload_json } } }
 }
 
-export async function listEvents(sessionId: string, afterSeq = 0, limit = 500) {
-  const data = await request<{ events: SessionEvent[] }>(`/sessions/${sessionId}/events?after_seq=${afterSeq}&limit=${limit}`)
+export async function listEvents(sessionId: string, afterSeq = 0, limit = 500, recent = false) {
+  const recentQ = recent ? '&recent=1' : ''
+  const data = await request<{ events: SessionEvent[] }>(
+    `/sessions/${sessionId}/events?after_seq=${afterSeq}&limit=${limit}${recentQ}`,
+  )
   return { events: data.events.map(normalizeEvent) }
 }
 

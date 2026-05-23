@@ -1,0 +1,2 @@
+# Shared FPGA part for all bad_vivado examples
+default_part: xc7a35tcpg236-1

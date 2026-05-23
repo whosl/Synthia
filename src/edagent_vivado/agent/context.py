@@ -114,14 +114,26 @@ def _error_kb_context(question: str) -> tuple[str, list[dict]]:
     return "\n".join(lines), records
 
 
-def _semantic_kb_context(question: str) -> tuple[str, list[dict]]:
-    """Retrieve from indexed repo docs (Phase 2A keyword search)."""
+def _semantic_kb_context(
+    question: str,
+    *,
+    session_id: str = "",
+    task_id: str = "",
+    run_id: str = "",
+) -> tuple[str, list[dict]]:
+    """Retrieve from indexed repo docs (Phase 2A hybrid search)."""
     if not question.strip():
         return "", []
     try:
         from edagent_vivado.knowledge.semantic_kb import search_semantic_kb
 
-        return search_semantic_kb(question, top_k=6)
+        return search_semantic_kb(
+            question,
+            top_k=6,
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+        )
     except Exception:
         return "", []
 
@@ -166,7 +178,9 @@ class AgentContextBuilder:
         if tool_lines:
             items.append(ContextItem("tool_summary", "Relevant Tool Summaries", "\n".join(tool_lines), priority=7, trust_score=0.72))
 
-        semantic_text, semantic_hits = _semantic_kb_context(question)
+        semantic_text, semantic_hits = _semantic_kb_context(
+            question, session_id=session_id, task_id=task_id, run_id=run_id,
+        )
         if semantic_text:
             items.append(ContextItem("semantic_kb", "Retrieved Semantic Knowledge", semantic_text, priority=8, source_type="semantic_kb", authority_score=0.7, trust_score=0.65, relevance_score=0.6))
 
@@ -201,13 +215,22 @@ class AgentContextBuilder:
             rejected_count=0,
             token_budget=self.max_context_tokens,
             token_used=token_counts["total"],
-            metadata={"phase": "2a", "vector_backend": "keyword"},
+            metadata={"phase": "2a", "vector_backend": "sqlite-json", "retrieval": "hybrid"},
         )
         for hit in semantic_hits:
             retrieval_audit_item_create(
-                audit["id"], hit["source_type"], title=hit["title"], excerpt=hit["excerpt"],
-                selected=True, source_id=hit["source_id"], final_score=hit["score"],
-                authority_score=0.7, trust_score=0.65, token_count=estimate_tokens(hit["excerpt"]),
+                audit["id"],
+                hit.get("source_type", "doc"),
+                title=hit.get("title", ""),
+                excerpt=hit.get("excerpt", ""),
+                selected=True,
+                source_id=hit.get("source_id", ""),
+                chunk_id=hit.get("chunk_id", ""),
+                final_score=hit.get("final_score", hit.get("score", 0)),
+                vector_score=hit.get("vector_score"),
+                authority_score=hit.get("authority_score", 0.7),
+                trust_score=hit.get("trust_score", 0.65),
+                token_count=estimate_tokens(hit.get("excerpt", "")),
             )
         for rec in error_records:
             retrieval_audit_item_create(

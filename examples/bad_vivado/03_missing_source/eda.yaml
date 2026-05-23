@@ -1,0 +1,27 @@
+project:
+  name: bad_missing_rtl
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: fifo_top
+
+sources:
+  rtl:
+    - rtl/fifo_top.v
+    - rtl/fifo_core.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+test:
+  description: "fifo_core.v is listed but file does not exist"
+  expected_error_class: missing_file

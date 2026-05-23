@@ -1,0 +1,26 @@
+project:
+  name: bad_wrong_top
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: counter_top
+
+sources:
+  rtl:
+    - rtl/counter.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+test:
+  description: "eda.yaml top=counter_top but RTL module is tick_counter"
+  expected_error_class: missing_top

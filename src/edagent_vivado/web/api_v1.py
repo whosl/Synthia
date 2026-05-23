@@ -18,7 +18,9 @@ from edagent_vivado.repository.store import (
     memory_latest, memory_list, context_package_get, context_package_items,
     context_packages_for_run, context_packages_for_session,
     retrieval_audits_for_run, retrieval_audits_for_session,
-    retrieval_audit_get, retrieval_audit_items, usage_create,
+    retrieval_audit_get, retrieval_audit_items, usage_create, usage_totals_for_session,
+    kb_candidate_list, kb_candidate_get, kb_candidate_approve, kb_candidate_reject, kb_candidate_merge,
+    vivado_command_list, knowledge_source_list,
 )
 from edagent_vivado.repository.db import get_db
 from edagent_vivado.tools.patch_tools import set_patch_approval, is_patch_approved
@@ -39,8 +41,8 @@ def _publish(session_id: str, event: dict) -> None:
 
 _store_event_create = event_create
 
-# Tool runs rejected at approval gate (run_id -> True)
-_blocked_tool_runs: dict[str, bool] = {}
+# Tool runs rejected at Vivado approval gate (langgraph run_id -> outcome scope)
+_blocked_tool_runs: dict[str, str] = {}
 
 def event_create(session_id: str, event_type: str, payload: dict, **kwargs) -> dict:  # type: ignore[no-redef]
     """Persist an event and publish it to live SSE subscribers."""
@@ -65,12 +67,22 @@ async def _flush_pending_file_batch(
     files, title, message = take_file_batch(session_id, task_id)
     if not files:
         return None
+    from edagent_vivado.harness.approval_payload import (
+        build_file_approval_payload,
+        payload_to_reason_json,
+    )
+    payload = build_file_approval_payload(
+        title,
+        message,
+        [{"path": f.path, "description": f.description, "action": f.action} for f in files],
+    )
     interaction = create_interaction(
         InteractionType.APPROVAL,
         session_id,
         task_id,
         title=title,
-        message=message,
+        message="",
+        reason=payload_to_reason_json(payload),
         files=files,
     )
     event_create(
@@ -192,15 +204,51 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             agent = create_agent()
             config = {"configurable": {"thread_id": f"session:{session_id}"}, "recursion_limit": 1000}
             from edagent_vivado.harness.run_context import set_agent_run_context
-            set_agent_run_context(session_id, t["id"])
+            set_agent_run_context(session_id, t["id"], run["id"])
+            from edagent_vivado.harness.observed_tool import ObservedToolRunner
+
+            tool_runner = ObservedToolRunner(session_id, t["id"], run["id"], event_create)
+            from edagent_vivado.harness.assistant_stream import AssistantStreamManager
+
+            stream_mgr = AssistantStreamManager(t["id"])
             full_response = ""
             continuation_msg: HumanMessage | None = None
             approval_round = 0
             max_approval_rounds = 6
 
+            def _emit_stream_completed(stream_id: str, *, stopped: bool = False) -> None:
+                snap = stream_mgr.text_for(stream_id)
+                event_create(
+                    session_id,
+                    "assistant.stream.completed",
+                    {"stream_id": stream_id, "stopped": stopped},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+                if snap:
+                    event_create(
+                        session_id,
+                        "message.assistant.snapshot",
+                        {"stream_id": stream_id, "text": snap},
+                        task_id=t["id"],
+                        run_id=run["id"],
+                    )
+
             while approval_round < max_approval_rounds:
+                if approval_round > 0:
+                    closed_stream, _ = stream_mgr.rotate_after_tool()
+                    _emit_stream_completed(closed_stream)
+                event_create(
+                    session_id,
+                    "assistant.stream.opened",
+                    {
+                        "stream_id": stream_mgr.current_stream_id,
+                        "segment_index": stream_mgr.segment_index,
+                    },
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
                 inline_approval_results: list[str] = []
-                tool_ids: dict[str, str] = {}
                 agent_input = (
                     HumanMessage(content=ctx.prompt)
                     if approval_round == 0
@@ -212,6 +260,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     latest_task = task_get(t["id"])
                     if latest_task and latest_task.get("stop_requested"):
                         if full_response:
+                            _emit_stream_completed(stream_mgr.current_stream_id, stopped=True)
                             message_create(session_id, "assistant", full_response, task_id=t["id"], stopped=True, partial=True)
                         task_update(t["id"], state="stopped", finished_at=int(time.time()))
                         session_update(session_id, status="idle")
@@ -223,6 +272,18 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                         return
                     kind = evt["event"]
                     if kind == "on_tool_start":
+                        closed_stream, _new_stream = stream_mgr.rotate_after_tool()
+                        _emit_stream_completed(closed_stream)
+                        event_create(
+                            session_id,
+                            "assistant.stream.opened",
+                            {
+                                "stream_id": stream_mgr.current_stream_id,
+                                "segment_index": stream_mgr.segment_index,
+                            },
+                            task_id=t["id"],
+                            run_id=run["id"],
+                        )
                         tool_name_start = evt.get("name", "")
                         tool_input = evt.get("data", {}).get("input", {})
                         # Flush batched file ops before any non-file tool; gate Vivado runs per invocation
@@ -231,62 +292,43 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 pre_flush = await _flush_pending_file_batch(session_id, t["id"], run, t)
                                 if pre_flush:
                                     inline_approval_results.append(pre_flush)
-                            if tool_name_start == "run_vivado_synth_tool":
-                                from edagent_vivado.harness.interaction import (
-                                    create_interaction,
-                                    wait_for_response,
-                                    InteractionType,
-                                )
-                                from edagent_vivado.harness.vivado_run_gate import (
-                                    begin_vivado_run_gate,
-                                    resolve_vivado_run_gate,
-                                )
-                                begin_vivado_run_gate(t["id"])
-                                manifest = tool_input.get("manifest_path", "")
-                                interaction = create_interaction(
-                                    InteractionType.APPROVAL,
-                                    session_id,
-                                    t["id"],
-                                    title="Run Vivado Synthesis",
-                                    message=f"Allow running Vivado synthesis?\nManifest: {manifest}",
-                                    files=[],
-                                )
-                                event_create(
-                                    session_id,
-                                    "interaction.requested",
-                                    interaction.to_dict(),
+                            from edagent_vivado.harness.vivado_agent_registry import (
+                                is_vivado_execution_tool,
+                                vivado_tool_spec,
+                            )
+                            from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
+
+                            if is_vivado_execution_tool(tool_name_start):
+                                approved = await request_vivado_tool_approval(
+                                    tool_name_start,
+                                    tool_input,
+                                    session_id=session_id,
                                     task_id=t["id"],
                                     run_id=run["id"],
+                                    event_create=event_create,
                                 )
-                                responded = await wait_for_response(interaction.id)
-                                approved = bool(
-                                    responded and responded.status.value == "approved"
-                                )
-                                resolve_vivado_run_gate(t["id"], approved)
                                 run_key = str(evt.get("run_id", ""))
                                 if not approved and run_key:
-                                    _blocked_tool_runs[run_key] = True
-                        args_str = json.dumps(tool_input, ensure_ascii=False, default=str)[:1500]
-                        tc = toolcall_create(run_id=run["id"], tool_name=evt["name"], session_id=session_id, task_id=t["id"],
-                                             input_summary=args_str)
-                        tool_ids[evt.get("run_id", tc["id"])] = tc["id"]
-                        event_create(session_id, "tool.started", {"tool_name": evt["name"], "toolcall_id": tc["id"], "args": args_str},
-                                     task_id=t["id"], run_id=run["id"])
+                                    spec = vivado_tool_spec(tool_name_start)
+                                    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_SYNTH
+
+                                    _blocked_tool_runs[run_key] = (
+                                        spec.scope if spec else SCOPE_VIVADO_SYNTH
+                                    )
+                        tool_runner.on_tool_start(str(evt.get("run_id", "")), evt.get("name", ""), tool_input)
                     elif kind == "on_tool_end":
                         output = str(evt.get("data", {}).get("output", ""))[:2500]
-                        tcid = tool_ids.get(evt.get("run_id", ""), "")
-                        tool_name = evt.get("name", "")
                         run_key = str(evt.get("run_id", ""))
-                        if _blocked_tool_runs.pop(run_key, False):
-                            from edagent_vivado.harness.approval_outcomes import (
-                                SCOPE_VIVADO_SYNTH,
-                                format_user_rejection,
-                            )
-                            output = format_user_rejection(
-                                SCOPE_VIVADO_SYNTH, tool_name=tool_name
-                            )
+                        tool_name = evt.get("name", "")
+                        blocked_scope = _blocked_tool_runs.pop(run_key, None)
+                        was_blocked = blocked_scope is not None
+                        tcid = tool_runner.tool_ids.get(run_key, "")
                         # Intercept interaction tools — create interaction and wait for user
-                        elif tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool") and not is_patch_approved():
+                        if (
+                            not was_blocked
+                            and tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
+                            and not is_patch_approved()
+                        ):
                             from edagent_vivado.harness.interaction import (
                                 create_interaction, wait_for_response, InteractionType, FileItem, InputField,
                                 append_file_to_batch, take_file_batch,
@@ -328,10 +370,22 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                     for f in (tool_input.get("files") or [])
                                 ]
                                 files = batched + extra
+                                from edagent_vivado.harness.approval_payload import (
+                                    build_file_approval_payload,
+                                    payload_to_reason_json,
+                                )
+                                approval_title = tool_input.get("title", batch_title or "File Approval Required")
+                                approval_msg = tool_input.get("message", batch_msg)
+                                file_payload = build_file_approval_payload(
+                                    approval_title,
+                                    approval_msg,
+                                    [{"path": f.path, "description": f.description, "action": f.action} for f in files],
+                                )
                                 interaction = create_interaction(
                                     InteractionType.APPROVAL, session_id, t["id"],
-                                    title=tool_input.get("title", batch_title or "File Approval Required"),
-                                    message=tool_input.get("message", batch_msg),
+                                    title=approval_title,
+                                    message="",
+                                    reason=payload_to_reason_json(file_payload),
                                     files=files,
                                 )
                                 event_create(session_id, "interaction.requested", interaction.to_dict(),
@@ -396,43 +450,13 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 else:
                                     output = "TIMEOUT: No user response"
                         if tcid:
-                            from edagent_vivado.harness.approval_outcomes import tool_ui_state_from_output
-                            ui_state = tool_ui_state_from_output(output)
-                            toolcall_update(
-                                tcid,
-                                state="completed" if ui_state != "error" else "error",
-                                finished_at=int(time.time()),
-                                output_summary=output[:500],
+                            tool_runner.on_tool_end(
+                                run_key,
+                                tool_name,
+                                output,
+                                blocked=was_blocked,
+                                blocked_scope=blocked_scope,
                             )
-                            event_create(
-                                session_id,
-                                "tool.completed",
-                                {
-                                    "tool_name": tool_name,
-                                    "toolcall_id": tcid,
-                                    "result": output[:500],
-                                    "state": ui_state,
-                                },
-                                task_id=t["id"],
-                                run_id=run["id"],
-                            )
-                            if output and ui_state in ("completed", "error", "rejected"):
-                                from edagent_vivado.harness.problem_collector import (
-                                    collect_from_tool_output,
-                                    record_problems,
-                                )
-
-                                probs = collect_from_tool_output(tool_name, output)
-                                if probs:
-                                    record_problems(
-                                        session_id,
-                                        probs,
-                                        task_id=t["id"],
-                                        run_id=run["id"] if run else "",
-                                        event_sink=lambda et, pl: event_create(
-                                            session_id, et, pl, task_id=t["id"], run_id=run["id"] if run else ""
-                                        ),
-                                    )
                         if (
                             tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
                             and output
@@ -491,8 +515,14 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 text = "".join(b.get("text","") for b in c if isinstance(b, dict) and b.get("type")=="text")
                             if text:
                                 full_response += text
-                                event_create(session_id, "message.assistant.delta", {"text": text},
-                                             task_id=t["id"], run_id=run["id"])
+                                stream_mgr.append_delta(text)
+                                event_create(
+                                    session_id,
+                                    "message.assistant.delta",
+                                    {"text": text, "stream_id": stream_mgr.current_stream_id},
+                                    task_id=t["id"],
+                                    run_id=run["id"],
+                                )
 
                 # End of one agent round — flush any queued file approvals
                 flush_output = None
@@ -517,11 +547,17 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     continue
                 break
 
-            # Save assistant message
+            # Save assistant message (denormalized snapshot for search/export — not used for chat timeline)
             if full_response:
+                _emit_stream_completed(stream_mgr.current_stream_id)
                 message_create(session_id, "assistant", full_response, task_id=t["id"])
-                event_create(session_id, "message.assistant.completed", {"text": full_response[:200]},
-                             task_id=t["id"], run_id=run["id"])
+                event_create(
+                    session_id,
+                    "message.assistant.completed",
+                    {"stream_id": stream_mgr.current_stream_id},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
                 from edagent_vivado.agent.summary import get_summary_model
                 previous = memory_latest(session_id)
                 recent = message_list(session_id, limit=20)
@@ -585,7 +621,10 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
 # ── Event / Stream API ───────────────────────────────────────
 
 @router.get("/sessions/{session_id}/events")
-async def api_events(session_id: str, after_seq: int = 0, limit: int = 500):
+async def api_events(session_id: str, after_seq: int = 0, limit: int = 500, recent: bool = False):
+    from edagent_vivado.repository.store import event_list_recent
+    if recent:
+        return {"events": event_list_recent(session_id, limit=limit)}
     return {"events": event_list(session_id, after_seq=after_seq, limit=limit)}
 
 @router.get("/sessions/{session_id}/stream")
@@ -664,6 +703,10 @@ async def api_monitor_context(run_id: str):
 async def api_monitor_session_runs(session_id: str, limit: int = 50):
     return {"runs": run_list(session_id=session_id, limit=limit)}
 
+@router.get("/monitor/sessions/{session_id}/usage")
+async def api_monitor_session_usage(session_id: str):
+    return usage_totals_for_session(session_id)
+
 @router.get("/sessions/{session_id}/memory")
 async def api_session_memory(session_id: str, limit: int = 20):
     return {"latest": memory_latest(session_id), "snapshots": memory_list(session_id, limit=limit)}
@@ -718,30 +761,68 @@ async def api_kb_cases():
         for i, c in enumerate(load_cases())
     ]}
 
+def _kb_candidate_row(row: dict) -> dict:
+    likely = row.get("likely_causes_json")
+    actions = row.get("suggested_actions_json")
+    if isinstance(likely, str):
+        try:
+            likely = json.loads(likely)
+        except json.JSONDecodeError:
+            likely = []
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except json.JSONDecodeError:
+            actions = []
+    return {
+        "id": row["id"],
+        "source_problem_id": row.get("source_problem_id"),
+        "source_run_id": row.get("source_run_id"),
+        "source_session_id": row.get("source_session_id"),
+        "pattern": row.get("pattern"),
+        "category": row.get("category") or "unclassified",
+        "title": (row.get("pattern") or "")[:120],
+        "likely_causes": likely or [],
+        "suggested_actions": actions or [],
+        "confidence": row.get("confidence") or 0.5,
+        "status": row.get("status") or "pending",
+        "created_by": row.get("created_by") or "harness",
+        "created_at": row.get("created_at"),
+        "merged_into_case_id": row.get("merged_into_case_id"),
+    }
+
 @router.get("/kb/candidates")
-async def api_kb_candidates(limit: int = 50):
-    problems = problem_list(limit=limit)
-    return {"candidates": [
-        {"id": f"candidate-{p['id']}", "source_problem_id": p["id"], "source_run_id": p.get("run_id"),
-         "source_session_id": p.get("session_id"),
-         "pattern": p.get("signature") or p.get("normalized_signature") or p["message"][:80],
-         "category": p.get("category") or "unclassified", "title": p["message"][:120],
-         "confidence": 0.55, "status": "pending", "created_by": p.get("source") or "harness",
-         "created_at": p.get("detected_at")}
-        for p in problems
-    ]}
+async def api_kb_candidates(status: str = "pending", limit: int = 50):
+    rows = kb_candidate_list(status=status, limit=limit)
+    return {"candidates": [_kb_candidate_row(r) for r in rows]}
+
+@router.get("/kb/candidates/{candidate_id}")
+async def api_kb_candidate_get(candidate_id: str):
+    row = kb_candidate_get(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"candidate": _kb_candidate_row(row)}
 
 @router.post("/kb/candidates/{candidate_id}/approve")
 async def api_kb_candidate_approve(candidate_id: str):
-    return {"ok": True, "candidate_id": candidate_id, "status": "approved"}
+    row = kb_candidate_approve(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"ok": True, "candidate": _kb_candidate_row(row)}
 
 @router.post("/kb/candidates/{candidate_id}/reject")
 async def api_kb_candidate_reject(candidate_id: str):
-    return {"ok": True, "candidate_id": candidate_id, "status": "rejected"}
+    row = kb_candidate_reject(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"ok": True, "candidate": _kb_candidate_row(row)}
 
 @router.post("/kb/candidates/{candidate_id}/merge")
 async def api_kb_candidate_merge(candidate_id: str):
-    return {"ok": True, "candidate_id": candidate_id, "status": "merged"}
+    row = kb_candidate_merge(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"ok": True, "candidate": _kb_candidate_row(row), "merged_into_case_id": row.get("merged_into_case_id")}
 
 # ── Interaction API (Human-in-the-loop) ────────────────────
 
@@ -813,24 +894,117 @@ async def api_vivado_targets():
     }]}
 
 @router.get("/vivado/commands")
-async def api_vivado_commands(limit: int = 50):
-    return {"commands": []}
+async def api_vivado_commands(session_id: str = "", limit: int = 50):
+    rows = vivado_command_list(session_id=session_id, limit=limit)
+    commands = []
+    for r in rows:
+        commands.append({
+            "id": r["id"],
+            "command": r.get("command_text"),
+            "command_type": r.get("command_type"),
+            "status": r.get("state"),
+            "started_at": r.get("started_at"),
+            "finished_at": r.get("finished_at"),
+            "elapsed_ms": r.get("elapsed_ms"),
+            "exit_code": r.get("exit_code"),
+            "session_id": r.get("session_id"),
+            "target_id": r.get("target_id"),
+            "error": r.get("error"),
+        })
+    return {"commands": commands}
 
 @router.post("/knowledge/reindex")
-async def api_knowledge_reindex():
-    from edagent_vivado.knowledge.semantic_kb import reindex_global
+async def api_knowledge_reindex(request: Request):
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    project_id = str(body.get("project_id") or "uart_demo")
+    from edagent_vivado.knowledge.semantic_kb import reindex_all
 
-    return reindex_global()
+    return reindex_all(project_id=project_id)
+
+@router.get("/knowledge/sources")
+async def api_knowledge_sources(scope: str = "", project_id: str = "", limit: int = 100):
+    return {"sources": knowledge_source_list(scope=scope, project_id=project_id, limit=limit)}
 
 @router.post("/knowledge/search")
 async def api_knowledge_search(request: Request):
     body = await request.json()
     query = str(body.get("query", ""))
     top_k = int(body.get("top_k", 12))
+    scope = str(body.get("scope") or "both")
+    project_id = str(body.get("project_id") or "uart_demo")
+    session_id = str(body.get("session_id") or "")
     from edagent_vivado.knowledge.semantic_kb import search_semantic_kb
 
-    text, hits = search_semantic_kb(query, top_k=top_k)
+    text, hits = search_semantic_kb(
+        query, top_k=top_k, scope=scope, project_id=project_id, session_id=session_id,
+    )
     return {"query": query, "results": hits, "formatted": text}
+
+@router.post("/knowledge/context-preview")
+async def api_knowledge_context_preview(request: Request):
+    body = await request.json()
+    question = str(body.get("question") or body.get("query") or "")
+    manifest_path = str(body.get("manifest_path") or "")
+    session_id = str(body.get("session_id") or "")
+    from edagent_vivado.agent.context import AgentContextBuilder
+
+    ctx = AgentContextBuilder().build(
+        session_id=session_id or "preview",
+        task_id="preview",
+        run_id="preview",
+        question=question,
+        manifest_path=manifest_path,
+    )
+    return {
+        "prompt_preview": ctx.prompt[:8000],
+        "token_counts": ctx.token_counts,
+        "context_package_id": ctx.context_package.get("id"),
+        "retrieval_audit_id": ctx.retrieval_audit.get("id") if ctx.retrieval_audit else None,
+        "items": [
+            {"type": i.item_type, "title": i.title, "included": i.included, "tokens": i.token_count}
+            for i in ctx.items
+        ],
+    }
+
+@router.post("/vivado/commands/flow")
+async def api_vivado_run_flow(request: Request):
+    """Run synth+impl from manifest (observed when session/run ids provided)."""
+    body = await request.json()
+    manifest_path = str(body.get("manifest_path") or "")
+    if not manifest_path:
+        raise HTTPException(400, "manifest_path is required")
+    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter
+
+    sid = str(body.get("session_id") or "")
+    tid = str(body.get("task_id") or "")
+    rid = str(body.get("run_id") or "")
+    adapter = VivadoRuntimeAdapter()
+    result = adapter.run_implementation(
+        manifest_path,
+        session_id=sid,
+        task_id=tid,
+        run_id=rid,
+    )
+    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_FLOW, tag_execution_result
+    from edagent_vivado.harness.vivado_observed import observe_vivado_command
+
+    tagged = tag_execution_result(result, SCOPE_VIVADO_FLOW)
+    if sid and rid:
+        observe_vivado_command(
+            session_id=sid,
+            task_id=tid,
+            run_id=rid,
+            tool_name="run_vivado_flow_tool",
+            input_payload={"manifest_path": manifest_path},
+            output=tagged,
+            event_create=event_create,
+        )
+    return {"ok": bool(result.get("success")), "result": result, "tool_output": tagged}
+
 
 @router.get("/vivado/devices")
 async def api_vivado_devices():
@@ -876,9 +1050,33 @@ async def api_vivado_run_tcl(request: Request):
         return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
     if policy.requires_approval:
         return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
-    result = adapter.run_tcl(command, auto_approved=True)
+    sid = str(body.get("session_id") or "")
+    tid = str(body.get("task_id") or "")
+    rid = str(body.get("run_id") or "")
+    result = adapter.run_tcl(
+        command,
+        auto_approved=True,
+        session_id=sid,
+        task_id=tid,
+        run_id=rid,
+    )
+    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_TCL, tag_vivado_adapter_result
+    from edagent_vivado.harness.vivado_observed import observe_vivado_command
+
+    tagged = tag_vivado_adapter_result(result, SCOPE_VIVADO_TCL)
+    if sid and rid:
+        observe_vivado_command(
+            session_id=sid,
+            task_id=tid,
+            run_id=rid,
+            tool_name="run_vivado_tcl_tool",
+            input_payload={"command": command, "target_id": target_id},
+            output=tagged,
+            event_create=event_create,
+        )
     return {"ok": result.success, "exit_code": result.exit_code, "stdout": result.stdout[:5000],
-            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error}
+            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error,
+            "tool_output": tagged}
 
 @router.post("/vivado/commands/script")
 async def api_vivado_run_script(request: Request):
@@ -896,6 +1094,30 @@ async def api_vivado_run_script(request: Request):
         return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
     if policy.requires_approval:
         return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
-    result = adapter.run_script(script, auto_approved=True)
+    sid = str(body.get("session_id") or "")
+    tid = str(body.get("task_id") or "")
+    rid = str(body.get("run_id") or "")
+    result = adapter.run_script(
+        script,
+        auto_approved=True,
+        session_id=sid,
+        task_id=tid,
+        run_id=rid,
+    )
+    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_SCRIPT, tag_vivado_adapter_result
+    from edagent_vivado.harness.vivado_observed import observe_vivado_command
+
+    tagged = tag_vivado_adapter_result(result, SCOPE_VIVADO_SCRIPT)
+    if sid and rid:
+        observe_vivado_command(
+            session_id=sid,
+            task_id=tid,
+            run_id=rid,
+            tool_name="run_vivado_script_tool",
+            input_payload={"script": script[:500], "target_id": target_id},
+            output=tagged,
+            event_create=event_create,
+        )
     return {"ok": result.success, "exit_code": result.exit_code, "stdout": result.stdout[:5000],
-            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error}
+            "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error,
+            "tool_output": tagged}

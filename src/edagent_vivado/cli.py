@@ -26,6 +26,10 @@ app = typer.Typer(help="EdAgent-Vivado: RTL Debug Agent for Xilinx Vivado")
 console = Console()
 logger = logging.getLogger("edagent_vivado")
 
+from edagent_vivado.cli_vivado import vivado_app  # noqa: E402
+
+app.add_typer(vivado_app, name="vivado")
+
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(message)s")
 
 

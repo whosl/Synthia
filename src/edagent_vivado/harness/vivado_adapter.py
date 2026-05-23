@@ -114,35 +114,118 @@ class VivadoRuntimeAdapter:
     def check_script_policy(self, script: str, auto_approved: bool = False) -> PolicyResult:
         return check_tcl_script(script, auto_approved=auto_approved)
 
-    def run_tcl(self, command: str, auto_approved: bool = False, timeout: int = 600) -> VivadoResult:
+    def _persist_command(
+        self,
+        command_text: str,
+        command_type: str,
+        result: VivadoResult,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+        project_id: str = "",
+    ) -> str | None:
+        if not self._target:
+            return None
+        from edagent_vivado.repository.store import vivado_command_create, vivado_command_finish
+
+        row = vivado_command_create(
+            self._target.id,
+            command_text,
+            command_type=command_type,
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            project_id=project_id,
+        )
+        state = "completed" if result.success else "error"
+        if result.error and "Policy" in (result.error or ""):
+            state = "denied"
+        vivado_command_finish(
+            row["id"],
+            state=state,
+            exit_code=result.exit_code,
+            elapsed_ms=int((result.elapsed_sec or 0) * 1000),
+            error=result.error or "",
+            parsed_summary={"command_type": command_type, "success": result.success},
+        )
+        return row["id"]
+
+    def run_tcl(
+        self,
+        command: str,
+        auto_approved: bool = False,
+        timeout: int = 600,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+        persist: bool = True,
+    ) -> VivadoResult:
         """Execute a single Tcl command via batch mode."""
         policy = self.check_policy(command, auto_approved=auto_approved)
         if not policy.allowed:
-            return VivadoResult(success=False, error=f"Policy denied: {policy.reason}", command_type="raw_tcl")
+            result = VivadoResult(success=False, error=f"Policy denied: {policy.reason}", command_type="raw_tcl")
+            if persist:
+                self._persist_command(command, "raw_tcl", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
         if policy.requires_approval:
-            return VivadoResult(success=False, error=f"Approval required: {policy.reason}", command_type="raw_tcl")
+            result = VivadoResult(success=False, error=f"Approval required: {policy.reason}", command_type="raw_tcl")
+            if persist:
+                self._persist_command(command, "raw_tcl", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
 
         if not self._target:
-            return VivadoResult(success=False, error="No Vivado target configured", command_type="raw_tcl")
+            result = VivadoResult(success=False, error="No Vivado target configured", command_type="raw_tcl")
+            if persist:
+                self._persist_command(command, "raw_tcl", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
 
         if self._target.target_type == "local":
-            return self._run_local_tcl(command, timeout)
-        return self._run_remote_tcl(command, timeout)
+            result = self._run_local_tcl(command, timeout)
+        else:
+            result = self._run_remote_tcl(command, timeout)
+        if persist:
+            self._persist_command(command, "raw_tcl", result, session_id=session_id, task_id=task_id, run_id=run_id)
+        return result
 
-    def run_script(self, script: str, auto_approved: bool = False, timeout: int = 3600) -> VivadoResult:
+    def run_script(
+        self,
+        script: str,
+        auto_approved: bool = False,
+        timeout: int = 3600,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+        persist: bool = True,
+    ) -> VivadoResult:
         """Execute a Tcl script via batch mode."""
         policy = self.check_script_policy(script, auto_approved=auto_approved)
         if not policy.allowed:
-            return VivadoResult(success=False, error=f"Policy denied: {policy.reason}", command_type="script")
+            result = VivadoResult(success=False, error=f"Policy denied: {policy.reason}", command_type="script")
+            if persist:
+                self._persist_command(script[:500], "script", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
         if policy.requires_approval:
-            return VivadoResult(success=False, error=f"Approval required: {policy.reason}", command_type="script")
+            result = VivadoResult(success=False, error=f"Approval required: {policy.reason}", command_type="script")
+            if persist:
+                self._persist_command(script[:500], "script", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
 
         if not self._target:
-            return VivadoResult(success=False, error="No Vivado target configured", command_type="script")
+            result = VivadoResult(success=False, error="No Vivado target configured", command_type="script")
+            if persist:
+                self._persist_command(script[:500], "script", result, session_id=session_id, task_id=task_id, run_id=run_id)
+            return result
 
         if self._target.target_type == "local":
-            return self._run_local_script(script, timeout)
-        return self._run_remote_script(script, timeout)
+            result = self._run_local_script(script, timeout)
+        else:
+            result = self._run_remote_script(script, timeout)
+        if persist:
+            self._persist_command(script[:500], "script", result, session_id=session_id, task_id=task_id, run_id=run_id)
+        return result
 
     def health_check(self) -> dict[str, Any]:
         """Check target connectivity and Vivado availability."""
@@ -301,7 +384,15 @@ class VivadoRuntimeAdapter:
         finally:
             os.unlink(local_path)
 
-    def run_synthesis(self, manifest_path: str) -> dict[str, Any]:
+    def run_synthesis(
+        self,
+        manifest_path: str,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+        persist: bool = True,
+    ) -> dict[str, Any]:
         """High-level synthesis flow — unified entry used by agent tools."""
         from pathlib import Path
 
@@ -312,6 +403,11 @@ class VivadoRuntimeAdapter:
         from edagent_vivado.tools.vivado_tools import _patch_tcl_to_relative
 
         manifest = Manifest.load(manifest_path)
+        mock_fail = os.environ.get("EDAGENT_MOCK_FAIL", "").strip() or None
+        if not mock_fail and getattr(manifest, "model_extra", None):
+            test_block = manifest.model_extra.get("test")
+            if isinstance(test_block, dict):
+                mock_fail = str(test_block.get("mock_fail") or "").strip() or None
         ws = Workspace(base_dir=Path(manifest_path).parent, task_name="agent_synth")
         ws.copy_sources(manifest)
         ws.write_manifest(manifest)
@@ -321,10 +417,22 @@ class VivadoRuntimeAdapter:
         tcl_path.write_text(tcl_content, encoding="utf-8")
         _patch_tcl_to_relative(tcl_path, ws.root)
 
-        runner = VivadoRunner(workspace=ws, manifest=manifest)
+        runner = VivadoRunner(workspace=ws, manifest=manifest, mock_fail=mock_fail)
         if runner.is_mock:
             result = runner.run_synth()
         elif runner._remote_cfg:
+            try:
+                from edagent_vivado.harness.file_sync import sync_manifest_sources
+                from edagent_vivado.harness.remote_executor import RemoteExecutor
+
+                sync_manifest_sources(
+                    manifest,
+                    ws.root,
+                    RemoteExecutor(self._target),
+                    remote_work_dir=self._target.remote_work_root if self._target else None,
+                )
+            except Exception as exc:
+                logger.warning("Remote file sync skipped: %s", exc)
             tc = tcl_path.read_text(errors="replace")
             for rp in manifest.rtl_paths():
                 tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
@@ -341,4 +449,117 @@ class VivadoRuntimeAdapter:
             for tf in ws.root.glob("scripts/*.tcl"):
                 _patch_tcl_to_relative(tf, ws.root)
         result["workspace"] = str(ws.root)
+        if persist and self._target:
+            ok = bool(result.get("success"))
+            synth_result = VivadoResult(
+                success=ok,
+                exit_code=int(result.get("return_code") or (0 if ok else 1)),
+                stdout=str(result.get("log_excerpt") or result.get("stdout") or "")[:2000],
+                stderr=str(result.get("error") or ""),
+                elapsed_sec=float(result.get("elapsed_sec") or 0),
+                target_id=self._target.id,
+                command_type="synthesis",
+                error=result.get("error"),
+            )
+            self._persist_command(
+                f"synth {manifest_path}",
+                "synthesis",
+                synth_result,
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                project_id=manifest.name(),
+            )
         return result
+
+    def run_implementation(
+        self,
+        manifest_path: str,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+        persist: bool = True,
+        run_synth_first: bool = True,
+    ) -> dict[str, Any]:
+        """Run implementation (opt/place/route) for a manifest workspace."""
+        from pathlib import Path
+
+        from edagent_vivado.harness.manifest import Manifest
+        from edagent_vivado.harness.tcl_templates import generate_impl_tcl, generate_synth_tcl
+        from edagent_vivado.harness.vivado_runner import VivadoRunner
+        from edagent_vivado.harness.workspace import Workspace
+        from edagent_vivado.tools.vivado_tools import _patch_tcl_to_relative
+
+        manifest = Manifest.load(manifest_path)
+        mock_fail = os.environ.get("EDAGENT_MOCK_FAIL", "").strip() or None
+        if not mock_fail and getattr(manifest, "model_extra", None):
+            test_block = manifest.model_extra.get("test")
+            if isinstance(test_block, dict):
+                mock_fail = str(test_block.get("mock_fail") or "").strip() or None
+
+        ws = Workspace(base_dir=Path(manifest_path).parent, task_name="agent_impl")
+        ws.copy_sources(manifest)
+        ws.write_manifest(manifest)
+
+        synth_path = ws.script_path("synth.tcl")
+        synth_path.write_text(generate_synth_tcl(manifest, ws.root), encoding="utf-8")
+        _patch_tcl_to_relative(synth_path, ws.root)
+
+        impl_path = ws.script_path("impl.tcl")
+        impl_path.write_text(generate_impl_tcl(manifest, ws.root), encoding="utf-8")
+        _patch_tcl_to_relative(impl_path, ws.root)
+
+        runner = VivadoRunner(workspace=ws, manifest=manifest, mock_fail=mock_fail)
+        results: dict[str, Any] = {"workspace": str(ws.root)}
+
+        if run_synth_first:
+            if runner.is_mock:
+                synth_result = runner.run_synth()
+            elif runner._remote_cfg:
+                tc = synth_path.read_text(errors="replace")
+                for rp in manifest.rtl_paths():
+                    tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
+                for xp in manifest.xdc_paths():
+                    tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
+                synth_path.write_text(tc)
+                synth_result = runner._remote_run("synth", synth_path)
+            else:
+                synth_result = runner.run_synth()
+            results["synth"] = synth_result
+            if not synth_result.get("success"):
+                results.update(synth_result)
+                results["success"] = False
+                return results
+
+        if runner.is_mock:
+            impl_result = runner.run_impl()
+        elif runner._remote_cfg:
+            impl_result = runner._remote_run("impl", impl_path)
+        else:
+            impl_result = runner.run_impl()
+        results.update(impl_result)
+        results["workspace"] = str(ws.root)
+
+        if persist and self._target:
+            ok = bool(results.get("success"))
+            impl_vr = VivadoResult(
+                success=ok,
+                exit_code=int(results.get("return_code") or (0 if ok else 1)),
+                stdout=str(results.get("log") or "")[:2000],
+                stderr=str(results.get("error") or ""),
+                elapsed_sec=float(results.get("elapsed_sec") or 0),
+                target_id=self._target.id,
+                command_type="implementation",
+                error=results.get("error"),
+            )
+            self._persist_command(
+                f"impl {manifest_path}",
+                "implementation",
+                impl_vr,
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                project_id=manifest.name(),
+            )
+        return results

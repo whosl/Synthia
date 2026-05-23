@@ -1,8 +1,18 @@
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, XCircle } from 'lucide-react'
-import type { ToolBlockState } from '../../lib/eventReducer'
 import { useTerminalStore } from '../../stores/terminalStore'
 
-export function ToolCallBlock({ tool }: { tool: ToolBlockState }) {
+export interface ToolCallViewModel {
+  id: string
+  name: string
+  state: 'running' | 'completed' | 'error' | 'rejected'
+  args?: string
+  result?: string
+  error?: string
+  startedAt?: number
+  elapsedMs?: number
+}
+
+export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
   const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? true)
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
   const done = tool.state === 'completed'

@@ -1,0 +1,26 @@
+project:
+  name: bad_constraint
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: gpio_top
+
+sources:
+  rtl:
+    - rtl/gpio_top.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+test:
+  description: "XDC references clk_100mhz and led[8] but ports do not exist"
+  expected_error_class: constraint

@@ -12,10 +12,14 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
   const queryClient = useQueryClient()
   const kbCasesQ = useQuery({ queryKey: ['legacy-kb'], queryFn: listLegacyErrorKb })
   const candidatesQ = useQuery({ queryKey: ['kb-candidates'], queryFn: listKbCandidates, enabled: mode === 'kb' })
+  const invalidateCandidates = () => queryClient.invalidateQueries({ queryKey: ['kb-candidates'] })
   const reindex = useMutation({
     mutationFn: reindexKnowledge,
     onSuccess: (r) => {
-      alert(`Indexed ${r.indexed_sources} sources, ${r.chunks} chunks`)
+      const g = (r as { global?: { indexed_sources?: number; chunks?: number } }).global
+      const totalChunks = g?.chunks ?? (r as { chunks?: number }).chunks ?? 0
+      const totalSources = g?.indexed_sources ?? (r as { indexed_sources?: number }).indexed_sources ?? 0
+      alert(`Indexed ${totalSources} sources, ${totalChunks} chunks`)
       queryClient.invalidateQueries({ queryKey: ['legacy-kb'] })
     },
   })
@@ -61,15 +65,16 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
     <div className="dashboard-grid">
       <Panel title="KB Candidates">
         {(candidatesQ.data?.candidates ?? []).length > 0
-          ? <table className="table"><thead><tr><th>ID</th><th>Title</th><th>Source</th><th>Score</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}>
-            <td className="mono" style={{ fontSize: 11 }}>{c.id}</td>
-            <td>{c.title}</td>
-            <td className="mono muted" style={{ fontSize: 11 }}>{c.source_run_id || c.source_session_id || '—'}</td>
-            <td>{c.confidence}</td>
+          ? <table className="table"><thead><tr><th>ID</th><th>Pattern</th><th>Category</th><th>Likely causes</th><th>Score</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}>
+            <td className="mono" style={{ fontSize: 11 }}>{c.id.slice(0, 8)}…</td>
+            <td>{c.title || c.pattern}</td>
+            <td className="muted">{c.category}</td>
+            <td className="muted" style={{ fontSize: 12, maxWidth: 280 }}>{(c.likely_causes ?? []).slice(0, 2).join('; ') || '—'}</td>
+            <td>{c.confidence?.toFixed?.(2) ?? c.confidence}</td>
             <td style={{ whiteSpace: 'nowrap' }}>
-              <Button className="success" onClick={() => approveKbCandidate(c.id)}><CheckCircle2 size={13} /></Button>{' '}
-              <Button className="danger" onClick={() => rejectKbCandidate(c.id)}><XCircle size={13} /></Button>{' '}
-              <Button className="ghost" onClick={() => mergeKbCandidate(c.id)}><GitMerge size={13} /></Button>
+              <Button className="success" onClick={async () => { await approveKbCandidate(c.id); invalidateCandidates() }}><CheckCircle2 size={13} /></Button>{' '}
+              <Button className="danger" onClick={async () => { await rejectKbCandidate(c.id); invalidateCandidates() }}><XCircle size={13} /></Button>{' '}
+              <Button className="ghost" onClick={async () => { await mergeKbCandidate(c.id); invalidateCandidates() }}><GitMerge size={13} /></Button>
             </td>
           </tr>)}</tbody></table>
           : <EmptyState title="No pending candidates" detail="Candidates are auto-generated from failed runs." />}
