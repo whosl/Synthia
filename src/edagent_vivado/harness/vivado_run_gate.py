@@ -58,6 +58,18 @@ def _wait_gate_registered(task_id: str, operation: str, timeout: float = 120.0) 
     return False
 
 
+def cancel_vivado_gates_for_task(task_id: str) -> int:
+    """Reject all pending gates for a task (e.g. user pressed Stop)."""
+    released = 0
+    with _lock:
+        keys = [k for k in list(_gates.keys()) if k.startswith(f"{task_id}:")]
+    for key in keys:
+        op = key.split(":", 1)[-1]
+        resolve_vivado_gate(task_id, op, False)
+        released += 1
+    return released
+
+
 def wait_vivado_gate_allowed(
     task_id: str | None,
     operation: str,
@@ -70,6 +82,11 @@ def wait_vivado_gate_allowed(
         if has_gate:
             return False
         return True
+    from edagent_vivado.harness.task_cancel import is_task_stop_requested
+
+    if is_task_stop_requested(task_id):
+        cancel_vivado_gates_for_task(task_id)
+        return False
     if is_vivado_gate_rejected(task_id, operation):
         with _lock:
             _rejected_keys.discard(_gate_key(task_id, operation))
@@ -91,7 +108,15 @@ def wait_vivado_gate_allowed(
         with _lock:
             _gates.pop(key, None)
         return allowed
-    ev.wait(timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_task_stop_requested(task_id):
+            resolve_vivado_gate(task_id, operation, False)
+            with _lock:
+                _gates.pop(key, None)
+            return False
+        if ev.wait(timeout=min(0.4, max(0.05, deadline - time.time()))):
+            break
     with _lock:
         entry = _gates.pop(key, ("rejected", threading.Event()))
     return entry[0] == "approved"

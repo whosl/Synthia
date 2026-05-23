@@ -732,9 +732,17 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
         if not t: raise HTTPException(404, "no active task")
         task_id = t["id"]
     task_update(task_id, stop_requested=1, state="stopping")
-    event_create(session_id or task_get(task_id)["session_id"],
-                 "task.stopping", {"task_id": task_id}, task_id=task_id)
-    return {"ok": True, "task_id": task_id, "state": "stopping"}
+    sid = session_id or task_get(task_id)["session_id"]
+    from edagent_vivado.harness.task_cancel import cancel_task_execution
+
+    cancel_stats = cancel_task_execution(task_id)
+    event_create(
+        sid,
+        "task.stopping",
+        {"task_id": task_id, **cancel_stats},
+        task_id=task_id,
+    )
+    return {"ok": True, "task_id": task_id, "state": "stopping", "cancel": cancel_stats}
 
 # ── Event / Stream API ───────────────────────────────────────
 

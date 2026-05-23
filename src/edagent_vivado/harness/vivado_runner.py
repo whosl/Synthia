@@ -108,48 +108,20 @@ class VivadoRunner:
         return {"step": "sim", "success": True, "log": cr.stdout_path, "elapsed_sec": cr.elapsed_sec}
 
     def _remote_run(self, step: str, tcl_path: Path) -> dict[str, Any]:
-        cfg = self._remote_cfg
-        if not cfg: return {"step": step, "success": False, "error": "No remote config"}
-        t0 = time.time(); rd = f"{cfg['work_dir']}/{self._workspace.root.name}"
-        h = cfg["host"]; v = cfg["vivado_path"]; e = cfg["env_script"]
-        port = cfg.get("port", "")
-        ssh = ["ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
-        if port: ssh += ["-p", str(port)]
-        ssh.append(h)
-        scp = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
-        if port: scp += ["-P", str(port)]
-        tc = tcl_path.read_text(errors="replace")
-        for rp in self._manifest.rtl_paths(): tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
-        for xp in self._manifest.xdc_paths(): tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
-        tcl_path.write_text(tc)
-        try:
-            subprocess.run(ssh + [f"mkdir -p {rd}/src {rd}/scripts {rd}/reports {rd}/checkpoints"], capture_output=True, timeout=15)
-            subprocess.run(scp + [str(tcl_path), f"{h}:{rd}/scripts/{step}.tcl"], capture_output=True, timeout=30)
-            ws = self._workspace.root / "src"
-            if ws.exists() and any(ws.iterdir()): subprocess.run(scp + ["-r", str(ws) + "/*", f"{h}:{rd}/src/"], capture_output=True, timeout=60)
-            for rp in self._manifest.rtl_paths():
-                if rp.exists() and rp.parent.resolve() != ws.resolve(): subprocess.run(scp + [str(rp), f"{h}:{rd}/src/{rp.name}"], capture_output=True, timeout=30)
-            for xp in self._manifest.xdc_paths():
-                if xp.exists() and xp.parent.resolve() != ws.resolve(): subprocess.run(scp + [str(xp), f"{h}:{rd}/src/{xp.name}"], capture_output=True, timeout=30)
-            cmd = f"cd {rd} && source {e} && {v} -mode batch -source scripts/{step}.tcl -log vivado_{step}.log"
-            proc = subprocess.run(ssh + [cmd], capture_output=True, text=True, timeout=7200)
-            for fn in [f"vivado_{step}.log"]: subprocess.run(scp + [f"{h}:{rd}/{fn}", str(self._workspace.root / fn)], capture_output=True, timeout=60)
-            out = {
-                "step": step,
-                "success": proc.returncode == 0,
-                "return_code": proc.returncode,
-                "log": str(self._workspace.root / f"vivado_{step}.log"),
-                "elapsed_sec": round(time.time() - t0, 2),
-                "timed_out": False,
-                "remote": True,
-                "mock": False,
-                "host": h,
-            }
-            if proc.returncode != 0:
-                out["error"] = (proc.stderr or proc.stdout or f"Remote {step} failed").strip()[:2000]
-            return out
-        except subprocess.TimeoutExpired: return {"step": step, "success": False, "error": "Timeout", "remote": True}
-        except Exception as ex: return {"step": step, "success": False, "error": str(ex), "remote": True}
+        """Delegate remote synth/impl to VivadoRuntimeAdapter (unified SSH/SCP path)."""
+        from edagent_vivado.harness.run_context import get_agent_task_id
+        from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter, get_default_target
+
+        adapter = VivadoRuntimeAdapter(get_default_target())
+        if not adapter.target or not adapter.target.host:
+            return {"step": step, "success": False, "error": "No remote config", "remote": True}
+        return adapter.run_manifest_batch_step(
+            step,
+            self._workspace.root,
+            self._manifest,
+            tcl_path,
+            task_id=get_agent_task_id() or "",
+        )
 
     def _mock_synth(self, tcl_path: Path, directive: str = "") -> dict[str, Any]:
         s = MOCK_FAILURE_SCENARIOS.get(self._mock_fail or "")

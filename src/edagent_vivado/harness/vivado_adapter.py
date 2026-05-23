@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from edagent_vivado.harness.task_cancel import is_task_stop_requested, run_cancellable
 from edagent_vivado.harness.tcl_policy import PolicyResult, check_tcl_policy, check_tcl_script
 from edagent_vivado.repository.store import (
     vivado_target_get,
@@ -183,9 +184,9 @@ class VivadoRuntimeAdapter:
             return result
 
         if self._target.target_type == "local":
-            result = self._run_local_tcl(command, timeout)
+            result = self._run_local_tcl(command, timeout, task_id=task_id)
         else:
-            result = self._run_remote_tcl(command, timeout)
+            result = self._run_remote_tcl(command, timeout, task_id=task_id)
         if persist:
             self._persist_command(command, "raw_tcl", result, session_id=session_id, task_id=task_id, run_id=run_id)
         return result
@@ -221,9 +222,9 @@ class VivadoRuntimeAdapter:
             return result
 
         if self._target.target_type == "local":
-            result = self._run_local_script(script, timeout)
+            result = self._run_local_script(script, timeout, task_id=task_id)
         else:
-            result = self._run_remote_script(script, timeout)
+            result = self._run_remote_script(script, timeout, task_id=task_id)
         if persist:
             self._persist_command(script[:500], "script", result, session_id=session_id, task_id=task_id, run_id=run_id)
         return result
@@ -272,7 +273,90 @@ class VivadoRuntimeAdapter:
 
         return result
 
-    def list_devices(self, *, persist: bool = True, timeout: int = 45) -> dict[str, Any]:
+    def run_manifest_batch_step(
+        self,
+        step: str,
+        workspace_root: Path,
+        manifest: Any,
+        tcl_path: Path,
+        *,
+        task_id: str = "",
+    ) -> dict[str, Any]:
+        """Run synth/impl Tcl on remote host via RemoteExecutor (unified remote path)."""
+        import time as _time
+
+        from edagent_vivado.harness.file_sync import sync_manifest_sources
+        from edagent_vivado.harness.remote_executor import RemoteExecutor
+
+        if not self._target or not self._target.host:
+            return {"step": step, "success": False, "error": "No remote Vivado target configured", "remote": True}
+
+        t0 = _time.time()
+        remote_root = f"{self._target.remote_work_root}/{workspace_root.name}"
+
+        if task_id and is_task_stop_requested(task_id):
+            return {
+                "step": step,
+                "success": False,
+                "error": "Task stopped by user",
+                "stopped": True,
+                "remote": True,
+            }
+
+        tc = tcl_path.read_text(errors="replace")
+        for rp in manifest.rtl_paths():
+            tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
+        for xp in manifest.xdc_paths():
+            tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
+        tcl_path.write_text(tc)
+
+        try:
+            ex = RemoteExecutor(self._target)
+            sync_manifest_sources(
+                manifest,
+                workspace_root,
+                ex,
+                remote_work_dir=self._target.remote_work_root,
+            )
+            ex.mkdir_remote(f"{remote_root}/scripts {remote_root}/reports {remote_root}/checkpoints", task_id=task_id or None)
+            up = ex.upload(tcl_path, f"{remote_root}/scripts/{step}.tcl", task_id=task_id or None)
+            if up.return_code != 0 or up.stopped:
+                return {
+                    "step": step,
+                    "success": False,
+                    "error": up.stderr or "Upload failed",
+                    "stopped": up.stopped,
+                    "remote": True,
+                }
+
+            env_cmd = f"source {self._target.settings_path} 2>/dev/null && " if self._target.settings_path else ""
+            cmd = f"cd {remote_root} && {env_cmd}{self._target.vivado_path} -mode batch -source scripts/{step}.tcl -log vivado_{step}.log"
+            run = ex.run(cmd, timeout=7200, task_id=task_id or None)
+            log_name = f"vivado_{step}.log"
+            local_log = workspace_root / log_name
+            ex.download(f"{remote_root}/{log_name}", local_log, task_id=task_id or None)
+
+            out = {
+                "step": step,
+                "success": run.return_code == 0 and not run.stopped,
+                "return_code": run.return_code,
+                "log": str(local_log),
+                "elapsed_sec": round(_time.time() - t0, 2),
+                "timed_out": run.timed_out,
+                "stopped": run.stopped,
+                "remote": True,
+                "mock": False,
+                "host": self._target.host,
+            }
+            if run.return_code != 0 or run.stopped:
+                out["error"] = (run.stderr or run.stdout or f"Remote {step} failed").strip()[:2000]
+            if run.return_code == 255 and not out.get("success"):
+                out["error"] = out.get("error") or "SSH connection to remote Vivado host failed (exit 255)"
+            return out
+        except Exception as exc:
+            return {"step": step, "success": False, "error": str(exc), "remote": True}
+
+    def list_devices(self, *, persist: bool = True, timeout: int = 45, task_id: str = "") -> dict[str, Any]:
         """Query Vivado `get_parts` via unified Tcl execution."""
         if not self._target:
             return {"devices": [], "error": "No Vivado target configured"}
@@ -283,6 +367,7 @@ class VivadoRuntimeAdapter:
             auto_approved=True,
             timeout=timeout,
             persist=persist,
+            task_id=task_id,
         )
         if not result.success:
             return {
@@ -311,7 +396,7 @@ class VivadoRuntimeAdapter:
             cmd.append(self._target.host)
         return cmd
 
-    def _run_local_tcl(self, command: str, timeout: int) -> VivadoResult:
+    def _run_local_tcl(self, command: str, timeout: int, *, task_id: str = "") -> VivadoResult:
         t0 = time.time()
         script_content = f"{command}\nexit\n"
         import tempfile
@@ -319,65 +404,96 @@ class VivadoRuntimeAdapter:
             f.write(script_content)
             script_path = f.name
         try:
-            p = subprocess.run(
+            res = run_cancellable(
                 [self._target.vivado_path, "-mode", "batch", "-source", script_path],
-                capture_output=True, text=True, timeout=timeout,
+                task_id=task_id or None,
+                timeout=float(timeout),
             )
+            if res.stopped:
+                return VivadoResult(
+                    success=False,
+                    exit_code=-1,
+                    stdout=res.stdout,
+                    stderr=res.stderr,
+                    error="Task stopped by user",
+                    elapsed_sec=round(time.time() - t0, 2),
+                    target_id=self._target.id,
+                    command_type="raw_tcl",
+                )
             return VivadoResult(
-                success=p.returncode == 0, exit_code=p.returncode,
-                stdout=p.stdout, stderr=p.stderr,
+                success=res.returncode == 0,
+                exit_code=res.returncode,
+                stdout=res.stdout,
+                stderr=res.stderr,
                 elapsed_sec=round(time.time() - t0, 2),
-                target_id=self._target.id, command_type="raw_tcl",
+                target_id=self._target.id,
+                command_type="raw_tcl",
+                error="Timeout" if res.timed_out else None,
             )
-        except subprocess.TimeoutExpired:
-            return VivadoResult(success=False, error="Timeout", elapsed_sec=round(time.time() - t0, 2),
-                                target_id=self._target.id, command_type="raw_tcl")
         finally:
             os.unlink(script_path)
 
-    def _run_local_script(self, script: str, timeout: int) -> VivadoResult:
+    def _run_local_script(self, script: str, timeout: int, *, task_id: str = "") -> VivadoResult:
         t0 = time.time()
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".tcl", delete=False) as f:
             f.write(script)
             script_path = f.name
         try:
-            p = subprocess.run(
+            res = run_cancellable(
                 [self._target.vivado_path, "-mode", "batch", "-source", script_path],
-                capture_output=True, text=True, timeout=timeout,
+                task_id=task_id or None,
+                timeout=float(timeout),
             )
+            if res.stopped:
+                return VivadoResult(
+                    success=False,
+                    exit_code=-1,
+                    error="Task stopped by user",
+                    elapsed_sec=round(time.time() - t0, 2),
+                    target_id=self._target.id,
+                    command_type="script",
+                )
             return VivadoResult(
-                success=p.returncode == 0, exit_code=p.returncode,
-                stdout=p.stdout, stderr=p.stderr,
+                success=res.returncode == 0,
+                exit_code=res.returncode,
+                stdout=res.stdout,
+                stderr=res.stderr,
                 elapsed_sec=round(time.time() - t0, 2),
-                target_id=self._target.id, command_type="script",
+                target_id=self._target.id,
+                command_type="script",
+                error="Timeout" if res.timed_out else None,
             )
-        except subprocess.TimeoutExpired:
-            return VivadoResult(success=False, error="Timeout", elapsed_sec=round(time.time() - t0, 2),
-                                target_id=self._target.id, command_type="script")
         finally:
             os.unlink(script_path)
 
-    def _run_remote_tcl(self, command: str, timeout: int) -> VivadoResult:
+    def _run_remote_tcl(self, command: str, timeout: int, *, task_id: str = "") -> VivadoResult:
         t0 = time.time()
         ssh = self._ssh_base()
         env_cmd = f"source {self._target.settings_path} 2>/dev/null && " if self._target.settings_path else ""
         full_cmd = f'{env_cmd}{self._target.vivado_path} -mode batch -nojournal -nolog -tclargs <<EOF\n{command}\nexit\nEOF'
-        try:
-            p = subprocess.run(ssh + [full_cmd], capture_output=True, text=True, timeout=timeout)
+        res = run_cancellable(ssh + [full_cmd], task_id=task_id or None, timeout=float(timeout))
+        if res.stopped:
             return VivadoResult(
-                success=p.returncode == 0, exit_code=p.returncode,
-                stdout=p.stdout, stderr=p.stderr,
+                success=False,
+                exit_code=-1,
+                error="Task stopped by user",
                 elapsed_sec=round(time.time() - t0, 2),
-                target_id=self._target.id, command_type="raw_tcl",
+                target_id=self._target.id,
+                command_type="raw_tcl",
             )
-        except subprocess.TimeoutExpired:
-            return VivadoResult(success=False, error="Timeout", elapsed_sec=round(time.time() - t0, 2),
-                                target_id=self._target.id, command_type="raw_tcl")
-        except OSError as e:
-            return VivadoResult(success=False, error=str(e), target_id=self._target.id, command_type="raw_tcl")
+        return VivadoResult(
+            success=res.returncode == 0,
+            exit_code=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            elapsed_sec=round(time.time() - t0, 2),
+            target_id=self._target.id,
+            command_type="raw_tcl",
+            error="Timeout" if res.timed_out else None,
+        )
 
-    def _run_remote_script(self, script: str, timeout: int) -> VivadoResult:
+    def _run_remote_script(self, script: str, timeout: int, *, task_id: str = "") -> VivadoResult:
         t0 = time.time()
         ssh = self._ssh_base()
         scp_base = ["scp", "-o", "StrictHostKeyChecking=no"]
@@ -392,25 +508,45 @@ class VivadoRuntimeAdapter:
             f.write(script)
             local_path = f.name
         try:
-            subprocess.run(ssh + [f"mkdir -p {self._target.remote_work_root}"], capture_output=True, timeout=15)
-            subprocess.run(scp_base + [local_path, f"{self._target.host}:{remote_script}"], capture_output=True, timeout=30)
+            tid = task_id or None
+            run_cancellable(ssh + [f"mkdir -p {self._target.remote_work_root}"], task_id=tid, timeout=15.0)
+            up = run_cancellable(
+                scp_base + [local_path, f"{self._target.host}:{remote_script}"],
+                task_id=tid,
+                timeout=30.0,
+            )
+            if up.stopped:
+                return VivadoResult(
+                    success=False,
+                    error="Task stopped by user",
+                    target_id=self._target.id,
+                    command_type="script",
+                )
             env_cmd = f"source {self._target.settings_path} 2>/dev/null && " if self._target.settings_path else ""
-            p = subprocess.run(
+            res = run_cancellable(
                 ssh + [f"{env_cmd}{self._target.vivado_path} -mode batch -source {remote_script}"],
-                capture_output=True, text=True, timeout=timeout,
+                task_id=tid,
+                timeout=float(timeout),
             )
-            subprocess.run(ssh + [f"rm -f {remote_script}"], capture_output=True, timeout=10)
+            run_cancellable(ssh + [f"rm -f {remote_script}"], task_id=tid, timeout=10.0)
+            if res.stopped:
+                return VivadoResult(
+                    success=False,
+                    error="Task stopped by user",
+                    elapsed_sec=round(time.time() - t0, 2),
+                    target_id=self._target.id,
+                    command_type="script",
+                )
             return VivadoResult(
-                success=p.returncode == 0, exit_code=p.returncode,
-                stdout=p.stdout, stderr=p.stderr,
+                success=res.returncode == 0,
+                exit_code=res.returncode,
+                stdout=res.stdout,
+                stderr=res.stderr,
                 elapsed_sec=round(time.time() - t0, 2),
-                target_id=self._target.id, command_type="script",
+                target_id=self._target.id,
+                command_type="script",
+                error="Timeout" if res.timed_out else None,
             )
-        except subprocess.TimeoutExpired:
-            return VivadoResult(success=False, error="Timeout", elapsed_sec=round(time.time() - t0, 2),
-                                target_id=self._target.id, command_type="script")
-        except OSError as e:
-            return VivadoResult(success=False, error=str(e), target_id=self._target.id, command_type="script")
         finally:
             os.unlink(local_path)
 
@@ -450,30 +586,10 @@ class VivadoRuntimeAdapter:
         runner = VivadoRunner(workspace=ws, manifest=manifest, mock_fail=mock_fail)
         if runner.is_mock:
             result = runner.run_synth()
-        elif runner._remote_cfg:
-            try:
-                from edagent_vivado.harness.file_sync import sync_manifest_sources
-                from edagent_vivado.harness.remote_executor import RemoteExecutor
-
-                sync_manifest_sources(
-                    manifest,
-                    ws.root,
-                    RemoteExecutor(self._target),
-                    remote_work_dir=self._target.remote_work_root if self._target else None,
-                )
-            except Exception as exc:
-                logger.warning("Remote file sync skipped: %s", exc)
-            tc = tcl_path.read_text(errors="replace")
-            for rp in manifest.rtl_paths():
-                tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
-            for xp in manifest.xdc_paths():
-                tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
-            tcl_path.write_text(tc)
-            result = runner._remote_run("synth", tcl_path)
-            if result.get("return_code") == 255 and not result.get("success"):
-                result["error"] = result.get("error") or "SSH connection to remote Vivado host failed (exit 255)"
-                result["mock"] = False
-                result["remote"] = True
+        elif self._target and self._target.host:
+            result = self.run_manifest_batch_step(
+                "synth", ws.root, manifest, tcl_path, task_id=task_id,
+            )
         else:
             result = runner.run_synth()
             for tf in ws.root.glob("scripts/*.tcl"):
@@ -546,14 +662,10 @@ class VivadoRuntimeAdapter:
         if run_synth_first:
             if runner.is_mock:
                 synth_result = runner.run_synth()
-            elif runner._remote_cfg:
-                tc = synth_path.read_text(errors="replace")
-                for rp in manifest.rtl_paths():
-                    tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
-                for xp in manifest.xdc_paths():
-                    tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
-                synth_path.write_text(tc)
-                synth_result = runner._remote_run("synth", synth_path)
+            elif self._target and self._target.host:
+                synth_result = self.run_manifest_batch_step(
+                    "synth", ws.root, manifest, synth_path, task_id=task_id,
+                )
             else:
                 synth_result = runner.run_synth()
             results["synth"] = synth_result
@@ -564,8 +676,10 @@ class VivadoRuntimeAdapter:
 
         if runner.is_mock:
             impl_result = runner.run_impl()
-        elif runner._remote_cfg:
-            impl_result = runner._remote_run("impl", impl_path)
+        elif self._target and self._target.host:
+            impl_result = self.run_manifest_batch_step(
+                "impl", ws.root, manifest, impl_path, task_id=task_id,
+            )
         else:
             impl_result = runner.run_impl()
         results.update(impl_result)
