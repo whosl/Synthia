@@ -5,6 +5,8 @@ import '../styles/global.css'
 import '../styles/sessions.css'
 import '../styles/terminal.css'
 import '../styles/monitor.css'
+import '../styles/knowledge.css'
+import '../styles/projects.css'
 
 export default function App() {
   return <Providers><BrowserRouter><AppRouter /></BrowserRouter></Providers>

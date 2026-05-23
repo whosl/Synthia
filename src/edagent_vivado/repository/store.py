@@ -10,12 +10,168 @@ init_db()
 def _now() -> int: return int(time.time())
 def _uid() -> str: return _uuid.uuid4().hex[:12]
 
+
+def _project_snapshot_row(project: dict) -> dict:
+    return {
+        "project_id": project["id"],
+        "name": project.get("name"),
+        "root_path": project.get("root_path"),
+        "manifest_path": project.get("manifest_path"),
+        "xpr_path": project.get("xpr_path"),
+        "part": project.get("part"),
+        "board_part": project.get("board_part"),
+        "top_module": project.get("top_module"),
+        "default_vivado_target_id": project.get("default_vivado_target_id"),
+    }
+
+
+# ── Projects ─────────────────────────────────────────────────
+
+def project_list(status: str | None = None, limit: int = 100) -> list[dict]:
+    db = get_db()
+    q = "SELECT * FROM projects WHERE deleted_at IS NULL"
+    params: list = []
+    if status:
+        q += " AND status=?"
+        params.append(status)
+    q += " AND archived_at IS NULL ORDER BY COALESCE(last_active_at, updated_at) DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in db.execute(q, params)]
+
+
+def project_get(pid: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    return dict(row) if row else None
+
+
+def project_create(fields: dict) -> dict:
+    pid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO projects(
+          id,name,status,root_path,manifest_path,xpr_path,part,board_part,top_module,
+          target_language,simulator,source_globs_json,constraint_globs_json,tcl_globs_json,
+          default_vivado_target_id,created_at,updated_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            pid,
+            fields["name"],
+            fields.get("status", "active"),
+            fields["root_path"],
+            fields["manifest_path"],
+            fields.get("xpr_path", ""),
+            fields.get("part"),
+            fields.get("board_part"),
+            fields.get("top_module"),
+            fields.get("target_language"),
+            fields.get("simulator"),
+            json.dumps(fields.get("source_globs") or []),
+            json.dumps(fields.get("constraint_globs") or []),
+            json.dumps(fields.get("tcl_globs") or []),
+            fields.get("default_vivado_target_id"),
+            now,
+            now,
+            json.dumps(fields.get("metadata") or {}),
+        ),
+    )
+    db.commit()
+    return project_get(pid)
+
+
+def project_update(pid: str, **fields) -> dict | None:
+    if not fields:
+        return project_get(pid)
+    allowed = {
+        "name", "status", "root_path", "manifest_path", "xpr_path", "part", "board_part",
+        "top_module", "target_language", "simulator", "default_vivado_target_id", "metadata_json",
+        "archived_at", "last_active_at", "session_count", "problem_count", "run_count",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if "metadata" in fields and "metadata_json" not in updates:
+        updates["metadata_json"] = json.dumps(fields["metadata"])
+    if not updates:
+        return project_get(pid)
+    updates["updated_at"] = _now()
+    sets = ", ".join(f"{k}=?" for k in updates)
+    vals = list(updates.values()) + [pid]
+    get_db().execute(f"UPDATE projects SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return project_get(pid)
+
+
+def project_delete(pid: str, hard: bool = False) -> bool:
+    db = get_db()
+    if hard:
+        db.execute("DELETE FROM projects WHERE id=?", (pid,))
+    else:
+        db.execute("UPDATE projects SET archived_at=?, status=? WHERE id=?", (_now(), "archived", pid))
+    db.commit()
+    return True
+
+
+def _refresh_project_session_count(pid: str) -> None:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) AS c, MAX(updated_at) AS last FROM sessions WHERE project_id=? AND deleted_at IS NULL AND archived_at IS NULL",
+        (pid,),
+    ).fetchone()
+    db.execute(
+        "UPDATE projects SET session_count=?, last_active_at=?, updated_at=? WHERE id=?",
+        (row["c"], row["last"], _now(), pid),
+    )
+    db.commit()
+
+
+def migrate_orphan_sessions_to_default_project() -> str:
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM projects WHERE metadata_json LIKE '%legacy_migration%' LIMIT 1"
+    ).fetchone()
+    if existing:
+        pid = existing["id"]
+    else:
+        pid = _uid()
+        now = _now()
+        db.execute(
+            """INSERT INTO projects(
+              id,name,status,root_path,manifest_path,xpr_path,part,created_at,updated_at,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                pid,
+                "Legacy imports",
+                "active",
+                ".",
+                "eda.yaml",
+                "",
+                "unknown",
+                now,
+                now,
+                json.dumps({"legacy_migration": True}),
+            ),
+        )
+    db.execute(
+        "UPDATE sessions SET project_id=?, project_snapshot_json=? WHERE project_id IS NULL OR project_id = ''",
+        (pid, json.dumps({"legacy_migration": True, "project_id": pid})),
+    )
+    db.commit()
+    _refresh_project_session_count(pid)
+    return pid
+
+
 # ── Sessions ─────────────────────────────────────────────────
 
-def session_list(status: str | None = None, limit: int = 50) -> list[dict]:
+def session_list(
+    status: str | None = None,
+    limit: int = 50,
+    project_id: str | None = None,
+) -> list[dict]:
     db = get_db()
     q = "SELECT * FROM sessions WHERE deleted_at IS NULL"
-    params = []
+    params: list = []
+    if project_id:
+        q += " AND project_id=?"
+        params.append(project_id)
     if status:
         q += " AND status=?"
         params.append(status)
@@ -27,12 +183,32 @@ def session_get(sid: str) -> dict | None:
     row = get_db().execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     return dict(row) if row else None
 
-def session_create(name: str = "", manifest_path: str = "", metadata: dict | None = None) -> dict:
-    sid = _uid(); now = _now(); name = name or f"Chat {time.strftime('%m-%d %H:%M')}"
+def session_create(
+    name: str = "",
+    *,
+    project_id: str,
+    metadata: dict | None = None,
+    manifest_path: str = "",
+) -> dict:
+    project = project_get(project_id)
+    if not project:
+        raise ValueError(f"project not found: {project_id}")
+    sid = _uid()
+    now = _now()
+    name = name or f"Chat {time.strftime('%m-%d %H:%M')}"
+    snapshot = _project_snapshot_row(project)
+    if manifest_path:
+        snapshot["legacy_manifest_path"] = manifest_path
+    meta = dict(metadata or {})
     db = get_db()
-    db.execute("INSERT INTO sessions(id,name,status,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?)",
-               (sid, name, "idle", now, now, json.dumps(metadata or {})))
+    db.execute(
+        """INSERT INTO sessions(
+          id,project_id,name,status,created_at,updated_at,project_snapshot_json,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (sid, project_id, name, "idle", now, now, json.dumps(snapshot), json.dumps(meta)),
+    )
     db.commit()
+    _refresh_project_session_count(project_id)
     return session_get(sid)
 
 def session_update(sid: str, **fields) -> dict | None:

@@ -29,7 +29,8 @@ def test_monitor_overview_empty(tmp_path, monkeypatch):
 
 def test_monitor_overview_aggregates(tmp_path, monkeypatch):
     store = _fresh_store(tmp_path, monkeypatch, "test2.db")
-    sess = store.session_create(name="m")
+    pid = store.migrate_orphan_sessions_to_default_project()
+    sess = store.session_create(name="m", project_id=pid)
     run = store.run_create("task", "t1", session_id=sess["id"])
     store.toolcall_create(run["id"], "vivado_run", session_id=sess["id"])
     tc = store.toolcall_create(run["id"], "bad_tool", session_id=sess["id"])

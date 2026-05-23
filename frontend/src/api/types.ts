@@ -1,7 +1,28 @@
 ﻿export type ID = string
 
+export interface Project {
+  id: ID
+  name: string
+  status?: string
+  root_path: string
+  manifest_path: string
+  xpr_path?: string
+  part?: string | null
+  board_part?: string | null
+  top_module?: string | null
+  created_at?: number
+  updated_at?: number
+  last_active_at?: number | null
+  session_count?: number
+  run_count?: number
+  problem_count?: number
+  default_vivado_target_id?: string | null
+  metadata_json?: string | null
+}
+
 export interface Session {
   id: ID
+  project_id?: ID
   name: string
   status?: 'idle' | 'running' | 'stopping' | 'stopped' | 'error' | 'archived' | string
   created_at?: number

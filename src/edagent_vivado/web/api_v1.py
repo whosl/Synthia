@@ -7,7 +7,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
+from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
 from edagent_vivado.repository.store import (
+    project_list, project_get, project_create, project_update, project_delete,
     session_list, session_get, session_create, session_update, session_delete,
     message_list, message_create,
     task_create, task_get, task_update, task_active_for_session,
@@ -134,21 +136,136 @@ async def _flush_pending_file_batch(
     return format_approval_tool_output(applied, skipped)
 
 
-# ── Session API ──────────────────────────────────────────────
+# ── Project API ──────────────────────────────────────────────
+
+class CreateProjectReq(BaseModel):
+    name: str
+    root_path: str
+    manifest_path: str
+    xpr_path: str = ""
+    part: str | None = None
+    board_part: str | None = None
+    top_module: str | None = None
+    target_language: str | None = None
+    simulator: str | None = None
+    source_globs: list[str] | None = None
+    constraint_globs: list[str] | None = None
+    tcl_globs: list[str] | None = None
+    default_vivado_target_id: str | None = None
+    metadata: dict | None = None
+
 
 class CreateSessionReq(BaseModel):
     name: str = ""
+    project_id: str = ""
     manifest_path: str = ""
     metadata: dict | None = None
 
+
+@router.get("/projects")
+async def api_projects(status: str | None = None, limit: int = 100):
+    return {"projects": project_list(status=status, limit=limit)}
+
+
+@router.post("/projects")
+async def api_projects_create(req: CreateProjectReq):
+    try:
+        validated = validate_project_paths(
+            root_path=req.root_path,
+            manifest_path=req.manifest_path,
+            xpr_path=req.xpr_path,
+            part=req.part,
+            board_part=req.board_part,
+        )
+    except ProjectValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    top = (req.top_module or "").strip() or validated.get("top_module")
+    p = project_create({
+        "name": req.name.strip() or Path(req.root_path).name,
+        "root_path": validated["root_path"],
+        "manifest_path": validated["manifest_path"],
+        "xpr_path": validated["xpr_path"],
+        "part": validated.get("part"),
+        "board_part": validated.get("board_part"),
+        "top_module": top,
+        "target_language": req.target_language,
+        "simulator": req.simulator,
+        "source_globs": req.source_globs,
+        "constraint_globs": req.constraint_globs,
+        "tcl_globs": req.tcl_globs,
+        "default_vivado_target_id": req.default_vivado_target_id,
+        "metadata": {**(req.metadata or {}), "flow": validated.get("flow")},
+    })
+    return {"project": p}
+
+
+@router.get("/projects/{project_id}")
+async def api_project_get(project_id: str):
+    p = project_get(project_id)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return {"project": p}
+
+
+@router.patch("/projects/{project_id}")
+async def api_project_update(project_id: str, body: dict):
+    p = project_update(project_id, **body)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return {"project": p}
+
+
+@router.delete("/projects/{project_id}")
+async def api_project_delete(project_id: str, hard: bool = False):
+    project_delete(project_id, hard=hard)
+    return {"ok": True}
+
+
+@router.get("/projects/{project_id}/sessions")
+async def api_project_sessions(project_id: str, status: str | None = None, limit: int = 50):
+    if not project_get(project_id):
+        raise HTTPException(404, "project not found")
+    return {"sessions": session_list(status=status, limit=limit, project_id=project_id)}
+
+
+@router.post("/projects/{project_id}/sessions")
+async def api_project_sessions_create(project_id: str, req: CreateSessionReq):
+    if not project_get(project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        s = session_create(name=req.name, project_id=project_id, metadata=req.metadata, manifest_path=req.manifest_path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    event_create(s["id"], "session.created", {"name": s["name"], "project_id": project_id})
+    return {"session": s}
+
+
+# ── Session API ──────────────────────────────────────────────
+
 @router.get("/sessions")
-async def api_sessions(status: str | None = None, limit: int = 50):
-    return {"sessions": session_list(status=status, limit=limit)}
+async def api_sessions(
+    status: str | None = None,
+    limit: int = 50,
+    project_id: str | None = Query(None),
+):
+    return {"sessions": session_list(status=status, limit=limit, project_id=project_id)}
 
 @router.post("/sessions")
 async def api_sessions_create(req: CreateSessionReq):
-    s = session_create(name=req.name, manifest_path=req.manifest_path, metadata=req.metadata)
-    event_create(s["id"], "session.created", {"name": s["name"]})
+    if not req.project_id:
+        raise HTTPException(400, "project_id is required; use POST /api/v1/projects/{project_id}/sessions")
+    if not project_get(req.project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        s = session_create(
+            name=req.name,
+            project_id=req.project_id,
+            manifest_path=req.manifest_path,
+            metadata=req.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    event_create(s["id"], "session.created", {"name": s["name"], "project_id": req.project_id})
     return {"session": s}
 
 @router.get("/sessions/{session_id}")

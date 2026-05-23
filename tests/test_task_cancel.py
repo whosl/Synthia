@@ -22,7 +22,9 @@ def test_is_task_stop_requested_reads_db(tmp_path, monkeypatch):
     from edagent_vivado.repository.store import session_create, task_create, task_update
 
     init_db()
-    s = session_create("stop-test")
+    from edagent_vivado.repository.store import migrate_orphan_sessions_to_default_project
+    pid = migrate_orphan_sessions_to_default_project()
+    s = session_create("stop-test", project_id=pid)
     t = task_create(s["id"])
     assert not is_task_stop_requested(t["id"])
     task_update(t["id"], stop_requested=1)

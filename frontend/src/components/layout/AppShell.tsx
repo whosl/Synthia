@@ -4,7 +4,7 @@ import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
-  { label: 'Sessions', path: '/', icon: Home },
+  { label: 'Projects', path: '/', icon: Home },
   { label: 'Monitor', path: '/monitor', icon: Gauge },
   { label: 'Vivado', path: '/vivado', icon: CircuitBoard },
   { label: 'Knowledge', path: '/knowledge', icon: Database },

@@ -11,9 +11,23 @@
 }
 
 .terminal-back-link {
-  visibility: hidden;
-  pointer-events: none;
   flex-shrink: 0;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--term-muted);
+}
+
+.terminal-back-link:hover {
+  color: var(--term-text);
+}
+
+.terminal-back-label {
+  display: none;
 }
 
 .terminal-status-dot {
@@ -1145,17 +1159,6 @@
     gap: 6px;
     height: 48px;
     min-height: 48px;
-  }
-
-  .terminal-back-link {
-    visibility: visible;
-    pointer-events: auto;
-    padding: 6px;
-    flex-shrink: 0;
-  }
-
-  .terminal-back-label {
-    display: none;
   }
 
   .chat-panel-header-title {

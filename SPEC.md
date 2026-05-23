@@ -14,6 +14,7 @@ EdAgent-Vivado 应从“单 Agent 终端聊天 + Vivado 工具调用”演进为
 
 系统必须支持：
 
+- project -> sessions 两层工作流：Project 是工程级容器，Session 是某个 Project 下的一次调试/问答/执行会话。
 - session 内完整记忆管理，不丢上下文。
 - 页面关闭、刷新、断线后，后台 agent/task 继续运行。
 - 用户重新进入 session 后，可恢复完整聊天记录、reasoning、tool call、partial response、状态与执行轨迹。
@@ -31,7 +32,7 @@ EdAgent-Vivado 应从“单 Agent 终端聊天 + Vivado 工具调用”演进为
    所有影响用户体验、agent 上下文、可审计性的状态都必须持久化。
 
 2. **事件驱动**  
-   session、task、agent、tool、Vivado、KB candidate、monitor 都以统一事件流连接。
+   project、session、task、agent、tool、Vivado、KB candidate、monitor 都以统一事件流连接。
 
 3. **强制观测**  
    harness/tool wrapper 层必须强制记录事实数据；LLM 只负责摘要、归纳和解释，不负责原始事实采集。
@@ -57,16 +58,50 @@ EdAgent-Vivado 应从“单 Agent 终端聊天 + Vivado 工具调用”演进为
 10. **Vivado 执行抽象**  
     Agent 不应直接拼接 SSH/Vivado 命令。所有 Vivado 操作必须通过 Vivado Runtime Adapter、FileSync、PathMapper、TclPolicy、ObservedToolRunner 统一执行。
 
+11. **Project 上下文先行**  
+    用户必须先创建 Project，确认项目根目录、Synthia YAML、Vivado `.xpr`、器件与 Vivado 创建项目所需配置；Session 创建时只填写 session 名称，并继承 Project 的路径、器件、KB、Vivado target、path mapping 与历史经验。
+
 ---
 
 ## 2. 核心概念模型
 
-### 2.1 Session
+### 2.1 Project
 
-Session 是用户可见的长期会话容器。
+Project 是用户可见的工程级长期容器，位于 Session 之上。
+
+一个 Project 代表一个可由 Synthia 理解并可由 Vivado 执行的设计工程。Project 必须绑定：
+
+- 项目根目录 `root_path`。
+- Synthia 可读的项目 YAML / manifest 路径 `manifest_path`。
+- Vivado `.xpr` 路径 `xpr_path`。
+- Vivado 创建/打开项目所需的器件信息，例如 `part` 或 `board_part`。
+- 顶层模块、目标语言、仿真器、RTL/XDC/Tcl 路径集合等项目配置。
+- 默认 Vivado target、path mapping、file sync 策略。
+
+约束：
+
+- Project 必须先于 Session 创建。
+- `root_path`、`manifest_path`、`xpr_path` 三者必须指向同一个工程边界；`manifest_path` 与 `xpr_path` 应位于 `root_path` 下，或可被 path mapping 证明属于同一工程。
+- Project 创建时后端必须校验 `root_path`、`manifest_path`、`xpr_path` 的存在性与一致性；前端只负责收集路径和配置，不以浏览器状态作为权威。
+- Project 可编辑路径和配置，但 Session 必须保存创建时的 project snapshot，避免历史会话因 Project 后续修改而语义漂移。
+- Project 可归档/删除，并维护 session count、problem count、last active、默认 target health 等摘要。
+
+Project 共享：
+
+- Project KB 与 retrieval profile。
+- 默认 Vivado target、path mapping、FileSync 记录。
+- 历史 run/session summary。
+- 项目级 artifacts、reports、Vivado command history。
+- Project context 注入策略。
+
+### 2.2 Session
+
+Session 是某个 Project 下的长期会话容器。Session 不直接要求用户重新选择 manifest、器件、Vivado target 或路径信息；这些都从所属 Project 继承。
 
 一个 session 包含：
 
+- 所属 `project_id`。
+- 创建时的 project snapshot，包括 root/manifest/xpr/part/top/target 等关键字段。
 - 用户和 assistant 消息。
 - 多次 task/run。
 - 完整事件流。
@@ -76,7 +111,7 @@ Session 是用户可见的长期会话容器。
 - monitor 统计。
 - KB candidate 来源记录。
 
-### 2.2 Task
+### 2.3 Task
 
 Task 是一次由用户消息触发的后台 agent 执行。
 
@@ -87,7 +122,7 @@ Task 是一次由用户消息触发的后台 agent 执行。
 - task 可进入 `running`、`stopping`、`stopped`、`done`、`error` 状态。
 - stop 后 partial assistant response 必须保存，标记 `stopped=true`。
 
-### 2.3 Run
+### 2.4 Run
 
 Run 是可观测执行单元，使用统一模型，通过 `run_type` 区分：
 
@@ -103,22 +138,24 @@ Run 是可观测执行单元，使用统一模型，通过 `run_type` 区分：
 Run 可以嵌套：
 
 ```text
-session
-  task_run
-    agent_run
-      llm_run
-      tool_run
-        eda_run
-      summary_run
+project
+  session
+    task_run
+      agent_run
+        llm_run
+        tool_run
+          eda_run
+        summary_run
 ```
 
-### 2.4 Event
+### 2.5 Event
 
 Event 是 UI、监控、重连和审计的统一事实流。
 
 所有事件必须具备：
 
 - `id`
+- `project_id`
 - `seq`
 - `session_id`
 - `task_id`
@@ -135,7 +172,7 @@ GET /api/sessions/{session_id}/events?after_seq=123
 GET /api/sessions/{session_id}/stream?after_seq=123
 ```
 
-### 2.5 Message
+### 2.6 Message
 
 Message 是 LLM 上下文和用户可读聊天历史的核心数据。
 
@@ -150,13 +187,13 @@ Message 是 LLM 上下文和用户可读聊天历史的核心数据。
 
 Reasoning 原文不默认进入 LLM 上下文；tool 原始输出不直接进入上下文。它们通过摘要或结构化 summary 进入上下文。
 
-### 2.6 Artifact
+### 2.7 Artifact
 
 Artifact 是大内容、文件、patch、报告、日志、tool 原始输入输出等实体。
 
 数据库只保存 artifact 元数据、摘要、路径、hash、MIME/type。大内容保存到 artifact store。
 
-### 2.7 Channel
+### 2.8 Channel
 
 Channel 是未来多 Agent 文件通信的基础抽象。
 
@@ -180,7 +217,7 @@ Channel 支持：
 - Supervisor 进行 handoff。
 - Monitor 记录谁写入了什么文件、何时写入、由哪个 run 触发。
 
-### 2.8 Error KB 与 Semantic Knowledge Base
+### 2.9 Error KB 与 Semantic Knowledge Base
 
 系统区分但统一检索：
 
@@ -221,6 +258,13 @@ Channel 支持：
 .edagent/
   edagent.db
   artifacts/
+    projects/
+      {project_id}/
+        manifests/
+        vivado/
+        reports/
+        logs/
+        kb/
     sessions/
       {session_id}/
         tasks/
@@ -233,6 +277,7 @@ Channel 支持：
         reasoning/
         channels/
   archives/
+    projects/
     sessions/
 ```
 
@@ -246,11 +291,52 @@ EDAGENT_ARTIFACT_ROOT
 
 ### 3.3 数据库表草案
 
+#### projects
+
+```sql
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  root_path TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  xpr_path TEXT NOT NULL,
+  part TEXT,
+  board_part TEXT,
+  top_module TEXT,
+  target_language TEXT,
+  simulator TEXT,
+  source_globs_json TEXT,
+  constraint_globs_json TEXT,
+  tcl_globs_json TEXT,
+  default_vivado_target_id TEXT,
+  default_path_mapping_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER,
+  deleted_at INTEGER,
+  session_count INTEGER NOT NULL DEFAULT 0,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  problem_count INTEGER NOT NULL DEFAULT 0,
+  last_active_at INTEGER,
+  metadata_json TEXT
+);
+```
+
+Project 创建时必须进行后端校验：
+
+- `root_path` 必须存在且为目录。
+- `manifest_path` 必须存在且可被 Synthia 解析。
+- `xpr_path` 必须存在且为 Vivado `.xpr` 文件。
+- `manifest_path` 与 `xpr_path` 必须位于 `root_path` 下，或通过 path mapping / metadata 明确绑定到同一工程。
+- `part` 或 `board_part` 至少提供一个；其余 Vivado 创建项目参数可选但应尽量结构化保存。
+
 #### sessions
 
 ```sql
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   name TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -265,15 +351,19 @@ CREATE TABLE sessions (
   token_input INTEGER NOT NULL DEFAULT 0,
   token_output INTEGER NOT NULL DEFAULT 0,
   total_cost REAL,
+  project_snapshot_json TEXT,
   metadata_json TEXT
 );
 ```
+
+`project_snapshot_json` 保存 session 创建时的 Project 关键配置快照，例如 `root_path`、`manifest_path`、`xpr_path`、`part`、`board_part`、`top_module`、`default_vivado_target_id`、path mapping 等。Project 后续修改不应改变历史 session 的语义。
 
 #### tasks
 
 ```sql
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   user_message_id TEXT,
   state TEXT NOT NULL,
@@ -292,6 +382,7 @@ CREATE TABLE tasks (
 ```sql
 CREATE TABLE messages (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT NOT NULL,
   task_id TEXT,
   agent_id TEXT,
@@ -312,6 +403,7 @@ CREATE TABLE messages (
 ```sql
 CREATE TABLE events (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT NOT NULL,
   task_id TEXT,
   run_id TEXT,
@@ -332,6 +424,7 @@ CREATE TABLE events (
 ```sql
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT,
   task_id TEXT,
   parent_run_id TEXT,
@@ -355,6 +448,7 @@ CREATE TABLE runs (
 ```sql
 CREATE TABLE tool_calls (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   run_id TEXT NOT NULL,
   session_id TEXT,
   task_id TEXT,
@@ -378,6 +472,7 @@ CREATE TABLE tool_calls (
 ```sql
 CREATE TABLE llm_usage (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   run_id TEXT NOT NULL,
   session_id TEXT,
   task_id TEXT,
@@ -419,6 +514,7 @@ CREATE TABLE llm_usage (
 ```sql
 CREATE TABLE artifacts (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT,
   task_id TEXT,
   run_id TEXT,
@@ -438,6 +534,7 @@ CREATE TABLE artifacts (
 ```sql
 CREATE TABLE memory_snapshots (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT NOT NULL,
   task_id TEXT,
   summary TEXT NOT NULL,
@@ -454,6 +551,7 @@ CREATE TABLE memory_snapshots (
 ```sql
 CREATE TABLE problems (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT,
   task_id TEXT,
   run_id TEXT,
@@ -478,6 +576,8 @@ CREATE TABLE problems (
 ```sql
 CREATE TABLE kb_cases (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
+  scope TEXT NOT NULL DEFAULT 'project',
   pattern TEXT NOT NULL,
   normalized_signature TEXT,
   category TEXT NOT NULL,
@@ -502,6 +602,7 @@ CREATE TABLE kb_cases (
 ```sql
 CREATE TABLE kb_candidates (
   id TEXT PRIMARY KEY,
+  source_project_id TEXT,
   source_run_id TEXT,
   source_session_id TEXT,
   source_problem_id TEXT,
@@ -627,6 +728,7 @@ CREATE TABLE knowledge_embeddings (
 ```sql
 CREATE TABLE retrieval_audits (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT,
   task_id TEXT,
   run_id TEXT,
@@ -678,6 +780,7 @@ CREATE TABLE retrieval_audit_items (
 ```sql
 CREATE TABLE context_packages (
   id TEXT PRIMARY KEY,
+  project_id TEXT,
   session_id TEXT NOT NULL,
   task_id TEXT,
   run_id TEXT,
@@ -728,6 +831,7 @@ CREATE TABLE context_package_items (
 ```sql
 CREATE TABLE channels (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   name TEXT NOT NULL,
   channel_type TEXT NOT NULL,
@@ -743,6 +847,7 @@ CREATE TABLE channels (
 CREATE TABLE channel_messages (
   id TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   task_id TEXT,
   run_id TEXT,
@@ -908,6 +1013,19 @@ CREATE TABLE path_mappings (
 
 ### 3.4 删除与归档
 
+Project 删除语义：
+
+- 默认归档 Project，不物理删除数据。
+- Project 归档后，其下 Session 默认仍可只读查看；是否允许继续运行新 task 由 UI/API 明确禁止。
+- Project hard delete 必须显式确认，并级联删除其 sessions、events、runs、artifacts、channels、project KB 绑定记录和 Vivado workspace 记录。
+
+API：
+
+```http
+DELETE /api/projects/{project_id}
+DELETE /api/projects/{project_id}?hard=true
+```
+
 Session 删除语义：
 
 - 默认归档，不物理删除数据。
@@ -930,6 +1048,18 @@ Hard delete 时：
 - 删除数据库中该 session 关联记录。
 - 删除 artifact 目录。
 - 删除 channel 文件。
+
+### 3.5 旧 Session 迁移到 Project
+
+现有单层 Session 必须迁移到 Project -> Sessions 两层模型。迁移策略采用自动归并：
+
+1. 优先从 session metadata、历史 task request、context package、manifest_path、Vivado xpr/path mapping 中提取项目路径信息。
+2. 按规范化后的 `root_path`、`manifest_path`、`xpr_path` 聚类生成或匹配 Project。
+3. 对每个可识别的历史 Session 写入 `project_id` 和 `project_snapshot_json`。
+4. 如果同一 Session 可匹配多个 Project，标记为 `migration_conflict`，需要用户在 Project 管理 UI 中手动选择。
+5. 长期不保留无 Project 的普通 Session；迁移完成后，新建 Session API 必须要求 project scope。
+
+迁移过程不得丢失历史 events/messages/runs/artifacts；旧 `manifest_path` request 字段仅作为迁移兼容字段保留。
 
 ---
 
@@ -1288,11 +1418,80 @@ artifact.created
 
 ## 7. API Specification
 
-### 7.1 Session API
+### 7.1 Project API
 
 ```http
-GET    /api/sessions
-POST   /api/sessions
+GET    /api/projects
+POST   /api/projects
+GET    /api/projects/{project_id}
+PATCH  /api/projects/{project_id}
+DELETE /api/projects/{project_id}
+GET    /api/projects/{project_id}/sessions
+```
+
+Create project:
+
+```json
+{
+  "name": "uart_full",
+  "root_path": "examples/uart_full",
+  "manifest_path": "examples/uart_full/eda.yaml",
+  "xpr_path": "examples/uart_full/vivado/uart_full.xpr",
+  "part": "xc7a35tcpg236-1",
+  "board_part": null,
+  "top_module": "uart_top",
+  "target_language": "Verilog",
+  "simulator": "xsim",
+  "source_globs": ["rtl/**/*.v", "rtl/**/*.sv"],
+  "constraint_globs": ["constraints/**/*.xdc"],
+  "tcl_globs": ["scripts/**/*.tcl"],
+  "default_vivado_target_id": "...",
+  "metadata": {}
+}
+```
+
+List response:
+
+```json
+{
+  "projects": [
+    {
+      "id": "...",
+      "name": "...",
+      "status": "active|archived|error",
+      "root_path": "...",
+      "manifest_path": "...",
+      "xpr_path": "...",
+      "part": "...",
+      "board_part": null,
+      "top_module": "...",
+      "created_at": 123,
+      "updated_at": 456,
+      "last_active_at": 456,
+      "session_count": 12,
+      "run_count": 33,
+      "problem_count": 2,
+      "default_vivado_target_id": "..."
+    }
+  ]
+}
+```
+
+Project path validation:
+
+- Backend validates `root_path` exists.
+- Backend validates `manifest_path` exists and is parseable by Synthia.
+- Backend validates `xpr_path` exists and is a Vivado project file.
+- Backend validates `manifest_path` and `xpr_path` belong to the same `root_path`.
+- Backend validates at least one of `part` or `board_part`.
+
+### 7.2 Session API
+
+Sessions are always created under a Project.
+
+```http
+POST   /api/projects/{project_id}/sessions
+GET    /api/projects/{project_id}/sessions
 GET    /api/sessions/{session_id}
 PATCH  /api/sessions/{session_id}
 DELETE /api/sessions/{session_id}
@@ -1303,9 +1502,16 @@ Create session:
 ```json
 {
   "name": "Timing debug",
-  "manifest_path": "examples/uart_full/manifest.yaml",
   "metadata": {}
 }
+```
+
+Session creation copies the current Project configuration into `project_snapshot_json`. The user should not be asked for manifest, xpr, part, top module, Vivado target, or path mapping during normal session creation.
+
+Global session listing may remain for search and migration support:
+
+```http
+GET /api/sessions?project_id=...&status=...
 ```
 
 List response:
@@ -1315,6 +1521,7 @@ List response:
   "sessions": [
     {
       "id": "...",
+      "project_id": "...",
       "name": "...",
       "status": "idle|running|stopping|stopped|error|archived",
       "created_at": 123,
@@ -1330,7 +1537,7 @@ List response:
 }
 ```
 
-### 7.2 Message API
+### 7.3 Message API
 
 ```http
 GET /api/sessions/{session_id}/messages
@@ -1342,7 +1549,7 @@ Supports pagination:
 GET /api/sessions/{session_id}/messages?before=...&limit=100
 ```
 
-### 7.3 Chat / Task API
+### 7.4 Chat / Task API
 
 Start task:
 
@@ -1355,11 +1562,12 @@ Request:
 ```json
 {
   "question": "...",
-  "manifest_path": "...",
   "agent_mode": "single|multi",
   "metadata": {}
 }
 ```
+
+Task execution uses the Session's `project_id` and `project_snapshot_json`; request-level `manifest_path` is deprecated and should only be accepted temporarily for migration/backward compatibility.
 
 Response:
 
@@ -1386,14 +1594,14 @@ POST /api/tasks/{task_id}/stop
 POST /api/sessions/{session_id}/stop
 ```
 
-### 7.4 Event API
+### 7.5 Event API
 
 ```http
 GET /api/sessions/{session_id}/events
 GET /api/sessions/{session_id}/stream
 ```
 
-### 7.5 Approval API
+### 7.6 Approval API
 
 Patch approval remains a first-class setting:
 
@@ -1410,7 +1618,7 @@ Response:
 }
 ```
 
-### 7.6 Monitor API
+### 7.7 Monitor API
 
 Phase 1 APIs:
 
@@ -1437,7 +1645,7 @@ GET /api/monitor/channels
 GET /api/monitor/stream
 ```
 
-### 7.7 KB API
+### 7.8 KB API
 
 Read built-in and user KB:
 
@@ -1465,7 +1673,7 @@ POST /api/monitor/runs/{run_id}/kb-candidates
 POST /api/monitor/problems/{problem_id}/kb-candidates
 ```
 
-### 7.8 Semantic Knowledge Base API
+### 7.9 Semantic Knowledge Base API
 
 知识库分为全局知识库和项目知识库：
 
@@ -1533,7 +1741,7 @@ Search response:
 }
 ```
 
-### 7.9 Artifact API
+### 7.10 Artifact API
 
 ```http
 GET /api/artifacts/{artifact_id}
@@ -1541,7 +1749,7 @@ GET /api/artifacts/{artifact_id}/download
 GET /api/sessions/{session_id}/artifacts
 ```
 
-### 7.10 Multi-Agent / Channel API
+### 7.11 Multi-Agent / Channel API
 
 ```http
 GET  /api/sessions/{session_id}/agents
@@ -1551,7 +1759,7 @@ GET  /api/channels/{channel_id}/messages
 POST /api/channels/{channel_id}/messages
 ```
 
-### 7.11 Vivado Runtime API
+### 7.12 Vivado Runtime API
 
 Targets:
 
@@ -1616,15 +1824,17 @@ Example flow request:
 ```json
 {
   "target_id": "default-remote",
+  "project_id": "uart_full",
+  "session_id": "...",
+  "task_id": "...",
   "flow": "synth|impl|sim|bitstream|report|ip",
-  "manifest_path": "examples/uart_full/manifest.yaml",
   "options": {
-    "top": "uart_top",
-    "part": "xc7a35tcpg236-1",
     "reports": ["timing", "utilization", "drc", "methodology"]
   }
 }
 ```
+
+Vivado flow requests resolve manifest/xpr/top/part from Project configuration or the Session project snapshot. Request-level manifest/top/part overrides should require explicit debug mode and be recorded in event metadata.
 
 ---
 
@@ -2512,7 +2722,8 @@ frontend/
       App.tsx
       router.tsx
     pages/
-      SessionsPage.tsx
+      ProjectsPage.tsx
+      ProjectDetailPage.tsx
       TerminalPage.tsx
       MonitorRunsPage.tsx
       MonitorRunDetailPage.tsx
@@ -2526,6 +2737,7 @@ frontend/
     api/
       client.ts
       types.ts
+      projects.ts
       sessions.ts
       tasks.ts
       events.ts
@@ -2547,7 +2759,8 @@ React 接管：
 
 ```http
 GET /
-GET /term
+GET /projects/:projectId
+GET /term?project={projectId}&session={sessionId}
 GET /monitor
 GET /monitor/runs/:runId
 GET /kb
@@ -2600,13 +2813,17 @@ class SessionEventStream {
 
 必须支持：
 
-- session 列表页。
-- 新建、重命名、删除、归档 session。
-- 搜索 session。
-- 按 updated/created/name/status 排序。
+- projects 首页，取代原单层 sessions 首页。
+- Project 列表支持新建、重命名、删除、归档、搜索、排序。
+- Project 创建表单必须收集并后端校验 root path、Synthia YAML、Vivado `.xpr`、part/board part、top module、target language、source/constraint/Tcl 路径集合、默认 Vivado target。
+- Project 详情页展示该 Project 下的 sessions。
+- Project 详情页内新建 Session 时只填写 session 名称。
+- Project 下 session 列表支持新建、重命名、删除、归档、搜索、排序。
+- 按 updated/created/name/status/project 排序。
 - 显示 running/stopped/error 状态。
 - 显示 token/toolcall/problem count 摘要。
 - 聊天页返回按钮。
+- Terminal header 必须显示所属 Project 与 Session，返回路径优先回到 `/projects/{projectId}`。
 - approve patches 开关。
 - Stop 按钮。
 - 输入框旁 Stop。
@@ -2819,6 +3036,7 @@ export interface FrontendModule {
 
 核心模块：
 
+- `projects`
 - `sessions`
 - `terminal`
 - `monitor`
@@ -2858,6 +3076,7 @@ frontend/src/
     generated/
     client.ts
     types.ts
+    projects.ts
     sessions.ts
     tasks.ts
     events.ts
@@ -2892,7 +3111,8 @@ frontend/src/
     common/
 
   pages/
-    SessionsPage.tsx
+    ProjectsPage.tsx
+    ProjectDetailPage.tsx
     TerminalPage.tsx
     MonitorPage.tsx
     RunDetailPage.tsx
@@ -2915,8 +3135,9 @@ frontend/src/
 长期路由：
 
 ```text
-/                         sessions
-/term?session={id}         terminal
+/                         projects
+/projects/:projectId       project detail + sessions
+/term?project={pid}&session={id}
 /monitor                   run list
 /monitor/runs/:runId       run detail
 /vivado                    targets / health / commands
@@ -3250,8 +3471,12 @@ Tool input/output 支持 whitelist/blacklist。
 
 ## 16. 验收标准
 
-### 16.1 Session 与记忆
+### 16.1 Project、Session 与记忆
 
+- 用户必须先创建 Project，且后端校验 root path、Synthia YAML、Vivado `.xpr`、part/board part 等项目配置。
+- 首页为 Projects，Project detail 展示该 Project 下的 Sessions。
+- 创建 Session 时只需填写 session 名称，并继承 Project 的上下文与配置。
+- 历史单层 Session 可根据 manifest/path 自动迁移到 Project。
 - 创建 session 后可连续多轮对话，agent 能引用前文。
 - 服务重启后 session 消息和摘要仍可恢复。
 - 长 session 通过 memory summary 继续保持上下文。
@@ -3288,7 +3513,9 @@ Tool input/output 支持 whitelist/blacklist。
 
 ### 16.4 React UI
 
-- Session list 支持新建/重命名/删除/归档/搜索/排序。
+- Projects 首页支持新建/重命名/删除/归档/搜索/排序。
+- Project detail 支持查看项目配置、健康状态、Project KB 摘要与该 Project 下的 Session list。
+- Session list 支持新建/重命名/删除/归档/搜索/排序，且 Session 创建只填写名称。
 - Terminal 支持聊天视图和 timeline 视图。
 - Reasoning 默认折叠，可展开。
 - Tool block 显示状态、耗时、输入输出摘要、artifact、错误、token/cost。
@@ -3366,8 +3593,10 @@ Tool input/output 支持 whitelist/blacklist。
 目标：
 
 - SQLite repository。
-- sessions/tasks/messages/events/runs/tool_calls/llm_usage/artifacts 基础表。
-- 新 session/task/event API。
+- projects/sessions/tasks/messages/events/runs/tool_calls/llm_usage/artifacts 基础表。
+- 新 project/session/task/event API。
+- Project 创建校验 root path、Synthia YAML、Vivado `.xpr`、器件与默认 Vivado 配置。
+- 旧单层 sessions 自动迁移到 Project。
 - SSE stream + reconnect。
 - Stop API。
 - React/Vite/TS terminal。
@@ -3388,7 +3617,7 @@ Tool input/output 支持 whitelist/blacklist。
 - 使用 `react-markdown` + `remark-gfm` 渲染模型输出。
 - 使用 `lucide-react` 和 `clsx` 构建统一 UI primitives。
 - Terminal 使用 messages + events + SSE reducer 作为权威 UI 状态来源。
-- 实现 session dashboard、terminal chat/timeline/debug drawer。
+- 实现 projects 首页、project detail + sessions、terminal chat/timeline/debug drawer。
 - 实现 monitor run list + run detail + toolcalls/usage/events。
 - 实现 Vivado target/health/command history 框架。
 - 实现 KB cases/candidates 审核界面。

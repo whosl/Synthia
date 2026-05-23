@@ -8,14 +8,45 @@ _DB_PATH = os.environ.get("EDAGENT_DB_PATH", "")
 _local = threading.local()
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    root_path TEXT NOT NULL,
+    manifest_path TEXT NOT NULL,
+    xpr_path TEXT NOT NULL,
+    part TEXT,
+    board_part TEXT,
+    top_module TEXT,
+    target_language TEXT,
+    simulator TEXT,
+    source_globs_json TEXT,
+    constraint_globs_json TEXT,
+    tcl_globs_json TEXT,
+    default_vivado_target_id TEXT,
+    default_path_mapping_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    deleted_at INTEGER,
+    session_count INTEGER NOT NULL DEFAULT 0,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    problem_count INTEGER NOT NULL DEFAULT 0,
+    last_active_at INTEGER,
+    metadata_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'idle',
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'idle',
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
     archived_at INTEGER, deleted_at INTEGER,
     last_message_preview TEXT, message_count INTEGER NOT NULL DEFAULT 0,
     task_count INTEGER NOT NULL DEFAULT 0, tool_call_count INTEGER NOT NULL DEFAULT 0,
     problem_count INTEGER NOT NULL DEFAULT 0, token_input INTEGER NOT NULL DEFAULT 0,
-    token_output INTEGER NOT NULL DEFAULT 0, total_cost REAL, metadata_json TEXT
+    token_output INTEGER NOT NULL DEFAULT 0, total_cost REAL,
+    project_snapshot_json TEXT, metadata_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -253,10 +284,53 @@ def get_db() -> sqlite3.Connection:
     return _local.conn
 
 
+def _migrate_orphan_sessions(db: sqlite3.Connection) -> None:
+    import json
+    import time
+    import uuid
+
+    existing = db.execute(
+        "SELECT id FROM projects WHERE metadata_json LIKE '%legacy_migration%' LIMIT 1"
+    ).fetchone()
+    if existing:
+        pid = existing["id"]
+    else:
+        pid = uuid.uuid4().hex[:12]
+        now = int(time.time())
+        db.execute(
+            """INSERT INTO projects(
+              id,name,status,root_path,manifest_path,xpr_path,part,created_at,updated_at,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (pid, "Legacy imports", "active", ".", "eda.yaml", "", "unknown", now, now, json.dumps({"legacy_migration": True})),
+        )
+    snap = json.dumps({"legacy_migration": True, "project_id": pid})
+    db.execute(
+        "UPDATE sessions SET project_id=?, project_snapshot_json=? WHERE project_id IS NULL OR project_id = ''",
+        (pid, snap),
+    )
+    db.commit()
+
+
+def _migrate_projects(db: sqlite3.Connection) -> None:
+    cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "project_id" not in cols:
+        db.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
+    if "project_snapshot_json" not in cols:
+        db.execute("ALTER TABLE sessions ADD COLUMN project_snapshot_json TEXT")
+    db.commit()
+
+    orphan = db.execute(
+        "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL AND (project_id IS NULL OR project_id = '')"
+    ).fetchone()[0]
+    if orphan:
+        _migrate_orphan_sessions(db)
+
+
 def init_db() -> None:
     db = get_db()
     db.executescript(SCHEMA)
     db.commit()
+    _migrate_projects(db)
 
 
 def close_db() -> None:

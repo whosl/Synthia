@@ -18,6 +18,7 @@ import { useTerminalStore } from '../stores/terminalStore'
 export default function TerminalPage() {
   const [searchParams] = useSearchParams()
   const sessionId = searchParams.get('session') || ''
+  const projectIdFromUrl = searchParams.get('project') || ''
   const queryClient = useQueryClient()
   const view = useTerminalStore((s) => s.view)
   const setView = useTerminalStore((s) => s.setView)
@@ -63,6 +64,8 @@ export default function TerminalPage() {
     [timeline.auditLog],
   )
   const session = sessionQ.data?.session
+  const projectId = projectIdFromUrl || session?.project_id || ''
+  const backHref = projectId ? `/projects/${projectId}` : '/'
 
   const handleInteractionRespond = async (interactionId: string, response: Record<string, unknown>) => {
     await request(`/interactions/${interactionId}/respond`, {
@@ -82,9 +85,9 @@ export default function TerminalPage() {
         <div className={`terminal-layout ${rightPanelOpen ? 'right-open' : 'right-closed'}`}>
           <section className="chat-panel">
             <header className="chat-panel-header">
-              <Link to="/" className="btn ghost terminal-back-link" aria-label="Back to sessions">
+              <Link to={backHref} className="btn ghost terminal-back-link" aria-label="Back to project sessions">
                 <ArrowLeft size={15} />
-                <span className="terminal-back-label">Sessions</span>
+                <span className="terminal-back-label">Back</span>
               </Link>
               <h1 className="chat-panel-header-title">
                 {session?.name || 'Session'}
