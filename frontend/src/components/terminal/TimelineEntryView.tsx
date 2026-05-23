@@ -34,13 +34,18 @@ export function TimelineEntryView({ entry, onInteractionRespond }: TimelineEntry
     )
   }
 
-  const stickyPending =
+  const isApprovalInteraction =
     entry.kind === 'interaction'
-    && (entry.payload as InteractionEntryPayload).status === 'pending'
     && (entry.payload as InteractionEntryPayload).interaction_type === 'approval'
 
+  const stickyPending =
+    isApprovalInteraction
+    && (entry.payload as InteractionEntryPayload).status === 'pending'
+
   return (
-    <div className={`message-turn assistant timeline-entry kind-${entry.kind}${stickyPending ? ' sticky-pending-approval' : ''}`}>
+    <div
+      className={`message-turn assistant timeline-entry kind-${entry.kind}${isApprovalInteraction ? ' kind-approval' : ''}${stickyPending ? ' sticky-pending-approval' : ''}`}
+    >
       {entry.kind === 'assistant_text' && (
         <div className="assistant-stack">
           <div className="message-meta assistant-meta">

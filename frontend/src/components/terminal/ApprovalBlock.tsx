@@ -90,10 +90,10 @@ export function ApprovalBlock({
     : '✗ 已拒绝'
 
   const headerIcon = isApproved
-    ? <CheckCircle2 size={14} color="var(--success)" />
+    ? <CheckCircle2 size={14} className="approval-status-icon approved" />
     : isPending
       ? null
-      : <XCircle size={14} color="var(--warning)" />
+      : <XCircle size={14} className="approval-status-icon rejected" />
 
   const body = (
     <>

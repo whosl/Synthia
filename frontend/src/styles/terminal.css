@@ -547,18 +547,46 @@
 .interaction-block.status-partial { border-color: rgba(245, 158, 11, 0.55); }
 
 .trace-block.approval-trace-block {
-  border: 1px solid var(--approval-border);
+  border: 1px solid var(--approval-border-strong);
   border-radius: var(--radius-sm);
   margin: 8px 0;
   overflow: hidden;
-  background: rgba(59, 130, 246, 0.04);
+  background: rgba(59, 130, 246, 0.06);
 }
 .trace-block.approval-trace-block .trace-header {
-  color: var(--approval-accent-muted);
+  color: var(--approval-accent-bright);
 }
-.trace-block.approval-trace-block.completed { border-color: rgba(22, 163, 74, 0.35); }
-.trace-block.approval-trace-block.rejected { border-color: rgba(239, 68, 68, 0.35); }
-.trace-block.approval-trace-block.status-partial { border-color: rgba(96, 165, 250, 0.55); }
+.trace-block.approval-trace-block.completed,
+.trace-block.approval-trace-block.status-partial {
+  border-color: var(--approval-border-strong);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.12);
+}
+.trace-block.approval-trace-block.rejected {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+.trace-block.approval-trace-block .approval-status-icon.approved {
+  color: var(--approval-accent-bright);
+  flex-shrink: 0;
+}
+.trace-block.approval-trace-block .approval-status-icon.rejected {
+  color: var(--error);
+  flex-shrink: 0;
+}
+.trace-block.approval-trace-block .interaction-badge.approved {
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--approval-accent-bright);
+}
+.trace-block.approval-trace-block.completed .tool-state,
+.trace-block.approval-trace-block.status-partial .tool-state {
+  color: var(--approval-accent-bright);
+}
+
+.timeline-entry.kind-approval {
+  width: 100%;
+}
+.timeline-entry.kind-approval .trace-block.approval-trace-block {
+  margin: 0;
+}
 .approval-trace-body .approval-detail-grid { margin-top: 0; }
 .approval-trace-body .interaction-rejected-hint { margin-top: 8px; }
 
