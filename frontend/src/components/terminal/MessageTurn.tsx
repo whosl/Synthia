@@ -58,7 +58,7 @@ export function MessageTurn({ turn, onInteractionRespond }: MessageTurnProps) {
             />
         }
       })}
-      {turn.blocks.length === 0 && !turn.content && <div className="message-bubble"><span className="muted">Waiting for response…</span></div>}
+      {turn.blocks.length === 0 && !turn.content && <div className="working-indicator"><span className="working-dot" /><span className="working-text">Working...</span></div>}
     </div>
   </div></div>
 }

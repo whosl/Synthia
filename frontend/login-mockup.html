@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EdAgent-Vivado Login</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: #1C1917;
+      color: #E7E5E4;
+      font-family: 'Inter', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .terminal-hint {
+      position: absolute;
+      top: 32px;
+      left: 40px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      color: #78716C;
+    }
+    .terminal-hint span { color: #F59E0B; }
+
+    .login-card {
+      width: 420px;
+      padding: 48px 36px 40px;
+      background: #292524;
+      border: 1px solid #44403C;
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    }
+
+    .brand {
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .brand h1 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 22px;
+      font-weight: 700;
+      color: #F59E0B;
+      margin-bottom: 6px;
+    }
+    .brand h1::before {
+      content: '> ';
+      color: #78716C;
+    }
+    .brand p {
+      font-size: 14px;
+      color: #A8A29E;
+    }
+
+    .divider {
+      height: 1px;
+      background: #44403C;
+      margin: 28px 0;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #E7E5E4;
+      margin-bottom: 6px;
+    }
+    .form-group input {
+      width: 100%;
+      height: 44px;
+      padding: 0 14px;
+      background: #352F2B;
+      border: 1px solid #44403C;
+      border-radius: 8px;
+      color: #E7E5E4;
+      font-size: 14px;
+      font-family: 'Inter', sans-serif;
+      outline: none;
+      transition: border-color 150ms ease;
+    }
+    .form-group input::placeholder {
+      color: #78716C;
+    }
+    .form-group input:focus {
+      border-color: #F59E0B;
+      box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+    }
+
+    .options {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 28px;
+      font-size: 13px;
+    }
+    .options label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #A8A29E;
+      cursor: pointer;
+    }
+    .options label input[type="checkbox"] {
+      accent-color: #F59E0B;
+      width: 14px;
+      height: 14px;
+    }
+    .options a {
+      color: #F59E0B;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .options a:hover {
+      text-decoration: underline;
+    }
+
+    .login-btn {
+      width: 100%;
+      height: 46px;
+      background: #F59E0B;
+      border: none;
+      border-radius: 8px;
+      color: #1C1917;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: 'Inter', sans-serif;
+      cursor: pointer;
+      transition: background 150ms ease, transform 100ms ease;
+    }
+    .login-btn:hover {
+      background: #D97706;
+    }
+    .login-btn:active {
+      transform: scale(0.98);
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 24px;
+      font-size: 12px;
+      color: #78716C;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .status-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 32px;
+      background: #292524;
+      border-top: 1px solid #3A3633;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #A8A29E;
+      gap: 16px;
+    }
+    .status-bar .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #16A34A;
+      display: inline-block;
+    }
+  </style>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+</head>
+<body>
+  <div class="terminal-hint"><span>$</span> edagent login --interactive</div>
+
+  <div class="login-card">
+    <div class="brand">
+      <h1>EdAgent-Vivado</h1>
+      <p>Vivado RTL Debug Agent</p>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" placeholder="Enter your username" />
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" placeholder="Enter your password" value="password123" />
+    </div>
+
+    <div class="options">
+      <label><input type="checkbox" /> Remember me</label>
+      <a href="#">Forgot password?</a>
+    </div>
+
+    <button class="login-btn">Sign In</button>
+
+    <div class="footer">v0.3.0 • MIT License</div>
+  </div>
+
+  <div class="status-bar">
+    <span><span class="dot"></span> CONNECTED</span>
+    <span>|</span>
+    <span>HOST: localhost:8484</span>
+    <span>|</span>
+    <span>MODE: MOCK</span>
+    <span>|</span>
+    <span>SESSION: idle</span>
+  </div>
+</body>
+</html>

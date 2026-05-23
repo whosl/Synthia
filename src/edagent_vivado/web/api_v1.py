@@ -170,9 +170,76 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 elif kind == "on_tool_end":
                     output = str(evt.get("data", {}).get("output", ""))[:2500]
                     tcid = tool_ids.get(evt.get("run_id", ""), "")
+                    tool_name = evt.get("name", "")
+                    # Intercept interaction tools — create interaction and wait for user
+                    if tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool") and not is_patch_approved():
+                        from edagent_vivado.harness.interaction import (
+                            create_interaction, wait_for_response, InteractionType, FileItem, InputField,
+                        )
+                        tool_input = evt.get("data", {}).get("input", {})
+                        if tool_name == "create_file_tool":
+                            files = [FileItem(path=tool_input.get("file_path",""), content=tool_input.get("content",""),
+                                             description=tool_input.get("description",""), action="create")]
+                            interaction = create_interaction(
+                                InteractionType.APPROVAL, session_id, t["id"],
+                                title="Create File",
+                                message=tool_input.get("description", f"Create {tool_input.get('file_path','')}"),
+                                files=files,
+                            )
+                        elif tool_name == "propose_patch_tool":
+                            files = [FileItem(path=tool_input.get("file_path",""),
+                                             content=f"--- OLD ---\n{tool_input.get('old_text','')}\n--- NEW ---\n{tool_input.get('new_text','')}",
+                                             description=tool_input.get("description",""), action="modify")]
+                            interaction = create_interaction(
+                                InteractionType.APPROVAL, session_id, t["id"],
+                                title="Modify File",
+                                message=tool_input.get("description", f"Modify {tool_input.get('file_path','')}"),
+                                files=files,
+                            )
+                        elif tool_name == "request_approval":
+                            files = [FileItem(path=f.get("path",""), content=f.get("content",""),
+                                             description=f.get("description",""), action=f.get("action","create"))
+                                     for f in (tool_input.get("files") or [])]
+                            interaction = create_interaction(
+                                InteractionType.APPROVAL, session_id, t["id"],
+                                title=tool_input.get("title", "File Approval Required"),
+                                message=tool_input.get("message", ""),
+                                files=files,
+                            )
+                        else:
+                            fields = [InputField(id=f.get("id",""), label=f.get("label",""),
+                                                field_type=f.get("field_type","text"),
+                                                options=f.get("options"), placeholder=f.get("placeholder",""),
+                                                recommendations=f.get("recommendations"), required=f.get("required",True))
+                                      for f in (tool_input.get("fields") or [])]
+                            interaction = create_interaction(
+                                InteractionType.INPUT_REQUEST, session_id, t["id"],
+                                title=tool_input.get("title", "Information Required"),
+                                message=tool_input.get("message", ""),
+                                fields=fields,
+                            )
+                        event_create(session_id, "interaction.requested", interaction.to_dict(),
+                                     task_id=t["id"], run_id=run["id"])
+                        # Wait for user response (blocks until user acts)
+                        responded = await wait_for_response(interaction.id)
+                        if responded:
+                            if responded.interaction_type == InteractionType.APPROVAL:
+                                output = "APPROVED" if responded.status.value == "approved" else "REJECTED"
+                                if responded.status.value == "approved":
+                                    # Apply approved files
+                                    from pathlib import Path as _Path
+                                    for fi in (interaction.files or []):
+                                        if fi.path in (responded.response.get("approved_files") or [fi.path]):
+                                            fp = _Path(fi.path)
+                                            fp.parent.mkdir(parents=True, exist_ok=True)
+                                            fp.write_text(fi.content)
+                            else:
+                                output = json.dumps(responded.response, ensure_ascii=False)
+                        else:
+                            output = "TIMEOUT: No user response"
                     if tcid:
-                        toolcall_update(tcid, state="completed", finished_at=int(time.time()), output_summary=output)
-                    event_create(session_id, "tool.completed", {"tool_name": evt["name"], "toolcall_id": tcid, "result": output},
+                        toolcall_update(tcid, state="completed", finished_at=int(time.time()), output_summary=output[:500])
+                    event_create(session_id, "tool.completed", {"tool_name": tool_name, "toolcall_id": tcid, "result": output[:500]},
                                  task_id=t["id"], run_id=run["id"])
                 elif kind == "on_chat_model_stream":
                     chunk = evt["data"].get("chunk", {})

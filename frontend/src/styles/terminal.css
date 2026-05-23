@@ -452,3 +452,36 @@
   font-size: 10px; padding: 1px 6px; border-radius: 8px;
   background: rgba(22,163,74,0.1); color: var(--success); border: 1px solid rgba(22,163,74,0.2);
 }
+
+/* ── Working Indicator (Claude Code style) ── */
+.working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--term-muted);
+  font-size: var(--font-size-sm);
+}
+.working-text {
+  animation: working-fade 2s ease-in-out infinite;
+}
+.working-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--term-accent);
+  animation: working-pulse 1.4s ease-in-out infinite;
+}
+@keyframes working-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+@keyframes working-fade {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* Also show working for active tool calls */
+.trace-block.tool-block:not(.completed):not(.errored) .trace-header .tool-state {
+  animation: working-fade 2s ease-in-out infinite;
+}

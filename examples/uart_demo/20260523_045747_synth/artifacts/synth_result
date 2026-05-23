@@ -1,0 +1,10 @@
+{
+  "step": "synth",
+  "success": false,
+  "return_code": 255,
+  "log": "/workspace/examples/uart_demo/20260523_045747_synth/vivado_synth.log",
+  "elapsed_sec": 30.05,
+  "timed_out": false,
+  "remote": true,
+  "host": "root@192.168.31.150"
+}
