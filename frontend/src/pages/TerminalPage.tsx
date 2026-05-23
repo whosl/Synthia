@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bug, Database, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
+import { ArrowLeft, Bug, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { listEvents } from '../api/events'
@@ -11,6 +11,7 @@ import { request } from '../api/client'
 import type { SessionEvent } from '../api/types'
 import { Button } from '../components/common/Button'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { ContextDebugPanel } from '../components/terminal/ContextDebugPanel'
 import { Composer } from '../components/terminal/Composer'
 import { MessageList } from '../components/terminal/MessageList'
 import { TimelineView } from '../components/terminal/TimelineView'
@@ -51,6 +52,8 @@ export default function TerminalPage() {
   const activeTask = activeQ.data?.task
   const running = activeTask?.state === 'running'
   const stopping = activeTask?.state === 'stopping'
+  const taskActive = running || stopping
+  const liveSeq = useStreamStore((s) => s.lastSeqBySession[sessionId] || 0)
 
   // Reset UI when switching sessions
   useEffect(() => {
@@ -58,26 +61,32 @@ export default function TerminalPage() {
     setLastSeq(sessionId, 0)
   }, [sessionId, setLastSeq])
 
-  // Rebuild runtime from persisted data + pending interactions (single pass avoids race)
+  // Rebuild from DB when idle/reloading — never clobber live SSE state during an active task
   useEffect(() => {
     if (!messagesQ.data || !eventsQ.data) return
+    if (taskActive && liveSeq > 0) return
+
     const pending = pendingInteractionsQ.data?.interactions || []
     let next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
     next = mergePendingInteractions(next, pending)
     setRuntime(next)
     if (next.lastSeq > 0) setLastSeq(sessionId, next.lastSeq)
-  }, [messagesQ.data, eventsQ.data, pendingInteractionsQ.data, sessionId, setLastSeq, activeTask])
+  }, [messagesQ.data, eventsQ.data, pendingInteractionsQ.data, sessionId, setLastSeq, activeTask, taskActive, liveSeq])
 
   // SSE stream event handler — stable ref to avoid stream reconnects
   const onStreamEventRef = useRef<(event: SessionEvent) => void>(() => {})
   onStreamEventRef.current = (event: SessionEvent) => {
     setRuntime((prev) => applyEvent(prev, event, { appendAssistantDelta: event.event_type === 'message.assistant.delta' }))
     setLastSeq(sessionId, event.seq)
+    if (event.event_type === 'context.package.created') {
+      queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
+    }
     if (event.event_type === 'task.done' || event.event_type === 'task.error' || event.event_type === 'task.stopped') {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
     }
   }
 
@@ -167,8 +176,8 @@ export default function TerminalPage() {
           <div className="drawer-header"><span>Debug</span><Button className="ghost icon-btn" onClick={() => setDebugOpen(false)}>×</Button></div>
           <div className="drawer-section">
             <div className="side-title"><FileText size={13} /> Context</div>
-            <div className="drawer-list">
-              <span><Database size={13} /> Retrieval audit pending</span>
+            <ContextDebugPanel sessionId={sessionId} taskId={activeTask?.id} />
+            <div className="drawer-list" style={{ marginTop: 8 }}>
               <span><Shield size={13} /> Patch: {approvalQ.data?.approved ? 'auto' : 'manual'}</span>
             </div>
           </div>

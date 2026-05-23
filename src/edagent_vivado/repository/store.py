@@ -339,6 +339,26 @@ def context_package_get(context_package_id: str) -> dict | None:
     row = get_db().execute("SELECT * FROM context_packages WHERE id=?", (context_package_id,)).fetchone()
     return dict(row) if row else None
 
+def context_packages_for_session(session_id: str, task_id: str = "", limit: int = 5) -> list[dict]:
+    q = "SELECT * FROM context_packages WHERE session_id=?"
+    params: list = [session_id]
+    if task_id:
+        q += " AND task_id=?"
+        params.append(task_id)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]
+
+def retrieval_audits_for_session(session_id: str, task_id: str = "", limit: int = 5) -> list[dict]:
+    q = "SELECT * FROM retrieval_audits WHERE session_id=?"
+    params: list = [session_id]
+    if task_id:
+        q += " AND task_id=?"
+        params.append(task_id)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]
+
 def problem_create(session_id: str, message: str, source: str = "harness", task_id: str = "",
                    run_id: str = "", severity: str = "warning", category: str = "",
                    signature: str = "", normalized_signature: str = "",

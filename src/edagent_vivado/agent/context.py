@@ -114,32 +114,16 @@ def _error_kb_context(question: str) -> tuple[str, list[dict]]:
     return "\n".join(lines), records
 
 
-def _semantic_kb_stub(question: str) -> tuple[str, list[dict]]:
-    """Phase 2 retrieval audit stub.
-
-    Phase 2A will replace this with vector search/rerank. For Phase 2 we still
-    create auditable retrieval records so the UI/API contract is stable.
-    """
-    candidates = [
-        {
-            "source_type": "spec",
-            "source_id": "SPEC.md",
-            "title": "SPEC.md — Context Builder and Vivado Runtime",
-            "excerpt": "Context Builder injects session memory, recent messages, Error KB, Semantic KB, tool summaries, and project context with token budgeting and audit records.",
-            "score": 0.62,
-        },
-        {
-            "source_type": "doc",
-            "source_id": "VIVADO_COMMANDS.md",
-            "title": "Vivado command support matrix",
-            "excerpt": "Vivado commands are routed through the Runtime Adapter with TclPolicy, artifacts, monitor events, and parser/problem collection.",
-            "score": 0.58,
-        },
-    ]
+def _semantic_kb_context(question: str) -> tuple[str, list[dict]]:
+    """Retrieve from indexed repo docs (Phase 2A keyword search)."""
     if not question.strip():
         return "", []
-    lines = [f"- {c['title']} (score={c['score']}): {c['excerpt']}" for c in candidates]
-    return "\n".join(lines), candidates
+    try:
+        from edagent_vivado.knowledge.semantic_kb import search_semantic_kb
+
+        return search_semantic_kb(question, top_k=6)
+    except Exception:
+        return "", []
 
 
 class AgentContextBuilder:
@@ -182,7 +166,7 @@ class AgentContextBuilder:
         if tool_lines:
             items.append(ContextItem("tool_summary", "Relevant Tool Summaries", "\n".join(tool_lines), priority=7, trust_score=0.72))
 
-        semantic_text, semantic_hits = _semantic_kb_stub(question)
+        semantic_text, semantic_hits = _semantic_kb_context(question)
         if semantic_text:
             items.append(ContextItem("semantic_kb", "Retrieved Semantic Knowledge", semantic_text, priority=8, source_type="semantic_kb", authority_score=0.7, trust_score=0.65, relevance_score=0.6))
 
@@ -217,7 +201,7 @@ class AgentContextBuilder:
             rejected_count=0,
             token_budget=self.max_context_tokens,
             token_used=token_counts["total"],
-            metadata={"phase": "2", "vector_backend": "stub"},
+            metadata={"phase": "2a", "vector_backend": "keyword"},
         )
         for hit in semantic_hits:
             retrieval_audit_item_create(

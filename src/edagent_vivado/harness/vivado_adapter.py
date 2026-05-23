@@ -300,3 +300,45 @@ class VivadoRuntimeAdapter:
             return VivadoResult(success=False, error=str(e), target_id=self._target.id, command_type="script")
         finally:
             os.unlink(local_path)
+
+    def run_synthesis(self, manifest_path: str) -> dict[str, Any]:
+        """High-level synthesis flow — unified entry used by agent tools."""
+        from pathlib import Path
+
+        from edagent_vivado.harness.manifest import Manifest
+        from edagent_vivado.harness.tcl_templates import generate_synth_tcl
+        from edagent_vivado.harness.vivado_runner import VivadoRunner
+        from edagent_vivado.harness.workspace import Workspace
+        from edagent_vivado.tools.vivado_tools import _patch_tcl_to_relative
+
+        manifest = Manifest.load(manifest_path)
+        ws = Workspace(base_dir=Path(manifest_path).parent, task_name="agent_synth")
+        ws.copy_sources(manifest)
+        ws.write_manifest(manifest)
+
+        tcl_content = generate_synth_tcl(manifest, ws.root)
+        tcl_path = ws.script_path("synth.tcl")
+        tcl_path.write_text(tcl_content, encoding="utf-8")
+        _patch_tcl_to_relative(tcl_path, ws.root)
+
+        runner = VivadoRunner(workspace=ws, manifest=manifest)
+        if runner.is_mock:
+            result = runner.run_synth()
+        elif runner._remote_cfg:
+            tc = tcl_path.read_text(errors="replace")
+            for rp in manifest.rtl_paths():
+                tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
+            for xp in manifest.xdc_paths():
+                tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
+            tcl_path.write_text(tc)
+            result = runner._remote_run("synth", tcl_path)
+            if result.get("return_code") == 255 and not result.get("success"):
+                result["error"] = result.get("error") or "SSH connection to remote Vivado host failed (exit 255)"
+                result["mock"] = False
+                result["remote"] = True
+        else:
+            result = runner.run_synth()
+            for tf in ws.root.glob("scripts/*.tcl"):
+                _patch_tcl_to_relative(tf, ws.root)
+        result["workspace"] = str(ws.root)
+        return result

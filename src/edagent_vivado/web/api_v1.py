@@ -16,8 +16,9 @@ from edagent_vivado.repository.store import (
     toolcall_create, toolcall_update, toolcall_list, usage_list,
     event_list_for_run, artifact_list, problem_list,
     memory_latest, memory_list, context_package_get, context_package_items,
-    context_packages_for_run, retrieval_audits_for_run, retrieval_audit_get,
-    retrieval_audit_items,
+    context_packages_for_run, context_packages_for_session,
+    retrieval_audits_for_run, retrieval_audits_for_session,
+    retrieval_audit_get, retrieval_audit_items, usage_create,
 )
 from edagent_vivado.repository.db import get_db
 from edagent_vivado.tools.patch_tools import set_patch_approval, is_patch_approved
@@ -415,6 +416,23 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 task_id=t["id"],
                                 run_id=run["id"],
                             )
+                            if output and ui_state in ("completed", "error", "rejected"):
+                                from edagent_vivado.harness.problem_collector import (
+                                    collect_from_tool_output,
+                                    record_problems,
+                                )
+
+                                probs = collect_from_tool_output(tool_name, output)
+                                if probs:
+                                    record_problems(
+                                        session_id,
+                                        probs,
+                                        task_id=t["id"],
+                                        run_id=run["id"] if run else "",
+                                        event_sink=lambda et, pl: event_create(
+                                            session_id, et, pl, task_id=t["id"], run_id=run["id"] if run else ""
+                                        ),
+                                    )
                         if (
                             tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
                             and output
@@ -423,6 +441,39 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                             from edagent_vivado.harness.approval_apply import should_continue_after_approval
                             if should_continue_after_approval(output) or output.startswith("{"):
                                 inline_approval_results.append(output)
+                    elif kind in ("on_chat_model_end", "on_llm_end"):
+                        usage_meta = {}
+                        data = evt.get("data") or {}
+                        output = data.get("output")
+                        if output is not None:
+                            usage_meta = getattr(output, "usage_metadata", None) or {}
+                            if not usage_meta and hasattr(output, "response_metadata"):
+                                usage_meta = (output.response_metadata or {}).get("usage") or {}
+                        if not usage_meta:
+                            usage_meta = data.get("usage_metadata") or data.get("usage") or {}
+                        inp = int(usage_meta.get("input_tokens") or usage_meta.get("prompt_tokens") or 0)
+                        out_tok = int(usage_meta.get("output_tokens") or usage_meta.get("completion_tokens") or 0)
+                        if (inp or out_tok) and run:
+                            model_name = _os.environ.get("EDAGENT_MODEL", "unknown")
+                            usage_create(
+                                run_id=run["id"],
+                                model=model_name,
+                                session_id=session_id,
+                                task_id=t["id"],
+                                provider="anthropic_compatible",
+                                model_role="primary",
+                                input_tokens=inp,
+                                output_tokens=out_tok,
+                                total_tokens=inp + out_tok,
+                                usage_source="provider" if inp else "estimated",
+                            )
+                            event_create(
+                                session_id,
+                                "llm.usage",
+                                {"input_tokens": inp, "output_tokens": out_tok, "model": model_name},
+                                task_id=t["id"],
+                                run_id=run["id"],
+                            )
                     elif kind == "on_chat_model_stream":
                         chunk = evt["data"].get("chunk", {})
                         reasoning = ""
@@ -617,6 +668,20 @@ async def api_monitor_session_runs(session_id: str, limit: int = 50):
 async def api_session_memory(session_id: str, limit: int = 20):
     return {"latest": memory_latest(session_id), "snapshots": memory_list(session_id, limit=limit)}
 
+@router.get("/sessions/{session_id}/context")
+async def api_session_context(session_id: str, task_id: str = ""):
+    """Latest context packages and retrieval audits for Terminal debug / Monitor."""
+    tid = task_id.strip()
+    if not tid:
+        active = task_active_for_session(session_id)
+        if active:
+            tid = active.get("id") or ""
+    packages = context_packages_for_session(session_id, task_id=tid, limit=3)
+    audits = retrieval_audits_for_session(session_id, task_id=tid, limit=3)
+    enriched = [{"package": p, "items": context_package_items(p["id"])} for p in packages]
+    enriched_audits = [{"audit": a, "items": retrieval_audit_items(a["id"])} for a in audits]
+    return {"contexts": enriched, "retrieval_audits": enriched_audits, "task_id": tid or None}
+
 @router.get("/context-packages/{context_package_id}")
 async def api_context_package(context_package_id: str):
     pkg = context_package_get(context_package_id)
@@ -720,39 +785,17 @@ async def api_interaction_respond(interaction_id: str, request: Request):
 
 @router.get("/health/vivado")
 async def api_vivado_health():
-    host = _os.environ.get("VIVADO_REMOTE_HOST", "")
-    key = _os.environ.get("VIVADO_REMOTE_KEY", "")
-    path = _os.environ.get("VIVADO_REMOTE_PATH", "vivado")
-    env_script = _os.environ.get("VIVADO_REMOTE_ENV", "")
+    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter
 
-    result = {"target": "default-remote", "host": host, "reachable": False, "vivado_path": path, "version": None}
-
-    if not host:
-        result["error"] = "VIVADO_REMOTE_HOST not configured"
-        return result
-
-    import subprocess
-    port = _os.environ.get("VIVADO_REMOTE_PORT", "")
-    ssh = ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
-    if port: ssh += ["-p", str(port)]
-    ssh.append(host)
-    # Test SSH
-    try:
-        p = subprocess.run(ssh + ["echo OK"], capture_output=True, text=True, timeout=15)
-        result["reachable"] = "OK" in p.stdout
-    except: pass
-    # Test Vivado version
-    if result["reachable"] and env_script:
-        try:
-            cmd = f"source {env_script} 2>/dev/null && {path} -version 2>&1"
-            p = subprocess.run(ssh + [cmd], capture_output=True, text=True, timeout=20)
-            for line in p.stdout.split("\n"):
-                if "Vivado v" in line:
-                    result["version"] = line.strip()
-                    break
-        except: pass
-
-    return result
+    hc = VivadoRuntimeAdapter().health_check()
+    return {
+        "target": hc.get("target_id", "default-remote"),
+        "host": hc.get("host", ""),
+        "reachable": hc.get("reachable", False),
+        "vivado_path": hc.get("vivado_path", ""),
+        "version": hc.get("version"),
+        "error": hc.get("error"),
+    }
 
 @router.get("/vivado/targets")
 async def api_vivado_targets():
@@ -772,6 +815,22 @@ async def api_vivado_targets():
 @router.get("/vivado/commands")
 async def api_vivado_commands(limit: int = 50):
     return {"commands": []}
+
+@router.post("/knowledge/reindex")
+async def api_knowledge_reindex():
+    from edagent_vivado.knowledge.semantic_kb import reindex_global
+
+    return reindex_global()
+
+@router.post("/knowledge/search")
+async def api_knowledge_search(request: Request):
+    body = await request.json()
+    query = str(body.get("query", ""))
+    top_k = int(body.get("top_k", 12))
+    from edagent_vivado.knowledge.semantic_kb import search_semantic_kb
+
+    text, hits = search_semantic_kb(query, top_k=top_k)
+    return {"query": query, "results": hits, "formatted": text}
 
 @router.get("/vivado/devices")
 async def api_vivado_devices():

@@ -536,3 +536,14 @@
 .trace-block.tool-block:not(.completed):not(.errored) .trace-header .tool-state {
   animation: working-fade 2s ease-in-out infinite;
 }
+
+/* Context debug drawer */
+.context-debug { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+.context-item { border: 1px solid var(--term-border-soft); border-radius: 6px; padding: 8px; font-size: 12px; }
+.context-item.excluded { opacity: 0.55; border-style: dashed; }
+.context-item-head { display: flex; justify-content: space-between; color: var(--term-muted); margin-bottom: 4px; }
+.context-item-title { font-weight: 600; color: var(--term-fg); margin-bottom: 4px; }
+.context-excerpt { margin: 0; font-size: 11px; white-space: pre-wrap; color: var(--term-muted); max-height: 120px; overflow: hidden; }
+.context-truncated { color: var(--warning); font-size: 11px; }
+.kv.compact { font-size: 11px; margin-bottom: 4px; }
+.drawer-hint { font-size: 12px; padding: 8px 0; }

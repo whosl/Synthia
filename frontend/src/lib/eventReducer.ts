@@ -317,6 +317,7 @@ export function applyEvent(
       break
     case 'interaction.requested': {
       const turn = assistantTurn(next, taskId, event.created_at)
+      closeTextBlock(turn)
       const iid = String(payload.id || payload.interaction_id || event.id)
       const block: InteractionBlockState = {
         id: iid,
@@ -406,14 +407,18 @@ function mergeAssistantMessagesFromDb(state: TerminalRuntimeState, messages: Mes
       state.turns.push(turn)
       continue
     }
+    const hasStructuredBlocks = turn.blocks.some((b) => b.kind !== 'text')
+    turn.content = m.content
+    if (hasStructuredBlocks) {
+      // Event replay already built text/tool/interaction order — do not collapse blocks
+      continue
+    }
     const textFromBlocks = turn.blocks
       .filter((b): b is { kind: 'text'; data: TextBlockState } => b.kind === 'text')
       .map((b) => b.data.text)
       .join('')
     if (m.content.length > textFromBlocks.length + 20) {
-      turn.content = m.content
-      const nonText = turn.blocks.filter((b) => b.kind !== 'text')
-      turn.blocks = [{ kind: 'text', data: { id: `text-${m.id}`, text: m.content } }, ...nonText]
+      turn.blocks = [{ kind: 'text', data: { id: `text-${m.id}`, text: m.content } }]
     }
     if (turn.createdAt == null && m.created_at) {
       const userForTask = state.turns.find((t) => t.role === 'user' && t.taskId === m.task_id)

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { CheckCircle2, Download, Play, RefreshCw, Server } from 'lucide-react'
 import { useState } from 'react'
-import { getVivadoHealth, listVivadoCommands, listVivadoTargets } from '../api/vivado'
+import { getVivadoHealth, listVivadoCommands, listVivadoTargets, runVivadoTcl } from '../api/vivado'
 import { Button } from '../components/common/Button'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
@@ -19,11 +19,23 @@ export default function VivadoPage() {
     'Vivado% ready',
   ])
 
-  const handleRun = () => {
+  const handleRun = async () => {
     const cmd = tclInput.trim()
     if (!cmd) return
-    setConsoleLines(prev => [...prev, `Vivado% ${cmd}`, '(submitted — command execution requires Phase 3A backend)'])
+    setConsoleLines(prev => [...prev, `Vivado% ${cmd}`])
     setTclInput('')
+    try {
+      const res = await runVivadoTcl(cmd, true)
+      if (res.requires_approval) {
+        setConsoleLines(prev => [...prev, 'Approval required — enable auto-approve or use Terminal approval flow'])
+        return
+      }
+      if (res.stdout) setConsoleLines(prev => [...prev, ...(res.stdout || '').split('\n').filter(Boolean).slice(-30)])
+      if (res.stderr) setConsoleLines(prev => [...prev, ...(res.stderr || '').split('\n').filter(Boolean).slice(-10)])
+      setConsoleLines(prev => [...prev, res.ok ? `# completed (${res.elapsed_sec ?? 0}s)` : `# failed: ${res.error || res.exit_code}`])
+    } catch (e) {
+      setConsoleLines(prev => [...prev, `# error: ${e instanceof Error ? e.message : String(e)}`])
+    }
   }
 
   const handleSaveScript = () => {

@@ -1,23 +1,33 @@
-import { useQuery } from '@tanstack/react-query'
-import { CheckCircle2, Database, GitMerge, RefreshCw, XCircle } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { CheckCircle2, GitMerge, RefreshCw, XCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { approveKbCandidate, listKbCandidates, listLegacyErrorKb, mergeKbCandidate, rejectKbCandidate } from '../api/kb'
+import { reindexKnowledge } from '../api/knowledge'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
 import { Panel } from '../components/common/Panel'
 
 export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'knowledge' }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const kbCasesQ = useQuery({ queryKey: ['legacy-kb'], queryFn: listLegacyErrorKb })
+  const candidatesQ = useQuery({ queryKey: ['kb-candidates'], queryFn: listKbCandidates, enabled: mode === 'kb' })
+  const reindex = useMutation({
+    mutationFn: reindexKnowledge,
+    onSuccess: (r) => {
+      alert(`Indexed ${r.indexed_sources} sources, ${r.chunks} chunks`)
+      queryClient.invalidateQueries({ queryKey: ['legacy-kb'] })
+    },
+  })
 
   if (mode === 'knowledge') {
-    const kbCasesQ = useQuery({ queryKey: ['legacy-kb'], queryFn: listLegacyErrorKb })
     const cases = kbCasesQ.data?.cases ?? []
 
     return <div className="page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Knowledge Base</h1>
-          <p className="page-subtitle">Error KB sources, candidate review, and retrieval audit</p>
+          <p className="page-subtitle">Semantic KB sources and retrieval</p>
         </div>
         <Button className="ghost" onClick={() => kbCasesQ.refetch()}><RefreshCw size={14} /> Refresh</Button>
       </div>
@@ -31,16 +41,15 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
         <Panel title="Actions">
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <Button className="primary" onClick={() => navigate('/kb')}>Review Candidates</Button>
-            <Button className="ghost" disabled title="Requires Phase 2A backend">Reindex Sources</Button>
+            <Button className="ghost" onClick={() => reindex.mutate()} disabled={reindex.isPending}>
+              {reindex.isPending ? 'Reindexing…' : 'Reindex Sources'}
+            </Button>
             <Button className="ghost" onClick={() => navigate('/monitor')}>Retrieval Audits</Button>
           </div>
         </Panel>
       </div>
     </div>
   }
-
-  const { data } = useQuery({ queryKey: ['legacy-kb'], queryFn: listLegacyErrorKb })
-  const candidatesQ = useQuery({ queryKey: ['kb-candidates'], queryFn: listKbCandidates })
 
   return <div className="page">
     <div className="page-header">
@@ -66,8 +75,8 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
           : <EmptyState title="No pending candidates" detail="Candidates are auto-generated from failed runs." />}
       </Panel>
       <Panel title="Built-in Error KB">
-        {data?.cases?.length
-          ? <div style={{ display: 'grid', gap: 10 }}>{data.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}>
+        {kbCasesQ.data?.cases?.length
+          ? <div style={{ display: 'grid', gap: 10 }}>{kbCasesQ.data!.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}>
             <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>{c.category}</div>
             <div className="muted mono" style={{ fontSize: 11, marginTop: 4 }}>{c.pattern}</div>
           </div>)}</div>
