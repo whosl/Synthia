@@ -34,6 +34,8 @@ from edagent_vivado.harness.file_patch_policy import (
     is_file_tool_queued_for_approval,
     is_interaction_tool,
 )
+from edagent_vivado.events.envelope import enrich_wire_event
+from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
 
 router = APIRouter(prefix="/api/v1")
 
@@ -43,8 +45,9 @@ _stream_queues: dict[str, list[asyncio.Queue]] = {}
 
 def _publish(session_id: str, event: dict) -> None:
     """Push event to all active SSE subscribers for a session."""
-    payload = json.dumps(event, ensure_ascii=False)
-    data = f"id: {session_id}:{event.get('seq',0)}\nevent: {event['event_type']}\ndata: {payload}\n\n"
+    wire = enrich_wire_event(event)
+    payload = json.dumps(wire, ensure_ascii=False, default=str)
+    data = f"id: {session_id}:{wire.get('seq',0)}\nevent: {wire['event_type']}\ndata: {payload}\n\n"
     for q in _stream_queues.get(session_id, []):
         try: q.put_nowait(data)
         except asyncio.QueueFull: pass
@@ -64,7 +67,7 @@ def _langgraph_tool_run_key(evt: dict) -> str:
 
 def event_create(session_id: str, event_type: str, payload: dict, **kwargs) -> dict:  # type: ignore[no-redef]
     """Persist an event and publish it to live SSE subscribers."""
-    evt = _store_event_create(session_id, event_type, payload, **kwargs)
+    evt = enrich_wire_event(_store_event_create(session_id, event_type, payload, **kwargs))
     _publish(session_id, evt)
     return evt
 
@@ -758,12 +761,23 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
 
 # ── Event / Stream API ───────────────────────────────────────
 
+@router.get("/events/protocol")
+async def api_events_protocol():
+    """Wire protocol catalog for SSE subscribers and timeline handlers."""
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "wire_event_types": list(ALL_WIRE_EVENT_TYPES),
+    }
+
+
 @router.get("/sessions/{session_id}/events")
 async def api_events(session_id: str, after_seq: int = 0, limit: int = 500, recent: bool = False):
     from edagent_vivado.repository.store import event_list_recent
     if recent:
-        return {"events": event_list_recent(session_id, limit=limit)}
-    return {"events": event_list(session_id, after_seq=after_seq, limit=limit)}
+        rows = event_list_recent(session_id, limit=limit)
+    else:
+        rows = event_list(session_id, after_seq=after_seq, limit=limit)
+    return {"events": [enrich_wire_event(e) for e in rows]}
 
 @router.get("/sessions/{session_id}/stream")
 async def api_stream(session_id: str, after_seq: int = 0):
@@ -776,8 +790,9 @@ async def api_stream(session_id: str, after_seq: int = 0):
         try:
             # Send missed events
             for evt in missed:
-                p = json.dumps(evt, ensure_ascii=False, default=str)
-                yield f"id: {session_id}:{evt['seq']}\nevent: {evt['event_type']}\ndata: {p}\n\n"
+                wire = enrich_wire_event(evt)
+                p = json.dumps(wire, ensure_ascii=False, default=str)
+                yield f"id: {session_id}:{wire['seq']}\nevent: {wire['event_type']}\ndata: {p}\n\n"
             # Stream live events
             while True:
                 try:

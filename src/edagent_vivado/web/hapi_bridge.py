@@ -1,4 +1,4 @@
-﻿"""HAPI-compatible API bridge — serves the HAPI frontend backed by EdAgent."""
+"""HAPI-compatible API bridge — serves the HAPI frontend backed by EdAgent."""
 
 from __future__ import annotations
 import json, os as _os, time, uuid, asyncio, threading
@@ -45,7 +45,7 @@ async def list_sessions() -> dict:
 @router.post("/api/sessions")
 async def create_session(body: dict | None = None) -> dict:
     sid = _new_id(); now = _now_ms()
-    name = (body or {}).get("name", "EdAgent Session")
+    name = (body or {}).get("name", "Synthia Session")
     SESSION_STORE[sid] = {"id": sid, "namespace": "default", "seq": 0, "createdAt": now,
         "updatedAt": now, "active": True, "activeAt": now,
         "metadata": {"path": str(Path.cwd()), "host": "localhost", "name": name, "os": "windows", "version": "0.2.0"},

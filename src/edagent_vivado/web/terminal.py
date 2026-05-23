@@ -1,4 +1,4 @@
-﻿"""Terminal-style chat frontend — single-file, no build step."""
+"""Terminal-style chat frontend — single-file, no build step."""
 
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ TERMINAL_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>EdAgent Terminal</title>
+<title>Synthia Terminal</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{height:100%}

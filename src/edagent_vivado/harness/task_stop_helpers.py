@@ -32,7 +32,7 @@ def cancel_running_toolcalls_for_task(
     for row in rows:
         tcid = row["id"]
         started_at = int(row["started_at"] or finished_at)
-        elapsed_ms = max(0, (finished_at - started_at) * 1000)
+        elapsed_ms = max(1, int((time.time() - started_at) * 1000))
         toolcall_update(
             tcid,
             state="stopped",

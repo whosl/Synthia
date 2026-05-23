@@ -1,5 +1,6 @@
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { resolveToolElapsedMs } from '../../lib/toolElapsed'
 import { useTerminalStore } from '../../stores/terminalStore'
 
 export interface ToolCallViewModel {
@@ -10,7 +11,9 @@ export interface ToolCallViewModel {
   result?: string
   error?: string
   startedAt?: number
+  startedAtMs?: number
   elapsedMs?: number
+  completedAtMs?: number
 }
 
 function formatElapsed(ms: number) {
@@ -31,11 +34,10 @@ function useToolElapsed(tool: ToolCallViewModel) {
     return () => window.clearInterval(id)
   }, [running])
 
-  if (tool.elapsedMs != null) return tool.elapsedMs
-  if (running && tool.startedAt) {
-    return Math.max(0, tick - tool.startedAt * 1000)
-  }
-  return null
+  return useMemo(() => {
+    const completedAtMs = running ? tick : tool.completedAtMs
+    return resolveToolElapsedMs(tool, { completedAtMs })
+  }, [tool, running, tick])
 }
 
 export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
@@ -55,22 +57,24 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
     <div
       className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}`}
     >
-    <div className="trace-header" onClick={() => toggle(tool.id)}>
-      {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-      {icon}
-      <span>{tool.name}</span>
-      {elapsedMs != null && (
-        <span className={`tool-elapsed${tool.state === 'running' ? ' tool-elapsed-live' : ''}`}>
-          {formatElapsed(elapsedMs)}
-        </span>
+      <div className="trace-header" onClick={() => toggle(tool.id)}>
+        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+        {icon}
+        <span>{tool.name}</span>
+        {elapsedMs != null && (
+          <span className={`tool-elapsed${tool.state === 'running' ? ' tool-elapsed-live' : ''}`}>
+            {formatElapsed(elapsedMs)}
+          </span>
+        )}
+        <span className="spacer" /><span className="tool-state">{tool.state}</span>
+      </div>
+      {!collapsed && (
+        <div className="trace-body">
+          {tool.args && <><b>Input</b>{'\n'}{tool.args}{'\n\n'}</>}
+          {errored && tool.error && <><b style={{ color: 'var(--error)' }}>Error</b>{'\n'}{tool.error}{'\n\n'}</>}
+          <><b>Output</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : 'No result summary yet.')}</>
+        </div>
       )}
-      <span className="spacer" /><span className="tool-state">{tool.state}</span>
-    </div>
-    {!collapsed && <div className="trace-body">
-      {tool.args && <><b>Input</b>{'\n'}{tool.args}{'\n\n'}</>}
-      {errored && tool.error && <><b style={{ color: 'var(--error)' }}>Error</b>{'\n'}{tool.error}{'\n\n'}</>}
-      <><b>Output</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : 'No result summary yet.')}</>
-    </div>}
     </div>
   )
 }

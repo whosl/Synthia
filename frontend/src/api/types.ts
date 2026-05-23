@@ -60,6 +60,9 @@ export interface SessionEvent {
   payload?: Record<string, unknown>
   artifact_id?: ID | null
   visibility?: string
+  /** Event envelope v1 — set by backend enrich_wire_event */
+  protocol_version?: number
+  canonical_type?: string
 }
 
 export interface Run {

@@ -7,6 +7,7 @@ export type TimelineEntryKind =
   | 'reasoning'
   | 'tool'
   | 'interaction'
+  | 'custom'
 
 export interface UserEntryPayload {
   text: string
@@ -32,7 +33,16 @@ export interface ToolEntryPayload {
   args?: string
   result?: string
   startedAt?: number
+  /** Wall-clock ms from tool.started (preferred for live timer). */
+  startedAtMs?: number
   elapsedMs?: number
+}
+
+/** Extension UI block — wire: custom.* or payload.ui_kind */
+export interface CustomEntryPayload {
+  uiKind: string
+  title?: string
+  data: Record<string, unknown>
 }
 
 export interface InteractionEntryPayload {
@@ -60,6 +70,7 @@ export type TimelineEntryPayload =
   | ReasoningEntryPayload
   | ToolEntryPayload
   | InteractionEntryPayload
+  | CustomEntryPayload
 
 export interface TimelineEntry {
   /** Stable key for upsert (user:id, assistant:taskId, tool:id, …) */

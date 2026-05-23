@@ -1,5 +1,6 @@
-﻿import { NavLink } from 'react-router-dom'
-import { Bot, ChevronLeft, ChevronRight, CircuitBoard, Database, Gauge, Home, Settings, TerminalSquare } from 'lucide-react'
+import { NavLink } from 'react-router-dom'
+import { ChevronLeft, ChevronRight, CircuitBoard, Database, Gauge, Home, Settings, TerminalSquare } from 'lucide-react'
+import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
@@ -20,8 +21,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside className="nav-rail" aria-label="Main navigation">
         <div className="nav-header">
           <div className="brand">
-            <span className="brand-mark"><Bot size={15} /></span>
-            <span className="brand-label">EdAgent</span>
+            <BrandMark />
+            <span className="brand-label">Synthia</span>
           </div>
           <button
             type="button"
@@ -49,7 +50,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
         <div className="nav-footer">
           <div className="user-card">
-            <span className="avatar">EA</span>
+            <span className="avatar">SY</span>
             <span className="nav-footer-label">Engineer</span>
           </div>
           <div className="nav-version">v0.3.0</div>

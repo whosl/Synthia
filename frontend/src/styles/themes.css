@@ -1,0 +1,290 @@
+/* App color themes — structural tokens live in tokens.css */
+
+/* Warm (default) — Claude-inspired light */
+:root,
+[data-theme='warm'] {
+  --bg: #FAF9F7;
+  --bg-subtle: #F5F3EF;
+  --surface: #FFFFFF;
+  --surface-raised: #FFFFFF;
+  --surface-inset: #F8F6F3;
+
+  --border: #E8E4DE;
+  --border-hover: #D4CFC7;
+  --border-strong: #C8C2BA;
+
+  --text: #1A1A1A;
+  --text-secondary: #5C5650;
+  --muted: #8C857E;
+  --subtle: #ADA69F;
+
+  --accent: #D97706;
+  --accent-hover: #B45309;
+  --accent-on: #FFFFFF;
+  --accent-subtle: rgba(217, 119, 6, 0.08);
+  --accent-border: rgba(217, 119, 6, 0.25);
+
+  --success: #16A34A;
+  --success-subtle: rgba(22, 163, 74, 0.08);
+  --success-border: rgba(22, 163, 74, 0.2);
+  --warning: #D97706;
+  --warning-subtle: rgba(217, 119, 6, 0.08);
+  --warning-border: rgba(217, 119, 6, 0.2);
+  --error: #DC2626;
+  --error-subtle: rgba(220, 38, 38, 0.06);
+  --error-border: rgba(220, 38, 38, 0.2);
+  --info: #2563EB;
+  --info-subtle: rgba(37, 99, 235, 0.06);
+  --info-border: rgba(37, 99, 235, 0.2);
+
+  /* Session chat — light cream (aligned with app shell) */
+  --term-bg: #FAF9F7;
+  --term-surface: #FFFFFF;
+  --term-surface-2: #F5F3EF;
+  --term-border: #E8E4DE;
+  --term-border-soft: #EDE9E3;
+  --term-text: #1A1A1A;
+  --term-text-strong: #1A1A1A;
+  --term-muted: #8C857E;
+  --term-subtle: #ADA69F;
+  --term-accent: #D97706;
+}
+
+/* Warm terminal — override dark-only component tints */
+[data-theme='warm'] .trace-block {
+  background: rgba(255, 255, 255, 0.96);
+}
+
+[data-theme='warm'] .trace-header:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+[data-theme='warm'] .message-turn.user .message-bubble {
+  background: rgba(217, 119, 6, 0.1);
+  border-color: rgba(217, 119, 6, 0.22);
+}
+
+[data-theme='warm'] .markdown pre {
+  background: #F5F3EF;
+  border-color: var(--term-border);
+}
+
+[data-theme='warm'] .markdown code {
+  color: #B45309;
+}
+
+[data-theme='warm'] .markdown pre code,
+[data-theme='warm'] .markdown pre code * {
+  background: transparent !important;
+  color: var(--term-text);
+  padding: 0;
+}
+
+[data-theme='warm'] .markdown td code,
+[data-theme='warm'] .markdown th code {
+  background: transparent;
+  color: inherit;
+}
+
+[data-theme='warm'] .remote-console {
+  background: #F5F3EF;
+  color: var(--term-text);
+}
+
+[data-theme='warm'] .right-panel-tab:hover,
+[data-theme='warm'] .terminal-layout .btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='warm'] .right-panel-tab.active {
+  background: var(--accent-subtle);
+}
+
+[data-theme='warm'] .terminal-layout .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+}
+
+[data-theme='warm'] .terminal-layout .status {
+  background: var(--term-surface);
+}
+
+[data-theme='warm'] .tool-block {
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
+[data-theme='warm'] .artifact-row {
+  background: var(--term-surface);
+}
+
+[data-theme='warm'] .approval-switch.enabled .approval-switch-state {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+
+/* Obsidian — true black / zinc (Figma site reference) */
+[data-theme='obsidian'] {
+  --bg: #000000;
+  --bg-subtle: #09090B;
+  --surface: #121214;
+  --surface-raised: #18181B;
+  --surface-inset: #0A0A0C;
+
+  --border: #27272A;
+  --border-hover: #3F3F46;
+  --border-strong: #52525B;
+
+  --text: #FAFAFA;
+  --text-secondary: #D4D4D8;
+  --muted: #A1A1AA;
+  --subtle: #71717A;
+
+  --accent: #FAFAFA;
+  --accent-hover: #E4E4E7;
+  --accent-on: #09090B;
+  --accent-subtle: rgba(250, 250, 250, 0.06);
+  --accent-border: rgba(250, 250, 250, 0.18);
+
+  --success: #4ADE80;
+  --success-subtle: rgba(74, 222, 128, 0.1);
+  --success-border: rgba(74, 222, 128, 0.22);
+  --warning: #FBBF24;
+  --warning-subtle: rgba(251, 191, 36, 0.1);
+  --warning-border: rgba(251, 191, 36, 0.22);
+  --error: #F87171;
+  --error-subtle: rgba(248, 113, 113, 0.1);
+  --error-border: rgba(248, 113, 113, 0.22);
+  --info: #60A5FA;
+  --info-subtle: rgba(96, 165, 250, 0.1);
+  --info-border: rgba(96, 165, 250, 0.22);
+
+  --term-bg: #000000;
+  --term-surface: #0F0F11;
+  --term-surface-2: #18181B;
+  --term-border: #27272A;
+  --term-border-soft: #1F1F23;
+  --term-text: #E4E4E7;
+  --term-text-strong: #FAFAFA;
+  --term-muted: #A1A1AA;
+  --term-subtle: #71717A;
+  --term-accent: #A78BFA;
+}
+
+/* Meadow — mint / organic (Figma reference screenshot) */
+[data-theme='meadow'] {
+  --bg: #F7FAF3;
+  --bg-subtle: #EEF6E6;
+  --surface: #FFFFFF;
+  --surface-raised: #FFFFFF;
+  --surface-inset: #D9EDC2;
+
+  --border: #DCE8D4;
+  --border-hover: #C5D9B8;
+  --border-strong: #A8C49A;
+
+  --text: #000000;
+  --text-secondary: #5F5F5F;
+  --muted: #7A7A7A;
+  --subtle: #9A9A9A;
+
+  --accent: #1A1A1A;
+  --accent-hover: #000000;
+  --accent-on: #FFFFFF;
+  --accent-subtle: rgba(26, 26, 26, 0.06);
+  --accent-border: rgba(26, 26, 26, 0.14);
+
+  --success: #3D8B4A;
+  --success-subtle: rgba(61, 139, 74, 0.1);
+  --success-border: rgba(61, 139, 74, 0.22);
+  --warning: #9A7B2F;
+  --warning-subtle: rgba(154, 123, 47, 0.1);
+  --warning-border: rgba(154, 123, 47, 0.2);
+  --error: #C45C5C;
+  --error-subtle: rgba(246, 216, 216, 0.65);
+  --error-border: rgba(196, 92, 92, 0.28);
+  --info: #6B6FA8;
+  --info-subtle: rgba(215, 217, 242, 0.85);
+  --info-border: rgba(107, 111, 168, 0.28);
+
+  /* Session chat — light mint (aligned with app shell, not dark terminal) */
+  --term-bg: #F7FAF3;
+  --term-surface: #FFFFFF;
+  --term-surface-2: #EEF6E6;
+  --term-border: #DCE8D4;
+  --term-border-soft: #E4EDE0;
+  --term-text: #1F2919;
+  --term-text-strong: #000000;
+  --term-muted: #5F6B58;
+  --term-subtle: #8A9584;
+  --term-accent: #4A7C3F;
+}
+
+/* Meadow terminal — override dark-only component tints */
+[data-theme='meadow'] .trace-block {
+  background: rgba(255, 255, 255, 0.94);
+}
+
+[data-theme='meadow'] .trace-header:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+[data-theme='meadow'] .message-turn.user .message-bubble {
+  background: rgba(217, 237, 194, 0.5);
+  border-color: var(--border-hover);
+}
+
+[data-theme='meadow'] .markdown pre {
+  background: #EEF6E6;
+  border-color: var(--term-border);
+}
+
+[data-theme='meadow'] .markdown code {
+  color: var(--term-accent);
+}
+
+[data-theme='meadow'] .markdown pre code,
+[data-theme='meadow'] .markdown pre code * {
+  background: transparent !important;
+  color: var(--term-text);
+  padding: 0;
+}
+
+[data-theme='meadow'] .markdown td code,
+[data-theme='meadow'] .markdown th code {
+  background: transparent;
+  color: inherit;
+}
+
+[data-theme='meadow'] .remote-console {
+  background: #EEF6E6;
+  color: var(--term-text);
+}
+
+[data-theme='meadow'] .right-panel-tab:hover,
+[data-theme='meadow'] .terminal-layout .btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='meadow'] .right-panel-tab.active {
+  background: rgba(74, 124, 63, 0.1);
+}
+
+[data-theme='meadow'] .terminal-layout .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+}
+
+[data-theme='meadow'] .terminal-layout .status {
+  background: var(--term-surface);
+}
+
+[data-theme='meadow'] .tool-block {
+  border-color: var(--border-hover);
+}
+
+[data-theme='meadow'] .artifact-row {
+  background: var(--term-surface);
+}

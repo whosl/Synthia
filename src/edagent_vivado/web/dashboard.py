@@ -227,7 +227,7 @@ async def get_error_kb() -> list[dict]:
 @router.get("/", response_class=HTMLResponse)
 async def index():
     return _page("Dashboard", """
-    <h1>EdAgent-Vivado Dashboard</h1>
+    <h1>Synthia Dashboard</h1>
     <p>Vivado RTL Debug Agent v0.2.0</p>
     <nav>
         <a href="/runs">Run History</a> |

@@ -1,11 +1,23 @@
 /* Sessions list — responsive table + mobile cards */
 
+.sessions-page-header {
+  margin-bottom: 12px;
+}
+
 .sessions-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.sessions-refresh {
+  flex-shrink: 0;
+}
+
+.sessions-refresh-label {
+  margin-left: 4px;
 }
 
 .sessions-search-wrap {
@@ -132,18 +144,41 @@
 
 @media (max-width: 768px) {
   .sessions-toolbar {
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .sessions-refresh {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .sessions-refresh-label {
+    display: none;
   }
 
   .sessions-search-wrap {
     flex: 1 1 auto;
+    min-width: 0;
     max-width: none;
-    width: 100%;
+    width: auto;
+  }
+
+  .sessions-search-wrap .input {
+    min-height: 36px;
+    font-size: 14px;
   }
 
   .sessions-sort {
-    width: 100%;
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 42%;
+    min-width: 0;
+    padding-left: 8px;
+    padding-right: 28px;
+    font-size: 12px;
   }
 
   .sessions-table-wrap {

@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="EdAgent-Vivado", version="0.3.0")
+    app = FastAPI(title="Synthia", version="0.3.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     # Phase 1 v1 API

@@ -28,6 +28,18 @@ class ObservedToolRunner:
     run_id: str
     event_sink: EventSink
     tool_ids: dict[str, str] = field(default_factory=dict)
+    _start_perf: dict[str, float] = field(default_factory=dict, repr=False)
+
+    def _mark_tool_start(self, tcid: str) -> tuple[int, int]:
+        """Wall-clock ms for UI + perf_counter for precise elapsed_ms."""
+        self._start_perf[tcid] = time.perf_counter()
+        return int(time.time() * 1000)
+
+    def _elapsed_ms(self, tcid: str, started_at_sec: int, finished_at_sec: int) -> int:
+        t0 = self._start_perf.pop(tcid, None)
+        if t0 is not None:
+            return max(1, int((time.perf_counter() - t0) * 1000))
+        return max(1, int((finished_at_sec - started_at_sec) * 1000))
 
     def on_tool_rejected(
         self,
@@ -55,7 +67,7 @@ class ObservedToolRunner:
         ui_state = tool_ui_state_from_output(output)
         finished_at = int(time.time())
         started_at = int(tc.get("started_at") or finished_at)
-        elapsed_ms = max(0, (finished_at - started_at) * 1000)
+        elapsed_ms = self._elapsed_ms(tcid, started_at, finished_at)
         toolcall_update(
             tcid,
             state="rejected",
@@ -91,6 +103,7 @@ class ObservedToolRunner:
         key = str(langgraph_run_id or tc["id"])
         self.tool_ids[key] = tc["id"]
         started_at = int(tc.get("started_at") or time.time())
+        started_at_ms = self._mark_tool_start(tc["id"])
         self.event_sink(
             self.session_id,
             "tool.started",
@@ -99,6 +112,7 @@ class ObservedToolRunner:
                 "toolcall_id": tc["id"],
                 "args": args_str,
                 "started_at": started_at,
+                "started_at_ms": started_at_ms,
             },
             task_id=self.task_id,
             run_id=self.run_id,
@@ -127,7 +141,7 @@ class ObservedToolRunner:
         if tcid:
             row = toolcall_get(tcid) or {}
             started_at = int(row.get("started_at") or finished_at)
-            elapsed_ms = max(0, (finished_at - started_at) * 1000)
+            elapsed_ms = self._elapsed_ms(tcid, started_at, finished_at)
             db_state = ui_state if ui_state in ("error", "rejected") else "completed"
             toolcall_update(
                 tcid,

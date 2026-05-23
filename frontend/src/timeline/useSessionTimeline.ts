@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { listEvents } from '../api/events'
+import { fetchEventProtocol, listEvents } from '../api/events'
+import { setSubscribedWireEventTypes } from '../lib/sse'
 import { listMessages } from '../api/messages'
 import { request } from '../api/client'
 import type { SessionEvent } from '../api/types'
@@ -107,6 +108,12 @@ export function useSessionTimeline(sessionId: string) {
       queryClient.invalidateQueries({ queryKey: ['session-context', sessionId] })
     }
   }, [queryClient, sessionId, setLastSeq])
+
+  useEffect(() => {
+    fetchEventProtocol()
+      .then((p) => setSubscribedWireEventTypes(p.wire_event_types))
+      .catch(() => { /* catalog fallback in sse.ts */ })
+  }, [])
 
   useEffect(() => {
     if (!sessionId) return

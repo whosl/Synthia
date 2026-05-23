@@ -1,5 +1,5 @@
 ﻿import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, Plus, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { ChevronRight, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createSession, deleteSession, listSessions } from '../api/sessions'
@@ -79,15 +79,23 @@ export default function SessionsPage() {
 
   return (
     <div className="page sessions-page">
-      <div className="page-header">
+      <div className="page-header sessions-page-header">
         <div>
           <h1 className="page-title">Sessions</h1>
           <p className="page-subtitle">Manage and resume engineering sessions</p>
         </div>
-        <Button className="ghost" onClick={() => refetch()}><RefreshCw size={15} /> Refresh</Button>
       </div>
 
       <div className="toolbar sessions-toolbar">
+        <Button
+          className="ghost sessions-refresh"
+          type="button"
+          aria-label="Refresh sessions"
+          onClick={() => refetch()}
+        >
+          <RefreshCw size={15} />
+          <span className="sessions-refresh-label">Refresh</span>
+        </Button>
         <div className="sessions-search-wrap">
           <Search size={15} className="sessions-search-icon" />
           <input
@@ -97,7 +105,6 @@ export default function SessionsPage() {
             placeholder="Search sessions..."
           />
         </div>
-        <Button className="ghost" type="button" aria-label="Filters (coming soon)"><SlidersHorizontal size={15} /></Button>
         <select className="select sessions-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
           <option value="updated">Sort: Updated desc</option>
           <option value="name">Sort: Name</option>
