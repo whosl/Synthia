@@ -139,25 +139,45 @@ def search_semantic_kb(
     session_id: str = "",
     task_id: str = "",
     run_id: str = "",
+    persist_audit: bool = True,
 ) -> tuple[str, list[dict]]:
+    """Hybrid search. scope=both uses one query (project scope includes global chunks)."""
     if scope == "both":
-        out = hybrid_search(
-            query, scope="global", top_k=top_k, min_score=min_score,
-            session_id=session_id, task_id=task_id, run_id=run_id,
-        )
         if project_id:
-            pout = hybrid_search(
-                query, scope="project", project_id=project_id, top_k=top_k, min_score=min_score,
-                session_id=session_id, task_id=task_id, run_id=run_id,
+            out = hybrid_search(
+                query,
+                scope="project",
+                project_id=project_id,
+                top_k=top_k,
+                min_score=min_score,
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                persist_audit=persist_audit,
             )
-            merged = sorted(out["results"] + pout["results"], key=lambda x: x["final_score"], reverse=True)[:top_k]
-            formatted = "\n".join(f"- {h['title']} (score={h['final_score']}): {h['excerpt']}" for h in merged)
-            return formatted, merged
+        else:
+            out = hybrid_search(
+                query,
+                scope="global",
+                top_k=top_k,
+                min_score=min_score,
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                persist_audit=persist_audit,
+            )
         return out["formatted"], out["results"]
 
     sco = "project" if scope == "project" else "global"
     out = hybrid_search(
-        query, scope=sco, project_id=project_id if sco == "project" else "",
-        top_k=top_k, min_score=min_score, session_id=session_id, task_id=task_id, run_id=run_id,
+        query,
+        scope=sco,
+        project_id=project_id if sco == "project" else "",
+        top_k=top_k,
+        min_score=min_score,
+        session_id=session_id,
+        task_id=task_id,
+        run_id=run_id,
+        persist_audit=persist_audit,
     )
     return out["formatted"], out["results"]

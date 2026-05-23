@@ -907,13 +907,44 @@ async def api_vivado_approval_set(body: dict):
 
 @router.get("/kb/cases")
 async def api_kb_cases():
-    from edagent_vivado.kb.error_case_loader import load_cases
-    return {"cases": [
-        {"id": f"builtin-{i}", "pattern": c.pattern, "category": c.category,
-         "likely_causes": c.likely_causes, "suggested_actions": c.suggested_actions,
-         "source": "builtin"}
-        for i, c in enumerate(load_cases())
-    ]}
+    import json
+
+    from edagent_vivado.kb.error_case_loader import load_cases, load_effective_cases
+    from edagent_vivado.repository.store import kb_case_list
+
+    rows: list[dict] = []
+    for i, c in enumerate(load_cases()):
+        rows.append({
+            "id": f"builtin-{i}",
+            "pattern": c.pattern,
+            "category": c.category,
+            "likely_causes": c.likely_causes,
+            "suggested_actions": c.suggested_actions,
+            "source": "builtin",
+        })
+    builtin_patterns = {c.pattern for c in load_cases()}
+    for row in kb_case_list(limit=500):
+        try:
+            likely = json.loads(row.get("likely_causes_json") or "[]")
+        except json.JSONDecodeError:
+            likely = []
+        try:
+            actions = json.loads(row.get("suggested_actions_json") or "[]")
+        except json.JSONDecodeError:
+            actions = []
+        pat = row.get("pattern") or ""
+        if pat in builtin_patterns:
+            continue
+        rows.append({
+            "id": row["id"],
+            "pattern": pat,
+            "category": row.get("category") or "unknown",
+            "likely_causes": likely,
+            "suggested_actions": actions,
+            "source": "db",
+        })
+    effective_count = len(load_effective_cases())
+    return {"cases": rows, "effective_count": effective_count}
 
 def _kb_candidate_row(row: dict) -> dict:
     likely = row.get("likely_causes_json")
@@ -962,7 +993,11 @@ async def api_kb_candidate_approve(candidate_id: str):
     row = kb_candidate_approve(candidate_id)
     if not row:
         raise HTTPException(404, "candidate not found")
-    return {"ok": True, "candidate": _kb_candidate_row(row)}
+    return {
+        "ok": True,
+        "candidate": _kb_candidate_row(row),
+        "merged_into_case_id": row.get("merged_into_case_id"),
+    }
 
 @router.post("/kb/candidates/{candidate_id}/reject")
 async def api_kb_candidate_reject(candidate_id: str):
@@ -1112,12 +1147,14 @@ async def api_knowledge_context_preview(request: Request):
         run_id="preview",
         question=question,
         manifest_path=manifest_path,
+        persist=False,
     )
     return {
         "prompt_preview": ctx.prompt[:8000],
         "token_counts": ctx.token_counts,
         "context_package_id": ctx.context_package.get("id"),
         "retrieval_audit_id": ctx.retrieval_audit.get("id") if ctx.retrieval_audit else None,
+        "persisted": False,
         "items": [
             {"type": i.item_type, "title": i.title, "included": i.included, "tokens": i.token_count}
             for i in ctx.items
@@ -1162,31 +1199,11 @@ async def api_vivado_run_flow(request: Request):
 
 @router.get("/vivado/devices")
 async def api_vivado_devices():
-    """Query available FPGA devices from connected Vivado instance."""
-    import subprocess, os
-    host = _os.environ.get("VIVADO_REMOTE_HOST", "")
-    key = _os.environ.get("VIVADO_REMOTE_KEY", "")
-    port = _os.environ.get("VIVADO_REMOTE_PORT", "")
-    env_script = _os.environ.get("VIVADO_REMOTE_ENV", "")
-    vivado_path = _os.environ.get("VIVADO_REMOTE_PATH", "vivado")
+    """Query available FPGA devices via VivadoRuntimeAdapter."""
+    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter
 
-    tcl_cmd = "foreach p [get_parts] { puts $p }; exit"
-    if host:
-        ssh = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
-        if key: ssh += ["-i", key]
-        if port: ssh += ["-p", str(port)]
-        ssh.append(host)
-        env_prefix = f"source {env_script} 2>/dev/null && " if env_script else ""
-        cmd = f'{env_prefix}{vivado_path} -mode batch -nojournal -nolog -tclargs <<< "{tcl_cmd}"'
-        try:
-            p = subprocess.run(ssh + [cmd], capture_output=True, text=True, timeout=30)
-            parts = [line.strip() for line in p.stdout.splitlines()
-                     if line.strip() and not line.startswith("***") and not line.startswith("INFO")
-                     and not line.startswith("Vivado") and "Copyright" not in line]
-            return {"devices": [{"value": part, "label": part} for part in sorted(parts) if part]}
-        except Exception as e:
-            return {"devices": [], "error": str(e)}
-    return {"devices": [], "error": "No Vivado target configured"}
+    adapter = VivadoRuntimeAdapter()
+    return adapter.list_devices(persist=True)
 
 @router.post("/vivado/commands/tcl")
 async def api_vivado_run_tcl(request: Request):

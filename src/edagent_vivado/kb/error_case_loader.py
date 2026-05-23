@@ -25,6 +25,45 @@ def _default_kb_path() -> Path:
     return Path(__file__).parent / "error_cases.yaml"
 
 
+def _db_cases() -> list[ErrorCase]:
+    """Approved KB cases persisted in SQLite (from merged candidates)."""
+    import json
+
+    from edagent_vivado.repository.store import kb_case_list
+
+    out: list[ErrorCase] = []
+    for row in kb_case_list(limit=500):
+        try:
+            likely = json.loads(row.get("likely_causes_json") or "[]")
+        except json.JSONDecodeError:
+            likely = []
+        try:
+            actions = json.loads(row.get("suggested_actions_json") or "[]")
+        except json.JSONDecodeError:
+            actions = []
+        out.append(
+            ErrorCase(
+                pattern=str(row.get("pattern") or ""),
+                category=str(row.get("category") or "unknown"),
+                likely_causes=likely if isinstance(likely, list) else [],
+                suggested_actions=actions if isinstance(actions, list) else [],
+            )
+        )
+    return [c for c in out if c.pattern]
+
+
+def load_effective_cases(kb_path: str | Path | None = None) -> list[ErrorCase]:
+    """Builtin YAML cases plus approved DB cases (deduped by pattern)."""
+    builtin = load_cases(kb_path)
+    seen = {c.pattern for c in builtin}
+    merged = list(builtin)
+    for case in _db_cases():
+        if case.pattern not in seen:
+            merged.append(case)
+            seen.add(case.pattern)
+    return merged
+
+
 def load_cases(kb_path: str | Path | None = None) -> list[ErrorCase]:
     """Load error cases from the YAML knowledge base."""
     global _CASE_CACHE

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from edagent_vivado.harness.approval_outcomes import (
@@ -15,6 +16,7 @@ from edagent_vivado.repository.store import problem_create
 EventSink = Callable[[str, dict], Any]
 
 _ERROR_LINE = re.compile(r"^(ERROR|CRITICAL WARNING):\s*(.+)", re.MULTILINE | re.IGNORECASE)
+_LOG_PATH = re.compile(r"([\w./\\:-]+\.log)\b", re.IGNORECASE)
 
 
 def _problems_from_text(text: str, source: str, tool_name: str = "") -> list[dict]:
@@ -30,6 +32,39 @@ def _problems_from_text(text: str, source: str, tool_name: str = "") -> list[dic
             "source": source,
         })
     return found
+
+
+def _problems_from_vivado_log_paths(text: str, source: str, tool_name: str = "") -> list[dict]:
+    """If tool output references a Vivado log file, parse it for structured problems."""
+    problems: list[dict] = []
+    seen_paths: set[str] = set()
+    for m in _LOG_PATH.finditer(text):
+        raw = m.group(1).strip().strip("'\"")
+        if raw in seen_paths:
+            continue
+        seen_paths.add(raw)
+        path = Path(raw)
+        if not path.is_file():
+            continue
+        try:
+            from edagent_vivado.parsers.vivado_log_parser import load_and_parse
+
+            summary = load_and_parse(path)
+        except OSError:
+            continue
+        for entry in summary.messages:
+            if entry.severity not in ("ERROR", "CRITICAL WARNING"):
+                continue
+            msg = f"[{entry.message_id}] {entry.text}"[:500]
+            problems.append({
+                "message": msg,
+                "severity": "error" if entry.severity == "ERROR" else "critical",
+                "category": "vivado",
+                "signature": msg[:120],
+                "source": source,
+                "metadata": {"tool_name": tool_name, "log_path": str(path)},
+            })
+    return problems
 
 
 def collect_from_tool_output(
@@ -57,6 +92,7 @@ def collect_from_tool_output(
         })
 
     problems.extend(_problems_from_text(text, source, tool_name))
+    problems.extend(_problems_from_vivado_log_paths(text, source, tool_name))
     vivado_tools = {
         "run_vivado_synth_tool": "vivado_synth",
         "run_vivado_impl_tool": "vivado_impl",

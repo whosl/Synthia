@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from edagent_vivado.agent.summary import compact_text, estimate_tokens
-from edagent_vivado.kb.error_case_loader import load_cases, match_cases
+from edagent_vivado.kb.error_case_loader import load_effective_cases, match_cases
 from edagent_vivado.repository.store import (
     context_package_create,
     context_package_item_create,
@@ -94,7 +94,7 @@ def _project_context(manifest_path: str) -> str:
 
 def _error_kb_context(question: str) -> tuple[str, list[dict]]:
     signatures = [question]
-    matches = match_cases(signatures, load_cases())
+    matches = match_cases(signatures, load_effective_cases())
     records: list[dict] = []
     lines: list[str] = []
     for case, sig in matches[:5]:
@@ -120,6 +120,7 @@ def _semantic_kb_context(
     session_id: str = "",
     task_id: str = "",
     run_id: str = "",
+    persist_audit: bool = True,
 ) -> tuple[str, list[dict]]:
     """Retrieve from indexed repo docs (Phase 2A hybrid search)."""
     if not question.strip():
@@ -133,6 +134,7 @@ def _semantic_kb_context(
             session_id=session_id,
             task_id=task_id,
             run_id=run_id,
+            persist_audit=persist_audit,
         )
     except Exception:
         return "", []
@@ -143,8 +145,18 @@ class AgentContextBuilder:
         self.max_context_tokens = max_context_tokens or int(os.environ.get("EDAGENT_MAX_CONTEXT_TOKENS", "64000"))
         self.recent_message_limit = recent_message_limit or int(os.environ.get("EDAGENT_RECENT_MESSAGE_LIMIT", "20"))
 
-    def build(self, session_id: str, task_id: str, run_id: str, question: str,
-              manifest_path: str = "", agent_id: str = "", model: str = "") -> AgentContext:
+    def build(
+        self,
+        session_id: str,
+        task_id: str,
+        run_id: str,
+        question: str,
+        manifest_path: str = "",
+        agent_id: str = "",
+        model: str = "",
+        *,
+        persist: bool = True,
+    ) -> AgentContext:
         items: list[ContextItem] = []
         token_counts: dict[str, int] = {}
 
@@ -179,7 +191,11 @@ class AgentContextBuilder:
             items.append(ContextItem("tool_summary", "Relevant Tool Summaries", "\n".join(tool_lines), priority=7, trust_score=0.72))
 
         semantic_text, semantic_hits = _semantic_kb_context(
-            question, session_id=session_id, task_id=task_id, run_id=run_id,
+            question,
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            persist_audit=persist,
         )
         if semantic_text:
             items.append(ContextItem("semantic_kb", "Retrieved Semantic Knowledge", semantic_text, priority=8, source_type="semantic_kb", authority_score=0.7, trust_score=0.65, relevance_score=0.6))
@@ -201,63 +217,96 @@ class AgentContextBuilder:
         token_counts["question"] = estimate_tokens(question)
         token_counts["total"] = sum(token_counts.values())
 
-        audit = retrieval_audit_create(
-            session_id=session_id,
-            task_id=task_id,
-            run_id=run_id,
-            agent_id=agent_id,
-            query=question,
-            rewritten_query=question,
-            intent={**_classify_intent(question), "entities": _extract_entities(question)},
-            filters={"scope": "global+project"},
-            candidate_count=len(error_records) + len(semantic_hits),
-            selected_count=len(error_records) + len(semantic_hits),
-            rejected_count=0,
-            token_budget=self.max_context_tokens,
-            token_used=token_counts["total"],
-            metadata={"phase": "2a", "vector_backend": "sqlite-json", "retrieval": "hybrid"},
-        )
-        for hit in semantic_hits:
-            retrieval_audit_item_create(
-                audit["id"],
-                hit.get("source_type", "doc"),
-                title=hit.get("title", ""),
-                excerpt=hit.get("excerpt", ""),
-                selected=True,
-                source_id=hit.get("source_id", ""),
-                chunk_id=hit.get("chunk_id", ""),
-                final_score=hit.get("final_score", hit.get("score", 0)),
-                vector_score=hit.get("vector_score"),
-                authority_score=hit.get("authority_score", 0.7),
-                trust_score=hit.get("trust_score", 0.65),
-                token_count=estimate_tokens(hit.get("excerpt", "")),
+        audit: dict | None
+        if persist:
+            audit = retrieval_audit_create(
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                agent_id=agent_id,
+                query=question,
+                rewritten_query=question,
+                intent={**_classify_intent(question), "entities": _extract_entities(question)},
+                filters={"scope": "global+project"},
+                candidate_count=len(error_records) + len(semantic_hits),
+                selected_count=len(error_records) + len(semantic_hits),
+                rejected_count=0,
+                token_budget=self.max_context_tokens,
+                token_used=token_counts["total"],
+                metadata={"phase": "2a", "vector_backend": "sqlite-json", "retrieval": "hybrid"},
             )
-        for rec in error_records:
-            retrieval_audit_item_create(
-                audit["id"], "error_kb", title=rec["category"], excerpt=json.dumps(rec, ensure_ascii=False),
-                selected=True, source_id=rec["pattern"], final_score=0.82,
-                authority_score=0.82, trust_score=0.82, token_count=estimate_tokens(str(rec)),
-            )
+            for hit in semantic_hits:
+                retrieval_audit_item_create(
+                    audit["id"],
+                    hit.get("source_type", "doc"),
+                    title=hit.get("title", ""),
+                    excerpt=hit.get("excerpt", ""),
+                    selected=True,
+                    source_id=hit.get("source_id", ""),
+                    chunk_id=hit.get("chunk_id", ""),
+                    final_score=hit.get("final_score", hit.get("score", 0)),
+                    vector_score=hit.get("vector_score"),
+                    authority_score=hit.get("authority_score", 0.7),
+                    trust_score=hit.get("trust_score", 0.65),
+                    token_count=estimate_tokens(hit.get("excerpt", "")),
+                )
+            for rec in error_records:
+                retrieval_audit_item_create(
+                    audit["id"],
+                    "error_kb",
+                    title=rec["category"],
+                    excerpt=json.dumps(rec, ensure_ascii=False),
+                    selected=True,
+                    source_id=rec["pattern"],
+                    final_score=0.82,
+                    authority_score=0.82,
+                    trust_score=0.82,
+                    token_count=estimate_tokens(str(rec)),
+                )
+        else:
+            audit = {
+                "id": "preview-audit",
+                "session_id": session_id,
+                "preview": True,
+            }
 
-        package = context_package_create(
-            session_id=session_id,
-            task_id=task_id,
-            run_id=run_id,
-            agent_id=agent_id,
-            model=model or os.environ.get("EDAGENT_MODEL", ""),
-            max_context_tokens=self.max_context_tokens,
-            token_counts=token_counts,
-            truncated=any(not i.included for i in selected),
-            metadata={"retrieval_audit_id": audit["id"], "phase": "2"},
-        )
-        for item in selected:
-            context_package_item_create(
-                package["id"], item.item_type, item.title, compact_text(item.content, 1200),
-                priority=item.priority, included=item.included, source_id=item.source_id,
-                source_type=item.source_type, token_count=item.token_count,
-                truncation_reason=item.truncation_reason, authority_score=item.authority_score,
-                trust_score=item.trust_score, relevance_score=item.relevance_score,
+        truncated = any(not i.included for i in selected)
+        if persist:
+            package = context_package_create(
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                agent_id=agent_id,
+                model=model or os.environ.get("EDAGENT_MODEL", ""),
+                max_context_tokens=self.max_context_tokens,
+                token_counts=token_counts,
+                truncated=truncated,
+                metadata={"retrieval_audit_id": audit["id"], "phase": "2"},
             )
+            for item in selected:
+                context_package_item_create(
+                    package["id"],
+                    item.item_type,
+                    item.title,
+                    compact_text(item.content, 1200),
+                    priority=item.priority,
+                    included=item.included,
+                    source_id=item.source_id,
+                    source_type=item.source_type,
+                    token_count=item.token_count,
+                    truncation_reason=item.truncation_reason,
+                    authority_score=item.authority_score,
+                    trust_score=item.trust_score,
+                    relevance_score=item.relevance_score,
+                )
+        else:
+            package = {
+                "id": "preview-package",
+                "session_id": session_id,
+                "preview": True,
+                "truncated": truncated,
+                "metadata_json": json.dumps({"retrieval_audit_id": audit["id"], "preview": True}),
+            }
 
         sections = []
         for item in selected:

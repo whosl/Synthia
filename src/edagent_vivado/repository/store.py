@@ -488,12 +488,15 @@ def kb_candidate_update(cand_id: str, **fields) -> dict | None:
     return kb_candidate_get(cand_id)
 
 def kb_candidate_approve(cand_id: str, reviewed_by: str = "user") -> dict | None:
-    now = _now()
-    get_db().execute(
-        "UPDATE kb_candidates SET status='approved', reviewed_at=?, reviewed_by=? WHERE id=?",
-        (now, reviewed_by, cand_id))
-    get_db().commit()
-    return kb_candidate_get(cand_id)
+    """Approve and merge into searchable kb_cases (approve ==入库)."""
+    cand = kb_candidate_get(cand_id)
+    if not cand:
+        return None
+    if cand.get("status") == "merged" and cand.get("merged_into_case_id"):
+        return cand
+    if cand.get("status") == "rejected":
+        return cand
+    return kb_candidate_merge(cand_id, reviewed_by=reviewed_by)
 
 def kb_candidate_reject(cand_id: str, reviewed_by: str = "user") -> dict | None:
     now = _now()

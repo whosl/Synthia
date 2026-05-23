@@ -49,6 +49,7 @@ def hybrid_search(
     session_id: str = "",
     task_id: str = "",
     run_id: str = "",
+    persist_audit: bool = True,
 ) -> dict[str, Any]:
     """Keyword + vector hybrid search with retrieval audit."""
     from edagent_vivado.repository.db import get_db
@@ -113,37 +114,45 @@ def hybrid_search(
     scored.sort(key=lambda x: x["final_score"], reverse=True)
     results = scored[:top_k]
 
-    audit = retrieval_audit_create(
-        session_id=session_id,
-        task_id=task_id,
-        run_id=run_id,
-        query=query,
-        rewritten_query=rewritten,
-        intent={"entities": extract_entities(query), "scope": scope},
-        filters={"scope": scope, "project_id": project_id or None},
-        candidate_count=len(scored),
-        selected_count=len(results),
-        rejected_count=max(0, len(scored) - len(results)),
-        token_budget=0,
-        token_used=0,
-        metadata={"phase": "2a", "vector_backend": "sqlite-json", "embedding": provider.model},
-    )
-    for hit in results:
-        retrieval_audit_item_create(
-            audit["id"],
-            hit["source_type"],
-            title=hit["title"],
-            excerpt=hit["excerpt"],
-            selected=True,
-            source_id=hit["source_id"],
-            chunk_id=hit["chunk_id"],
-            vector_score=hit["vector_score"],
-            final_score=hit["final_score"],
-            authority_score=hit["authority_score"],
-            trust_score=hit["trust_score"],
+    audit_id: str | None = None
+    if persist_audit:
+        audit = retrieval_audit_create(
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            query=query,
+            rewritten_query=rewritten,
+            intent={"entities": extract_entities(query), "scope": scope},
+            filters={"scope": scope, "project_id": project_id or None},
+            candidate_count=len(scored),
+            selected_count=len(results),
+            rejected_count=max(0, len(scored) - len(results)),
+            token_budget=0,
+            token_used=0,
+            metadata={"phase": "2a", "vector_backend": "sqlite-json", "embedding": provider.model},
         )
+        audit_id = audit["id"]
+        for hit in results:
+            retrieval_audit_item_create(
+                audit_id,
+                hit["source_type"],
+                title=hit["title"],
+                excerpt=hit["excerpt"],
+                selected=True,
+                source_id=hit["source_id"],
+                chunk_id=hit["chunk_id"],
+                vector_score=hit["vector_score"],
+                final_score=hit["final_score"],
+                authority_score=hit["authority_score"],
+                trust_score=hit["trust_score"],
+            )
 
     formatted = "\n".join(
         f"- {h['title']} (score={h['final_score']}): {h['excerpt']}" for h in results
     )
-    return {"audit_id": audit["id"], "results": results, "formatted": formatted, "rewritten_query": rewritten}
+    return {
+        "audit_id": audit_id,
+        "results": results,
+        "formatted": formatted,
+        "rewritten_query": rewritten,
+    }

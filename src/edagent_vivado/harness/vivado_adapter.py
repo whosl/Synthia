@@ -272,6 +272,35 @@ class VivadoRuntimeAdapter:
 
         return result
 
+    def list_devices(self, *, persist: bool = True, timeout: int = 45) -> dict[str, Any]:
+        """Query Vivado `get_parts` via unified Tcl execution."""
+        if not self._target:
+            return {"devices": [], "error": "No Vivado target configured"}
+
+        tcl = "foreach p [get_parts] { puts $p }; exit"
+        result = self.run_tcl(
+            tcl,
+            auto_approved=True,
+            timeout=timeout,
+            persist=persist,
+        )
+        if not result.success:
+            return {
+                "devices": [],
+                "error": result.error or result.stderr or "Vivado list_devices failed",
+                "exit_code": result.exit_code,
+            }
+
+        skip_prefixes = ("***", "INFO", "WARNING", "Vivado", "Copyright", "SW Build")
+        parts: list[str] = []
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line or any(line.startswith(p) for p in skip_prefixes):
+                continue
+            parts.append(line)
+        devices = [{"value": p, "label": p} for p in sorted(set(parts))]
+        return {"devices": devices, "target_id": self._target.id}
+
     def _ssh_base(self) -> list[str]:
         cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
         if self._target and self._target.ssh_key_path:
