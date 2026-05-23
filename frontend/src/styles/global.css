@@ -40,10 +40,18 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
 }
 
+.nav-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
 .nav-collapse-btn {
-  position: absolute;
-  top: 14px;
-  right: 8px;
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   border: 1px solid var(--border);
@@ -53,7 +61,6 @@ a { color: inherit; text-decoration: none; }
   display: grid;
   place-items: center;
   padding: 0;
-  z-index: 2;
   transition: color var(--transition), border-color var(--transition);
 }
 
@@ -62,14 +69,16 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--border-strong);
 }
 
-.app-shell.nav-collapsed .nav-collapse-btn {
-  right: 50%;
-  transform: translateX(50%);
+.app-shell.nav-collapsed .nav-header {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 8px;
 }
 
 .app-shell.nav-collapsed .brand {
   justify-content: center;
-  padding: 0 8px;
+  padding: 0;
 }
 
 .app-shell.nav-collapsed .brand-label,
@@ -106,12 +115,12 @@ a { color: inherit; text-decoration: none; }
 }
 
 .brand {
-  height: 56px;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 44px 0 20px;
-  border-bottom: 1px solid var(--border);
+  padding: 0;
   color: var(--text);
   font-weight: 700;
   font-size: var(--font-size-md);
@@ -496,9 +505,16 @@ a { color: inherit; text-decoration: none; }
     display: none;
   }
 
+  .app-shell .nav-header {
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 6px 8px;
+  }
+
   .app-shell .brand {
     justify-content: center;
-    padding: 0 8px;
+    padding: 0;
   }
 
   .app-shell .nav-items { padding: 12px 6px; }

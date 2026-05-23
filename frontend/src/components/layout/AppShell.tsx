@@ -18,9 +18,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}`}>
       <aside className="nav-rail" aria-label="Main navigation">
-        <div className="brand">
-          <span className="brand-mark"><Bot size={15} /></span>
-          <span className="brand-label">EdAgent</span>
+        <div className="nav-header">
+          <div className="brand">
+            <span className="brand-mark"><Bot size={15} /></span>
+            <span className="brand-label">EdAgent</span>
+          </div>
+          <button
+            type="button"
+            className="nav-collapse-btn"
+            onClick={toggleNavCollapsed}
+            aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={navCollapsed ? 'Expand' : 'Collapse'}
+          >
+            {navCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+          </button>
         </div>
         <nav className="nav-items">
           {nav.map((item) => (
@@ -43,15 +54,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="nav-version">v0.3.0</div>
         </div>
-        <button
-          type="button"
-          className="nav-collapse-btn"
-          onClick={toggleNavCollapsed}
-          aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          title={navCollapsed ? 'Expand' : 'Collapse'}
-        >
-          {navCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-        </button>
       </aside>
       <main className="app-main">{children}</main>
     </div>
