@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, XCircle } from 'lucide-react'
 import type { ToolBlockState } from '../../lib/eventReducer'
 import { useTerminalStore } from '../../stores/terminalStore'
 
@@ -6,11 +6,13 @@ export function ToolCallBlock({ tool }: { tool: ToolBlockState }) {
   const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? true)
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
   const done = tool.state === 'completed'
+  const rejected = tool.state === 'rejected'
   const errored = tool.state === 'error'
   const icon = done ? <CheckCircle2 size={14} color="var(--success)" />
+    : rejected ? <XCircle size={14} color="var(--warning)" />
     : errored ? <AlertCircle size={14} color="var(--error)" />
     : <CircleDotDashed size={14} color="var(--warning)" />
-  return <div className={`trace-block tool-block ${done ? 'completed' : ''} ${errored ? 'errored' : ''}`}>
+  return <div className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''}`}>
     <div className="trace-header" onClick={() => toggle(tool.id)}>
       {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       {icon}
@@ -21,7 +23,7 @@ export function ToolCallBlock({ tool }: { tool: ToolBlockState }) {
     {!collapsed && <div className="trace-body">
       {tool.args && <><b>Input</b>{'\n'}{tool.args}{'\n\n'}</>}
       {errored && tool.error && <><b style={{ color: 'var(--error)' }}>Error</b>{'\n'}{tool.error}{'\n\n'}</>}
-      {tool.result || (errored ? '' : 'No result summary yet.')}
+      <><b>Output</b>{'\n'}{tool.result || (errored || rejected ? '' : 'No result summary yet.')}</>
     </div>}
   </div>
 }

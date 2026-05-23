@@ -14,7 +14,7 @@ import { StatusBadge } from '../components/common/StatusBadge'
 import { Composer } from '../components/terminal/Composer'
 import { MessageList } from '../components/terminal/MessageList'
 import { TimelineView } from '../components/terminal/TimelineView'
-import { applyEvent, rebuildTerminalState, type TerminalRuntimeState } from '../lib/eventReducer'
+import { applyEvent, mergePendingInteractions, rebuildTerminalState, type TerminalRuntimeState } from '../lib/eventReducer'
 import { SessionEventStream } from '../lib/sse'
 import { formatNumber, formatRelative, formatTime } from '../lib/time'
 import { useStreamStore } from '../stores/streamStore'
@@ -40,22 +40,33 @@ export default function TerminalPage() {
   const messagesQ = useQuery({ queryKey: ['messages', sessionId], queryFn: () => listMessages(sessionId, 500), enabled: Boolean(sessionId) })
   const activeQ = useQuery({ queryKey: ['active-task', sessionId], queryFn: () => getActiveTask(sessionId), enabled: Boolean(sessionId), refetchInterval: 3000 })
   const approvalQ = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
-  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 2000), enabled: Boolean(sessionId) })
+  const eventsQ = useQuery({ queryKey: ['events', sessionId], queryFn: () => listEvents(sessionId, 0, 5000), enabled: Boolean(sessionId) })
+  const pendingInteractionsQ = useQuery({
+    queryKey: ['interactions', sessionId],
+    queryFn: () => request<{ interactions: Record<string, unknown>[] }>(`/sessions/${sessionId}/interactions`),
+    enabled: Boolean(sessionId),
+    refetchInterval: 3000,
+  })
 
   const activeTask = activeQ.data?.task
   const running = activeTask?.state === 'running'
   const stopping = activeTask?.state === 'stopping'
 
-  // Rebuild runtime from persisted data — only when queries return fresher data than current SSE state
+  // Reset UI when switching sessions
+  useEffect(() => {
+    setRuntime({ turns: [], timeline: [], tools: [], lastSeq: 0 })
+    setLastSeq(sessionId, 0)
+  }, [sessionId, setLastSeq])
+
+  // Rebuild runtime from persisted data + pending interactions (single pass avoids race)
   useEffect(() => {
     if (!messagesQ.data || !eventsQ.data) return
-    const next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
-    setRuntime((prev) => {
-      if (next.lastSeq >= prev.lastSeq) return next
-      return prev
-    })
+    const pending = pendingInteractionsQ.data?.interactions || []
+    let next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
+    next = mergePendingInteractions(next, pending)
+    setRuntime(next)
     if (next.lastSeq > 0) setLastSeq(sessionId, next.lastSeq)
-  }, [messagesQ.data, eventsQ.data, sessionId, setLastSeq, activeTask])
+  }, [messagesQ.data, eventsQ.data, pendingInteractionsQ.data, sessionId, setLastSeq, activeTask])
 
   // SSE stream event handler — stable ref to avoid stream reconnects
   const onStreamEventRef = useRef<(event: SessionEvent) => void>(() => {})
@@ -108,6 +119,8 @@ export default function TerminalPage() {
     await request(`/interactions/${interactionId}/respond`, { method: 'POST', body: JSON.stringify(response), headers: { 'Content-Type': 'application/json' } })
     queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
     queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['interactions', sessionId] })
   }
 
   return <div className="page terminal-page">

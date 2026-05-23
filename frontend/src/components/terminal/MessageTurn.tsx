@@ -42,6 +42,7 @@ export function MessageTurn({ turn, onInteractionRespond }: MessageTurnProps) {
                 message={block.data.message}
                 files={block.data.files || []}
                 status={block.data.status as 'pending' | 'approved' | 'rejected'}
+                response={block.data.response}
                 onApprove={(id, files) => onInteractionRespond?.(id, { approved: true, approved_files: files })}
                 onReject={(id) => onInteractionRespond?.(id, { approved: false })}
               />

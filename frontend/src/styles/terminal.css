@@ -133,20 +133,26 @@
 .message-list, .timeline-view {
   min-height: 0;
   overflow: auto;
-  padding: 20px 16px;
+  padding: 20px 12px;
 }
 
-.message-turn { margin-bottom: 16px; }
+.message-turn {
+  margin-bottom: 16px;
+  width: 100%;
+  max-width: 100%;
+}
 
 .message-bubble {
-  max-width: 85%;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   border: 1px solid var(--term-border-soft);
   border-radius: var(--radius-md);
   padding: 12px 16px;
   background: var(--term-surface);
 }
 
-.message-turn.user { display: flex; justify-content: flex-end; }
+.message-turn.user { display: flex; justify-content: stretch; }
 .message-turn.user .message-bubble {
   background: rgba(245, 158, 11, 0.08);
   border-color: rgba(245, 158, 11, 0.2);
@@ -162,10 +168,23 @@
   margin-bottom: 6px;
 }
 
-.assistant-stack { max-width: 94%; display: grid; gap: 8px; }
+.assistant-stack {
+  width: 100%;
+  max-width: 100%;
+  display: grid;
+  gap: 8px;
+}
 .assistant-meta { margin: 0 0 2px; padding-left: 2px; }
-.assistant-blocks { display: grid; gap: 8px; }
-.assistant-blocks .message-bubble { max-width: 88%; }
+.assistant-blocks {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+.assistant-blocks .message-bubble,
+.assistant-blocks .trace-block {
+  width: 100%;
+  max-width: 100%;
+}
 
 /* Trace blocks (reasoning/tool) */
 .trace-block {
@@ -206,6 +225,8 @@
 
 .tool-block { border-color: rgba(245, 158, 11, 0.25); }
 .tool-block.completed { border-color: rgba(22, 163, 74, 0.25); }
+.tool-block.rejected { border-color: rgba(245, 158, 11, 0.45); }
+.tool-block.rejected .trace-header .tool-state { color: var(--warning); }
 .tool-state { font-size: var(--font-size-xs); color: var(--success); font-family: var(--font-mono); }
 
 /* Composer */
@@ -233,7 +254,7 @@
 
 /* Assistant text */
 .assistant-text-bubble { padding: 12px 16px; }
-.assistant-blocks .trace-block { max-width: 88%; margin: 0; }
+.assistant-blocks .trace-block { margin: 0; }
 
 /* Markdown in terminal */
 .markdown { line-height: 1.65; font-size: 13.5px; color: var(--term-text); }
@@ -352,11 +373,13 @@
 
 /* ── Interaction Blocks (Approval / Input Request) ── */
 .interaction-block {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   border: 1px solid var(--term-border);
   border-radius: var(--radius-md);
   padding: 16px;
   background: var(--term-surface);
-  max-width: 88%;
 }
 .interaction-block.status-pending { border-color: var(--term-accent); }
 .interaction-block.status-approved { border-color: var(--success); opacity: 0.85; }
@@ -380,7 +403,35 @@
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
   font-size: var(--font-size-sm); background: rgba(0,0,0,0.15);
 }
-.approval-file-header input[type="checkbox"] { accent-color: var(--term-accent); }
+.approval-file-header input[type="checkbox"] { accent-color: var(--term-accent); flex-shrink: 0; }
+
+.approval-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: var(--font-size-xs);
+}
+.approval-select-bar .link-btn {
+  background: none;
+  border: none;
+  color: var(--term-accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+}
+.approval-select-bar .link-btn:hover { text-decoration: underline; }
+.approval-select-bar .sep { color: var(--term-subtle); }
+.approval-select-count { margin-left: auto; color: var(--term-muted); }
+
+.approval-file.selected { border-color: rgba(245, 158, 11, 0.35); }
+.approval-file.file-approved { border-color: rgba(22, 163, 74, 0.35); }
+.approval-file.file-skipped { opacity: 0.55; }
+.file-status-icon.approved { color: var(--success); flex-shrink: 0; }
+.file-status-icon.skipped { color: var(--term-muted); flex-shrink: 0; }
+
+.interaction-block.status-partial { border-color: rgba(245, 158, 11, 0.55); }
+
 .file-action-badge {
   font-size: 10px; padding: 1px 6px; border-radius: 4px;
   background: var(--term-accent); color: var(--term-bg); font-weight: 600; text-transform: uppercase;

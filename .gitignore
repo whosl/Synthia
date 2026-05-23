@@ -5,6 +5,9 @@
 *.key
 id_*
 
+# Python venv
+.venv/
+
 # Python cache
 __pycache__/
 *.py[cod]

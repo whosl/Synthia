@@ -7,7 +7,15 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from edagent_vivado.harness.approval_outcomes import (
+    SCOPE_VIVADO_SYNTH,
+    format_execution_failed,
+    format_user_rejection,
+    tag_execution_result,
+)
 from edagent_vivado.harness.manifest import Manifest
+from edagent_vivado.harness.run_context import get_agent_task_id
+from edagent_vivado.harness.vivado_run_gate import wait_vivado_run_allowed
 from edagent_vivado.harness.vivado_runner import VivadoRunner
 from edagent_vivado.harness.workspace import Workspace
 
@@ -31,6 +39,10 @@ def run_vivado_synth_tool(manifest_path: str) -> str:
         manifest_path: Path to the eda.yaml manifest file.
     """
     try:
+        task_id = get_agent_task_id()
+        if not wait_vivado_run_allowed(task_id):
+            return format_user_rejection(SCOPE_VIVADO_SYNTH, tool_name="run_vivado_synth_tool")
+
         manifest = Manifest.load(manifest_path)
         ws = Workspace(base_dir=Path(manifest_path).parent, task_name="agent_synth")
         ws.copy_sources(manifest)
@@ -57,12 +69,14 @@ def run_vivado_synth_tool(manifest_path: str) -> str:
                 tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")
             tcl_path.write_text(tc)
             result = runner._remote_run("synth", tcl_path)
-            # If SSH fails (return code 255), fall back to mock mode
-            if result.get("return_code") == 255:
+            # SSH connection failure — do not silently mock; surface the error
+            if result.get("return_code") == 255 and not result.get("success"):
                 import logging
-                logging.warning("SSH connection to remote host failed, falling back to mock mode")
-                runner = VivadoRunner(workspace=ws, manifest=manifest, force_mock=True)
-                result = runner.run_synth()
+                err = result.get("error") or "SSH connection to remote Vivado host failed (exit 255)"
+                logging.error("Remote synthesis failed: %s", err)
+                result["error"] = err
+                result["mock"] = False
+                result["remote"] = True
         else:
             result = runner.run_synth()
             for tf in ws.root.glob("scripts/*.tcl"):
@@ -71,6 +85,6 @@ def run_vivado_synth_tool(manifest_path: str) -> str:
         summary_path = ws.write_json(result, "synth_result")
         result["workspace"] = str(ws.root)
         result["summary_path"] = str(summary_path)
-        return json.dumps(result, indent=2, default=str)
+        return tag_execution_result(result, SCOPE_VIVADO_SYNTH)
     except Exception as e:
-        return f"ERROR: Synthesis failed: {e}"
+        return format_execution_failed(SCOPE_VIVADO_SYNTH, str(e))

@@ -38,11 +38,60 @@ def _publish(session_id: str, event: dict) -> None:
 
 _store_event_create = event_create
 
+# Tool runs rejected at approval gate (run_id -> True)
+_blocked_tool_runs: dict[str, bool] = {}
+
 def event_create(session_id: str, event_type: str, payload: dict, **kwargs) -> dict:  # type: ignore[no-redef]
     """Persist an event and publish it to live SSE subscribers."""
     evt = _store_event_create(session_id, event_type, payload, **kwargs)
     _publish(session_id, evt)
     return evt
+
+
+async def _flush_pending_file_batch(
+    session_id: str,
+    task_id: str,
+    run: dict,
+    t: dict,
+) -> str | None:
+    """If file ops were queued, create one approval interaction and wait. Returns tool output or None."""
+    from edagent_vivado.harness.interaction import (
+        take_file_batch,
+        create_interaction,
+        wait_for_response,
+        InteractionType,
+    )
+    files, title, message = take_file_batch(session_id, task_id)
+    if not files:
+        return None
+    interaction = create_interaction(
+        InteractionType.APPROVAL,
+        session_id,
+        task_id,
+        title=title,
+        message=message,
+        files=files,
+    )
+    event_create(
+        session_id,
+        "interaction.requested",
+        interaction.to_dict(),
+        task_id=task_id,
+        run_id=run["id"],
+    )
+    responded = await wait_for_response(interaction.id)
+    if not responded:
+        return "TIMEOUT: No user response"
+    if responded.interaction_type != InteractionType.APPROVAL:
+        return json.dumps(responded.response, ensure_ascii=False)
+    if responded.status.value != "approved":
+        from edagent_vivado.harness.approval_outcomes import SCOPE_FILE_CHANGES, format_user_rejection
+        return format_user_rejection(SCOPE_FILE_CHANGES)
+    from edagent_vivado.harness.approval_apply import apply_approved_files, format_approval_tool_output
+    approved_paths = responded.response.get("approved_files") or [fi.path for fi in files]
+    applied, skipped = apply_approved_files(files, approved_paths)
+    return format_approval_tool_output(applied, skipped)
+
 
 # ── Session API ──────────────────────────────────────────────
 
@@ -141,125 +190,282 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             }, task_id=t["id"], run_id=run["id"])
             agent = create_agent()
             config = {"configurable": {"thread_id": f"session:{session_id}"}, "recursion_limit": 1000}
+            from edagent_vivado.harness.run_context import set_agent_run_context
+            set_agent_run_context(session_id, t["id"])
             full_response = ""
-            tool_ids: dict[str, str] = {}
-            async for evt in agent.astream_events(
-                {"messages": [HumanMessage(content=ctx.prompt)]}, config=config, version="v2",
-            ):
-                latest_task = task_get(t["id"])
-                if latest_task and latest_task.get("stop_requested"):
-                    if full_response:
-                        message_create(session_id, "assistant", full_response, task_id=t["id"], stopped=True, partial=True)
-                    task_update(t["id"], state="stopped", finished_at=int(time.time()))
-                    session_update(session_id, status="idle")
-                    if run: run_update(run["id"], state="stopped", finished_at=int(time.time()),
-                                      elapsed_ms=int((time.time() - run["started_at"]) * 1000))
-                    event_create(session_id, "message.assistant.stopped", {"text": full_response[-200:]},
-                                 task_id=t["id"], run_id=run["id"])
-                    event_create(session_id, "task.stopped", {"task_id": t["id"]}, task_id=t["id"], run_id=run["id"])
-                    return
-                kind = evt["event"]
-                if kind == "on_tool_start":
-                    tool_input = evt.get("data", {}).get("input", {})
-                    args_str = json.dumps(tool_input, ensure_ascii=False, default=str)[:1500]
-                    tc = toolcall_create(run_id=run["id"], tool_name=evt["name"], session_id=session_id, task_id=t["id"],
-                                         input_summary=args_str)
-                    tool_ids[evt.get("run_id", tc["id"])] = tc["id"]
-                    event_create(session_id, "tool.started", {"tool_name": evt["name"], "toolcall_id": tc["id"], "args": args_str},
-                                 task_id=t["id"], run_id=run["id"])
-                elif kind == "on_tool_end":
-                    output = str(evt.get("data", {}).get("output", ""))[:2500]
-                    tcid = tool_ids.get(evt.get("run_id", ""), "")
-                    tool_name = evt.get("name", "")
-                    # Intercept interaction tools — create interaction and wait for user
-                    if tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool") and not is_patch_approved():
-                        from edagent_vivado.harness.interaction import (
-                            create_interaction, wait_for_response, InteractionType, FileItem, InputField,
-                        )
+            continuation_msg: HumanMessage | None = None
+            approval_round = 0
+            max_approval_rounds = 6
+
+            while approval_round < max_approval_rounds:
+                inline_approval_results: list[str] = []
+                tool_ids: dict[str, str] = {}
+                agent_input = (
+                    HumanMessage(content=ctx.prompt)
+                    if approval_round == 0
+                    else continuation_msg  # type: ignore[assignment]
+                )
+                async for evt in agent.astream_events(
+                    {"messages": [agent_input]}, config=config, version="v2",
+                ):
+                    latest_task = task_get(t["id"])
+                    if latest_task and latest_task.get("stop_requested"):
+                        if full_response:
+                            message_create(session_id, "assistant", full_response, task_id=t["id"], stopped=True, partial=True)
+                        task_update(t["id"], state="stopped", finished_at=int(time.time()))
+                        session_update(session_id, status="idle")
+                        if run: run_update(run["id"], state="stopped", finished_at=int(time.time()),
+                                          elapsed_ms=int((time.time() - run["started_at"]) * 1000))
+                        event_create(session_id, "message.assistant.stopped", {"text": full_response[-200:]},
+                                     task_id=t["id"], run_id=run["id"])
+                        event_create(session_id, "task.stopped", {"task_id": t["id"]}, task_id=t["id"], run_id=run["id"])
+                        return
+                    kind = evt["event"]
+                    if kind == "on_tool_start":
+                        tool_name_start = evt.get("name", "")
                         tool_input = evt.get("data", {}).get("input", {})
-                        if tool_name == "create_file_tool":
-                            files = [FileItem(path=tool_input.get("file_path",""), content=tool_input.get("content",""),
-                                             description=tool_input.get("description",""), action="create")]
-                            interaction = create_interaction(
-                                InteractionType.APPROVAL, session_id, t["id"],
-                                title="Create File",
-                                message=tool_input.get("description", f"Create {tool_input.get('file_path','')}"),
-                                files=files,
-                            )
-                        elif tool_name == "propose_patch_tool":
-                            files = [FileItem(path=tool_input.get("file_path",""),
-                                             content=f"--- OLD ---\n{tool_input.get('old_text','')}\n--- NEW ---\n{tool_input.get('new_text','')}",
-                                             description=tool_input.get("description",""), action="modify")]
-                            interaction = create_interaction(
-                                InteractionType.APPROVAL, session_id, t["id"],
-                                title="Modify File",
-                                message=tool_input.get("description", f"Modify {tool_input.get('file_path','')}"),
-                                files=files,
-                            )
-                        elif tool_name == "request_approval":
-                            files = [FileItem(path=f.get("path",""), content=f.get("content",""),
-                                             description=f.get("description",""), action=f.get("action","create"))
-                                     for f in (tool_input.get("files") or [])]
-                            interaction = create_interaction(
-                                InteractionType.APPROVAL, session_id, t["id"],
-                                title=tool_input.get("title", "File Approval Required"),
-                                message=tool_input.get("message", ""),
-                                files=files,
-                            )
-                        else:
-                            fields = [InputField(id=f.get("id",""), label=f.get("label",""),
-                                                field_type=f.get("field_type","text"),
-                                                options=f.get("options"), placeholder=f.get("placeholder",""),
-                                                recommendations=f.get("recommendations"), required=f.get("required",True))
-                                      for f in (tool_input.get("fields") or [])]
-                            interaction = create_interaction(
-                                InteractionType.INPUT_REQUEST, session_id, t["id"],
-                                title=tool_input.get("title", "Information Required"),
-                                message=tool_input.get("message", ""),
-                                fields=fields,
-                            )
-                        event_create(session_id, "interaction.requested", interaction.to_dict(),
+                        # Flush batched file ops before any non-file tool; gate Vivado runs per invocation
+                        if not is_patch_approved():
+                            if tool_name_start not in ("create_file_tool", "propose_patch_tool"):
+                                pre_flush = await _flush_pending_file_batch(session_id, t["id"], run, t)
+                                if pre_flush:
+                                    inline_approval_results.append(pre_flush)
+                            if tool_name_start == "run_vivado_synth_tool":
+                                from edagent_vivado.harness.interaction import (
+                                    create_interaction,
+                                    wait_for_response,
+                                    InteractionType,
+                                )
+                                from edagent_vivado.harness.vivado_run_gate import (
+                                    begin_vivado_run_gate,
+                                    resolve_vivado_run_gate,
+                                )
+                                begin_vivado_run_gate(t["id"])
+                                manifest = tool_input.get("manifest_path", "")
+                                interaction = create_interaction(
+                                    InteractionType.APPROVAL,
+                                    session_id,
+                                    t["id"],
+                                    title="Run Vivado Synthesis",
+                                    message=f"Allow running Vivado synthesis?\nManifest: {manifest}",
+                                    files=[],
+                                )
+                                event_create(
+                                    session_id,
+                                    "interaction.requested",
+                                    interaction.to_dict(),
+                                    task_id=t["id"],
+                                    run_id=run["id"],
+                                )
+                                responded = await wait_for_response(interaction.id)
+                                approved = bool(
+                                    responded and responded.status.value == "approved"
+                                )
+                                resolve_vivado_run_gate(t["id"], approved)
+                                run_key = str(evt.get("run_id", ""))
+                                if not approved and run_key:
+                                    _blocked_tool_runs[run_key] = True
+                        args_str = json.dumps(tool_input, ensure_ascii=False, default=str)[:1500]
+                        tc = toolcall_create(run_id=run["id"], tool_name=evt["name"], session_id=session_id, task_id=t["id"],
+                                             input_summary=args_str)
+                        tool_ids[evt.get("run_id", tc["id"])] = tc["id"]
+                        event_create(session_id, "tool.started", {"tool_name": evt["name"], "toolcall_id": tc["id"], "args": args_str},
                                      task_id=t["id"], run_id=run["id"])
-                        # Wait for user response (blocks until user acts)
-                        responded = await wait_for_response(interaction.id)
-                        if responded:
-                            if responded.interaction_type == InteractionType.APPROVAL:
-                                output = "APPROVED" if responded.status.value == "approved" else "REJECTED"
-                                if responded.status.value == "approved":
-                                    # Apply approved files
-                                    from pathlib import Path as _Path
-                                    for fi in (interaction.files or []):
-                                        if fi.path in (responded.response.get("approved_files") or [fi.path]):
-                                            fp = _Path(fi.path)
-                                            fp.parent.mkdir(parents=True, exist_ok=True)
-                                            fp.write_text(fi.content)
+                    elif kind == "on_tool_end":
+                        output = str(evt.get("data", {}).get("output", ""))[:2500]
+                        tcid = tool_ids.get(evt.get("run_id", ""), "")
+                        tool_name = evt.get("name", "")
+                        run_key = str(evt.get("run_id", ""))
+                        if _blocked_tool_runs.pop(run_key, False):
+                            from edagent_vivado.harness.approval_outcomes import (
+                                SCOPE_VIVADO_SYNTH,
+                                format_user_rejection,
+                            )
+                            output = format_user_rejection(
+                                SCOPE_VIVADO_SYNTH, tool_name=tool_name
+                            )
+                        # Intercept interaction tools — create interaction and wait for user
+                        elif tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool") and not is_patch_approved():
+                            from edagent_vivado.harness.interaction import (
+                                create_interaction, wait_for_response, InteractionType, FileItem, InputField,
+                                append_file_to_batch, take_file_batch,
+                            )
+                            tool_input = evt.get("data", {}).get("input", {})
+                            if tool_name in ("create_file_tool", "propose_patch_tool"):
+                                if tool_name == "create_file_tool":
+                                    fi = FileItem(
+                                        path=tool_input.get("file_path", ""),
+                                        content=tool_input.get("content", ""),
+                                        description=tool_input.get("description", ""),
+                                        action="create",
+                                    )
+                                    title = "Create File"
+                                    message = tool_input.get("description", f"Create {tool_input.get('file_path', '')}")
+                                else:
+                                    fi = FileItem(
+                                        path=tool_input.get("file_path", ""),
+                                        content=(
+                                            f"--- OLD ---\n{tool_input.get('old_text', '')}\n"
+                                            f"--- NEW ---\n{tool_input.get('new_text', '')}"
+                                        ),
+                                        description=tool_input.get("description", ""),
+                                        action="modify",
+                                    )
+                                    title = "Modify File"
+                                    message = tool_input.get("description", f"Modify {tool_input.get('file_path', '')}")
+                                n = append_file_to_batch(session_id, t["id"], fi, title=title, message=message)
+                                output = f"QUEUED_FOR_APPROVAL ({n} file(s) in batch)"
+                            elif tool_name == "request_approval":
+                                batched, batch_title, batch_msg = take_file_batch(session_id, t["id"])
+                                extra = [
+                                    FileItem(
+                                        path=f.get("path", ""),
+                                        content=f.get("content", ""),
+                                        description=f.get("description", ""),
+                                        action=f.get("action", "create"),
+                                    )
+                                    for f in (tool_input.get("files") or [])
+                                ]
+                                files = batched + extra
+                                interaction = create_interaction(
+                                    InteractionType.APPROVAL, session_id, t["id"],
+                                    title=tool_input.get("title", batch_title or "File Approval Required"),
+                                    message=tool_input.get("message", batch_msg),
+                                    files=files,
+                                )
+                                event_create(session_id, "interaction.requested", interaction.to_dict(),
+                                             task_id=t["id"], run_id=run["id"])
+                                responded = await wait_for_response(interaction.id)
+                                if responded:
+                                    if responded.interaction_type == InteractionType.APPROVAL:
+                                        if responded.status.value == "approved":
+                                            from edagent_vivado.harness.approval_apply import (
+                                                apply_approved_files,
+                                                format_approval_tool_output,
+                                            )
+                                            approved_paths = responded.response.get("approved_files") or [fi.path for fi in files]
+                                            applied, skipped = apply_approved_files(files, approved_paths)
+                                            output = format_approval_tool_output(applied, skipped)
+                                        else:
+                                            from edagent_vivado.harness.approval_outcomes import (
+                                                SCOPE_FILE_CHANGES,
+                                                format_user_rejection,
+                                            )
+                                            output = format_user_rejection(SCOPE_FILE_CHANGES)
+                                    else:
+                                        from edagent_vivado.harness.interaction import InteractionStatus
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            OUTCOME_APPROVED,
+                                            SCOPE_INPUT_REQUEST,
+                                            format_tool_outcome,
+                                            format_user_rejection,
+                                        )
+                                        if responded.status == InteractionStatus.REJECTED:
+                                            output = format_user_rejection(SCOPE_INPUT_REQUEST)
+                                        else:
+                                            resp = responded.response if isinstance(responded.response, dict) else {}
+                                            output = format_tool_outcome(
+                                                OUTCOME_APPROVED,
+                                                "User submitted the requested information.",
+                                                scope=SCOPE_INPUT_REQUEST,
+                                                ran=False,
+                                                success=True,
+                                                extra=resp,
+                                            )
+                                else:
+                                    output = "TIMEOUT: No user response"
                             else:
-                                output = json.dumps(responded.response, ensure_ascii=False)
-                        else:
-                            output = "TIMEOUT: No user response"
-                    if tcid:
-                        toolcall_update(tcid, state="completed", finished_at=int(time.time()), output_summary=output[:500])
-                    event_create(session_id, "tool.completed", {"tool_name": tool_name, "toolcall_id": tcid, "result": output[:500]},
-                                 task_id=t["id"], run_id=run["id"])
-                elif kind == "on_chat_model_stream":
-                    chunk = evt["data"].get("chunk", {})
-                    reasoning = ""
-                    if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
-                        reasoning = chunk.additional_kwargs.get("reasoning_content") or ""
-                    if reasoning:
-                        event_create(session_id, "reasoning.delta", {"text": reasoning},
-                                     task_id=t["id"], run_id=run["id"])
-                        continue
-                    if hasattr(chunk, "content") and chunk.content:
-                        c = chunk.content
-                        text = ""
-                        if isinstance(c, str): text = c
-                        elif isinstance(c, list):
-                            text = "".join(b.get("text","") for b in c if isinstance(b, dict) and b.get("type")=="text")
-                        if text:
-                            full_response += text
-                            event_create(session_id, "message.assistant.delta", {"text": text},
+                                await _flush_pending_file_batch(session_id, t["id"], run, t)
+                                fields = [InputField(id=f.get("id",""), label=f.get("label",""),
+                                                    field_type=f.get("field_type","text"),
+                                                    options=f.get("options"), placeholder=f.get("placeholder",""),
+                                                    recommendations=f.get("recommendations"), required=f.get("required",True))
+                                          for f in (tool_input.get("fields") or [])]
+                                interaction = create_interaction(
+                                    InteractionType.INPUT_REQUEST, session_id, t["id"],
+                                    title=tool_input.get("title", "Information Required"),
+                                    message=tool_input.get("message", ""),
+                                    fields=fields,
+                                )
+                                event_create(session_id, "interaction.requested", interaction.to_dict(),
+                                             task_id=t["id"], run_id=run["id"])
+                                responded = await wait_for_response(interaction.id)
+                                if responded:
+                                    output = json.dumps(responded.response, ensure_ascii=False)
+                                else:
+                                    output = "TIMEOUT: No user response"
+                        if tcid:
+                            from edagent_vivado.harness.approval_outcomes import tool_ui_state_from_output
+                            ui_state = tool_ui_state_from_output(output)
+                            toolcall_update(
+                                tcid,
+                                state="completed" if ui_state != "error" else "error",
+                                finished_at=int(time.time()),
+                                output_summary=output[:500],
+                            )
+                            event_create(
+                                session_id,
+                                "tool.completed",
+                                {
+                                    "tool_name": tool_name,
+                                    "toolcall_id": tcid,
+                                    "result": output[:500],
+                                    "state": ui_state,
+                                },
+                                task_id=t["id"],
+                                run_id=run["id"],
+                            )
+                        if (
+                            tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
+                            and output
+                            and not is_patch_approved()
+                        ):
+                            from edagent_vivado.harness.approval_apply import should_continue_after_approval
+                            if should_continue_after_approval(output) or output.startswith("{"):
+                                inline_approval_results.append(output)
+                    elif kind == "on_chat_model_stream":
+                        chunk = evt["data"].get("chunk", {})
+                        reasoning = ""
+                        if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
+                            reasoning = chunk.additional_kwargs.get("reasoning_content") or ""
+                        if reasoning:
+                            event_create(session_id, "reasoning.delta", {"text": reasoning},
                                          task_id=t["id"], run_id=run["id"])
+                            continue
+                        if hasattr(chunk, "content") and chunk.content:
+                            c = chunk.content
+                            text = ""
+                            if isinstance(c, str): text = c
+                            elif isinstance(c, list):
+                                text = "".join(b.get("text","") for b in c if isinstance(b, dict) and b.get("type")=="text")
+                            if text:
+                                full_response += text
+                                event_create(session_id, "message.assistant.delta", {"text": text},
+                                             task_id=t["id"], run_id=run["id"])
+
+                # End of one agent round — flush any queued file approvals
+                flush_output = None
+                if not is_patch_approved():
+                    flush_output = await _flush_pending_file_batch(session_id, t["id"], run, t)
+
+                from edagent_vivado.harness.approval_apply import (
+                    should_continue_after_approval,
+                    continuation_prompt,
+                )
+                follow_up = flush_output or (inline_approval_results[-1] if inline_approval_results else "")
+                if follow_up and should_continue_after_approval(follow_up) and approval_round < max_approval_rounds - 1:
+                    continuation_msg = HumanMessage(content=continuation_prompt(follow_up))
+                    approval_round += 1
+                    event_create(
+                        session_id,
+                        "agent.continuation",
+                        {"reason": "approval_completed", "approval_output": follow_up[:500]},
+                        task_id=t["id"],
+                        run_id=run["id"],
+                    )
+                    continue
+                break
+
             # Save assistant message
             if full_response:
                 message_create(session_id, "assistant", full_response, task_id=t["id"])
@@ -476,14 +682,15 @@ async def api_kb_candidate_merge(candidate_id: str):
 
 @router.get("/sessions/{session_id}/interactions")
 async def api_interactions(session_id: str):
-    from edagent_vivado.harness.interaction import get_pending_for_session
+    from edagent_vivado.harness.interaction import get_pending_for_session, rehydrate_session_interactions
+    rehydrate_session_interactions(session_id)
     pending = get_pending_for_session(session_id)
     return {"interactions": [i.to_dict() for i in pending]}
 
 @router.get("/interactions/{interaction_id}")
 async def api_interaction_detail(interaction_id: str):
     from edagent_vivado.harness.interaction import get_interaction
-    interaction = get_interaction(interaction_id)
+    interaction = get_interaction(interaction_id)  # rehydrates from events if needed
     if not interaction:
         raise HTTPException(404, "Interaction not found")
     return interaction.to_dict()
@@ -495,7 +702,7 @@ async def api_interaction_respond(interaction_id: str, request: Request):
     interaction = get_interaction(interaction_id)
     if not interaction:
         raise HTTPException(404, "Interaction not found")
-    result = respond_interaction(interaction_id, body)
+    result = respond_interaction(interaction_id, body, session_id=interaction.session_id)
     if not result:
         raise HTTPException(500, "Failed to process response")
     # Emit event
@@ -503,8 +710,8 @@ async def api_interaction_respond(interaction_id: str, request: Request):
         "interaction.rejected" if result.status.value == "rejected" else "interaction.responded"
     )
     event_create(interaction.session_id, event_type, {
+        **result.to_dict(),
         "interaction_id": interaction_id,
-        "interaction_type": interaction.interaction_type.value,
         "response": body,
     }, task_id=interaction.task_id)
     return {"ok": True, "interaction": result.to_dict()}

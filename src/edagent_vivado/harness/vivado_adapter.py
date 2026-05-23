@@ -68,9 +68,12 @@ class VivadoTarget:
         host = os.environ.get("VIVADO_REMOTE_HOST", "")
         if not host:
             return None
+        port_raw = os.environ.get("VIVADO_REMOTE_PORT", "")
+        ssh_port = int(port_raw) if port_raw else None
         return cls(
             id="default-remote", name="default-remote", target_type="remote_ssh",
             host=host, ssh_key_path=os.environ.get("VIVADO_REMOTE_KEY", ""),
+            ssh_port=ssh_port,
             vivado_path=os.environ.get("VIVADO_REMOTE_PATH", "vivado"),
             settings_path=os.environ.get("VIVADO_REMOTE_ENV", ""),
             remote_work_root=os.environ.get("VIVADO_REMOTE_WORK", "/tmp/edagent_remote"),
