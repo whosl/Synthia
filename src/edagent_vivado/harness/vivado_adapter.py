@@ -40,6 +40,7 @@ class VivadoTarget:
     target_type: str
     host: str = ""
     ssh_key_path: str = ""
+    ssh_port: int | None = None
     vivado_path: str = "vivado"
     settings_path: str = ""
     remote_work_root: str = "/tmp/edagent_remote"
@@ -49,9 +50,12 @@ class VivadoTarget:
 
     @classmethod
     def from_db(cls, row: dict) -> VivadoTarget:
+        import json as _json
+        meta = _json.loads(row.get("metadata_json") or "{}") if row.get("metadata_json") else {}
         return cls(
             id=row["id"], name=row["name"], target_type=row["target_type"],
             host=row.get("host") or "", ssh_key_path=row.get("ssh_key_path") or "",
+            ssh_port=meta.get("ssh_port"),
             vivado_path=row.get("vivado_path") or "vivado",
             settings_path=row.get("settings_path") or "",
             remote_work_root=row.get("remote_work_root") or "/tmp/edagent_remote",
@@ -185,6 +189,8 @@ class VivadoRuntimeAdapter:
         cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
         if self._target and self._target.ssh_key_path:
             cmd += ["-i", self._target.ssh_key_path]
+        if self._target and self._target.ssh_port:
+            cmd += ["-p", str(self._target.ssh_port)]
         if self._target:
             cmd.append(self._target.host)
         return cmd
@@ -261,6 +267,8 @@ class VivadoRuntimeAdapter:
         scp_base = ["scp", "-o", "StrictHostKeyChecking=no"]
         if self._target.ssh_key_path:
             scp_base += ["-i", self._target.ssh_key_path]
+        if self._target.ssh_port:
+            scp_base += ["-P", str(self._target.ssh_port)]
 
         remote_script = f"{self._target.remote_work_root}/tmp_script_{int(time.time())}.tcl"
         import tempfile
