@@ -40,7 +40,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               to={item.path}
               end={item.path === '/'}
               className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              title={navCollapsed ? item.label : undefined}
+              title={item.label}
             >
               <item.icon size={16} />
               <span className="nav-item-label">{item.label}</span>
