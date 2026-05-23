@@ -1,4 +1,4 @@
-﻿import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -24,7 +24,6 @@ function SessionCard({
       <div className="session-card-head">
         <div className="session-card-title">
           <strong>{session.name || 'Untitled session'}</strong>
-          <div className="muted mono session-card-id">{session.id}</div>
         </div>
         <StatusBadge status={session.status} />
       </div>
@@ -132,7 +131,6 @@ export default function SessionsPage() {
                 <tr key={s.id} onClick={() => navigate(`/term?session=${s.id}`)} style={{ cursor: 'pointer' }}>
                   <td>
                     <div style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</div>
-                    <div className="muted mono" style={{ fontSize: 11 }}>{s.id}</div>
                   </td>
                   <td><StatusBadge status={s.status} /></td>
                   <td className="muted">{formatRelative(s.updated_at)}</td>

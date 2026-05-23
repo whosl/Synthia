@@ -1,4 +1,4 @@
-import { Bot, User } from 'lucide-react'
+import { User } from 'lucide-react'
 import { Markdown } from '../../components/common/Markdown'
 import { ApprovalBlock } from '../../components/terminal/ApprovalBlock'
 import { CustomEntryBlock } from '../../components/terminal/CustomEntryBlock'
@@ -36,7 +36,7 @@ function AssistantTextRenderer({ entry }: TimelineRenderContext) {
   return (
     <div className="assistant-stack">
       <div className="message-meta assistant-meta">
-        <Bot size={15} color="var(--accent)" /> Synthia
+        Synthia
         {p.stopped && <span className="status stopped">stopped</span>}
         {p.partial && !p.stopped && <span className="status stopped">partial</span>}
       </div>

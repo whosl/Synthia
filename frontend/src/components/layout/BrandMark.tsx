@@ -1,6 +1,6 @@
 /** Synthia logo mark (transparent PNG, no container fill). */
 
-export function BrandMark({ size = 28 }: { size?: number }) {
+export function BrandMark({ size = 36 }: { size?: number }) {
   return (
     <span
       className="brand-mark"

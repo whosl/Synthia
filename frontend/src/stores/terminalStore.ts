@@ -1,4 +1,4 @@
-﻿import { create } from 'zustand'
+import { create } from 'zustand'
 
 type TerminalView = 'chat' | 'timeline'
 export type RightPanelTab = 'run' | 'artifacts' | 'vivado' | 'debug'
@@ -11,7 +11,8 @@ interface TerminalStore {
   setView: (view: TerminalView) => void
   setRightPanelOpen: (open: boolean) => void
   setRightPanelTab: (tab: RightPanelTab) => void
-  toggleCollapsed: (id: string) => void
+  /** @param defaultCollapsed fold state when id has never been toggled (default true) */
+  toggleCollapsed: (id: string, defaultCollapsed?: boolean) => void
 }
 
 export const useTerminalStore = create<TerminalStore>((set) => ({
@@ -22,5 +23,8 @@ export const useTerminalStore = create<TerminalStore>((set) => ({
   setView: (view) => set({ view }),
   setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),
   setRightPanelTab: (rightPanelTab) => set({ rightPanelTab }),
-  toggleCollapsed: (id) => set((s) => ({ collapsed: { ...s.collapsed, [id]: !s.collapsed[id] } })),
+  toggleCollapsed: (id, defaultCollapsed = true) => set((s) => {
+    const isCollapsed = s.collapsed[id] ?? defaultCollapsed
+    return { collapsed: { ...s.collapsed, [id]: !isCollapsed } }
+  }),
 }))

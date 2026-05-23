@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, PanelRightClose, PanelRightOpen, SlidersHorizontal } from 'lucide-react'
+import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getSession } from '../api/sessions'
@@ -8,6 +8,7 @@ import { request } from '../api/client'
 import { Button } from '../components/common/Button'
 import { Composer } from '../components/terminal/Composer'
 import { TerminalRightPanel } from '../components/terminal/TerminalRightPanel'
+import { ChatEnterProvider } from '../components/terminal/ChatEnterAnimation'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
@@ -29,6 +30,7 @@ export default function TerminalPage() {
   const {
     timeline,
     activeTask,
+    taskActive,
     running,
     stopping,
     start,
@@ -77,43 +79,68 @@ export default function TerminalPage() {
   return (
     <div className="page terminal-page">
       <div className="terminal-shell">
-        <header className="terminal-header">
-          <Link to="/" className="btn ghost terminal-back-link"><ArrowLeft size={15} /> Sessions</Link>
-          <div className="terminal-title">
-            {session?.name || 'Session'} {(running || stopping) && <span className="terminal-status-dot" />}
-          </div>
-          <Button
-            className="ghost terminal-controls-button"
-            onClick={() => {
-              setRightPanelTab('run')
-              setRightPanelOpen(true)
-            }}
-            aria-label="Open run controls"
-          >
-            <SlidersHorizontal size={15} />
-            <span>Controls</span>
-          </Button>
-          {(running || stopping) && (
-            <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop</Button>
-          )}
-        </header>
         <div className={`terminal-layout ${rightPanelOpen ? 'right-open' : 'right-closed'}`}>
           <section className="chat-panel">
-            <div className="view-tabs">
-              <button type="button" className={`tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}>Chat</button>
-              <button type="button" className={`tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>Timeline</button>
-              <span style={{ flex: 1 }} />
-              <Button
-                className="ghost right-panel-toggle"
-                onClick={() => setRightPanelOpen(!rightPanelOpen)}
-                aria-label={rightPanelOpen ? 'Hide side panel' : 'Show side panel'}
-              >
-                {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-              </Button>
-            </div>
-            <div className={view === 'chat' ? 'message-list' : 'timeline-view'} ref={scrollRef}>
+            <header className="chat-panel-header">
+              <Link to="/" className="btn ghost terminal-back-link" aria-label="Back to sessions">
+                <ArrowLeft size={15} />
+                <span className="terminal-back-label">Sessions</span>
+              </Link>
+              <h1 className="chat-panel-header-title">
+                {session?.name || 'Session'}
+                {(running || stopping) && <span className="terminal-status-dot" />}
+              </h1>
+              <div className="chat-panel-header-tabs" role="tablist" aria-label="Chat views">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={view === 'chat'}
+                  className={`tab ${view === 'chat' ? 'active' : ''}`}
+                  onClick={() => setView('chat')}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={view === 'timeline'}
+                  className={`tab ${view === 'timeline' ? 'active' : ''}`}
+                  onClick={() => setView('timeline')}
+                >
+                  Timeline
+                </button>
+              </div>
+              <div className="chat-panel-header-actions">
+                <Button
+                  className="ghost terminal-controls-button header-icon-btn"
+                  onClick={() => {
+                    setRightPanelTab('run')
+                    setRightPanelOpen(true)
+                  }}
+                  aria-label="Open run controls"
+                  title="Controls"
+                >
+                  <SlidersHorizontal size={16} />
+                </Button>
+                {(running || stopping) && (
+                  <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>
+                    Stop
+                  </Button>
+                )}
+              </div>
+            </header>
+            <div
+              className={`chat-panel-scroll${view === 'chat' ? ' message-list' : ' timeline-view'}`}
+              ref={scrollRef}
+            >
               {view === 'chat' ? (
-                <TimelineChatList timeline={timeline} onInteractionRespond={handleInteractionRespond} />
+                <ChatEnterProvider sessionId={sessionId}>
+                  <TimelineChatList
+                    timeline={timeline}
+                    taskActive={taskActive}
+                    onInteractionRespond={handleInteractionRespond}
+                  />
+                </ChatEnterProvider>
               ) : (
                 <TimelineView items={timeline.auditLog} />
               )}

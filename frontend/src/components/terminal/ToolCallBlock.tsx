@@ -40,8 +40,15 @@ function useToolElapsed(tool: ToolCallViewModel) {
   }, [tool, running, tick])
 }
 
-export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
-  const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? true)
+export function ToolCallBlock({
+  tool,
+  defaultCollapsed = true,
+}: {
+  tool: ToolCallViewModel
+  /** Default fold state when user has not toggled this tool yet */
+  defaultCollapsed?: boolean
+}) {
+  const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? defaultCollapsed)
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
   const elapsedMs = useToolElapsed(tool)
   const done = tool.state === 'completed'
@@ -57,7 +64,7 @@ export function ToolCallBlock({ tool }: { tool: ToolCallViewModel }) {
     <div
       className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}`}
     >
-      <div className="trace-header" onClick={() => toggle(tool.id)}>
+      <div className="trace-header" onClick={() => toggle(tool.id, defaultCollapsed)}>
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         {icon}
         <span>{tool.name}</span>
