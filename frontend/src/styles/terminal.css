@@ -51,29 +51,111 @@
 
 .approval-toggle input { accent-color: var(--accent); }
 
-/* Terminal Layout Grid */
+/* Terminal Layout Grid — chat + responsive right panel */
 .terminal-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   background: var(--term-bg);
 }
 
-/* Side panels in terminal — slightly lighter dark */
-.terminal-side, .debug-drawer {
-  min-height: 0;
-  overflow: auto;
-  background: var(--term-surface);
-  border-right: 1px solid var(--term-border-soft);
+.terminal-layout.right-open {
+  grid-template-columns: minmax(0, 1fr) clamp(260px, 32vw, 420px);
 }
 
-.debug-drawer {
-  border-right: none;
+.terminal-right-panel {
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: var(--term-surface);
   border-left: 1px solid var(--term-border-soft);
+  overflow: hidden;
+}
+
+.right-panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--term-border-soft);
+  background: var(--term-surface-2);
+}
+
+.right-panel-tab {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--term-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.right-panel-tab:hover { color: var(--term-text); background: rgba(255,255,255,0.04); }
+.right-panel-tab.active { color: var(--term-accent); background: rgba(255,255,255,0.06); }
+
+.right-panel-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.remote-terminal-tab {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  padding-bottom: 12px;
 }
+
+.remote-console {
+  flex: 1;
+  min-height: 120px;
+  margin: 0 12px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--term-text);
+  background: #0F0D0C;
+  border: 1px solid var(--term-border);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.remote-console-input {
+  display: flex;
+  gap: 8px;
+  margin: 10px 12px 0;
+}
+
+.remote-console-input .input {
+  flex: 1;
+  min-width: 0;
+  background: var(--term-bg);
+  border-color: var(--term-border);
+  color: var(--term-text);
+}
+
+.remote-console-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 12px 0;
+  font-size: 11px;
+}
+
+.placeholder-tab { min-height: 120px; }
 
 .side-section {
   padding: 14px 16px;
@@ -380,9 +462,23 @@
 .terminal-layout ::-webkit-scrollbar-track { background: var(--term-bg); }
 .terminal-layout ::-webkit-scrollbar-thumb { background: var(--term-border); }
 
-@media (max-width: 1180px) {
-  .terminal-layout { grid-template-columns: minmax(0, 1fr); }
-  .terminal-side, .debug-drawer { display: none; }
+@media (max-width: 900px) {
+  .terminal-layout.right-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(200px, 42vh);
+  }
+
+  .terminal-right-panel {
+    border-left: none;
+    border-top: 1px solid var(--term-border-soft);
+  }
+
+  .right-panel-tab-label { display: none; }
+  .right-panel-tab { flex: 1; padding: 8px; }
+}
+
+@media (max-width: 520px) {
+  .terminal-layout.right-closed .right-panel-toggle { display: inline-flex; }
 }
 
 /* ── Interaction Blocks (Approval / Input Request) ── */

@@ -22,10 +22,16 @@ a { color: inherit; text-decoration: none; }
 .app-shell {
   height: 100%;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: var(--nav-width, 240px) 1fr;
+  transition: grid-template-columns 0.2s ease;
+}
+
+.app-shell.nav-collapsed {
+  --nav-width: 64px;
 }
 
 .nav-rail {
+  position: relative;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
@@ -34,12 +40,77 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
 }
 
+.nav-collapse-btn {
+  position: absolute;
+  top: 14px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  z-index: 2;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.nav-collapse-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.app-shell.nav-collapsed .nav-collapse-btn {
+  right: 50%;
+  transform: translateX(50%);
+}
+
+.app-shell.nav-collapsed .brand {
+  justify-content: center;
+  padding: 0 8px;
+}
+
+.app-shell.nav-collapsed .brand-label,
+.app-shell.nav-collapsed .nav-item-label,
+.app-shell.nav-collapsed .nav-footer-label,
+.app-shell.nav-collapsed .nav-version {
+  display: none;
+}
+
+.app-shell.nav-collapsed .nav-items {
+  padding: 12px 6px;
+}
+
+.app-shell.nav-collapsed .nav-item {
+  justify-content: center;
+  padding: 10px;
+}
+
+.app-shell.nav-collapsed .nav-footer {
+  padding: 10px 6px;
+}
+
+.app-shell.nav-collapsed .user-card {
+  justify-content: center;
+  padding: 8px;
+}
+
+.brand-label,
+.nav-item-label,
+.nav-footer-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .brand {
   height: 56px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 20px;
+  padding: 0 44px 0 20px;
   border-bottom: 1px solid var(--border);
   color: var(--text);
   font-weight: 700;
@@ -412,8 +483,29 @@ a { color: inherit; text-decoration: none; }
 
 /* ========== RESPONSIVE ========== */
 @media (max-width: 980px) {
-  .app-shell { grid-template-columns: 1fr; }
-  .nav-rail { display: none; }
+  .app-shell,
+  .app-shell.nav-collapsed {
+    grid-template-columns: 64px 1fr;
+    --nav-width: 64px;
+  }
+
+  .app-shell .brand-label,
+  .app-shell .nav-item-label,
+  .app-shell .nav-footer-label,
+  .app-shell .nav-version {
+    display: none;
+  }
+
+  .app-shell .brand {
+    justify-content: center;
+    padding: 0 8px;
+  }
+
+  .app-shell .nav-items { padding: 12px 6px; }
+  .app-shell .nav-item { justify-content: center; padding: 10px; }
+  .app-shell .nav-footer { padding: 10px 6px; }
+  .app-shell .user-card { justify-content: center; padding: 8px; }
+
   .page { padding: 16px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bug, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
+import { ArrowLeft, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getSession } from '../api/sessions'
@@ -7,13 +7,11 @@ import { getPatchApproval, setPatchApproval } from '../api/settings'
 import { stopSessionTask } from '../api/tasks'
 import { request } from '../api/client'
 import { Button } from '../components/common/Button'
-import { StatusBadge } from '../components/common/StatusBadge'
-import { ContextDebugPanel } from '../components/terminal/ContextDebugPanel'
 import { Composer } from '../components/terminal/Composer'
+import { TerminalRightPanel } from '../components/terminal/TerminalRightPanel'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
-import { formatNumber, formatRelative, formatTime } from '../lib/time'
 import { useStreamStore } from '../stores/streamStore'
 import { useTerminalStore } from '../stores/terminalStore'
 
@@ -23,8 +21,10 @@ export default function TerminalPage() {
   const queryClient = useQueryClient()
   const view = useTerminalStore((s) => s.view)
   const setView = useTerminalStore((s) => s.setView)
-  const debugOpen = useTerminalStore((s) => s.debugOpen)
-  const setDebugOpen = useTerminalStore((s) => s.setDebugOpen)
+  const rightPanelOpen = useTerminalStore((s) => s.rightPanelOpen)
+  const setRightPanelOpen = useTerminalStore((s) => s.setRightPanelOpen)
+  const rightPanelTab = useTerminalStore((s) => s.rightPanelTab)
+  const setRightPanelTab = useTerminalStore((s) => s.setRightPanelTab)
   const streamStatus = useStreamStore((s) => s.statusBySession[sessionId] || 'idle')
 
   const {
@@ -90,32 +90,18 @@ export default function TerminalPage() {
             <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop</Button>
           )}
         </header>
-        <div className="terminal-layout">
-          <aside className="terminal-side">
-            <div className="side-section">
-              <div className="side-title">Session</div>
-              <div className="kv"><span>ID</span><span className="mono">{sessionId}</span></div>
-              <div className="kv"><span>Status</span><span><StatusBadge status={activeTask?.state || session?.status} /></span></div>
-              <div className="kv"><span>Created</span><span>{formatTime(session?.created_at)}</span></div>
-              <div className="kv"><span>Updated</span><span>{formatRelative(session?.updated_at)}</span></div>
-              <div className="kv"><span>Messages</span><span>{formatNumber(session?.message_count)}</span></div>
-              <div className="kv"><span>Tools</span><span>{formatNumber(timeline.tools.length || session?.tool_call_count)}</span></div>
-              <div className="kv"><span>Problems</span><span style={{ color: problemCount ? 'var(--error)' : undefined }}>{formatNumber(problemCount || session?.problem_count)}</span></div>
-            </div>
-            <div className="side-section">
-              <div className="side-title">Stream</div>
-              <div className="kv"><span>Status</span><span>{streamStatus}</span></div>
-              <div className="kv"><span>Last seq</span><span className="mono">{timeline.lastSeq}</span></div>
-            </div>
-          </aside>
-
+        <div className={`terminal-layout ${rightPanelOpen ? 'right-open' : 'right-closed'}`}>
           <section className="chat-panel">
             <div className="view-tabs">
               <button type="button" className={`tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}>Chat</button>
               <button type="button" className={`tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>Timeline</button>
               <span style={{ flex: 1 }} />
-              <Button className="ghost" onClick={() => setDebugOpen(!debugOpen)}>
-                {debugOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+              <Button
+                className="ghost right-panel-toggle"
+                onClick={() => setRightPanelOpen(!rightPanelOpen)}
+                aria-label={rightPanelOpen ? 'Hide side panel' : 'Show side panel'}
+              >
+                {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
               </Button>
             </div>
             <div className={view === 'chat' ? 'message-list' : 'timeline-view'} ref={scrollRef}>
@@ -134,35 +120,17 @@ export default function TerminalPage() {
             />
           </section>
 
-          {debugOpen && (
-            <aside className="debug-drawer">
-              <div className="drawer-header">
-                <span>Debug</span>
-                <Button className="ghost icon-btn" onClick={() => setDebugOpen(false)}>×</Button>
-              </div>
-              <div className="drawer-section">
-                <div className="side-title"><FileText size={13} /> Context</div>
-                <ContextDebugPanel sessionId={sessionId} taskId={activeTask?.id} />
-                <div className="drawer-list" style={{ marginTop: 8 }}>
-                  <span><Shield size={13} /> Patch: {approvalQ.data?.approved ? 'auto' : 'manual'}</span>
-                </div>
-              </div>
-              <div className="drawer-section">
-                <div className="side-title"><Bug size={13} /> Events</div>
-                <div className="drawer-list">
-                  <span>{timeline.auditLog.length} events</span>
-                  <span>{problemCount} problems</span>
-                </div>
-              </div>
-              <div className="drawer-section">
-                <div className="side-title"><Wrench size={13} /> Tools</div>
-                <div className="drawer-list">
-                  {timeline.tools.slice(-8).map((t) => (
-                    <span key={t.toolcallId}>{t.name} — {t.state}</span>
-                  ))}
-                </div>
-              </div>
-            </aside>
+          {rightPanelOpen && (
+            <TerminalRightPanel
+              sessionId={sessionId}
+              session={session}
+              activeTask={activeTask}
+              streamStatus={streamStatus}
+              timeline={timeline}
+              problemCount={problemCount}
+              tab={rightPanelTab}
+              onTabChange={setRightPanelTab}
+            />
           )}
         </div>
       </div>
