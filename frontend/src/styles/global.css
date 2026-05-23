@@ -1,4 +1,4 @@
-﻿@import './themes.css';
+@import './themes.css';
 @import './tokens.css';
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -47,13 +47,29 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
 }
 
+.nav-top {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
 .nav-header {
   display: flex;
   align-items: center;
   gap: 8px;
   min-height: 56px;
   padding: 8px 10px 8px 14px;
-  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.nav-collapse-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px 0 0;
   flex-shrink: 0;
 }
 
@@ -76,16 +92,31 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--border-strong);
 }
 
-.app-shell.nav-collapsed .nav-header {
+.app-shell.nav-collapsed .nav-top {
+  display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 6px 8px;
+  align-items: stretch;
+  border-bottom: none;
 }
 
-.app-shell.nav-collapsed .brand {
-  justify-content: center;
+.app-shell.nav-collapsed .nav-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
   padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-shell.nav-collapsed .nav-header .brand {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  justify-content: stretch;
+  padding: 0;
+}
+
+.app-shell.nav-collapsed .nav-collapse-bar {
+  padding: 6px 0 8px;
 }
 
 .app-shell.nav-collapsed .brand-label,
@@ -121,6 +152,15 @@ a { color: inherit; text-decoration: none; }
   text-overflow: ellipsis;
 }
 
+.brand-label {
+  font-family: var(--font-brand);
+  font-weight: 600;
+  font-size: 17px;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  font-feature-settings: 'liga' 1, 'kern' 1;
+}
+
 .brand {
   flex: 1;
   min-width: 0;
@@ -129,9 +169,6 @@ a { color: inherit; text-decoration: none; }
   gap: 10px;
   padding: 0;
   color: var(--text);
-  font-weight: 700;
-  font-size: var(--font-size-md);
-  letter-spacing: -0.01em;
 }
 
 .brand-mark {
@@ -141,9 +178,18 @@ a { color: inherit; text-decoration: none; }
   background: transparent;
 }
 
+.brand-mark--fill,
+.app-shell.nav-collapsed .nav-header .brand-mark {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-self: stretch;
+}
+
 .brand-mark-img {
-  width: 88%;
-  height: 88%;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   display: block;
   pointer-events: none;
@@ -528,16 +574,39 @@ a { color: inherit; text-decoration: none; }
     display: none;
   }
 
-  .app-shell .nav-header {
+  .app-shell .nav-top {
+    display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 6px 8px;
+    align-items: stretch;
+    border-bottom: none;
   }
 
-  .app-shell .brand {
-    justify-content: center;
+  .app-shell .nav-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
     padding: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .app-shell .nav-header .brand {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    justify-content: stretch;
+    padding: 0;
+  }
+
+  .app-shell .nav-header .brand-mark {
+    flex: 1;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0;
+    align-self: stretch;
+  }
+
+  .app-shell .nav-collapse-bar {
+    padding: 6px 0 8px;
   }
 
   .app-shell .nav-items { padding: 12px 6px; }
@@ -575,6 +644,15 @@ a { color: inherit; text-decoration: none; }
     min-height: 0;
   }
 
+  .nav-top {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    border-bottom: none;
+    border-right: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
   .nav-header {
     flex-direction: row;
     align-items: center;
@@ -583,10 +661,10 @@ a { color: inherit; text-decoration: none; }
     min-height: 0;
     align-self: stretch;
     border-bottom: none;
-    border-right: 1px solid var(--border);
     flex-shrink: 0;
   }
 
+  .nav-collapse-bar,
   .nav-collapse-btn {
     display: none;
   }
@@ -649,9 +727,15 @@ a { color: inherit; text-decoration: none; }
   }
 
   /* Collapsed desktop rules should not apply on top nav */
+  .app-shell.nav-collapsed .nav-top {
+    flex-direction: row;
+    border-right: 1px solid var(--border);
+  }
+
   .app-shell.nav-collapsed .nav-header {
     flex-direction: row;
     padding: 0 10px;
+    border-bottom: none;
   }
 
   .app-shell.nav-collapsed .nav-items {

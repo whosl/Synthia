@@ -154,28 +154,27 @@ export default function TerminalPage() {
             />
           </section>
 
-          {rightPanelOpen && (
-            <button
-              type="button"
-              className="right-panel-backdrop"
-              aria-label="Close side panel"
-              onClick={() => setRightPanelOpen(false)}
-            />
-          )}
+          <button
+            type="button"
+            className={`right-panel-backdrop${rightPanelOpen ? ' is-open' : ''}`}
+            aria-label="Close side panel"
+            aria-hidden={!rightPanelOpen}
+            tabIndex={rightPanelOpen ? 0 : -1}
+            onClick={() => setRightPanelOpen(false)}
+          />
 
-          {rightPanelOpen && (
-            <TerminalRightPanel
-              sessionId={sessionId}
-              session={session}
-              activeTask={activeTask}
-              streamStatus={streamStatus}
-              timeline={timeline}
-              problemCount={problemCount}
-              tab={rightPanelTab}
-              onTabChange={setRightPanelTab}
-              onClose={() => setRightPanelOpen(false)}
-            />
-          )}
+          <TerminalRightPanel
+            open={rightPanelOpen}
+            sessionId={sessionId}
+            session={session}
+            activeTask={activeTask}
+            streamStatus={streamStatus}
+            timeline={timeline}
+            problemCount={problemCount}
+            tab={rightPanelTab}
+            onTabChange={setRightPanelTab}
+            onClose={() => setRightPanelOpen(false)}
+          />
         </div>
       </div>
     </div>

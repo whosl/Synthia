@@ -107,7 +107,7 @@ export function handleAssistantStreamOpened(ctx: TimelineHandlerContext): Sessio
   if (streamId) {
     next.activeStreamByTask = { ...next.activeStreamByTask, [taskId]: streamId }
   }
-  pushAudit(next, event, 'Assistant stream opened', streamId)
+  pushAudit(next, event, 'Synthia stream opened', streamId)
   return next
 }
 
@@ -118,7 +118,7 @@ export function handleAssistantStreamCompleted(ctx: TimelineHandlerContext): Ses
   if (streamId) {
     state = completeAssistantStream(state, streamId, { stopped: Boolean(payload.stopped) })
   }
-  pushAudit(state, event, 'Assistant stream completed', streamId, 'done')
+  pushAudit(state, event, 'Synthia stream completed', streamId, 'done')
   return state
 }
 
@@ -166,7 +166,7 @@ export function handleMessageAssistantCompleted(ctx: TimelineHandlerContext): Se
   const streamId = taskId ? resolveStreamIdForCompletion(next, event, taskId) : ''
   let state = next
   if (streamId) state = completeAssistantStream(state, streamId)
-  pushAudit(state, event, 'Assistant response completed', streamId || String(payload.text || '').slice(0, 80), 'done')
+  pushAudit(state, event, 'Synthia response completed', streamId || String(payload.text || '').slice(0, 80), 'done')
   return state
 }
 
@@ -175,7 +175,7 @@ export function handleMessageAssistantStopped(ctx: TimelineHandlerContext): Sess
   const streamId = taskId ? resolveStreamIdForCompletion(next, event, taskId) : ''
   let state = next
   if (streamId) state = completeAssistantStream(state, streamId, { stopped: true })
-  pushAudit(state, event, 'Assistant response stopped', streamId, 'stopped')
+  pushAudit(state, event, 'Synthia response stopped', streamId, 'stopped')
   return state
 }
 

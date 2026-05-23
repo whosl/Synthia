@@ -4,20 +4,53 @@
   margin-bottom: 12px;
 }
 
+.sessions-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessions-title-row .page-title {
+  margin: 0;
+}
+
+.sessions-refresh {
+  flex-shrink: 0;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.sessions-refresh:hover {
+  color: var(--text);
+}
+
+.sessions-refresh.is-spinning svg {
+  animation: sessions-refresh-spin 0.65s linear infinite;
+}
+
+@keyframes sessions-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessions-refresh.is-spinning svg {
+    animation: none;
+  }
+}
+
 .sessions-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 16px;
   flex-wrap: wrap;
-}
-
-.sessions-refresh {
-  flex-shrink: 0;
-}
-
-.sessions-refresh-label {
-  margin-left: 4px;
 }
 
 .sessions-search-wrap {
@@ -27,9 +60,22 @@
   max-width: 420px;
 }
 
+.sessions-search-wrap .input,
+.sessions-sort {
+  height: 40px;
+  min-height: 40px;
+  box-sizing: border-box;
+  border-radius: 12px;
+}
+
 .sessions-search-wrap .input {
   width: 100%;
   padding-left: 34px;
+}
+
+.sessions-sort {
+  padding: 0 32px 0 12px;
+  line-height: 1.2;
 }
 
 .sessions-search-icon {
@@ -46,6 +92,22 @@
   min-width: 0;
   width: auto;
   max-width: 100%;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.sessions-create-btn {
+  flex-shrink: 0;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .sessions-panel {
@@ -65,16 +127,16 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: grid;
-  gap: 10px;
+  gap: 6px;
 }
 
 .session-card-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -86,7 +148,8 @@
 .session-card-title strong {
   display: block;
   color: var(--text);
-  font-size: 15px;
+  font-size: 14px;
+  line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -95,45 +158,43 @@
 .session-card-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-  font-size: 12px;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 11px;
 }
 
 .session-card-meta dt {
   color: var(--muted);
   font-weight: 500;
+  line-height: 1.2;
 }
 
 .session-card-meta dd {
   margin: 0;
   color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .session-card-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .session-card-actions .btn {
   flex: 1;
   justify-content: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
 }
 
 .session-card-actions .btn.danger-ghost {
   color: var(--error);
   border-color: var(--error-border);
   background: var(--error-subtle);
-}
-
-.session-create-panel .panel-body {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.session-create-panel .input {
-  flex: 1;
-  min-width: 0;
 }
 
 @media (max-width: 768px) {
@@ -144,15 +205,6 @@
     gap: 6px;
   }
 
-  .sessions-refresh {
-    padding-left: 10px;
-    padding-right: 10px;
-  }
-
-  .sessions-refresh-label {
-    display: none;
-  }
-
   .sessions-search-wrap {
     flex: 1 1 auto;
     min-width: 0;
@@ -160,8 +212,13 @@
     width: auto;
   }
 
-  .sessions-search-wrap .input {
+  .sessions-search-wrap .input,
+  .sessions-sort {
+    height: 36px;
     min-height: 36px;
+  }
+
+  .sessions-search-wrap .input {
     font-size: 14px;
   }
 
@@ -179,18 +236,24 @@
     display: none;
   }
 
+  /* Mobile: no outer panel chrome — cards sit on page background */
+  .sessions-page .sessions-panel {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+    overflow: visible;
+  }
+
   .sessions-mobile-list {
     display: grid;
-    gap: 10px;
-    padding: 12px;
+    gap: 8px;
+    padding: 0;
   }
 
-  .session-create-panel .panel-body {
-    flex-direction: column;
-  }
-
-  .session-create-panel .btn.primary {
-    width: 100%;
-    justify-content: center;
+  .sessions-create-btn {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
   }
 }

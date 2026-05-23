@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+﻿import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -30,10 +30,9 @@ function SessionCard({
       <dl className="session-card-meta">
         <div><dt>Updated</dt><dd>{formatRelative(session.updated_at)}</dd></div>
         <div><dt>Messages</dt><dd>{formatNumber(session.message_count)}</dd></div>
-        <div><dt>Tools</dt><dd>{formatNumber(session.tool_call_count)}</dd></div>
-        <div><dt>Problems</dt><dd style={{ color: (session.problem_count || 0) > 0 ? 'var(--error)' : undefined }}>{formatNumber(session.problem_count)}</dd></div>
+        <div><dt>tools called</dt><dd>{formatNumber(session.tool_call_count)}</dd></div>
         {tokens > 0 && (
-          <div style={{ gridColumn: '1 / -1' }}><dt>Tokens</dt><dd>{formatNumber(tokens)}</dd></div>
+          <div><dt>Tokens</dt><dd>{formatNumber(tokens)}</dd></div>
         )}
       </dl>
       <div className="session-card-actions">
@@ -59,8 +58,10 @@ export default function SessionsPage() {
   const queryClient = useQueryClient()
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<'updated' | 'name' | 'status'>('updated')
-  const [name, setName] = useState('')
-  const { data, isLoading, refetch } = useQuery({ queryKey: ['sessions'], queryFn: () => listSessions({ limit: 200 }) })
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['sessions'],
+    queryFn: () => listSessions({ limit: 200 }),
+  })
   const create = useMutation({ mutationFn: createSession, onSuccess: ({ session }) => navigate(`/term?session=${session.id}`) })
   const del = useMutation({ mutationFn: (id: string) => deleteSession(id), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sessions'] }) })
 
@@ -74,27 +75,30 @@ export default function SessionsPage() {
     })
   }, [data, query, sort])
 
-  const createNow = () => create.mutate({ name: name.trim() })
+  const createNow = () => create.mutate({ name: '' })
 
   return (
     <div className="page sessions-page">
       <div className="page-header sessions-page-header">
-        <div>
-          <h1 className="page-title">Sessions</h1>
+        <div className="sessions-page-heading">
+          <div className="sessions-title-row">
+            <h1 className="page-title">Sessions</h1>
+            <Button
+              className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
+              type="button"
+              aria-label="Refresh sessions"
+              title="Refresh"
+              onClick={() => refetch()}
+              disabled={isFetching}
+            >
+              <RefreshCw size={16} aria-hidden />
+            </Button>
+          </div>
           <p className="page-subtitle">Manage and resume engineering sessions</p>
         </div>
       </div>
 
       <div className="toolbar sessions-toolbar">
-        <Button
-          className="ghost sessions-refresh"
-          type="button"
-          aria-label="Refresh sessions"
-          onClick={() => refetch()}
-        >
-          <RefreshCw size={15} />
-          <span className="sessions-refresh-label">Refresh</span>
-        </Button>
         <div className="sessions-search-wrap">
           <Search size={15} className="sessions-search-icon" />
           <input
@@ -109,6 +113,16 @@ export default function SessionsPage() {
           <option value="name">Sort: Name</option>
           <option value="status">Sort: Status</option>
         </select>
+        <Button
+          className="primary sessions-create-btn"
+          type="button"
+          onClick={createNow}
+          disabled={create.isPending}
+          aria-label="Create session"
+          title="Create session"
+        >
+          <Plus size={18} />
+        </Button>
       </div>
 
       <section className="panel sessions-panel">
@@ -120,7 +134,7 @@ export default function SessionsPage() {
                 <th>Status</th>
                 <th>Updated</th>
                 <th>Messages</th>
-                <th>Tools</th>
+                <th>tools called</th>
                 <th>Problems</th>
                 <th>Tokens</th>
                 <th aria-label="Actions" />
@@ -169,23 +183,8 @@ export default function SessionsPage() {
         </div>
 
         {!isLoading && sessions.length === 0 && (
-          <EmptyState title="No sessions found" detail="Create a session below to start a Vivado debug run." />
+          <EmptyState title="No sessions found" detail="Tap + to start a new Vivado debug session." />
         )}
-      </section>
-
-      <section className="panel session-create-panel" style={{ marginTop: 16 }}>
-        <div className="panel-body">
-          <input
-            className="input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') createNow() }}
-            placeholder="New session name (optional)"
-          />
-          <Button className="primary" onClick={createNow} disabled={create.isPending}>
-            <Plus size={15} /> Create Session
-          </Button>
-        </div>
       </section>
     </div>
   )

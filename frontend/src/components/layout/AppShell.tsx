@@ -1,11 +1,10 @@
-import { NavLink } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, CircuitBoard, Database, Gauge, Home, Settings, TerminalSquare } from 'lucide-react'
+﻿import { NavLink } from 'react-router-dom'
+import { ChevronLeft, ChevronRight, CircuitBoard, Database, Gauge, Home, Settings } from 'lucide-react'
 import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
   { label: 'Sessions', path: '/', icon: Home },
-  { label: 'Terminal', path: '/term', icon: TerminalSquare },
   { label: 'Monitor', path: '/monitor', icon: Gauge },
   { label: 'Vivado', path: '/vivado', icon: CircuitBoard },
   { label: 'Knowledge', path: '/knowledge', icon: Database },
@@ -19,20 +18,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}`}>
       <aside className="nav-rail" aria-label="Main navigation">
-        <div className="nav-header">
-          <div className="brand">
-            <BrandMark />
-            <span className="brand-label">Synthia</span>
+        <div className="nav-top">
+          <div className="nav-header">
+            <div className="brand">
+              <BrandMark fill={navCollapsed} />
+              <span className="brand-label">Synthia</span>
+            </div>
           </div>
-          <button
-            type="button"
-            className="nav-collapse-btn"
-            onClick={toggleNavCollapsed}
-            aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={navCollapsed ? 'Expand' : 'Collapse'}
-          >
-            {navCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-          </button>
+          <div className="nav-collapse-bar">
+            <button
+              type="button"
+              className="nav-collapse-btn"
+              onClick={toggleNavCollapsed}
+              aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={navCollapsed ? 'Expand' : 'Collapse'}
+            >
+              {navCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            </button>
+          </div>
         </div>
         <nav className="nav-items">
           {nav.map((item) => (

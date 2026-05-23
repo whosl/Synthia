@@ -19,6 +19,7 @@ const TABS: { id: RightPanelTab; label: string; icon: typeof FileText }[] = [
 ]
 
 export function TerminalRightPanel({
+  open,
   sessionId,
   session,
   activeTask,
@@ -29,6 +30,7 @@ export function TerminalRightPanel({
   onTabChange,
   onClose,
 }: {
+  open: boolean
   sessionId: string
   session?: Session
   activeTask?: { id?: string; state?: string } | null
@@ -78,7 +80,12 @@ export function TerminalRightPanel({
   })
 
   return (
-    <aside className="terminal-right-panel" aria-label="Session inspector">
+    <aside
+      className={`terminal-right-panel${open ? ' is-open' : ''}`}
+      aria-label="Session inspector"
+      aria-hidden={!open}
+      inert={!open || undefined}
+    >
       <div className="right-panel-topbar">
         <div className="right-panel-tabs" role="tablist">
           {TABS.map((t) => (
