@@ -1,13 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getPatchApproval, setPatchApproval } from '../api/settings'
+import { getApprovals, setPatchApproval, setVivadoApproval } from '../api/settings'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 
 export default function SettingsPage() {
   const qc = useQueryClient()
-  const approval = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
-  const update = useMutation({ mutationFn: setPatchApproval, onSuccess: () => qc.invalidateQueries({ queryKey: ['patch-approval'] }) })
-  const approved = Boolean(approval.data?.approved)
+  const approvals = useQuery({ queryKey: ['approvals'], queryFn: getApprovals })
+  const patchMut = useMutation({
+    mutationFn: setPatchApproval,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+  const vivadoMut = useMutation({
+    mutationFn: setVivadoApproval,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+
+  const patchOn = Boolean(approvals.data?.patch_approved)
+  const vivadoOn = Boolean(approvals.data?.vivado_execution_approved)
+
   return <div className="page">
     <div className="page-header">
       <div>
@@ -16,13 +26,36 @@ export default function SettingsPage() {
       </div>
     </div>
     <div style={{ display: 'grid', gap: 16, maxWidth: 600 }}>
-      <Panel title="Patch Approval" actions={<StatusBadge status={approved ? 'done' : 'warning'} />}>
-        <div style={{ marginBottom: 12, color: approved ? 'var(--success)' : 'var(--warning)', fontSize: 13 }}>
-          {approved ? 'Auto-approved — agent can apply patches without confirmation' : 'Manual approval — each patch requires user confirmation'}
+      <Panel title="File patch approval" actions={<StatusBadge status={patchOn ? 'done' : 'warning'} />}>
+        <div style={{ marginBottom: 12, color: patchOn ? 'var(--success)' : 'var(--warning)', fontSize: 13 }}>
+          {patchOn
+            ? 'Auto-approved — agent can create/modify files without confirmation'
+            : 'Manual — each file create/patch requires confirmation'}
         </div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 13 }}>
-          <input type="checkbox" checked={approved} onChange={(e) => update.mutate(e.target.checked)} style={{ accentColor: 'var(--accent)' }} />
-          <span>Approve patches by default</span>
+          <input
+            type="checkbox"
+            checked={patchOn}
+            onChange={(e) => patchMut.mutate(e.target.checked)}
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          <span>Auto-approve file patches</span>
+        </label>
+      </Panel>
+      <Panel title="Vivado execution approval" actions={<StatusBadge status={vivadoOn ? 'done' : 'warning'} />}>
+        <div style={{ marginBottom: 12, color: vivadoOn ? 'var(--success)' : 'var(--warning)', fontSize: 13 }}>
+          {vivadoOn
+            ? 'Auto-approved — synthesis/implementation/Tcl runs without confirmation'
+            : 'Manual — each Vivado tool run requires confirmation'}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={vivadoOn}
+            onChange={(e) => vivadoMut.mutate(e.target.checked)}
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          <span>Auto-approve Vivado execution</span>
         </label>
       </Panel>
       <Panel title="Runtime Configuration">

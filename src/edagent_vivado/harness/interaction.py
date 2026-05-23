@@ -311,20 +311,43 @@ def respond_interaction(interaction_id: str, response: dict[str, Any], session_i
     return interaction
 
 
-async def wait_for_response(interaction_id: str, timeout: float | None = None) -> Interaction | None:
-    """Block until user responds to an interaction. Returns None on timeout."""
+def _task_stop_requested(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    from edagent_vivado.repository.store import task_get
+
+    row = task_get(task_id)
+    return bool(row and row.get("stop_requested"))
+
+
+async def wait_for_response(
+    interaction_id: str,
+    timeout: float | None = None,
+    *,
+    task_id: str | None = None,
+) -> Interaction | None:
+    """Block until user responds. Returns None on timeout or task stop."""
     interaction = _interactions.get(interaction_id)
     evt = _ensure_wait_event(interaction_id, interaction)
     if interaction is None:
         return None
-    try:
-        if timeout:
-            await asyncio.wait_for(evt.wait(), timeout)
-        else:
-            await evt.wait()
-    except asyncio.TimeoutError:
-        return None
-    return _interactions.get(interaction_id)
+    poll = 0.35
+    deadline = (time.time() + timeout) if timeout else None
+    while True:
+        if _task_stop_requested(task_id):
+            return None
+        if evt.is_set():
+            return _interactions.get(interaction_id)
+        wait_for = poll
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            wait_for = min(wait_for, remaining)
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=wait_for)
+        except asyncio.TimeoutError:
+            continue
 
 
 def cleanup_interaction(interaction_id: str) -> None:

@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from edagent_vivado.harness.vivado_agent_registry import is_vivado_execution_tool, vivado_tool_spec
 from edagent_vivado.harness.vivado_run_gate import begin_vivado_gate, resolve_vivado_gate
-from edagent_vivado.tools.patch_tools import is_patch_approved
+from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
 
 EventCreate = Callable[..., Any]
 
@@ -23,7 +23,7 @@ async def request_vivado_tool_approval(
     """Show approval UI and resolve gate. Returns True if execution may proceed."""
     if not is_vivado_execution_tool(tool_name):
         return True
-    if is_patch_approved():
+    if is_vivado_execution_approved():
         return True
 
     spec = vivado_tool_spec(tool_name)

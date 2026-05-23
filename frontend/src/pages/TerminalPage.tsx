@@ -3,7 +3,7 @@ import { ArrowLeft, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getSession } from '../api/sessions'
-import { getPatchApproval, setPatchApproval } from '../api/settings'
+import { getApprovals, setPatchApproval, setVivadoApproval } from '../api/settings'
 import { stopSessionTask } from '../api/tasks'
 import { request } from '../api/client'
 import { Button } from '../components/common/Button'
@@ -41,7 +41,7 @@ export default function TerminalPage() {
     queryFn: () => getSession(sessionId),
     enabled: Boolean(sessionId),
   })
-  const approvalQ = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
+  const approvalsQ = useQuery({ queryKey: ['approvals'], queryFn: getApprovals })
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -51,9 +51,13 @@ export default function TerminalPage() {
     mutationFn: () => stopSessionTask(sessionId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] }),
   })
-  const approve = useMutation({
+  const patchApprove = useMutation({
     mutationFn: setPatchApproval,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['patch-approval'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+  const vivadoApprove = useMutation({
+    mutationFn: setVivadoApproval,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
   })
 
   const problemCount = useMemo(
@@ -82,9 +86,21 @@ export default function TerminalPage() {
           <div className="terminal-title">
             {session?.name || 'Session'} {(running || stopping) && <span className="terminal-status-dot" />}
           </div>
-          <label className="approval-toggle">
-            <span>Auto-approve</span>
-            <input type="checkbox" checked={Boolean(approvalQ.data?.approved)} onChange={(e) => approve.mutate(e.target.checked)} />
+          <label className="approval-toggle" title="Auto-approve file patches">
+            <span>Patches</span>
+            <input
+              type="checkbox"
+              checked={Boolean(approvalsQ.data?.patch_approved)}
+              onChange={(e) => patchApprove.mutate(e.target.checked)}
+            />
+          </label>
+          <label className="approval-toggle" title="Auto-approve Vivado synth/impl/Tcl">
+            <span>Vivado</span>
+            <input
+              type="checkbox"
+              checked={Boolean(approvalsQ.data?.vivado_execution_approved)}
+              onChange={(e) => vivadoApprove.mutate(e.target.checked)}
+            />
           </label>
           {(running || stopping) && (
             <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>Stop</Button>

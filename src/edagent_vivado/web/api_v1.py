@@ -25,6 +25,15 @@ from edagent_vivado.repository.store import (
 )
 from edagent_vivado.repository.db import get_db
 from edagent_vivado.tools.patch_tools import set_patch_approval, is_patch_approved
+from edagent_vivado.harness.execution_approval import (
+    set_vivado_execution_approval,
+    is_vivado_execution_approved,
+)
+from edagent_vivado.harness.file_patch_policy import (
+    is_file_patch_tool,
+    is_file_tool_queued_for_approval,
+    is_interaction_tool,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -101,8 +110,15 @@ async def _flush_pending_file_batch(
         task_id=task_id,
         run_id=run["id"],
     )
-    responded = await wait_for_response(interaction.id)
+    responded = await wait_for_response(interaction.id, task_id=task_id)
     if not responded:
+        from edagent_vivado.repository.store import task_get
+
+        stopped = task_get(task_id)
+        if stopped and stopped.get("stop_requested"):
+            from edagent_vivado.harness.approval_outcomes import SCOPE_FILE_CHANGES, format_user_rejection
+
+            return format_user_rejection(SCOPE_FILE_CHANGES, detail="Task stopped by user.")
         return "TIMEOUT: No user response"
     if responded.interaction_type != InteractionType.APPROVAL:
         return json.dumps(responded.response, ensure_ascii=False)
@@ -295,69 +311,68 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                         )
                         tool_name_start = evt.get("name", "")
                         tool_input = evt.get("data", {}).get("input", {})
-                        # Flush batched file ops before any non-file tool; gate Vivado runs per invocation
+                        run_key = _langgraph_tool_run_key(evt)
+                        # Flush batched file ops before any non-file tool
                         if not is_patch_approved():
-                            if tool_name_start not in ("create_file_tool", "propose_patch_tool"):
+                            if not is_file_patch_tool(tool_name_start):
                                 pre_flush = await _flush_pending_file_batch(session_id, t["id"], run, t)
                                 if pre_flush:
                                     inline_approval_results.append(pre_flush)
-                            from edagent_vivado.harness.vivado_agent_registry import (
-                                is_vivado_execution_tool,
-                                vivado_tool_spec,
+                        from edagent_vivado.harness.vivado_agent_registry import (
+                            is_vivado_execution_tool,
+                            vivado_tool_spec,
+                        )
+                        from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
+
+                        vivado_blocked_early = False
+                        if is_vivado_execution_tool(tool_name_start) and not is_vivado_execution_approved():
+                            approved = await request_vivado_tool_approval(
+                                tool_name_start,
+                                tool_input,
+                                session_id=session_id,
+                                task_id=t["id"],
+                                run_id=run["id"],
+                                event_create=event_create,
                             )
-                            from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
-
-                            run_key = _langgraph_tool_run_key(evt)
-                            vivado_blocked_early = False
-                            if is_vivado_execution_tool(tool_name_start):
-                                approved = await request_vivado_tool_approval(
-                                    tool_name_start,
-                                    tool_input,
-                                    session_id=session_id,
-                                    task_id=t["id"],
-                                    run_id=run["id"],
-                                    event_create=event_create,
+                            if not approved:
+                                spec = vivado_tool_spec(tool_name_start)
+                                from edagent_vivado.harness.approval_outcomes import (
+                                    SCOPE_VIVADO_SYNTH,
+                                    format_user_rejection,
                                 )
-                                if not approved:
-                                    spec = vivado_tool_spec(tool_name_start)
-                                    from edagent_vivado.harness.approval_outcomes import (
-                                        SCOPE_VIVADO_SYNTH,
-                                        format_user_rejection,
-                                    )
 
-                                    blocked_scope = spec.scope if spec else SCOPE_VIVADO_SYNTH
-                                    lg_key = run_key or f"vivado-reject:{t['id']}:{tool_name_start}"
-                                    from edagent_vivado.harness.run_context import set_tool_thread_context
-
-                                    set_tool_thread_context(session_id, t["id"], run["id"])
-                                    tcid = tool_runner.on_tool_rejected(
-                                        lg_key,
-                                        tool_name_start,
-                                        tool_input,
-                                        blocked_scope=blocked_scope,
-                                    )
-                                    _early_completed_toolcall_ids.add(tcid)
-                                    _blocked_tool_runs[lg_key] = blocked_scope
-                                    if run_key:
-                                        _blocked_tool_runs[run_key] = blocked_scope
-                                        tool_runner.tool_ids[run_key] = tcid
-                                    _vivado_reject_run_keys.add(lg_key)
-                                    if run_key:
-                                        _vivado_reject_run_keys.add(run_key)
-                                    vivado_blocked_early = True
-                                    inline_approval_results.append(
-                                        format_user_rejection(blocked_scope, tool_name=tool_name_start)
-                                    )
-                            if not vivado_blocked_early:
+                                blocked_scope = spec.scope if spec else SCOPE_VIVADO_SYNTH
+                                lg_key = run_key or f"vivado-reject:{t['id']}:{tool_name_start}"
                                 from edagent_vivado.harness.run_context import set_tool_thread_context
 
                                 set_tool_thread_context(session_id, t["id"], run["id"])
-                                tool_runner.on_tool_start(run_key or str(evt.get("run_id", "")), tool_name_start, tool_input)
-                        else:
+                                tcid = tool_runner.on_tool_rejected(
+                                    lg_key,
+                                    tool_name_start,
+                                    tool_input,
+                                    blocked_scope=blocked_scope,
+                                )
+                                _early_completed_toolcall_ids.add(tcid)
+                                _blocked_tool_runs[lg_key] = blocked_scope
+                                if run_key:
+                                    _blocked_tool_runs[run_key] = blocked_scope
+                                    tool_runner.tool_ids[run_key] = tcid
+                                _vivado_reject_run_keys.add(lg_key)
+                                if run_key:
+                                    _vivado_reject_run_keys.add(run_key)
+                                vivado_blocked_early = True
+                                inline_approval_results.append(
+                                    format_user_rejection(blocked_scope, tool_name=tool_name_start)
+                                )
+                        if not vivado_blocked_early:
                             from edagent_vivado.harness.run_context import set_tool_thread_context
 
                             set_tool_thread_context(session_id, t["id"], run["id"])
-                            tool_runner.on_tool_start(str(evt.get("run_id", "")), evt.get("name", ""), tool_input)
+                            tool_runner.on_tool_start(
+                                run_key or str(evt.get("run_id", "")),
+                                tool_name_start,
+                                tool_input,
+                            )
                     elif kind == "on_tool_end":
                         output = str(evt.get("data", {}).get("output", ""))[:2500]
                         run_key = _langgraph_tool_run_key(evt)
@@ -387,18 +402,25 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 blocked_scope or "",
                                 tool_name=tool_name,
                             )
-                        # Intercept interaction tools — create interaction and wait for user
-                        if (
+                        queue_file_patch = (
                             not was_blocked
-                            and tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
+                            and is_file_patch_tool(tool_name)
+                            and is_file_tool_queued_for_approval(tool_name, output)
                             and not is_patch_approved()
-                        ):
+                        )
+                        handle_interaction_tool = (
+                            not was_blocked
+                            and is_interaction_tool(tool_name)
+                            and not is_patch_approved()
+                        )
+                        # Intercept interaction tools — create interaction and wait for user
+                        if queue_file_patch or handle_interaction_tool:
                             from edagent_vivado.harness.interaction import (
                                 create_interaction, wait_for_response, InteractionType, FileItem, InputField,
                                 append_file_to_batch, take_file_batch,
                             )
                             tool_input = evt.get("data", {}).get("input", {})
-                            if tool_name in ("create_file_tool", "propose_patch_tool"):
+                            if queue_file_patch and tool_name in ("create_file_tool", "propose_patch_tool"):
                                 if tool_name == "create_file_tool":
                                     fi = FileItem(
                                         path=tool_input.get("file_path", ""),
@@ -454,8 +476,21 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 )
                                 event_create(session_id, "interaction.requested", interaction.to_dict(),
                                              task_id=t["id"], run_id=run["id"])
-                                responded = await wait_for_response(interaction.id)
-                                if responded:
+                                responded = await wait_for_response(interaction.id, task_id=t["id"])
+                                if responded is None:
+                                    from edagent_vivado.repository.store import task_get as _task_get
+
+                                    if _task_get(t["id"]) and _task_get(t["id"]).get("stop_requested"):
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            SCOPE_FILE_CHANGES,
+                                            format_user_rejection,
+                                        )
+                                        output = format_user_rejection(
+                                            SCOPE_FILE_CHANGES, detail="Task stopped by user."
+                                        )
+                                    else:
+                                        output = "TIMEOUT: No user response"
+                                elif responded:
                                     if responded.interaction_type == InteractionType.APPROVAL:
                                         if responded.status.value == "approved":
                                             from edagent_vivado.harness.approval_apply import (
@@ -491,9 +526,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                                 success=True,
                                                 extra=resp,
                                             )
-                                else:
-                                    output = "TIMEOUT: No user response"
-                            else:
+                            elif handle_interaction_tool and tool_name == "request_user_input":
                                 await _flush_pending_file_batch(session_id, t["id"], run, t)
                                 fields = [InputField(id=f.get("id",""), label=f.get("label",""),
                                                     field_type=f.get("field_type","text"),
@@ -508,11 +541,22 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 )
                                 event_create(session_id, "interaction.requested", interaction.to_dict(),
                                              task_id=t["id"], run_id=run["id"])
-                                responded = await wait_for_response(interaction.id)
-                                if responded:
+                                responded = await wait_for_response(interaction.id, task_id=t["id"])
+                                if responded is None:
+                                    from edagent_vivado.repository.store import task_get as _task_get
+
+                                    if _task_get(t["id"]) and _task_get(t["id"]).get("stop_requested"):
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            SCOPE_INPUT_REQUEST,
+                                            format_user_rejection,
+                                        )
+                                        output = format_user_rejection(
+                                            SCOPE_INPUT_REQUEST, detail="Task stopped by user."
+                                        )
+                                    else:
+                                        output = "TIMEOUT: No user response"
+                                elif responded:
                                     output = json.dumps(responded.response, ensure_ascii=False)
-                                else:
-                                    output = "TIMEOUT: No user response"
                         if tcid:
                             tool_runner.on_tool_end(
                                 run_key,
@@ -828,15 +872,36 @@ async def api_retrieval_audit(audit_id: str):
 
 # ── Approval API ─────────────────────────────────────────────
 
+@router.get("/settings/approvals")
+async def api_approvals_get():
+    return {
+        "patch_approved": is_patch_approved(),
+        "vivado_execution_approved": is_vivado_execution_approved(),
+    }
+
+
 @router.get("/settings/patch-approval")
 async def api_approval_get():
     return {"approved": is_patch_approved()}
 
+
 @router.post("/settings/patch-approval")
 async def api_approval_set(body: dict):
-    approved = body.get("approved", not is_patch_approved())
+    approved = bool(body.get("approved", not is_patch_approved()))
     set_patch_approval(approved)
-    return {"approved": approved}
+    return {"approved": is_patch_approved()}
+
+
+@router.get("/settings/vivado-approval")
+async def api_vivado_approval_get():
+    return {"approved": is_vivado_execution_approved()}
+
+
+@router.post("/settings/vivado-approval")
+async def api_vivado_approval_set(body: dict):
+    approved = bool(body.get("approved", not is_vivado_execution_approved()))
+    set_vivado_execution_approval(approved)
+    return {"approved": is_vivado_execution_approved()}
 
 # ── KB API ───────────────────────────────────────────────────
 

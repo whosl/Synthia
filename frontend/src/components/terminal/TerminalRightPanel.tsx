@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bug, CircuitBoard, FileText, FolderOpen, Shield, Terminal, Wrench } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getPatchApproval } from '../../api/settings'
+import { getApprovals } from '../../api/settings'
 import type { Session } from '../../api/types'
 import { getVivadoHealth, runVivadoTcl } from '../../api/vivado'
 import { formatNumber, formatRelative, formatTime } from '../../lib/time'
@@ -37,7 +37,7 @@ export function TerminalRightPanel({
   tab: RightPanelTab
   onTabChange: (tab: RightPanelTab) => void
 }) {
-  const approvalQ = useQuery({ queryKey: ['patch-approval'], queryFn: getPatchApproval })
+  const approvalQ = useQuery({ queryKey: ['approvals'], queryFn: getApprovals })
 
   return (
     <aside className="terminal-right-panel">
@@ -66,7 +66,8 @@ export function TerminalRightPanel({
             streamStatus={streamStatus}
             timeline={timeline}
             problemCount={problemCount}
-            patchApproved={approvalQ.data?.approved}
+            patchApproved={approvalQ.data?.patch_approved}
+            vivadoApproved={approvalQ.data?.vivado_execution_approved}
           />
         )}
         {tab === 'terminal' && <RemoteTerminalTab />}
@@ -85,6 +86,7 @@ function SummaryTab({
   timeline,
   problemCount,
   patchApproved,
+  vivadoApproved,
 }: {
   sessionId: string
   session?: Session
@@ -93,6 +95,7 @@ function SummaryTab({
   timeline: SessionTimelineState
   problemCount: number
   patchApproved?: boolean
+  vivadoApproved?: boolean
 }) {
   return (
     <>
@@ -115,7 +118,8 @@ function SummaryTab({
         <div className="side-title"><FileText size={13} /> Context</div>
         <ContextDebugPanel sessionId={sessionId} taskId={activeTask?.id} />
         <div className="drawer-list" style={{ marginTop: 8 }}>
-          <span><Shield size={13} /> Patch: {patchApproved ? 'auto' : 'manual'}</span>
+          <span><Shield size={13} /> Patches: {patchApproved ? 'auto' : 'manual'}</span>
+          <span><Shield size={13} /> Vivado: {vivadoApproved ? 'auto' : 'manual'}</span>
         </div>
       </section>
       <section className="drawer-section">
