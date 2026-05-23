@@ -61,8 +61,13 @@ export interface TerminalRuntimeState {
 }
 
 const assistantTurn = (state: TerminalRuntimeState, taskId?: string | null) => {
+  // Find existing assistant turn for this task (preserves position in interleaved list)
+  if (taskId) {
+    const existing = state.turns.find((t) => t.role === 'assistant' && t.taskId === taskId)
+    if (existing) return existing
+  }
   const last = state.turns[state.turns.length - 1]
-  if (last?.role === 'assistant' && (!taskId || last.taskId === taskId || !last.taskId)) return last
+  if (last?.role === 'assistant' && last.taskId === taskId) return last
   const turn: TerminalTurn = { id: `assistant-${taskId || Date.now()}`, role: 'assistant', taskId, content: '', reasoning: [], tools: [], blocks: [] }
   state.turns.push(turn)
   return turn
@@ -244,9 +249,14 @@ export function rebuildTerminalState(messages: Message[], events: SessionEvent[]
       .filter((evt) => evt.task_id && evt.event_type === 'message.assistant.delta')
       .map((evt) => evt.task_id),
   )
-  let state = stateFromMessages(
-    messages.filter((m) => !(m.role === 'assistant' && m.task_id && replayableAssistantTasks.has(m.task_id))),
-  )
+  // Keep all messages in order; clear blocks for those rebuilt from deltas
+  let state = stateFromMessages(messages)
+  state.turns = state.turns.map((turn) => {
+    if (turn.role === 'assistant' && replayableAssistantTasks.has(turn.taskId || '')) {
+      return { ...turn, content: '', blocks: [], reasoning: [], tools: [] }
+    }
+    return turn
+  })
   for (const evt of events) {
     state = applyEvent(state, evt, { appendAssistantDelta: true })
   }

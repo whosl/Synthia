@@ -107,8 +107,12 @@ class VivadoRunner:
         if not cfg: return {"step": step, "success": False, "error": "No remote config"}
         t0 = time.time(); rd = f"{cfg['work_dir']}/{self._workspace.root.name}"
         h = cfg["host"]; v = cfg["vivado_path"]; e = cfg["env_script"]
-        ssh = ["ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no", h]
+        port = cfg.get("port", "")
+        ssh = ["ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
+        if port: ssh += ["-p", str(port)]
+        ssh.append(h)
         scp = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no"]
+        if port: scp += ["-P", str(port)]
         tc = tcl_path.read_text(errors="replace")
         for rp in self._manifest.rtl_paths(): tc = tc.replace(str(rp), f"src/{rp.name}").replace(str(rp).replace("\\", "/"), f"src/{rp.name}")
         for xp in self._manifest.xdc_paths(): tc = tc.replace(str(xp), f"src/{xp.name}").replace(str(xp).replace("\\", "/"), f"src/{xp.name}")

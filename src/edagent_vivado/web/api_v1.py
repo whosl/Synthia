@@ -421,7 +421,10 @@ async def api_vivado_health():
         return result
 
     import subprocess
-    ssh = ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", host]
+    port = _os.environ.get("VIVADO_REMOTE_PORT", "")
+    ssh = ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
+    if port: ssh += ["-p", str(port)]
+    ssh.append(host)
     # Test SSH
     try:
         p = subprocess.run(ssh + ["echo OK"], capture_output=True, text=True, timeout=15)
