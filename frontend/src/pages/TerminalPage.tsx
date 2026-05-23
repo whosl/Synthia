@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bug, Database, FileText, PanelRightClose, PanelRightOpen, Shield, Wrench } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { listEvents } from '../api/events'
 import { listMessages } from '../api/messages'
@@ -44,16 +44,19 @@ export default function TerminalPage() {
   const activeTask = activeQ.data?.task
   const running = activeTask?.state === 'running'
   const stopping = activeTask?.state === 'stopping'
-  const rebuildGenRef = useRef(0)
 
+  // Rebuild runtime from persisted data — only when queries return fresher data than current SSE state
   useEffect(() => {
     if (!messagesQ.data || !eventsQ.data) return
-    rebuildGenRef.current++
     const next = rebuildTerminalState(messagesQ.data.messages, eventsQ.data.events, activeTask)
-    setRuntime(next)
-    setLastSeq(sessionId, next.lastSeq)
-  }, [messagesQ.data, eventsQ.data, activeTask?.id, sessionId, setLastSeq])
+    setRuntime((prev) => {
+      if (next.lastSeq >= prev.lastSeq) return next
+      return prev
+    })
+    if (next.lastSeq > 0) setLastSeq(sessionId, next.lastSeq)
+  }, [messagesQ.data, eventsQ.data, sessionId, setLastSeq, activeTask])
 
+  // SSE stream event handler — stable ref to avoid stream reconnects
   const onStreamEventRef = useRef<(event: SessionEvent) => void>(() => {})
   onStreamEventRef.current = (event: SessionEvent) => {
     setRuntime((prev) => applyEvent(prev, event, { appendAssistantDelta: event.event_type === 'message.assistant.delta' }))
@@ -66,18 +69,21 @@ export default function TerminalPage() {
     }
   }
 
-  const stableOnStreamEvent = useCallback((event: SessionEvent) => {
-    onStreamEventRef.current(event)
-  }, [])
-
+  // SSE connection — only reconnects when sessionId changes
   useEffect(() => {
     if (!sessionId) return
     streamRef.current?.disconnect()
-    const stream = new SessionEventStream(sessionId, getLastSeq(sessionId), stableOnStreamEvent, (status) => setStreamStatus(sessionId, status))
+    const stream = new SessionEventStream(
+      sessionId,
+      getLastSeq(sessionId),
+      (evt) => onStreamEventRef.current(evt),
+      (status) => setStreamStatus(sessionId, status),
+    )
     streamRef.current = stream
     stream.connect()
     return () => stream.disconnect()
-  }, [sessionId, stableOnStreamEvent, getLastSeq, setStreamStatus])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }) }, [runtime.turns, runtime.timeline, view])
 
@@ -85,6 +91,8 @@ export default function TerminalPage() {
     mutationFn: (question: string) => startTask(sessionId, { question }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
     },
   })
