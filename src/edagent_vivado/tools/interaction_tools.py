@@ -57,7 +57,8 @@ def request_approval(
 
     Args:
         title: Brief title (e.g. "Create Project Files")
-        message: Explanation of what will be created/modified and why.
+        message: JSON string (same schema as run_vivado approval_request): reason, action,
+            optional files array [{path, action, description}].
         files: List of file operations. Each is a dict with:
             - path: file path
             - content: file content (full content for create, new content for modify)

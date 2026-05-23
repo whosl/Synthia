@@ -1,0 +1,26 @@
+project:
+  name: mock_synth_fail
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: blink_top
+
+sources:
+  rtl:
+    - rtl/blink_top.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+test:
+  description: "RTL is valid; use mock_fail to simulate Synth 8-439 without Vivado"
+  mock_fail: synth_8_439

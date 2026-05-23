@@ -56,6 +56,7 @@ class Interaction:
     task_id: str
     title: str
     message: str = ""
+    reason: str = ""  # LLM justification shown in approval UI (申请理由)
     status: InteractionStatus = InteractionStatus.PENDING
     created_at: int = 0
 
@@ -78,6 +79,7 @@ class Interaction:
             "task_id": self.task_id,
             "title": self.title,
             "message": self.message,
+            "reason": self.reason,
             "status": self.status.value,
             "created_at": self.created_at,
             "response": self.response,
@@ -146,6 +148,7 @@ def create_interaction(
     message: str = "",
     files: list[FileItem] | None = None,
     fields: list[InputField] | None = None,
+    reason: str = "",
 ) -> Interaction:
     interaction = Interaction(
         id=uuid.uuid4().hex[:12],
@@ -154,6 +157,7 @@ def create_interaction(
         task_id=task_id,
         title=title,
         message=message,
+        reason=reason.strip(),
         created_at=int(time.time()),
         files=files or [],
         fields=fields or [],
@@ -199,6 +203,7 @@ def interaction_from_payload(payload: dict[str, Any], session_id: str, task_id: 
         task_id=task_id,
         title=str(payload.get("title", "")),
         message=str(payload.get("message", "")),
+        reason=str(payload.get("reason", "")),
         status=status,
         created_at=int(payload.get("created_at") or time.time()),
         files=files,

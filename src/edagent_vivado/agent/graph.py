@@ -21,7 +21,14 @@ from edagent_vivado.tools.report_tools import (
     parse_utilization_tool,
     parse_vivado_log_tool,
 )
-from edagent_vivado.tools.vivado_tools import run_vivado_synth_tool
+from edagent_vivado.tools.vivado_tools import (
+    run_vivado_flow_tool,
+    run_vivado_impl_tool,
+    run_vivado_script_tool,
+    run_vivado_synth_tool,
+    run_vivado_tcl_tool,
+)
+from edagent_vivado.tools.knowledge_tools import search_knowledge_tool, reindex_knowledge_tool
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +40,12 @@ _TOOLS = [
     parse_utilization_tool,
     match_error_cases_tool,
     run_vivado_synth_tool,
+    run_vivado_impl_tool,
+    run_vivado_tcl_tool,
+    run_vivado_script_tool,
+    run_vivado_flow_tool,
+    search_knowledge_tool,
+    reindex_knowledge_tool,
     propose_patch_tool,
     create_file_tool,
 ]

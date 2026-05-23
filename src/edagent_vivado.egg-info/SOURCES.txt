@@ -23,6 +23,7 @@ src/edagent_vivado/harness/batch_runner.py
 src/edagent_vivado/harness/ci_runner.py
 src/edagent_vivado/harness/command_runner.py
 src/edagent_vivado/harness/diff_runner.py
+src/edagent_vivado/harness/interaction.py
 src/edagent_vivado/harness/ip_manager.py
 src/edagent_vivado/harness/manifest.py
 src/edagent_vivado/harness/qor_checker.py
@@ -44,6 +45,7 @@ src/edagent_vivado/repository/db.py
 src/edagent_vivado/repository/store.py
 src/edagent_vivado/tools/__init__.py
 src/edagent_vivado/tools/file_tools.py
+src/edagent_vivado/tools/interaction_tools.py
 src/edagent_vivado/tools/patch_tools.py
 src/edagent_vivado/tools/report_tools.py
 src/edagent_vivado/tools/vivado_tools.py

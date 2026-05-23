@@ -1,17 +1,20 @@
-"""Keyword-based semantic KB (Phase 2A skeleton). Indexes repo docs into knowledge_chunks."""
+"""Semantic KB indexing and search — Phase 2A hybrid retrieval."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import time
 from pathlib import Path
 from typing import Any
 
+from edagent_vivado.knowledge.embedding import get_embedding_provider
+from edagent_vivado.knowledge.retrieval import hybrid_search, rewrite_query
+from edagent_vivado.knowledge.vector_store import get_vector_store
 from edagent_vivado.repository.db import get_db
 
-DEFAULT_DOC_GLOBS = ("SPEC.md", "VIVADO_COMMANDS.md", "README.md", "arch.md")
+DEFAULT_DOC_GLOBS = ("SPEC.md", "VIVADO_COMMANDS.md", "README.md")
+PROJECT_DOC_GLOBS = ("examples/*/eda.yaml", "examples/*/README.md")
 CHUNK_MAX_CHARS = 900
 
 
@@ -19,15 +22,10 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _tokenize(text: str) -> set[str]:
-    return {t.lower() for t in re.findall(r"[a-zA-Z0-9_./-]{2,}", text)}
-
-
 def _chunk_markdown(text: str, source_id: str) -> list[tuple[str, str, int]]:
-    """Split markdown into (title, content, index) chunks."""
     parts = re.split(r"\n(?=#{1,3}\s)", text)
     chunks: list[tuple[str, str, int]] = []
-    for i, part in enumerate(parts):
+    for part in parts:
         part = part.strip()
         if not part:
             continue
@@ -43,97 +41,123 @@ def _chunk_markdown(text: str, source_id: str) -> list[tuple[str, str, int]]:
     return chunks or [(source_id, text[:CHUNK_MAX_CHARS], 0)]
 
 
-def reindex_global(extra_paths: list[str] | None = None) -> dict[str, Any]:
-    """Index global markdown sources into knowledge_sources + knowledge_chunks."""
+def _index_file(
+    path: Path,
+    *,
+    scope: str,
+    project_id: str = "",
+    source_type: str = "repo_markdown",
+    authority: float = 0.85,
+    trust: float = 0.8,
+) -> int:
+    if not path.is_file():
+        return 0
     root = _repo_root()
-    paths = list(DEFAULT_DOC_GLOBS) + (extra_paths or [])
+    try:
+        rel = str(path.relative_to(root))
+    except ValueError:
+        rel = str(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    sha = hashlib.sha256(text.encode()).hexdigest()[:16]
+    sid = f"{scope}-{hashlib.md5(rel.encode()).hexdigest()[:10]}"
     db = get_db()
     now = int(time.time())
-    indexed = 0
-    chunk_count = 0
 
-    db.execute("DELETE FROM knowledge_chunks WHERE scope='global'")
-  # keep sources, refresh below
+    existing = db.execute("SELECT id FROM knowledge_sources WHERE id=?", (sid,)).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE knowledge_sources SET title=?, path=?, sha256=?, scope=?, project_id=?, indexed_at=?, updated_at=?, source_type=? WHERE id=?",
+            (path.name, str(path), sha, scope, project_id or None, now, now, source_type, sid),
+        )
+    else:
+        db.execute(
+            "INSERT INTO knowledge_sources(id,scope,project_id,source_type,title,path,authority_score,trust_score,sha256,indexed_at,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, scope, project_id or None, source_type, path.name, str(path), authority, trust, sha, now, now, now, "{}"),
+        )
+
+    db.execute("DELETE FROM knowledge_chunks WHERE source_id=?", (sid,))
+    chunk_ids: list[str] = []
+    texts: list[str] = []
+    count = 0
+    for title, content, idx in _chunk_markdown(text, rel):
+        cid = f"{sid}-{idx}"
+        db.execute(
+            "INSERT INTO knowledge_chunks(id,source_id,scope,project_id,chunk_index,title,content,token_count,authority_score,trust_score,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cid, sid, scope, project_id or None, idx, title, content, max(1, len(content) // 4), authority, trust, now, now, "{}"),
+        )
+        chunk_ids.append(cid)
+        texts.append(f"{title}\n{content}")
+        count += 1
+
+    provider = get_embedding_provider()
+    get_vector_store().upsert_chunks(chunk_ids, texts, provider)
+    return count
+
+
+def reindex_global(extra_paths: list[str] | None = None) -> dict[str, Any]:
+    root = _repo_root()
+    paths = list(DEFAULT_DOC_GLOBS) + (extra_paths or [])
+    total_chunks = 0
+    sources = 0
     for rel in paths:
-        path = root / rel
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        sha = hashlib.sha256(text.encode()).hexdigest()[:16]
-        sid = f"global-{rel.replace('/', '-')}"
+        n = _index_file(root / rel, scope="global")
+        if n:
+            sources += 1
+            total_chunks += n
+    get_db().commit()
+    return {"indexed_sources": sources, "chunks": total_chunks, "root": str(root), "scope": "global"}
 
-        existing = db.execute("SELECT id FROM knowledge_sources WHERE id=?", (sid,)).fetchone()
-        if existing:
-            db.execute(
-                "UPDATE knowledge_sources SET title=?, path=?, sha256=?, indexed_at=?, updated_at=? WHERE id=?",
-                (rel, str(path), sha, now, now, sid),
+
+def reindex_project(project_id: str = "uart_demo") -> dict[str, Any]:
+    root = _repo_root() / "examples" / project_id
+    if not root.is_dir():
+        return {"indexed_sources": 0, "chunks": 0, "project_id": project_id}
+    total = 0
+    sources = 0
+    for pattern in ("*.md", "eda.yaml", "constrs/*.xdc", "rtl/*.v"):
+        for path in root.glob(pattern):
+            n = _index_file(path, scope="project", project_id=project_id, source_type="project_doc", authority=0.75, trust=0.75)
+            if n:
+                sources += 1
+                total += n
+    get_db().commit()
+    return {"indexed_sources": sources, "chunks": total, "project_id": project_id, "scope": "project"}
+
+
+def reindex_all(project_id: str = "uart_demo") -> dict[str, Any]:
+    g = reindex_global()
+    p = reindex_project(project_id)
+    return {"global": g, "project": p}
+
+
+def search_semantic_kb(
+    query: str,
+    top_k: int = 6,
+    min_score: float = 0.15,
+    scope: str = "both",
+    project_id: str = "uart_demo",
+    session_id: str = "",
+    task_id: str = "",
+    run_id: str = "",
+) -> tuple[str, list[dict]]:
+    if scope == "both":
+        out = hybrid_search(
+            query, scope="global", top_k=top_k, min_score=min_score,
+            session_id=session_id, task_id=task_id, run_id=run_id,
+        )
+        if project_id:
+            pout = hybrid_search(
+                query, scope="project", project_id=project_id, top_k=top_k, min_score=min_score,
+                session_id=session_id, task_id=task_id, run_id=run_id,
             )
-        else:
-            db.execute(
-                "INSERT INTO knowledge_sources(id,scope,source_type,title,path,authority_score,trust_score,sha256,indexed_at,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (sid, "global", "repo_markdown", rel, str(path), 0.85, 0.8, sha, now, now, now, "{}"),
-            )
+            merged = sorted(out["results"] + pout["results"], key=lambda x: x["final_score"], reverse=True)[:top_k]
+            formatted = "\n".join(f"- {h['title']} (score={h['final_score']}): {h['excerpt']}" for h in merged)
+            return formatted, merged
+        return out["formatted"], out["results"]
 
-        db.execute("DELETE FROM knowledge_chunks WHERE source_id=?", (sid,))
-        for title, content, idx in _chunk_markdown(text, rel):
-            cid = f"{sid}-{idx}"
-            db.execute(
-                "INSERT INTO knowledge_chunks(id,source_id,scope,chunk_index,title,content,token_count,authority_score,trust_score,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (cid, sid, "global", idx, title, content, max(1, len(content) // 4), 0.85, 0.8, now, now, "{}"),
-            )
-            chunk_count += 1
-        indexed += 1
-
-    db.commit()
-    return {"indexed_sources": indexed, "chunks": chunk_count, "root": str(root)}
-
-
-def search_semantic_kb(query: str, top_k: int = 6, min_score: float = 0.12) -> tuple[str, list[dict]]:
-    """Return (formatted_text, hit_records) for Context Builder / audit."""
-    q_tokens = _tokenize(query)
-    if not q_tokens:
-        return "", []
-
-    db = get_db()
-    n = db.execute("SELECT COUNT(*) AS n FROM knowledge_chunks WHERE scope='global'").fetchone()
-    if not n or n["n"] == 0:
-        reindex_global()
-
-    rows = db.execute(
-        "SELECT c.id, c.source_id, c.title, c.content, c.authority_score, c.trust_score, s.title AS source_title "
-        "FROM knowledge_chunks c JOIN knowledge_sources s ON c.source_id=s.id WHERE c.scope='global'"
-    ).fetchall()
-
-    hits: list[dict] = []
-    for row in rows:
-        r = dict(row)
-        content = r.get("content") or ""
-        title = r.get("title") or ""
-        c_tokens = _tokenize(content + " " + title)
-        if not c_tokens:
-            continue
-        overlap = len(q_tokens & c_tokens)
-        score = overlap / max(len(q_tokens), 1)
-        if title.lower() in query.lower():
-            score += 0.15
-        if score < min_score:
-            continue
-        excerpt = content[:320].replace("\n", " ")
-        hits.append({
-            "source_type": "semantic_kb",
-            "source_id": r.get("source_id", ""),
-            "chunk_id": r.get("id", ""),
-            "title": f"{r.get('source_title', '')} — {title}",
-            "excerpt": excerpt,
-            "score": round(min(1.0, score), 3),
-            "authority_score": float(r.get("authority_score") or 0.7),
-            "trust_score": float(r.get("trust_score") or 0.7),
-        })
-
-    hits.sort(key=lambda h: h["score"], reverse=True)
-    hits = hits[:top_k]
-    if not hits:
-        return "", []
-
-    lines = [f"- {h['title']} (score={h['score']}): {h['excerpt']}" for h in hits]
-    return "\n".join(lines), hits
+    sco = "project" if scope == "project" else "global"
+    out = hybrid_search(
+        query, scope=sco, project_id=project_id if sco == "project" else "",
+        top_k=top_k, min_score=min_score, session_id=session_id, task_id=task_id, run_id=run_id,
+    )
+    return out["formatted"], out["results"]

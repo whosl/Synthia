@@ -57,6 +57,18 @@ def collect_from_tool_output(
         })
 
     problems.extend(_problems_from_text(text, source, tool_name))
+    vivado_tools = {
+        "run_vivado_synth_tool": "vivado_synth",
+        "run_vivado_impl_tool": "vivado_impl",
+        "run_vivado_tcl_tool": "vivado_tcl",
+        "run_vivado_script_tool": "vivado_script",
+        "run_vivado_flow_tool": "vivado_flow",
+    }
+    if tool_name in vivado_tools and problems:
+        cat = vivado_tools[tool_name]
+        for p in problems:
+            if not p.get("category"):
+                p["category"] = cat
     return problems
 
 

@@ -1,0 +1,26 @@
+project:
+  name: bad_width
+  vivado_version: "2022.1"
+  flow: non_project
+  part: xc7a35tcpg236-1
+  top: width_bad
+
+sources:
+  rtl:
+    - rtl/width_bad.v
+  tb: []
+  include_dirs: []
+
+constraints:
+  xdc:
+    - constrs/top.xdc
+
+runs:
+  synth:
+    enabled: true
+  impl:
+    enabled: false
+
+test:
+  description: "4-bit bus assigned to 8-bit wire without resize"
+  expected_error_class: width
