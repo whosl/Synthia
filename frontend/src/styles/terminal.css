@@ -1424,7 +1424,8 @@
   }
 }
 
-.timeline-entry.sticky-pending-approval {
+.timeline-entry.sticky-pending-approval,
+.tool-run-approval.sticky-pending-approval {
   position: sticky;
   bottom: 0;
   z-index: 2;
