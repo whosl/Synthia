@@ -1361,10 +1361,18 @@ task.stopped
 task.done
 task.error
 
+run.started
+run.completed
+run.error
+
 message.user.created
 message.assistant.delta
 message.assistant.completed
 message.assistant.stopped
+message.assistant.snapshot
+
+assistant.stream.opened
+assistant.stream.completed
 
 reasoning.delta
 reasoning.summary
@@ -1373,6 +1381,18 @@ tool.started
 tool.delta
 tool.completed
 tool.error
+
+interaction.requested
+interaction.approved
+interaction.rejected
+interaction.responded
+
+agent.started
+agent.completed
+agent.message
+agent.handoff
+agent.continuation
+channel.message.created
 
 llm.started
 llm.usage
@@ -1401,18 +1421,77 @@ vivado.file.uploaded
 vivado.file.downloaded
 vivado.path.mapped
 
+vivado.stop_requested
+vivado.interrupt_sent
+vivado.terminate_sent
+vivado.kill_sent
+vivado.stopped
+vivado.killed
+vivado.stop_error
+
 problem.detected
 kb.candidate.created
 kb.candidate.updated
 
-agent.started
-agent.completed
-agent.handoff
-agent.message
-
-channel.message.created
+context.package.created
+memory.updated
 artifact.created
 ```
+
+事件载荷约定：
+
+- `message.assistant.delta` 必须携带 `stream_id`，与同一 `assistant.stream.opened` 关联，便于在 tool call 之间分段渲染。
+- `message.assistant.snapshot` 是每个 stream 段完成时写入的纯文本快照，确保断线后能从事件流端到端重建 UI（即使 `messages` 表里尚未落 `assistant` 行）。
+- `agent.continuation` 由 harness 在 HITL approval 之后启动下一轮 LLM 时发出，载荷必须包含 `reason` 与裁剪后的 `approval_output`。
+- `kb.candidate.updated` 用于审批/合并后通知前端刷新。
+- 所有 `vivado.stop_*` 事件必须由 Vivado Runtime Adapter 按发生顺序发出，并写入 `vivado_commands.killed/stopped` 字段。
+
+### 6.6 协议版本协商
+
+后端在 `/api/v1/events/protocol` 暴露：
+
+```json
+{
+  "protocol_version": 2,
+  "wire_event_types": ["session.created", "..."]
+}
+```
+
+前端在初始化时必须读取并据此校验事件 reducer 注册的事件集；遇到未知事件类型必须降级到 generic timeline，不得崩溃。每次新增/重命名事件类型，必须同时：
+
+1. 更新 `src/edagent_vivado/events/catalog.py`。
+2. 提升 `PROTOCOL_VERSION`。
+3. 同步 `frontend/src/lib/events/catalog.ts`。
+
+### 6.7 Interaction Protocol
+
+HITL 交互是 chat/tool stream 的独立子通道。事件类型：
+
+```text
+interaction.requested
+interaction.approved
+interaction.rejected
+interaction.responded
+```
+
+`interaction.requested.payload` 必须包含：
+
+- `id`（interaction id，hex12 即可）
+- `interaction_id`（同 id，向前兼容）
+- `interaction_type`：`approval` 或 `input_request`
+- `session_id`, `task_id`
+- `title`, `message`, `reason`
+- `status`：`pending|approved|rejected|responded`
+- `created_at`
+- `files?`：`[{path, content, description, action: create|modify|delete}]`
+- `fields?`：`[{id, label, field_type: text|select|search_select, options?, placeholder, recommendations?, required}]`
+
+约束：
+
+- 同一 task 同一时刻最多保留一个 pending 的 approval interaction；多个 file 创建/修改请求必须由 harness 自动 batch 到同一 approval。
+- agent 主动发起的 HITL 必须通过工具：`request_approval(title, message, files?, fields?)` 和 `request_user_input(title, message, fields)`。
+- interaction 状态必须由 events 表重放可恢复；服务重启或前端刷新后，pending interaction 都能再次拉取（`GET /api/v1/sessions/{sid}/interactions` 必须能 rehydrate）。
+- 用户拒绝后，工具返回值必须包含 `edagent_outcome=user_rejected`（见 §8.5）。
 
 ---
 
@@ -1567,7 +1646,13 @@ Request:
 }
 ```
 
-Task execution uses the Session's `project_id` and `project_snapshot_json`; request-level `manifest_path` is deprecated and should only be accepted temporarily for migration/backward compatibility.
+Task execution uses the Session's `project_id` and `project_snapshot_json`; request-level `manifest_path` is **deprecated as of v1**. New clients must not send it. The server should:
+
+- Silently ignore `manifest_path` when `project_snapshot_json` is non-empty.
+- Log a `migration.manifest_path_used` event when an old client still sends it, so we can plan removal.
+- Reject the field outright once the migration window closes (target: next minor release after the Phase 1F frontend refactor lands).
+
+Vivado tools (`run_vivado_*_tool`) must not accept `manifest_path` as an LLM-controlled argument. The harness layer resolves manifest/top/part from `project_snapshot_json` before invoking the adapter; the tool signature only carries Vivado-specific parameters (e.g. `directive`, `target_id`).
 
 Response:
 
@@ -1603,20 +1688,47 @@ GET /api/sessions/{session_id}/stream
 
 ### 7.6 Approval API
 
-Patch approval remains a first-class setting:
+Patch approval and Vivado-execution auto-approval are first-class settings:
 
 ```http
+GET  /api/settings/approvals
 GET  /api/settings/patch-approval
 POST /api/settings/patch-approval
+GET  /api/settings/vivado-approval
+POST /api/settings/vivado-approval
 ```
 
 Response:
 
 ```json
+{ "approved": true }
+```
+
+Both flags must be **persisted** (SQLite `settings` table) so they survive process restart and are shared across uvicorn workers; in-memory module globals are not acceptable.
+
+#### 7.6.A Approval-request schema (LLM contract)
+
+Every Vivado / file-mutating tool must include a JSON-encoded `approval_request` argument so the UI can render an approval card. The body is a **JSON string** (no markdown fences). Schema:
+
+```json
 {
-  "approved": true
+  "reason": "Why this operation is needed; what was already checked",
+  "action": "One-line summary of what will happen",
+  "manifest_path": "examples/.../eda.yaml",
+  "tcl_command": "only for run_vivado_tcl_tool",
+  "script": "only for run_vivado_script_tool",
+  "target_id": "optional Vivado target id",
+  "files": [
+    { "path": "...", "action": "create|modify|delete", "description": "..." }
+  ]
 }
 ```
+
+Rules:
+
+- Empty fields must be omitted, not stringified as empty.
+- The LLM must not put free-form prose in `details` / `message` / `说明` — executable content goes in `tcl_command`, `script`, `manifest_path`, or `files`.
+- The frontend renders the dict as flat key/value rows in a fixed display order; unknown keys go to a generic section.
 
 ### 7.7 Monitor API
 
@@ -1925,6 +2037,35 @@ search_error_kb(error_signature: str, context: dict | None = None) -> str
 ```
 
 工具返回必须包含来源、相关度、权威度、可信度、artifact/source id。Agent 回答时应优先基于高可信来源。
+
+### 8.5 Tool Outcome Envelope
+
+Every tool that may surface in the chat timeline must return a JSON document with the following stable fields, so the agent (and the UI) can mechanically distinguish user rejection from execution failure from success:
+
+```json
+{
+  "edagent_outcome": "user_rejected | execution_failed | execution_succeeded | approved | partially_approved | timeout | queued",
+  "summary": "Human-readable one-line summary",
+  "scope": "vivado_synth | vivado_impl | vivado_tcl | vivado_script | vivado_flow | file_changes | input_request",
+  "ran": true,
+  "success": true,
+  "error": "optional structured error",
+  "...": "extra scope-specific fields"
+}
+```
+
+Required semantics:
+
+| `edagent_outcome` | `ran` | `success` | Agent must |
+|---|---|---|---|
+| `user_rejected` | false | false | Treat as "step skipped". Never report this as a Vivado/synth/impl failure. Ask the user what to do next. |
+| `execution_failed` | true | false | Diagnose from logs/reports — this is a real tool failure. |
+| `execution_succeeded` | true | true | Use the result normally. |
+| `approved` / `partially_approved` | true | true | Continue; applied paths are on disk. |
+| `timeout` | true | false | Re-check whether the tool should be retried with longer timeout or alternative path. |
+| `queued` | false | — | File change has been batched into a pending approval; user has not seen it yet. Do not surface as a final answer. |
+
+`scope` values are open-set but must be drawn from the constants in `harness/approval_outcomes.py`. The system prompt must teach the agent to read `edagent_outcome` strictly; any natural-language interpretation of the tool body is forbidden when an `edagent_outcome` field is present.
 
 ### 8.4 Tool 包装器
 
@@ -2533,6 +2674,7 @@ class EmbeddingProvider:
 - 支持本地 embedding 模型。
 - 支持与当前 LLM provider 同源的 embedding。
 - usage/cost 进入 `llm_usage` 或 embedding usage 记录。
+- 必须存在一个**确定性 offline fallback**（例如 hash-bow embedding），用于无 API key 的开发/CI/单元测试环境；fallback 的 `provider` 字段必须显式标记为 `"hash"` 之类的非真实模型名，以便检索审计能识别"当前结果可信度低"。Fallback 只用于开发，不允许作为生产默认；后端必须在启动时记录当前 embedding provider，并在 monitor overview 暴露。
 
 ### 10A.5 Ingestion Pipeline
 
@@ -3400,6 +3542,12 @@ src/edagent_vivado/web/static/
 - 构建模式 FastAPI 托管 React 静态资源。
 - Python package 可包含已构建静态资源。
 
+构建产物治理：
+
+- `src/edagent_vivado/web/static/assets/index-*.js` / `index-*.css` 是 Vite 输出的带 hash 文件，**只允许一份当前版本进入仓库**；每次 `npm run build` 必须清空 `assets/` 后再写入，避免历史 hash 文件累积。
+- `frontend/dist/`、`frontend/.vite/`、`frontend/bun.lock`、`*.egg-info/`、`__pycache__/`、`*.py[cod]`、`build/`、`dist/` 必须在 `.gitignore` 中。
+- `examples/**/[0-9]{8}_*_agent_(synth|impl)/`、`examples/**/_*.py`、`examples/**/_*.tcl` 这类 run-time scratch 产物必须 ignore；历史已 tracked 的可以在专门的 cleanup PR 中 `git rm --cached`。
+
 ---
 
 ## 14. 旧 Dashboard/API 迁移
@@ -3825,6 +3973,17 @@ LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
 ### 19.4 SSE 是长期实时协议
 
 多 Agent 也使用 SSE 进行前端实时展示。Agent 间通信通过文件 channel 和持久化事件表达。
+
+### 19.5 单 worker 部署约束
+
+当前 SSE queue、approval gate (`vivado_run_gate`)、HITL interaction store、file-batch、`patch_auto_approve` 在线缓存等运行时状态都驻留在单进程内存。Spec 接受这一现实，但要求：
+
+- 后端默认以**单 uvicorn worker** 启动。多 worker 部署明确不支持。
+- 所有运行时状态都必须**可由 events 表 + settings 表完整重建**：
+  - Pending interaction 重启后由 `rehydrate_session_interactions(session_id)` 从 `interaction.requested` / `interaction.responded` 重放还原。
+  - 审批开关由 `settings` 表持久化。
+  - Vivado gate 状态可丢失：服务重启等价于"所有 pending Vivado 请求被拒"，前端必须能识别并提示用户重新申请。
+- 集群部署（多 worker / 多进程）属于未来工作，需要把上述状态迁到外部 broker（Redis / SQLite advisory lock / NATS）后才可启用。当前实现不得依赖跨进程一致性。
 
 ---
 

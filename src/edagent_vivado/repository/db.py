@@ -367,6 +367,12 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     metric_summary_json TEXT,
     metadata_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
