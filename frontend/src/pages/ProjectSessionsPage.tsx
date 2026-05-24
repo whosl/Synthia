@@ -33,20 +33,25 @@ import { formatNumber, formatRelative } from '../lib/time'
 
 function SessionCard({
   session,
-  projectId,
   onOpen,
-  onDelete,
-  onRename,
 }: {
   session: Session
-  projectId: string
   onOpen: () => void
-  onDelete: () => void
-  onRename: () => void
 }) {
   const tokens = (session.token_input || 0) + (session.token_output || 0)
   return (
-    <article className="session-card">
+    <article
+      className="session-card session-card-clickable"
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen()
+        }
+      }}
+    >
       <div className="session-card-head">
         <div className="session-card-title">
           <strong>{session.name || 'Untitled session'}</strong>
@@ -61,23 +66,6 @@ function SessionCard({
           <div><dt>Tokens</dt><dd>{formatNumber(tokens)}</dd></div>
         )}
       </dl>
-      <div className="session-card-actions">
-        <Button className="primary" onClick={onOpen}>
-          Open <ChevronRight size={14} />
-        </Button>
-        <Button className="ghost" onClick={onRename} title="Rename">
-          <Pencil size={14} />
-        </Button>
-        <Button
-          className="ghost danger-ghost"
-          onClick={(e) => {
-            e.stopPropagation()
-            if (confirm('Archive this session?')) onDelete()
-          }}
-        >
-          <Trash2 size={14} /> Delete
-        </Button>
-      </div>
     </article>
   )
 }
@@ -378,10 +366,7 @@ export default function ProjectSessionsPage() {
             <SessionCard
               key={s.id}
               session={s}
-              projectId={projectId}
               onOpen={() => navigate(`/term?project=${projectId}&session=${s.id}`)}
-              onDelete={() => del.mutate(s.id)}
-              onRename={() => promptRename(s)}
             />
           ))}
         </div>

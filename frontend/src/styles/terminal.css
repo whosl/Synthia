@@ -183,6 +183,26 @@
   padding: 14px 16px;
 }
 
+.session-info-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.session-info-actions .btn {
+  flex: 1;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.session-info-actions .btn.danger-ghost {
+  color: var(--error);
+  border-color: var(--error-border);
+  background: var(--error-subtle);
+}
+
 .remote-terminal-tab {
   display: flex;
   flex-direction: column;
