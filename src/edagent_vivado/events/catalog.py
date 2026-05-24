@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 # Lifecycle
 LIFECYCLE_EVENTS = (
@@ -48,6 +48,16 @@ INTERACTION_EVENTS = (
     "interaction.responded",
 )
 
+# Agent orchestration / continuation
+AGENT_EVENTS = (
+    "agent.started",
+    "agent.completed",
+    "agent.message",
+    "agent.handoff",
+    "agent.continuation",
+    "channel.message.created",
+)
+
 # Monitor / EDA (audit-only in chat UI)
 MONITOR_EVENTS = (
     "llm.started",
@@ -59,14 +69,32 @@ MONITOR_EVENTS = (
     "eda.problem_detected",
     "eda.completed",
     "eda.error",
+    "vivado.target.checked",
+    "vivado.path.mapped",
+    "vivado.file.uploaded",
+    "vivado.file.downloaded",
+    "vivado.session.started",
+    "vivado.session.ready",
+    "vivado.session.idle_timeout",
+    "vivado.session.closed",
     "vivado.command.started",
     "vivado.command.stdout",
     "vivado.command.stderr",
     "vivado.command.log",
     "vivado.command.completed",
     "vivado.command.error",
+    # Vivado stop / lifecycle (SPEC §5.5)
+    "vivado.stop_requested",
+    "vivado.interrupt_sent",
+    "vivado.terminate_sent",
+    "vivado.kill_sent",
+    "vivado.stopped",
+    "vivado.killed",
+    "vivado.stop_error",
+    "vivado.command.stopped",
     "problem.detected",
     "kb.candidate.created",
+    "kb.candidate.updated",
     "artifact.created",
     "context.package.created",
     "memory.updated",
@@ -77,6 +105,7 @@ ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *MESSAGE_EVENTS,
     *TOOL_EVENTS,
     *INTERACTION_EVENTS,
+    *AGENT_EVENTS,
     *MONITOR_EVENTS,
 )
 
@@ -99,6 +128,8 @@ CANONICAL_BY_WIRE_TYPE: dict[str, str] = {
     "interaction.approved": "TOOL_CALL_RESULT",
     "interaction.rejected": "TOOL_CALL_RESULT",
     "interaction.responded": "TOOL_CALL_RESULT",
+    "agent.continuation": "TEXT_MESSAGE_START",
+    "agent.handoff": "TOOL_CALL_RESULT",
     "task.started": "RUN_STARTED",
     "task.done": "RUN_FINISHED",
     "task.error": "RUN_ERROR",
