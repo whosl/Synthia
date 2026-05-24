@@ -6,6 +6,7 @@ export function Composer({
   disabled,
   running,
   stopping,
+  statusActive,
   placeholder,
   onSend,
   onStop,
@@ -13,6 +14,7 @@ export function Composer({
   disabled?: boolean
   running?: boolean
   stopping?: boolean
+  statusActive?: boolean
   placeholder?: string
   onSend: (text: string) => void
   onStop: () => void
@@ -22,7 +24,17 @@ export function Composer({
   const inputPlaceholder =
     placeholder ??
     (running ? 'Agent is running…' : 'Ask about synthesis, timing, constraints…')
-  return <div className="composer">
+  const showStatus = statusActive ?? (running || stopping)
+  return (
+    <div className="composer-anchor">
+      {showStatus && (
+        <span
+          className="terminal-status-dot composer-status-dot"
+          role="status"
+          aria-label={stopping ? 'Agent stopping' : 'Agent running'}
+        />
+      )}
+      <div className="composer">
     <input className="input mono" value={text} disabled={disabled} placeholder={inputPlaceholder} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
     {running || stopping ? (
       <Button
@@ -39,5 +51,7 @@ export function Composer({
         <Send size={16} />
       </Button>
     )}
-  </div>
+      </div>
+    </div>
+  )
 }

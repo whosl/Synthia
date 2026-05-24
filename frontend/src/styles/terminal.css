@@ -36,7 +36,7 @@
   border-radius: 50%;
   background: var(--success);
   display: inline-block;
-  margin-left: 8px;
+  flex-shrink: 0;
   box-shadow: 0 0 8px rgba(22, 163, 74, 0.5);
   animation: pulse-dot 2s ease-in-out infinite;
 }
@@ -905,12 +905,24 @@
 }
 
 /* Composer — floating input + action (no outer chrome) */
-.composer {
+.composer-anchor {
   position: absolute;
   left: 8px;
   right: 8px;
   bottom: 24px;
   z-index: 10;
+}
+
+.composer-status-dot {
+  position: absolute;
+  left: 10px;
+  bottom: calc(100% + 8px);
+  margin: 0;
+  z-index: 1;
+}
+
+.composer {
+  position: relative;
   padding: 0;
   display: flex;
   align-items: stretch;
@@ -1243,10 +1255,15 @@
     height: 116px;
   }
 
-  .composer {
+  .composer-anchor {
     left: 6px;
     right: 6px;
     bottom: 18px;
+  }
+
+  .composer-status-dot {
+    left: 8px;
+    bottom: calc(100% + 6px);
   }
 
   .approval-detail-row {

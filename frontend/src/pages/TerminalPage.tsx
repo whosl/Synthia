@@ -106,10 +106,7 @@ export default function TerminalPage() {
                 <span className="terminal-back-label">Back</span>
               </Link>
               <div className="chat-panel-header-title-block">
-                <h1 className="chat-panel-header-title">
-                  {headerTitle}
-                  {(running || stopping) && <span className="terminal-status-dot" />}
-                </h1>
+                <h1 className="chat-panel-header-title">{headerTitle}</h1>
                 {headerSubtitle && (
                   <p className="chat-panel-header-subtitle mono" title={headerSubtitle}>{headerSubtitle}</p>
                 )}
@@ -176,6 +173,7 @@ export default function TerminalPage() {
             <Composer
               running={running}
               stopping={stopping}
+              statusActive={running || stopping}
               disabled={composerDisabled}
               placeholder={
                 projectArchived
