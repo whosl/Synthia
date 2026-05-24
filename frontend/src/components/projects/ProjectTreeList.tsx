@@ -20,11 +20,7 @@ import type { Project, Session } from '../../api/types'
 import { useIsDesktop } from '../../hooks/useIsDesktop'
 import { useLongPress } from '../../hooks/useLongPress'
 import { isProjectArchived } from '../../lib/projectStatus'
-import {
-  isSessionRunning,
-  sessionAvatarColors,
-  sessionInitials,
-} from '../../lib/sessionVisual'
+import { isSessionRunning, sessionInitials } from '../../lib/sessionVisual'
 import { formatNumber, formatRelative } from '../../lib/time'
 import { Button } from '../common/Button'
 import { EmptyState } from '../common/EmptyState'
@@ -82,7 +78,6 @@ function SessionTreeRow({
   const running = isSessionRunning(session.status)
   const archived = Boolean(session.archived_at)
   const initials = sessionInitials(session.name || 'Session')
-  const avatarStyle = sessionAvatarColors(session.id, archived)
 
   const actions: MobileAction[] = [
     { id: 'rename', label: 'Rename session', onSelect: onRename },
@@ -109,7 +104,7 @@ function SessionTreeRow({
         }}
         {...pressHandlers}
       >
-        <span className="project-tree-session-avatar" style={avatarStyle} aria-hidden>
+        <span className="project-tree-session-avatar" aria-hidden>
           {initials}
         </span>
         <span className={`project-tree-session-title${archived ? ' muted' : ''}`}>
