@@ -37,9 +37,11 @@ from edagent_vivado.evolution.feedback import (
 from edagent_vivado.evolution.generators import (
     GENERATORS,
     gen_approval_drop,
+    gen_flow_template_reuse,
     gen_negative_feedback,
     gen_recurrence,
     gen_repeated_failure,
+    gen_routing_drift,
     run_generators,
 )
 from edagent_vivado.evolution.overlays import (
@@ -142,9 +144,11 @@ __all__ = [
     "candidate_update_status",
     "GENERATORS",
     "gen_approval_drop",
+    "gen_flow_template_reuse",
     "gen_negative_feedback",
     "gen_recurrence",
     "gen_repeated_failure",
+    "gen_routing_drift",
     "run_generators",
     # SE-PR4
     "overlay_create",

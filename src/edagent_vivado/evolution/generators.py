@@ -26,8 +26,10 @@ from edagent_vivado.evolution.aggregator import latest_snapshot
 from edagent_vivado.evolution.candidates import candidate_create
 from edagent_vivado.evolution.feedback import feedback_thumb_rolling
 from edagent_vivado.evolution.overlays import (
+    SURFACE_FLOW_TEMPLATE,
     SURFACE_KB,
     SURFACE_PROMPT,
+    SURFACE_ROUTING,
 )
 from edagent_vivado.repository.db import get_db
 
@@ -47,6 +49,41 @@ NEGATIVE_FEEDBACK_MIN_NEGATIVES = 3
 
 APPROVAL_DROP_MIN_SAMPLE = 5
 APPROVAL_DROP_THRESHOLD = 0.5
+
+# SE-PR7: routing drift — keyword vs tool-actually-used mismatch.
+ROUTING_LOOKBACK_TASKS = 20
+ROUTING_MIN_MISMATCHES = 3
+ROUTING_KEYWORDS: dict[str, list[str]] = {
+    "timing": [
+        "wns", "tns", "slack", "clock period", "setup violation",
+        "hold violation", "max_delay", "min_delay", "false_path",
+    ],
+    "constraint": [
+        "xdc", "pin assignment", "io_standard", "pblock", "loc ",
+        "set_property pin", "create_clock", "set_input_delay",
+        "set_output_delay",
+    ],
+    "synthesis": [
+        "synth_design", "elaboration", "[synth ", "read_verilog",
+        "read_vhdl", "module not found",
+    ],
+}
+ROUTING_TOOL_TO_SPECIALIST: dict[str, str] = {
+    "parse_timing_tool": "timing",
+    "parse_utilization_tool": "constraint",
+    "parse_vivado_log_tool": "synthesis",
+    "match_error_cases_tool": "synthesis",
+    "run_vivado_synth_tool": "synthesis",
+    "run_vivado_impl_tool": "constraint",
+    "run_vivado_flow_tool": "synthesis",
+}
+
+# SE-PR7: flow_template reuse — detect recurring Vivado scripts a project
+# keeps issuing ad-hoc that ought to be codified as a reusable template.
+FLOW_TEMPLATE_LOOKBACK_TASKS = 40
+FLOW_TEMPLATE_MIN_OCCURRENCES = 3
+FLOW_TEMPLATE_MIN_LINES = 3
+FLOW_TEMPLATE_MAX_LINES = 200
 
 
 # ── shared helpers ────────────────────────────────────────────
@@ -531,6 +568,338 @@ def gen_approval_drop(
     return [cand]
 
 
+# ── 5. routing_drift (SE-PR7) ─────────────────────────────────
+
+
+def _classify_question(question: str) -> set[str]:
+    """Return the set of specialist categories the question keywords match."""
+    q = (question or "").lower()
+    hits: set[str] = set()
+    for specialist, keywords in ROUTING_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            hits.add(specialist)
+    return hits
+
+
+def _recent_task_signals(project_id: str, lookback: int) -> list[dict]:
+    """Return last N tasks for the project with their first user message + tools used."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT t.id AS task_id, t.session_id AS session_id
+             FROM tasks t
+             JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ?
+            ORDER BY t.started_at DESC
+            LIMIT ?""",
+        (project_id, lookback),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        msg = db.execute(
+            """SELECT content FROM messages
+                WHERE task_id=? AND role='user'
+                ORDER BY created_at ASC LIMIT 1""",
+            (row["task_id"],),
+        ).fetchone()
+        if not msg:
+            continue
+        tools = db.execute(
+            """SELECT DISTINCT tool_name FROM tool_calls
+                WHERE task_id=? AND state IN ('completed','rejected')""",
+            (row["task_id"],),
+        ).fetchall()
+        out.append({
+            "task_id": row["task_id"],
+            "session_id": row["session_id"],
+            "question": str(msg["content"] or ""),
+            "tools": [r["tool_name"] for r in tools],
+        })
+    return out
+
+
+def gen_routing_drift(
+    *,
+    project_id: str | None,
+    session_id: str = "",
+    task_id: str = "",
+    event_sink: EventSink | None = None,
+) -> list[dict]:
+    """Propose a routing overlay when keyword/tool-use evidence points at the wrong specialist.
+
+    Heuristic: for each task in the last ROUTING_LOOKBACK_TASKS, identify which
+    specialists the **question keywords** point at and which specialists the
+    **tools actually used** point at. When ≥ROUTING_MIN_MISMATCHES tasks in
+    the same project flag the same specialist via question keywords but the
+    tools never matched that specialist, propose a routing rule overlay.
+    """
+    if not project_id:
+        return []
+    samples = _recent_task_signals(project_id, ROUTING_LOOKBACK_TASKS)
+    if len(samples) < ROUTING_MIN_MISMATCHES:
+        return []
+
+    # Bucket: specialist -> [(task_id, question_snippet) ...] where keywords
+    # pointed at that specialist but no tool corroborated it.
+    mismatches: dict[str, list[dict]] = {s: [] for s in ROUTING_KEYWORDS}
+    for sample in samples:
+        keyword_specialists = _classify_question(sample["question"])
+        tool_specialists: set[str] = set()
+        for tool_name in sample["tools"]:
+            mapped = ROUTING_TOOL_TO_SPECIALIST.get(tool_name)
+            if mapped:
+                tool_specialists.add(mapped)
+        for specialist in keyword_specialists:
+            if specialist not in tool_specialists:
+                mismatches[specialist].append({
+                    "task_id": sample["task_id"],
+                    "snippet": sample["question"][:120],
+                })
+
+    fired: list[dict] = []
+    for specialist, items in mismatches.items():
+        if len(items) < ROUTING_MIN_MISMATCHES:
+            continue
+        signal_key = f"routing_drift:{specialist}"
+        existing = _existing_pending_candidate(
+            surface=SURFACE_ROUTING, project_id=project_id, signal_key=signal_key,
+        )
+        detail = {
+            "specialist": specialist,
+            "mismatches": len(items),
+            "lookback": ROUTING_LOOKBACK_TASKS,
+            "samples": items[:5],
+            "keywords": ROUTING_KEYWORDS[specialist],
+        }
+        _signal_fired(
+            event_sink, session_id=session_id, name="routing_drift",
+            project_id=project_id,
+            detail={**detail, "deduped": existing is not None},
+            task_id=task_id,
+        )
+        if existing:
+            fired.append(existing)
+            continue
+        # The default routing overlay body just adds a rule that pushes the
+        # specialist keywords toward that specialist. SE-PR4 default_payload
+        # for routing was empty; this generator supplies the real content.
+        payload_body = {
+            "weights": {},
+            "rules": [
+                {
+                    "if_contains_any": ROUTING_KEYWORDS[specialist],
+                    "route_to": specialist,
+                },
+            ],
+        }
+        cand = candidate_create(
+            surface=SURFACE_ROUTING,
+            scope="project",
+            project_id=project_id,
+            session_id=session_id or None,
+            title=f"Route {specialist}-flavoured questions to the {specialist} specialist",
+            rationale=(
+                f"{len(items)} task(s) out of the last {ROUTING_LOOKBACK_TASKS} carried "
+                f"{specialist} keywords but the resulting tool calls never matched "
+                f"that specialist. A routing rule keyed on the keywords would have "
+                f"shortened the path on those tasks."
+            ),
+            signal_source={
+                "signal": "routing_drift",
+                "signal_key": signal_key,
+                **detail,
+                "suggested_payload": payload_body,
+            },
+            confidence=min(0.85, 0.4 + 0.05 * len(items)),
+            created_by="routing_drift_generator",
+            candidate_type="routing_overlay",
+            metadata={"generator_version": 1, "suggested_payload": payload_body},
+        )
+        _candidate_created(event_sink, session_id=session_id, candidate=cand, task_id=task_id)
+        fired.append(cand)
+    return fired
+
+
+# ── 6. flow_template_reuse (SE-PR7) ──────────────────────────
+
+
+_TCL_COMMENT = (";", "#")
+
+
+def _normalize_tcl_script(script: str) -> tuple[str, list[str]]:
+    """Strip whitespace + comments. Returns (normalized, leading_commands)."""
+    lines: list[str] = []
+    leading_cmds: list[str] = []
+    for raw in (script or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_TCL_COMMENT):
+            continue
+        lines.append(stripped)
+        if len(leading_cmds) < 4:
+            first_token = stripped.split(None, 1)[0]
+            leading_cmds.append(first_token.lower())
+    return "\n".join(lines), leading_cmds
+
+
+def _flow_name_for(commands: list[str]) -> str:
+    """Heuristic: classify a normalized Tcl script into a flow bucket."""
+    cmd_set = {c.lower() for c in commands}
+    if "synth_design" in cmd_set:
+        return "synth"
+    if cmd_set & {"opt_design", "place_design", "route_design"}:
+        return "impl"
+    if cmd_set & {"report_timing_summary", "report_timing"}:
+        return "report_timing"
+    if cmd_set & {"report_utilization"}:
+        return "report_utilization"
+    if cmd_set & {"report_drc"}:
+        return "report_drc"
+    return "custom"
+
+
+def _recent_script_toolcalls(project_id: str, lookback: int) -> list[dict]:
+    """Return recent run_vivado_script_tool calls with their script body."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT tc.id AS tcid, tc.task_id AS task_id, tc.input_summary AS input_summary,
+                  tc.output_summary AS output_summary, tc.state AS state
+             FROM tool_calls tc
+             JOIN tasks t ON tc.task_id = t.id
+             JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ? AND tc.tool_name = 'run_vivado_script_tool'
+              AND tc.state = 'completed'
+            ORDER BY tc.started_at DESC
+            LIMIT ?""",
+        (project_id, lookback),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        raw = row["input_summary"] or ""
+        if not isinstance(raw, str) or not raw.strip().startswith("{"):
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        script = payload.get("script")
+        if not isinstance(script, str) or not script.strip():
+            continue
+        # Tag with execution success to avoid recommending broken scripts.
+        outcome = ""
+        out_raw = row["output_summary"] or ""
+        if isinstance(out_raw, str) and out_raw.strip().startswith("{"):
+            try:
+                outcome = str(json.loads(out_raw).get("edagent_outcome") or "")
+            except json.JSONDecodeError:
+                outcome = ""
+        if outcome and outcome != "execution_succeeded":
+            continue
+        out.append({"tool_call_id": row["tcid"], "script": script})
+    return out
+
+
+def gen_flow_template_reuse(
+    *,
+    project_id: str | None,
+    session_id: str = "",
+    task_id: str = "",
+    event_sink: EventSink | None = None,
+) -> list[dict]:
+    """Propose a flow_template overlay when the same script body recurs.
+
+    Looks at the last FLOW_TEMPLATE_LOOKBACK_TASKS successful
+    ``run_vivado_script_tool`` invocations for the project, normalises each
+    script (strip whitespace + comments), and when the same normalised body
+    shows up at least FLOW_TEMPLATE_MIN_OCCURRENCES times suggests turning it
+    into a reusable Tcl flow template.
+    """
+    if not project_id:
+        return []
+    scripts = _recent_script_toolcalls(project_id, FLOW_TEMPLATE_LOOKBACK_TASKS)
+    if len(scripts) < FLOW_TEMPLATE_MIN_OCCURRENCES:
+        return []
+
+    buckets: dict[str, dict] = {}
+    for entry in scripts:
+        norm, leading = _normalize_tcl_script(entry["script"])
+        line_count = len(norm.splitlines())
+        if line_count < FLOW_TEMPLATE_MIN_LINES or line_count > FLOW_TEMPLATE_MAX_LINES:
+            continue
+        flow_name = _flow_name_for(leading)
+        key = f"{flow_name}:{hash(norm) & 0xFFFFFFFF:08x}"
+        if key not in buckets:
+            buckets[key] = {
+                "flow_name": flow_name,
+                "normalized": norm,
+                "leading": leading,
+                "count": 0,
+                "samples": [],
+            }
+        buckets[key]["count"] += 1
+        buckets[key]["samples"].append(entry["tool_call_id"])
+
+    fired: list[dict] = []
+    for key, bucket in buckets.items():
+        if bucket["count"] < FLOW_TEMPLATE_MIN_OCCURRENCES:
+            continue
+        flow_name = bucket["flow_name"]
+        signal_key = f"flow_template_reuse:{key}"
+        existing = _existing_pending_candidate(
+            surface=SURFACE_FLOW_TEMPLATE, project_id=project_id, signal_key=signal_key,
+        )
+        detail = {
+            "flow_name": flow_name,
+            "occurrences": bucket["count"],
+            "lookback": FLOW_TEMPLATE_LOOKBACK_TASKS,
+            "sample_tool_call_ids": bucket["samples"][:5],
+            "leading_commands": bucket["leading"],
+            "line_count": len(bucket["normalized"].splitlines()),
+        }
+        _signal_fired(
+            event_sink, session_id=session_id, name="flow_template_reuse",
+            project_id=project_id,
+            detail={**detail, "deduped": existing is not None},
+            task_id=task_id,
+        )
+        if existing:
+            fired.append(existing)
+            continue
+        # Default overlay payload supplies the actual templated body.
+        payload_body = {
+            "templates": {
+                flow_name: bucket["normalized"] + "\n",
+            },
+        }
+        cand = candidate_create(
+            surface=SURFACE_FLOW_TEMPLATE,
+            scope="project",
+            project_id=project_id,
+            session_id=session_id or None,
+            title=f"Promote recurring `{flow_name}` Tcl script to a reusable template",
+            rationale=(
+                f"The same {flow_name} Tcl body was executed {bucket['count']} times "
+                f"in the last {FLOW_TEMPLATE_LOOKBACK_TASKS} successful "
+                f"run_vivado_script_tool invocations for this project. "
+                f"Codify it as a flow_template so future runs share the same path."
+            ),
+            signal_source={
+                "signal": "flow_template_reuse",
+                "signal_key": signal_key,
+                **detail,
+                "suggested_payload": payload_body,
+            },
+            confidence=min(0.85, 0.4 + 0.05 * bucket["count"]),
+            created_by="flow_template_reuse_generator",
+            candidate_type="flow_template_overlay",
+            metadata={"generator_version": 1, "suggested_payload": payload_body},
+        )
+        _candidate_created(event_sink, session_id=session_id, candidate=cand, task_id=task_id)
+        fired.append(cand)
+    return fired
+
+
 # ── dispatcher ────────────────────────────────────────────────
 
 
@@ -541,6 +910,8 @@ GENERATORS: tuple[tuple[str, GeneratorFn], ...] = (
     ("repeated_failure", gen_repeated_failure),
     ("negative_feedback", gen_negative_feedback),
     ("approval_drop", gen_approval_drop),
+    ("routing_drift", gen_routing_drift),
+    ("flow_template_reuse", gen_flow_template_reuse),
 )
 
 
