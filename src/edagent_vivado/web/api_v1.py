@@ -1018,6 +1018,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 from edagent_vivado.evolution import (
                     aggregate_rolling,
                     collect_task_metrics,
+                    run_generators,
                 )
 
                 project_id_for_metrics: str | None = None
@@ -1044,6 +1045,13 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                         session_id=session_id,
                         task_id=t["id"],
                     )
+                # SPEC §22.6 — Level-0 candidate generators (always pending, never auto-apply).
+                run_generators(
+                    project_id=project_id_for_metrics,
+                    session_id=session_id,
+                    task_id=t["id"],
+                    event_sink=event_create,
+                )
             except Exception:
                 pass
         except Exception as e:
@@ -1368,6 +1376,92 @@ async def api_metrics_series(
         "scope": scope,
         "window": window,
         "count": len(series),
+    }
+
+# ── Evolution Candidates API (SPEC §22.9 — SE-PR3 read-only) ───
+
+def _candidate_dto(row: dict) -> dict:
+    """Decode JSON fields so the frontend can use them directly."""
+    try:
+        signal = json.loads(row.get("signal_source_json") or "{}")
+    except json.JSONDecodeError:
+        signal = {}
+    try:
+        meta = json.loads(row.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    out = dict(row)
+    out["signal_source"] = signal
+    out["metadata"] = meta
+    return out
+
+
+@router.get("/evolution/candidates")
+async def api_evolution_candidates_list(
+    status: str = "pending",
+    surface: str = "",
+    project_id: str = "",
+    limit: int = Query(100, ge=1, le=500),
+):
+    from edagent_vivado.evolution import candidate_list
+
+    rows = candidate_list(
+        status=status or None,
+        surface=surface or None,
+        project_id=project_id or None,
+        limit=limit,
+    )
+    return {
+        "candidates": [_candidate_dto(r) for r in rows],
+        "filters": {
+            "status": status or None,
+            "surface": surface or None,
+            "project_id": project_id or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/candidates/{candidate_id}")
+async def api_evolution_candidate_get(candidate_id: str):
+    from edagent_vivado.evolution import candidate_get
+
+    row = candidate_get(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"candidate": _candidate_dto(row)}
+
+
+class GeneratorRunReq(BaseModel):
+    project_id: str | None = None
+    session_id: str = ""
+    task_id: str = ""
+    only: list[str] | None = None
+
+
+@router.post("/evolution/generators/run")
+async def api_evolution_generators_run(body: GeneratorRunReq):
+    """On-demand trigger for the SE-PR3 generators.
+
+    Mainly for debugging / catching up after a backfill; the live system
+    runs the same dispatcher automatically after every ``task.done``.
+    """
+    from edagent_vivado.evolution import run_generators
+
+    if body.project_id and not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    sink = event_create if body.session_id else None
+    result = run_generators(
+        project_id=body.project_id,
+        session_id=body.session_id or "",
+        task_id=body.task_id or "",
+        event_sink=sink,
+        only=body.only,
+    )
+    return {
+        "project_id": body.project_id,
+        "created": result.get("created", []),
+        "errors": result.get("errors", {}),
     }
 
 # ── KB API ───────────────────────────────────────────────────
