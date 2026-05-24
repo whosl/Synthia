@@ -148,22 +148,33 @@ def resolve_prompt(base_prompt: str, project_id: str | None = None) -> str:
 def resolve_tools(base_tools: Sequence[Any], project_id: str | None = None) -> list[Any]:
     """Filter / extend the agent tool registry for a given project.
 
-    Overlay payload schema (SE-PR8+):
+    Overlay payload schema (SE-PR8):
+
+    .. code-block:: json
+
         {
-            "disabled": ["tool_name", ...],
-            "additional_tool_ids": ["evolved-<id>", ...]
+          "disabled": ["tool_name", ...],
+          "additional_tools": [
+            {"name": "summarise_xdc", "source": "from langchain_core.tools import tool\\n@tool\\ndef summarise_xdc(...)..."}
+          ]
         }
 
-    SE-PR1 only honors the ``disabled`` filter; the ``additional_tool_ids``
-    side requires the sandbox loader from SE-PR8 before it does anything.
+    ``disabled`` strips named tools from the baseline registry.
+    ``additional_tools`` runs each source through
+    :mod:`edagent_vivado.evolution.sandbox` (AST whitelist + restricted
+    exec) and appends the resulting LangChain tool. Any source that fails
+    validation is logged and skipped so a single bad evolved tool can never
+    break the agent boot. Loaded tools are cached by sha256 of the source.
     """
     overlay = active_overlay(SURFACE_TOOL, project_id)
     if not overlay:
         return list(base_tools)
     payload = overlay.get("payload") or {}
     disabled = {str(name) for name in (payload.get("disabled") or [])}
-    if not disabled:
+    additional = payload.get("additional_tools") or []
+    if not disabled and not additional:
         return list(base_tools)
+
     out: list[Any] = []
     for tool in base_tools:
         name = getattr(tool, "name", None) or getattr(tool, "__name__", None) or ""
@@ -171,6 +182,29 @@ def resolve_tools(base_tools: Sequence[Any], project_id: str | None = None) -> l
             logger.info("evolution: tool %s disabled by overlay %s", name, overlay.get("id"))
             continue
         out.append(tool)
+
+    if isinstance(additional, list):
+        try:
+            from edagent_vivado.evolution.sandbox import SandboxError, load_tool
+        except Exception:  # pragma: no cover
+            SandboxError = ValueError  # type: ignore[assignment]
+            load_tool = None  # type: ignore[assignment]
+        if load_tool is not None:
+            for entry in additional:
+                if not isinstance(entry, dict):
+                    continue
+                source = entry.get("source")
+                declared = entry.get("name")
+                if not isinstance(source, str) or not isinstance(declared, str):
+                    continue
+                try:
+                    out.append(load_tool(source, declared_name=declared))
+                except SandboxError as exc:  # type: ignore[misc]
+                    logger.warning(
+                        "evolution: evolved tool %s rejected (%s)", declared, exc,
+                    )
+                except Exception:  # pragma: no cover
+                    logger.exception("evolution: evolved tool %s load failed", declared)
     return out
 
 

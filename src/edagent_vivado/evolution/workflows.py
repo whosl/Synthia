@@ -133,8 +133,46 @@ def _suggested_payload(candidate: dict) -> dict | None:
 
 
 def _default_payload_tool(candidate: dict) -> dict:
-    """Tool surface stays Level 0 — empty payload until SE-PR8."""
-    return {"disabled": [], "additional_tool_ids": []}
+    """Tool surface payload synthesizer (SE-PR8).
+
+    Reads the candidate's ``signal_source.suggested_payload`` first so a
+    generator (or a reviewer-supplied payload via approve) can hand the
+    workflow a complete ``{disabled, additional_tools}`` body. When nothing
+    is supplied we fall back to an inert pair — disabling no tools and
+    injecting no evolved tools.
+
+    Every ``additional_tools`` entry is re-validated through the sandbox
+    here so an unsafe body can never be persisted as an active overlay even
+    if the UI's pre-check is bypassed.
+    """
+    suggested = _suggested_payload(candidate) or {}
+    disabled = list(suggested.get("disabled") or [])
+    additional = list(suggested.get("additional_tools") or [])
+    if additional:
+        from edagent_vivado.evolution.sandbox import SandboxError, validate_source
+
+        validated: list[dict] = []
+        for entry in additional:
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            name = entry.get("name") or ""
+            if not isinstance(source, str) or not isinstance(name, str):
+                continue
+            summary = validate_source(source)  # may raise SandboxError
+            if summary["tool_name"] != name:
+                raise SandboxError(
+                    "name_mismatch",
+                    f"entry name {name!r} but source defines {summary['tool_name']!r}",
+                )
+            validated.append({
+                "name": name,
+                "description": entry.get("description") or "",
+                "source": source,
+                "hash": summary["hash"],
+            })
+        return {"disabled": disabled, "additional_tools": validated}
+    return {"disabled": disabled, "additional_tools": []}
 
 
 def _signal(candidate: dict) -> dict:
@@ -229,6 +267,7 @@ def approve_candidate(
     reviewed_by: str = "user",
     payload_override: dict | None = None,
     force_active: bool = False,
+    confirm_source_reviewed: bool = False,
     event_sink: EventSink | None = None,
 ) -> dict:
     """Apply a candidate.
@@ -257,6 +296,37 @@ def approve_candidate(
         raise ValueError("session-scope candidate cannot be approved directly; merge to project first")
 
     project_id = cand.get("project_id") if scope == "project" else None
+
+    # SE-PR8: tool-surface candidates carry executable Python. Require an
+    # explicit second confirmation per SPEC §22.11 and re-validate every
+    # source body before persisting, even if the UI already pre-checked.
+    if surface == SURFACE_TOOL:
+        if not confirm_source_reviewed:
+            raise PermissionError(
+                "tool-surface approval requires confirm_source_reviewed=true"
+                " (SPEC §22.11)"
+            )
+        from edagent_vivado.evolution.sandbox import SandboxError, validate_source
+
+        sources_to_check = []
+        if payload_override and isinstance(payload_override, dict):
+            sources_to_check = list(payload_override.get("additional_tools") or [])
+        if not sources_to_check:
+            suggested = _suggested_payload(cand) or {}
+            sources_to_check = list(suggested.get("additional_tools") or [])
+        for entry in sources_to_check:
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            name = entry.get("name") or ""
+            if not isinstance(source, str) or not source.strip():
+                continue
+            summary = validate_source(source)  # raises SandboxError on failure
+            if name and summary["tool_name"] != name:
+                raise SandboxError(
+                    "name_mismatch",
+                    f"entry name {name!r} but source defines {summary['tool_name']!r}",
+                )
 
     # KB surface: bridge to the legacy kb_cases workflow + still write an overlay row.
     kb_case_id: str | None = None

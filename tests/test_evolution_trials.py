@@ -218,7 +218,8 @@ def test_approve_with_force_active_bypasses_trial():
 
 def test_approve_tool_surface_does_not_start_trial_even_when_enabled():
     # tool surface is forbidden from A/B by SPEC §22.2; set_trial_enabled refuses,
-    # so an approval on a tool surface ALWAYS uses the Level-0 path.
+    # so an approval on a tool surface ALWAYS uses the Level-0 path. SE-PR8 also
+    # requires confirm_source_reviewed for any tool-surface approve.
     pid = _make_project()
     with pytest.raises(ValueError):
         set_trial_enabled(pid["id"], "tool", True)
@@ -230,7 +231,7 @@ def test_approve_tool_surface_does_not_start_trial_even_when_enabled():
         signal_source={"signal": "x", "signal_key": "x"},
         created_by="test",
     )
-    out = approve_candidate(cand["id"])
+    out = approve_candidate(cand["id"], confirm_source_reviewed=True)
     assert out["status"] == "approved"
 
 
