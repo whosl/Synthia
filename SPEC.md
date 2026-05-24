@@ -3990,6 +3990,8 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 | `repeated_failure` | latest project-scope `metric_snapshots(window=rolling_10)` | `first_run_success < 0.4` 且 `sample_size ≥ 5` | `prompt` |
 | `negative_feedback` | `feedback`（project 范围，最近 10 条非空 thumb） | 负面 thumb ≥ 3 | `prompt` |
 | `approval_drop` | latest project-scope `metric_snapshots(window=rolling_10)` | `approval_pass_rate < 0.5` 且 `sample_size ≥ 5` | `prompt` |
+| `routing_drift` | 最近 20 个 task 的 `messages.role='user'` + `tool_calls.tool_name` | 同一 specialist 的关键词（timing/constraint/synthesis）在 ≥ 3 个 task 出现但对应工具一次都没被调用 | `routing` |
+| `flow_template_reuse` | 最近 40 个 task 的成功 `run_vivado_script_tool` 调用 | 同一**归一化**（去注释 + 去空白）的 Tcl 脚本出现 ≥ 3 次 | `flow_template` |
 | `eval_set` | `eval_runs` + `tests/eval_set/*.yaml` | 占位；SE-PR6 起 schema + CLI (`edagent eval`) + API (`POST /api/v1/evolution/eval/run`) 可用，runner 仍在后续 PR 中 | n/a |
 
 Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
@@ -4222,6 +4224,7 @@ evolution.signal.fired            # 信号源命中阈值
 | SE-PR4b | React `/evolution` review UI |
 | SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
 | SE-PR6 | Eval set 占位：`tests/eval_set/*.yaml` 约定 + 加载/校验 + `/evolution/eval/{sets,runs,run}` + `edagent eval` CLI + UI 启动器（runner 桩，本 PR 不执行）|
+| SE-PR7 | `routing_drift` 与 `flow_template_reuse` 两个真实 candidate 生成器；approve 时 default payload 直接读 `signal_source.suggested_payload` 把候选载体一次性应用为 overlay |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
 | SE-PR8 | tool surface（AST whitelist + sandbox loader）|

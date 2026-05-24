@@ -81,13 +81,55 @@ def _default_payload_prompt(candidate: dict) -> dict:
 
 
 def _default_payload_flow_template(candidate: dict) -> dict:
-    """Default flow template body — empty until SE-PR7 wires a real generator."""
+    """Flow-template payload synthesizer (SE-PR7).
+
+    The SE-PR7 ``gen_flow_template_reuse`` generator stamps the recommended
+    payload onto the candidate's ``signal_source.suggested_payload`` (and
+    duplicates it under ``metadata.suggested_payload`` for resilience). Use
+    that when present; otherwise fall back to the empty default that lets
+    the resolver behave as if no overlay existed.
+    """
+    suggested = _suggested_payload(candidate)
+    if isinstance(suggested, dict) and isinstance(suggested.get("templates"), dict):
+        return suggested
     return {"templates": {}}
 
 
 def _default_payload_routing(candidate: dict) -> dict:
-    """Default routing payload — empty rules / weights until SE-PR7."""
+    """Routing payload synthesizer (SE-PR7).
+
+    ``gen_routing_drift`` writes the proposed weights/rules block into the
+    candidate's ``signal_source.suggested_payload``. Re-use it when present;
+    otherwise return the empty default which the resolver collapses to None
+    so the LLM-based supervisor router runs unchanged.
+    """
+    suggested = _suggested_payload(candidate)
+    if isinstance(suggested, dict) and ("rules" in suggested or "weights" in suggested):
+        return {
+            "weights": dict(suggested.get("weights") or {}),
+            "rules": list(suggested.get("rules") or []),
+        }
     return {"weights": {}, "rules": []}
+
+
+def _suggested_payload(candidate: dict) -> dict | None:
+    """Return the generator's recommended overlay body, if any."""
+    signal = _signal(candidate)
+    if isinstance(signal, dict):
+        sp = signal.get("suggested_payload")
+        if isinstance(sp, dict):
+            return sp
+    raw_meta = candidate.get("metadata_json")
+    meta: dict = {}
+    if isinstance(raw_meta, str) and raw_meta.strip():
+        try:
+            meta = json.loads(raw_meta) or {}
+        except json.JSONDecodeError:
+            meta = {}
+    elif isinstance(candidate.get("metadata"), dict):
+        meta = candidate["metadata"]
+    sp = meta.get("suggested_payload") if isinstance(meta, dict) else None
+    return sp if isinstance(sp, dict) else None
 
 
 def _default_payload_tool(candidate: dict) -> dict:
