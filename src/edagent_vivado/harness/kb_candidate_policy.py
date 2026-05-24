@@ -5,17 +5,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from edagent_vivado.repository.store import kb_candidate_create, kb_candidate_list
+from edagent_vivado.repository.db import get_db
+from edagent_vivado.repository.store import kb_candidate_create
 
 
 def _signature_exists(session_id: str, signature: str) -> bool:
+    """Authoritative dedup via SQL — not a bounded scan (SPEC §10.4)."""
     sig = (signature or "").strip()[:200]
     if not sig:
         return False
-    for row in kb_candidate_list(status="pending", limit=200):
-        if row.get("source_session_id") == session_id and (row.get("normalized_signature") or row.get("pattern")) == sig:
-            return True
-    return False
+    row = get_db().execute(
+        """SELECT 1 FROM kb_candidates
+            WHERE status='pending'
+              AND source_session_id=?
+              AND (normalized_signature=? OR pattern=?)
+            LIMIT 1""",
+        (session_id, sig, sig),
+    ).fetchone()
+    return row is not None
 
 
 def maybe_create_kb_candidate(

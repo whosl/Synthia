@@ -11,18 +11,37 @@ from langchain_core.tools import tool
 logger = logging.getLogger(__name__)
 
 # ── approval state ────────────────────────────────────────────
-# Global flag: when False, patches are only proposed, not applied.
-_patch_approval_granted = False
+# Persisted in the settings table so multi-worker / restart preserves the flag (SPEC §3.1).
+_PATCH_APPROVAL_KEY = "patch_auto_approve"
+_patch_cache: dict[str, bool] = {}
+
+
+def _load_patch_approval() -> bool:
+    if _PATCH_APPROVAL_KEY in _patch_cache:
+        return _patch_cache[_PATCH_APPROVAL_KEY]
+    try:
+        from edagent_vivado.repository.store import settings_get
+
+        val = bool(settings_get(_PATCH_APPROVAL_KEY, False))
+    except Exception:
+        val = False
+    _patch_cache[_PATCH_APPROVAL_KEY] = val
+    return val
 
 
 def set_patch_approval(granted: bool) -> None:
-    """Enable or disable automatic patch application."""
-    global _patch_approval_granted
-    _patch_approval_granted = granted
+    """Enable or disable automatic patch application (persisted)."""
+    _patch_cache[_PATCH_APPROVAL_KEY] = bool(granted)
+    try:
+        from edagent_vivado.repository.store import settings_set
+
+        settings_set(_PATCH_APPROVAL_KEY, bool(granted))
+    except Exception:
+        pass
 
 
 def is_patch_approved() -> bool:
-    return _patch_approval_granted
+    return _load_patch_approval()
 
 
 def resolve_old_text_in_file(original: str, old_text: str) -> tuple[str | None, str | None]:
@@ -101,7 +120,7 @@ def propose_patch_tool(file_path: str, old_text: str, new_text: str, description
         )
     )
 
-    if _patch_approval_granted:
+    if is_patch_approved():
         ok, msg = apply_text_patch(p, old_text, new_text)
         if not ok:
             return f"ERROR applying patch: {msg}"
@@ -130,7 +149,7 @@ def create_file_tool(file_path: str, content: str, description: str = "") -> str
     if p.exists():
         return f"ERROR: File already exists: {file_path}. Use propose_patch_tool to modify it."
 
-    if _patch_approval_granted:
+    if is_patch_approved():
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)

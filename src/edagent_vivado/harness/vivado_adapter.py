@@ -469,32 +469,24 @@ class VivadoRuntimeAdapter:
             os.unlink(script_path)
 
     def _run_remote_tcl(self, command: str, timeout: int, *, task_id: str = "") -> VivadoResult:
-        t0 = time.time()
-        ssh = self._ssh_base()
-        env_cmd = f"source {self._target.settings_path} 2>/dev/null && " if self._target.settings_path else ""
-        full_cmd = f'{env_cmd}{self._target.vivado_path} -mode batch -nojournal -nolog -tclargs <<EOF\n{command}\nexit\nEOF'
-        res = run_cancellable(ssh + [full_cmd], task_id=task_id or None, timeout=float(timeout))
-        if res.stopped:
-            return VivadoResult(
-                success=False,
-                exit_code=-1,
-                error="Task stopped by user",
-                elapsed_sec=round(time.time() - t0, 2),
-                target_id=self._target.id,
-                command_type="raw_tcl",
-            )
-        return VivadoResult(
-            success=res.returncode == 0,
-            exit_code=res.returncode,
-            stdout=res.stdout,
-            stderr=res.stderr,
-            elapsed_sec=round(time.time() - t0, 2),
-            target_id=self._target.id,
-            command_type="raw_tcl",
-            error="Timeout" if res.timed_out else None,
-        )
+        """Wrap the raw command into a script and run it via `-source` on the remote.
 
-    def _run_remote_script(self, script: str, timeout: int, *, task_id: str = "") -> VivadoResult:
+        Vivado's `-tclargs` is for positional Tcl args, not for piping Tcl source via stdin;
+        the previous heredoc form silently dropped the command on most builds.
+        """
+        script_body = command.rstrip()
+        if "exit" not in script_body.splitlines()[-1:] and "quit" not in script_body.splitlines()[-1:]:
+            script_body = script_body + "\nexit\n"
+        return self._run_remote_script(script_body, timeout, task_id=task_id, command_type_override="raw_tcl")
+
+    def _run_remote_script(
+        self,
+        script: str,
+        timeout: int,
+        *,
+        task_id: str = "",
+        command_type_override: str = "script",
+    ) -> VivadoResult:
         t0 = time.time()
         ssh = self._ssh_base()
         scp_base = ["scp", "-o", "StrictHostKeyChecking=no"]
@@ -521,7 +513,7 @@ class VivadoRuntimeAdapter:
                     success=False,
                     error="Task stopped by user",
                     target_id=self._target.id,
-                    command_type="script",
+                    command_type=command_type_override,
                 )
             env_cmd = f"source {self._target.settings_path} 2>/dev/null && " if self._target.settings_path else ""
             res = run_cancellable(
@@ -536,7 +528,7 @@ class VivadoRuntimeAdapter:
                     error="Task stopped by user",
                     elapsed_sec=round(time.time() - t0, 2),
                     target_id=self._target.id,
-                    command_type="script",
+                    command_type=command_type_override,
                 )
             return VivadoResult(
                 success=res.returncode == 0,
@@ -545,7 +537,7 @@ class VivadoRuntimeAdapter:
                 stderr=res.stderr,
                 elapsed_sec=round(time.time() - t0, 2),
                 target_id=self._target.id,
-                command_type="script",
+                command_type=command_type_override,
                 error="Timeout" if res.timed_out else None,
             )
         finally:
