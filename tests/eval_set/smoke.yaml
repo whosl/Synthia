@@ -1,0 +1,40 @@
+name: smoke
+description: |
+  Minimal sanity eval set — exercises the canonical Vivado-debug flow without
+  depending on a remote toolchain. The runner does not exist yet (SE-PR6 ships
+  schema + CLI stubs only); these cases describe the regression bar we want to
+  catch when the runner lands.
+cases:
+  - id: parse-synth-log
+    question: |
+      Read examples/uart_demo/logs/sample_vivado_error.log, run
+      parse_vivado_log_tool, and tell me how many ERRORs the run produced
+      together with the matched KB category.
+    expected:
+      tool_calls_any:
+        - parse_vivado_log_tool
+        - match_error_cases_tool
+      contains:
+        - ERROR
+        - synthesis
+      not_contains:
+        - I cannot
+      max_task_tokens: 6000
+    metadata:
+      tags: [smoke, vivado, log_parsing]
+
+  - id: kb-recurrence-uart
+    question: |
+      I am hitting "[Synth 8-439] Module 'echo_handler' not found" repeatedly
+      in the uart_full project. Match it against the KB and propose the next
+      one or two actions, no patches yet.
+    expected:
+      tool_calls_any:
+        - match_error_cases_tool
+      contains:
+        - echo_handler
+        - Synth 8-439
+      not_contains:
+        - file not found
+    metadata:
+      tags: [smoke, vivado, kb_match]

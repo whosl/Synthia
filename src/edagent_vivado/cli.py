@@ -495,5 +495,101 @@ def web(
         raise typer.Exit(1)
 
 
+@app.command()
+def eval(
+    name: str = typer.Argument("", help="Eval set name (omit to list available sets)"),
+    project_id: str = typer.Option("", "--project-id", help="Tag the queued run with a project id"),
+    overlay_id: str = typer.Option("", "--overlay-id", help="Tag the queued run with an overlay id"),
+    note: str = typer.Option("", "--note", help="Free-form audit string"),
+    status: str = typer.Option("", "--status", help="Filter the listing by run state"),
+    limit: int = typer.Option(20, "--limit", help="Max rows to show when listing"),
+    show_cases: bool = typer.Option(False, "--show-cases", help="Print the case list for the set"),
+) -> None:
+    """Queue an A/B eval run (SE-PR6 placeholder — runner lands later).
+
+    Examples:
+
+      edagent eval                                 # list available eval sets
+      edagent eval smoke                           # queue smoke as placeholder
+      edagent eval smoke --project-id <id>         # tag with a project
+      edagent eval smoke --show-cases              # print smoke's cases
+      edagent eval --status placeholder            # list queued runs
+    """
+    from edagent_vivado.evolution import (
+        EvalSetError,
+        enqueue_eval_run,
+        eval_run_list,
+        get_eval_set_dto,
+        list_eval_sets_dto,
+    )
+
+    name = (name or "").strip()
+    status = (status or "").strip()
+
+    # No name + no status filter ⇒ show the eval set library + recent runs.
+    if not name:
+        sets = list_eval_sets_dto()
+        console.print("[bold]Available eval sets[/]")
+        if not sets:
+            console.print("  [dim](no YAML files under tests/eval_set/)[/]")
+        for s in sets:
+            console.print(
+                f"  [cyan]{s['name']}[/] · {s['case_count']} case(s) · {s['path']}"
+            )
+            if s["description"]:
+                console.print(f"    [dim]{s['description'].splitlines()[0]}[/]")
+        rows = eval_run_list(state=status or None, limit=limit)
+        if rows:
+            console.print(f"\n[bold]Recent eval runs[/] (state filter: {status or 'any'})")
+            for r in rows:
+                console.print(
+                    f"  [magenta]{r['id']}[/] · [yellow]{r['state']}[/] · "
+                    f"{r['eval_set']} · cases={r.get('total_cases')}"
+                )
+        console.print(
+            "\n[dim]SE-PR6 ships placeholders only — the runner that drives cases "
+            "through the agent loop is not yet implemented (SPEC §22.6B).[/]"
+        )
+        return
+
+    if show_cases:
+        try:
+            dto = get_eval_set_dto(name)
+        except EvalSetError as exc:
+            console.print(f"[red]Eval set error:[/] {exc}")
+            raise typer.Exit(1)
+        console.print(f"[bold]{dto['name']}[/] · {dto['case_count']} case(s)")
+        if dto["description"]:
+            console.print(f"[dim]{dto['description']}[/]")
+        for case in dto["cases"]:
+            console.print(f"\n  [cyan]{case['id']}[/]")
+            for line in case["question"].splitlines():
+                console.print(f"    [dim]>[/] {line}")
+            if case.get("expected"):
+                console.print(f"    [dim]expected:[/] {case['expected']}")
+        return
+
+    try:
+        row = enqueue_eval_run(
+            name,
+            project_id=project_id or None,
+            overlay_id=overlay_id or None,
+            note=note,
+        )
+    except EvalSetError as exc:
+        console.print(f"[red]Eval set error:[/] {exc}")
+        raise typer.Exit(1)
+    console.print(f"[green]Queued[/] eval_run [magenta]{row['id']}[/]")
+    console.print(f"  eval_set: {row['eval_set']}")
+    console.print(f"  state:    {row['state']} (runner_implemented={row.get('runner_implemented')})")
+    console.print(f"  cases:    {row.get('total_cases')}")
+    if project_id:
+        console.print(f"  project:  {project_id}")
+    console.print(
+        "[dim]The row sits in eval_runs.state='placeholder' until the runner "
+        "ships. Inspect via GET /api/v1/evolution/eval/runs.[/]"
+    )
+
+
 if __name__ == "__main__":
     app()

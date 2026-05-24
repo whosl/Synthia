@@ -265,6 +265,15 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
     vector_ref TEXT NOT NULL, indexed_at INTEGER NOT NULL, metadata_json TEXT
 );
 
+-- Persisted key/value settings (shared with PR1's approval flags + SE-PR5
+-- per-project trial config). Both branches use IF NOT EXISTS, so the merge
+-- is conflict-free regardless of order.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 -- ── Self-evolution (SPEC §22) ─────────────────────────────
 -- Schema is forward-compatible with the full SE-PR2..8 roadmap;
 -- SE-PR1 only writes resolver indirection (no behavior change yet).

@@ -4143,17 +4143,130 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 
 ### 22.6 信号源
 
-| 信号 | 数据源 | 触发条件 |
-|---|---|---|
-| `user_feedback` | `feedback` 表 | 负面 thumb 在 rolling 10 turn 内 >= 3 |
-| `run_result` | `runs / vivado_commands / qor_checker` | `first_run_success=false` 且同一 project 内最近 5 个 task 中 >=3 失败 |
-| `recurrence` | `problems.normalized_signature` | 同一 signature 在 >=3 个 session 中出现 |
-| `approval_pass_rate` | `interactions` | rolling 20 个 interaction 通过率 < 0.5 |
-| `eval_set` | `eval_runs` | 占位；SE-PR6 后启用 |
+| 信号 | 数据源 | 触发条件（SE-PR3 实现常量） | 产生 surface |
+|---|---|---|---|
+| `recurrence` | `problems.normalized_signature`（最近 30 天） | 同一 normalized signature 在 ≥ 3 个 distinct session 中出现 | `kb` |
+| `repeated_failure` | latest project-scope `metric_snapshots(window=rolling_10)` | `first_run_success < 0.4` 且 `sample_size ≥ 5` | `prompt` |
+| `negative_feedback` | `feedback`（project 范围，最近 10 条非空 thumb） | 负面 thumb ≥ 3 | `prompt` |
+| `approval_drop` | latest project-scope `metric_snapshots(window=rolling_10)` | `approval_pass_rate < 0.5` 且 `sample_size ≥ 5` | `prompt` |
+| `routing_drift` | 最近 20 个 task 的 `messages.role='user'` + `tool_calls.tool_name` | 同一 specialist 的关键词（timing/constraint/synthesis）在 ≥ 3 个 task 出现但对应工具一次都没被调用 | `routing` |
+| `flow_template_reuse` | 最近 40 个 task 的成功 `run_vivado_script_tool` 调用 | 同一**归一化**（去注释 + 去空白）的 Tcl 脚本出现 ≥ 3 次 | `flow_template` |
+| `eval_set` | `eval_runs` + `tests/eval_set/*.yaml` | 占位；SE-PR6 起 schema + CLI (`edagent eval`) + API (`POST /api/v1/evolution/eval/run`) 可用，runner 仍在后续 PR 中 | n/a |
+
+Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
+
+### 22.6A A/B Trial 引擎（SE-PR5）
+
+每个 surface 可选 opt-in 到 A/B 模式（per-project flag，存于 `settings`：`evolution.trial.<surface>.<project_id>`）。`tool` surface 永远拒绝（SPEC §22.2）。
+
+启用后，`approve_candidate` 不再直接写 active overlay：
+
+1. 创建 `state=shadow` 的 overlay，记录 candidate 已合成的 payload。
+2. 写一条 `evolution_trials(state='running')`：`baseline_overlay_id` 指向当前 active overlay（可为空），`variant_overlay_id` 指向 shadow overlay。
+3. candidate.status = `trialing`。
+4. 发出 `evolution.trial.started` 事件；先前 active overlay **不退役**，继续服务 baseline 分支的任务。
+
+调用方仍可传 `force_active=True` 绕过 trial 直接 apply（紧急回滚或人工裁定）。
+
+**Arm 分配**：`_run_agent` 在调用 agent 之前为该 project 下所有 running trial 调用 `assign_arms_for_task(project_id, task_id)`，按 `md5(task_id || trial_id) % 2` 确定 baseline / variant。结果以 `{surface: (arm, overlay_id, trial_id)}` 形式放入 contextvar `evolution_task_arms`，同时落库到 `tasks.metadata_json.evolution_arms`。
+
+**Resolver 优先级**：`active_overlay(surface, project_id)` 优先读取 contextvar。如果该 surface 在当前 task 中有 arm 分配，则直接返回 `overlay_id` 对应的行（variant 分支 → shadow overlay；baseline 分支 → 老 active overlay）。无 arm 时回退到 §22.5 的原始优先级。每个事件发出 `evolution.trial.assigned`。
+
+**Metric 收集**：SE-PR2 的 `collect_task_metrics` 读取 `tasks.metadata_json.evolution_arms`，除了写 task-scope 主 snapshot 外，还为每个 arm 写一条额外 snapshot 并调用 `trials.record_snapshot(trial_id, arm, composite_score)`。Trial 行内的 `n_baseline / n_variant / metric_baseline_json / metric_variant_json` 滚动更新。
+
+**判定**：每个 `task.done` 后，`_run_agent` 对该 task 涉及的 trial 调用 `maybe_decide_trial`：
+
+- `n_baseline ≥ MIN_SAMPLES_PER_ARM` **且** `n_variant ≥ MIN_SAMPLES_PER_ARM`（默认 10）→ 计算 `delta = mean(variant) - mean(baseline)`：
+  - `delta ≥ DECISION_MARGIN`（默认 0.05）→ `variant_wins`：retire baseline overlay，把 variant overlay 由 `shadow` 升级为 `active`，candidate.status=approved。
+  - `delta ≤ -DECISION_MARGIN` → `baseline_wins`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`baseline_wins`）。
+  - 其他 → `tie`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`tie`）。
+- 启动 14 天后未决 → 自动 `abort_trial`，candidate 回到 pending。
+
+**操作覆盖**：`POST /api/v1/evolution/trials/{id}/decide { decision }` 允许 operator 在样本不足时强制决策；`POST /api/v1/evolution/trials/{id}/abort` 手动放弃 trial，variant 退役、candidate 回 pending。
+
+**事件**：
+
+```text
+evolution.trial.started        # approve_candidate 进入 trial 路径时
+evolution.trial.assigned       # 每个 task 启动时，每个 arm 一条
+evolution.trial.completed      # decide 落定（自动或 force）
+evolution.trial.reverted       # abort_trial / max-age 触发
+```
+
+**约束**：
+
+- `tool` surface 永远不能进 A/B（`set_trial_enabled` 与 `start_trial` 双重拒绝）。
+- A/B 决策仍是"L1 自动应用"——variant_wins 自动把 shadow 升级为 active，无需人工二次确认。SPEC §22.11 的"10% / 3 窗口自动 rollback"独立于 A/B 决策依然生效，A/B 之后的劣化触发常规 rollback。
+
+### 22.6B Eval set 占位（SE-PR6）
+
+静态回归集是后续 A/B / drift detection 的"地面真值"，但 runner 还没写。SE-PR6 落地以下骨架，所有面都标注 `runner_implemented=false`，把"等运行器到位"和"已经能录入提案"解耦：
+
+**YAML 约定**（位于 `tests/eval_set/<name>.yaml`，文件名 stem 必须等于 `name` 字段；强制 `[a-z0-9_-]` 且 `cases` 非空、`cases[].id` 唯一、`cases[].question` 非空）：
+
+```yaml
+name: smoke
+description: 短描述（可选）
+cases:
+  - id: parse-synth-log
+    question: |
+      给 agent 的自然语言问题…
+    project_id: 可选；指定后 runner 使用该 project 的 overlay
+    expected:
+      contains: ["WNS", "timing"]      # 必须全部出现
+      not_contains: ["TODO"]
+      tool_calls_any: ["parse_timing_tool"]
+      tool_calls_all: []
+      max_task_tokens: 8000
+      min_first_run_success: null
+    metadata: {}                         # 自由字段（tag、owner、关联 candidate）
+```
+
+`expected` 中的字段为 forward-compatible 约定；SE-PR6 的 loader 只校验结构，runner 在落地时再消费打分语义。
+
+**存储**：
+
+`eval_runs` 表已经在 SE-PR1 schema 里，本 PR 写入 `state='placeholder'`、`metadata_json.spec_section='22.6B'`，并保留 `total_cases` / `case_ids` / `note` / `path` 等字段。Runner 实装后将复用同一表行迁移状态：
+
+```text
+placeholder ─► queued ─► running ─► completed | error
+```
+
+**API**：
+
+```
+GET    /api/v1/evolution/eval/sets           # discovery
+GET    /api/v1/evolution/eval/sets/{name}    # cases detail
+GET    /api/v1/evolution/eval/runs           # list eval_runs (filter by eval_set / state)
+GET    /api/v1/evolution/eval/runs/{id}
+POST   /api/v1/evolution/eval/run            # 写入 placeholder 行，返回 runner_implemented=false
+```
+
+**CLI**：
+
+```
+edagent eval                       # 列出 eval set 和最近 runs
+edagent eval smoke                 # 提交 smoke 为 placeholder
+edagent eval smoke --show-cases    # 展开 smoke 的 cases
+edagent eval --status placeholder  # 按 state 过滤 runs
+```
+
+**事件**：
+
+```
+evolution.eval.queued       # SE-PR6 起在每次 placeholder 写入时发出
+evolution.eval.started      # 占位事件名，等 runner
+evolution.eval.completed    # 占位事件名，等 runner
+evolution.eval.error        # 占位事件名，等 runner
+```
+
+`runner_implemented=false` 标记由 API 与 CLI 同时回传，明确告诉 reviewer "提案已记录但还不会真正执行"。当 runner 到位时唯一变化是该 flag 翻 true + state 进入 `queued / running / completed`，调用方不需改 schema。
 
 ### 22.7 度量与综合 score
 
-每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`）。后台聚合器定期写 `rolling_10` / `rolling_50` / `all` 三档窗口。字段：
+每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`），紧接着对所在 project 触发 `rolling_10` 与 `rolling_50` 聚合写入。聚合器读取 task-scope 单点快照的最近 N 条，逐字段取均值（数值）/ 成功率（布尔）/ 求和（计数），并以 project-scope（或 global-scope，当 session 未绑定 project 时）写回。`all` 窗口可以按需在 monitor 查询时按需聚合，不要求每次 task.done 都写入。
+
+字段：
 
 ```json
 {
@@ -4198,9 +4311,11 @@ proposed ─approve──▶ approved ──apply──▶ overlay.active
 
 强制要求：
 
-- 任何 surface 的 candidate 在被 apply 前必须把当前 baseline 持久化为 `baseline_artifact_id`；rollback 时使用该 artifact 还原。
-- rollback 必须发出 `evolution.overlay.rolled_back` 事件，并把 `overlays.state` 改为 `retired`。
+- 任何 surface 的 candidate 在被 apply 前必须保留先前 baseline 的恢复路径。SE-PR4 起的实现使用 `overlays.parent_overlay_id`：在 apply 新 overlay 前先 retire 当前 active overlay，并把它的 id 写入新 overlay 的 `parent_overlay_id`；rollback 时 retire 当前 overlay 并把 `parent_overlay_id` 指向的行重新置为 `active`。`baseline_artifact_id` 字段仍保留给未来需要"快照非 overlay 形态 baseline"的场景（如重写 system prompt 时的整文件快照）。
+- rollback 必须发出 `evolution.candidate.rolled_back` 与 `evolution.overlay.retired` 事件，并把当前 `overlays.state` 改为 `retired`。
 - `tool` surface 的 candidate 必须额外通过 AST whitelist 检查（禁止 `exec` / `eval` / `subprocess` / `os.system` / 网络访问）并存为只读 artifact。
+- **Reject suppression**：reject API 接受可选的 `suppress_days`，被设置后 generator dedup 会同时把"已 reject 且 `metadata.suppressed_until > now()`"的候选视为占位，阻止同 `signal_key` 在窗口内重复生成。`suppress_days=0`（默认）保持现有"reject 不阻挡"语义。
+- **Tool 沙箱（SE-PR8）**：surface=`tool` 的 overlay payload 形如 `{disabled: [...], additional_tools: [{name, source, description?}]}`，每条 `source` 必须先通过 AST 白名单（允许的 import 集 = `re/json/math/hashlib/typing/dataclasses/pathlib/langchain_core.tools`；禁止 `exec / eval / open / __import__ / subprocess / os.* / 文件 IO / async / yield / 双下划线属性 / class 定义`），再通过 sandbox loader 在精简的 `__builtins__`（含一个 whitelist 化的 `__import__`）下 exec，最终拿到 LangChain `@tool` 函数注册到 agent 工具集合。`approve_candidate(surface=tool)` 必须传 `confirm_source_reviewed=True`（API 返回 403 否则），并对 `additional_tools[*].source` 在持久化前**再次**校验一遍，确保即便绕过 UI 预检也无法把不安全 payload 落库。Loader 按 sha256 缓存编译结果，resolver 端任何加载失败都被吞掉 + 警告日志，单条坏 tool 永远不会让 agent 启动失败。
 
 ### 22.9 API
 
@@ -4264,9 +4379,13 @@ evolution.signal.fired            # 信号源命中阈值
 |---|---|
 | **SE-PR1** | 表结构 + resolver indirection（no-op）+ 本章 §22 |
 | SE-PR2 | feedback API + metric_snapshots post-task hook + rolling aggregator |
-| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）|
-| SE-PR4 | `/evolution` review UI + approve/reject/merge/rollback API |
-| SE-PR5 | A/B trial engine（opt-in per surface） |
+| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）+ `/evolution/candidates` 只读 API + `/evolution/generators/run` 手动触发 |
+| SE-PR4 | approve/reject/merge/rollback/retire 后端 API + overlay 生命周期 + reject suppression + default payload synthesis（prompt/kb/flow_template/routing/tool）|
+| SE-PR4b | React `/evolution` review UI |
+| SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
+| SE-PR6 | Eval set 占位：`tests/eval_set/*.yaml` 约定 + 加载/校验 + `/evolution/eval/{sets,runs,run}` + `edagent eval` CLI + UI 启动器（runner 桩，本 PR 不执行）|
+| SE-PR7 | `routing_drift` 与 `flow_template_reuse` 两个真实 candidate 生成器；approve 时 default payload 直接读 `signal_source.suggested_payload` 把候选载体一次性应用为 overlay |
+| SE-PR8 | Tool surface 沙箱：AST 白名单 + 精简 `__builtins__` exec + sha256 缓存；`approve(surface=tool)` 强制 `confirm_source_reviewed` 二次确认；`POST /api/v1/evolution/tools/validate` 给前端预检；UI 在 detail modal 渲染源码与"我已阅读源码"复选框 |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
 | SE-PR8 | tool surface（AST whitelist + sandbox loader）|

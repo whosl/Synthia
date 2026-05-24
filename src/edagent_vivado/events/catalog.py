@@ -100,6 +100,31 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
+# Evolution / metrics / feedback / candidates / overlays / trials (SPEC §22.10)
+EVOLUTION_EVENTS = (
+    "evolution.metric.snapshot",
+    "evolution.feedback.created",
+    "evolution.signal.fired",
+    "evolution.candidate.created",
+    "evolution.candidate.updated",
+    "evolution.candidate.approved",
+    "evolution.candidate.rejected",
+    "evolution.candidate.merged",
+    "evolution.candidate.rolled_back",
+    "evolution.overlay.applied",
+    "evolution.overlay.retired",
+    # SE-PR5 — A/B trial engine
+    "evolution.trial.started",
+    "evolution.trial.assigned",
+    "evolution.trial.completed",
+    "evolution.trial.reverted",
+    # SE-PR6 — eval set placeholder; runner lands in a later PR.
+    "evolution.eval.queued",
+    "evolution.eval.started",
+    "evolution.eval.completed",
+    "evolution.eval.error",
+)
+
 ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *LIFECYCLE_EVENTS,
     *MESSAGE_EVENTS,
@@ -107,6 +132,7 @@ ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *INTERACTION_EVENTS,
     *AGENT_EVENTS,
     *MONITOR_EVENTS,
+    *EVOLUTION_EVENTS,
 )
 
 # Legacy / internal type → AG-UI–style canonical category
