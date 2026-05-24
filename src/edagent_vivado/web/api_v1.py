@@ -1011,6 +1011,41 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             event_create(session_id, "run.completed", {"run_id": run["id"] if run else None},
                          task_id=t["id"], run_id=run["id"] if run else "")
             event_create(session_id, "task.done", {"task_id": t["id"]}, task_id=t["id"])
+
+            # SPEC §22.7 — write a task-scope metric snapshot, then refresh rolling
+            # aggregates. Failures must never propagate into the agent loop.
+            try:
+                from edagent_vivado.evolution import (
+                    aggregate_rolling,
+                    collect_task_metrics,
+                )
+
+                project_id_for_metrics: str | None = None
+                if sess.get("project_id"):
+                    project_id_for_metrics = sess["project_id"]
+                collect_task_metrics(
+                    session_id=session_id,
+                    task_id=t["id"],
+                    run_id=run["id"] if run else "",
+                    event_sink=event_create,
+                )
+                if project_id_for_metrics:
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_10",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_50",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+            except Exception:
+                pass
         except Exception as e:
             task_update(t["id"], state="error", error=str(e), finished_at=int(time.time()))
             session_update(session_id, status="error")
@@ -1242,6 +1277,98 @@ async def api_vivado_approval_set(body: dict):
     approved = bool(body.get("approved", not is_vivado_execution_approved()))
     set_vivado_execution_approval(approved)
     return {"approved": is_vivado_execution_approved()}
+
+# ── Feedback API (SPEC §22.6) ─────────────────────────────────
+
+class FeedbackReq(BaseModel):
+    session_id: str
+    task_id: str | None = None
+    message_id: str | None = None
+    user_thumb: int | None = None
+    comment: str | None = None
+    tags: list[str] | None = None
+    metadata: dict | None = None
+
+
+@router.post("/feedback")
+async def api_feedback_create(req: FeedbackReq):
+    if req.user_thumb is not None and req.user_thumb not in (-1, 0, 1):
+        raise HTTPException(400, "user_thumb must be -1, 0, or 1")
+    sess = session_get(req.session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    from edagent_vivado.evolution import feedback_create
+
+    try:
+        row = feedback_create(
+            session_id=req.session_id,
+            task_id=req.task_id,
+            message_id=req.message_id,
+            user_thumb=req.user_thumb,
+            comment=(req.comment or None),
+            tags=req.tags,
+            metadata=req.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    event_create(
+        req.session_id,
+        "evolution.feedback.created",
+        {
+            "feedback_id": row["id"],
+            "user_thumb": row.get("user_thumb"),
+            "task_id": req.task_id,
+            "message_id": req.message_id,
+        },
+        task_id=req.task_id or "",
+    )
+    return {"feedback": row}
+
+
+@router.get("/sessions/{session_id}/feedback")
+async def api_feedback_list(session_id: str, limit: int = 200):
+    from edagent_vivado.evolution import feedback_list_for_session
+
+    return {"feedback": feedback_list_for_session(session_id, limit=limit)}
+
+# ── Metrics API (SPEC §22.9) ──────────────────────────────────
+
+@router.get("/metrics/summary")
+async def api_metrics_summary(
+    project_id: str = "",
+    window: str = "rolling_10",
+):
+    from edagent_vivado.evolution import latest_snapshot
+
+    scope = "project" if project_id else "global"
+    snap = latest_snapshot(project_id=project_id or None, scope=scope, window=window)
+    if not snap:
+        return {"snapshot": None, "project_id": project_id or None, "scope": scope, "window": window}
+    return {"snapshot": snap, "project_id": project_id or None, "scope": scope, "window": window}
+
+
+@router.get("/metrics/series")
+async def api_metrics_series(
+    project_id: str = "",
+    scope: str = "task",
+    window: str = "single",
+    limit: int = Query(50, ge=1, le=500),
+):
+    from edagent_vivado.evolution import snapshot_series
+
+    series = snapshot_series(
+        project_id=project_id or None,
+        scope=scope,
+        window=window,
+        limit=limit,
+    )
+    return {
+        "series": series,
+        "project_id": project_id or None,
+        "scope": scope,
+        "window": window,
+        "count": len(series),
+    }
 
 # ── KB API ───────────────────────────────────────────────────
 
