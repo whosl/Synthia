@@ -54,6 +54,19 @@ from edagent_vivado.evolution.overlays import (
     resolve_flow_template,
     resolve_routing,
     active_overlay,
+    overlay_create,
+    overlay_get,
+    overlay_list,
+    overlay_retire,
+    overlay_activate,
+    overlay_retire_active_for,
+)
+from edagent_vivado.evolution.workflows import (
+    approve_candidate,
+    reject_candidate,
+    merge_candidate,
+    rollback_candidate,
+    retire_overlay,
 )
 
 __all__ = [
@@ -89,4 +102,16 @@ __all__ = [
     "gen_recurrence",
     "gen_repeated_failure",
     "run_generators",
+    # SE-PR4
+    "overlay_create",
+    "overlay_get",
+    "overlay_list",
+    "overlay_retire",
+    "overlay_activate",
+    "overlay_retire_active_for",
+    "approve_candidate",
+    "reject_candidate",
+    "merge_candidate",
+    "rollback_candidate",
+    "retire_overlay",
 ]
