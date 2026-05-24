@@ -1432,6 +1432,170 @@ async def api_evolution_candidate_get(candidate_id: str):
     return {"candidate": _candidate_dto(row)}
 
 
+class CandidateApproveReq(BaseModel):
+    reviewed_by: str = "user"
+    payload: dict | None = None
+
+
+@router.post("/evolution/candidates/{candidate_id}/approve")
+async def api_evolution_candidate_approve(candidate_id: str, body: CandidateApproveReq):
+    from edagent_vivado.evolution import approve_candidate, candidate_get
+
+    try:
+        updated = approve_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            payload_override=body.payload,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    cand = candidate_get(candidate_id)
+    return {
+        "candidate": _candidate_dto(updated or cand or {"id": candidate_id}),
+        "overlay_id": (updated or {}).get("applied_overlay_id"),
+    }
+
+
+class CandidateRejectReq(BaseModel):
+    reviewed_by: str = "user"
+    suppress_days: int = 0
+    reason: str | None = None
+
+
+@router.post("/evolution/candidates/{candidate_id}/reject")
+async def api_evolution_candidate_reject(candidate_id: str, body: CandidateRejectReq):
+    from edagent_vivado.evolution import reject_candidate
+
+    if body.suppress_days < 0 or body.suppress_days > 365:
+        raise HTTPException(400, "suppress_days must be between 0 and 365")
+    try:
+        updated = reject_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            suppress_days=body.suppress_days,
+            reason=body.reason,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+class CandidateMergeReq(BaseModel):
+    reviewed_by: str = "user"
+
+
+@router.post("/evolution/candidates/{candidate_id}/merge")
+async def api_evolution_candidate_merge(candidate_id: str, body: CandidateMergeReq):
+    from edagent_vivado.evolution import merge_candidate
+
+    try:
+        updated = merge_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+class CandidateRollbackReq(BaseModel):
+    reviewed_by: str = "user"
+    reason: str | None = None
+
+
+@router.post("/evolution/candidates/{candidate_id}/rollback")
+async def api_evolution_candidate_rollback(candidate_id: str, body: CandidateRollbackReq):
+    from edagent_vivado.evolution import rollback_candidate
+
+    try:
+        updated = rollback_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            reason=body.reason,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+def _overlay_dto(row: dict) -> dict:
+    """Serialise an overlay row with decoded payload + metadata."""
+    out = dict(row)
+    if "payload" not in out:
+        try:
+            out["payload"] = json.loads(out.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            out["payload"] = {}
+    if "metadata" not in out:
+        try:
+            out["metadata"] = json.loads(out.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            out["metadata"] = {}
+    return out
+
+
+@router.get("/evolution/overlays")
+async def api_evolution_overlays_list(
+    project_id: str = "",
+    surface: str = "",
+    state: str = "",
+    scope: str = "",
+    limit: int = Query(200, ge=1, le=500),
+):
+    from edagent_vivado.evolution import overlay_list
+
+    rows = overlay_list(
+        project_id=project_id or None,
+        surface=surface or None,
+        state=state or None,
+        scope=scope or None,
+        limit=limit,
+    )
+    return {
+        "overlays": [_overlay_dto(r) for r in rows],
+        "filters": {
+            "project_id": project_id or None,
+            "surface": surface or None,
+            "state": state or None,
+            "scope": scope or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/overlays/{overlay_id}")
+async def api_evolution_overlay_get(overlay_id: str):
+    from edagent_vivado.evolution import overlay_get
+
+    row = overlay_get(overlay_id)
+    if not row:
+        raise HTTPException(404, "overlay not found")
+    return {"overlay": _overlay_dto(row)}
+
+
+@router.post("/evolution/overlays/{overlay_id}/retire")
+async def api_evolution_overlay_retire(overlay_id: str):
+    from edagent_vivado.evolution import retire_overlay
+
+    try:
+        out = retire_overlay(overlay_id, event_sink=event_create)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"overlay": _overlay_dto(out)}
+
+
 class GeneratorRunReq(BaseModel):
     project_id: str | None = None
     session_id: str = ""
