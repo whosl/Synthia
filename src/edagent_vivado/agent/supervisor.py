@@ -52,10 +52,11 @@ If the question is general or spans multiple areas, choose the most urgent one.
 """
 
 
-class TeamState(TypedDict):
+class TeamState(TypedDict, total=False):
     messages: list
     next_agent: str
     specialist_output: str
+    parent_thread_id: str
 
 
 # ── specialist agent caches ──────────────────────────────────
@@ -99,25 +100,33 @@ def _route_question(question: str) -> str:
 # ── specialist nodes (full agent invocation) ─────────────────
 
 
-def _synthesis_node(state: TeamState) -> dict:
-    agent = _get_specialist("synthesis")
+def _specialist_thread_id(state: TeamState, specialist: str) -> str:
+    """Specialist threads must be session-scoped so multiple users do not share LangGraph state."""
+    parent = (state.get("parent_thread_id") or "default").strip() or "default"
+    return f"{parent}:specialist:{specialist}"
+
+
+def _invoke_specialist(state: TeamState, specialist: str) -> dict:
+    agent = _get_specialist(specialist)
     question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "synth"}, "recursion_limit": 1000})
+    thread_id = _specialist_thread_id(state, specialist)
+    result = agent.invoke(
+        {"messages": [HumanMessage(content=question)]},
+        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 1000},
+    )
     return _extract_response(result)
+
+
+def _synthesis_node(state: TeamState) -> dict:
+    return _invoke_specialist(state, "synthesis")
 
 
 def _timing_node(state: TeamState) -> dict:
-    agent = _get_specialist("timing")
-    question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "timing"}, "recursion_limit": 1000})
-    return _extract_response(result)
+    return _invoke_specialist(state, "timing")
 
 
 def _constraint_node(state: TeamState) -> dict:
-    agent = _get_specialist("constraint")
-    question = _extract_question(state["messages"])
-    result = agent.invoke({"messages": [HumanMessage(content=question)]}, config={"configurable": {"thread_id": "constraint"}, "recursion_limit": 1000})
-    return _extract_response(result)
+    return _invoke_specialist(state, "constraint")
 
 
 def _extract_question(messages: list) -> str:
@@ -182,7 +191,12 @@ def invoke_supervisor(agent: CompiledStateGraph, question: str, thread_id: str =
     """Invoke the multi-agent supervisor. Returns the specialist's final text response."""
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 1000}
     result = agent.invoke(
-        {"messages": [HumanMessage(content=question)], "next_agent": "", "specialist_output": ""},
+        {
+            "messages": [HumanMessage(content=question)],
+            "next_agent": "",
+            "specialist_output": "",
+            "parent_thread_id": thread_id,
+        },
         config=config,
     )
     return result.get("specialist_output", "") or str(result)
