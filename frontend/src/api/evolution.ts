@@ -236,6 +236,61 @@ export function abortEvolutionTrial(id: string, body: { reason?: string } = {}) 
   )
 }
 
+// ── eval set placeholder (SE-PR6) ──────────────────────────
+
+export type EvalRunState = 'placeholder' | 'queued' | 'running' | 'completed' | 'error'
+
+export interface EvalSetDescriptor {
+  name: string
+  description: string
+  case_count: number
+  path: string
+}
+
+export interface EvalRun {
+  id: string
+  eval_set: string
+  overlay_id?: string | null
+  state: EvalRunState
+  started_at?: number | null
+  finished_at?: number | null
+  total_cases?: number | null
+  passed?: number | null
+  failed?: number | null
+  metric_summary?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export function listEvalSets() {
+  return request<{ sets: EvalSetDescriptor[]; count: number; runner_implemented: boolean }>(
+    `/evolution/eval/sets`,
+  )
+}
+
+export function listEvalRuns(
+  params: { eval_set?: string; state?: EvalRunState | ''; limit?: number } = {},
+) {
+  const qs = new URLSearchParams()
+  if (params.eval_set) qs.set('eval_set', params.eval_set)
+  if (params.state) qs.set('state', params.state)
+  if (params.limit) qs.set('limit', String(params.limit))
+  return request<{ runs: EvalRun[]; count: number; runner_implemented: boolean }>(
+    `/evolution/eval/runs${qs.size ? `?${qs}` : ''}`,
+  )
+}
+
+export function queueEvalRun(body: {
+  eval_set: string
+  project_id?: string | null
+  overlay_id?: string | null
+  note?: string
+}) {
+  return request<{ run: EvalRun; runner_implemented: boolean; note?: string }>(
+    `/evolution/eval/run`,
+    { method: 'POST', ...jsonBody(body) },
+  )
+}
+
 // ── on-demand generator trigger ────────────────────────────
 
 export function runEvolutionGenerators(

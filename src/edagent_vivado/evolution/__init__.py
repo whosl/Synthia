@@ -95,6 +95,23 @@ from edagent_vivado.evolution.task_arms import (
     set_task_arms,
     task_arms_summary,
 )
+from edagent_vivado.evolution.eval_set import (
+    EvalCase,
+    EvalSet,
+    EvalSetError,
+    default_eval_set_dir,
+    discover_eval_sets,
+    get_eval_set,
+    load_eval_set,
+)
+from edagent_vivado.evolution.eval_runs import (
+    enqueue_eval_run,
+    eval_run_create,
+    eval_run_get,
+    eval_run_list,
+    get_eval_set_dto,
+    list_eval_sets_dto,
+)
 
 __all__ = [
     "SURFACES",
@@ -163,4 +180,18 @@ __all__ = [
     "get_task_arm",
     "current_task_arms",
     "task_arms_summary",
+    # SE-PR6 — eval set placeholder
+    "EvalCase",
+    "EvalSet",
+    "EvalSetError",
+    "default_eval_set_dir",
+    "discover_eval_sets",
+    "load_eval_set",
+    "get_eval_set",
+    "enqueue_eval_run",
+    "eval_run_create",
+    "eval_run_get",
+    "eval_run_list",
+    "get_eval_set_dto",
+    "list_eval_sets_dto",
 ]

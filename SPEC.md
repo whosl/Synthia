@@ -3990,7 +3990,7 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 | `repeated_failure` | latest project-scope `metric_snapshots(window=rolling_10)` | `first_run_success < 0.4` 且 `sample_size ≥ 5` | `prompt` |
 | `negative_feedback` | `feedback`（project 范围，最近 10 条非空 thumb） | 负面 thumb ≥ 3 | `prompt` |
 | `approval_drop` | latest project-scope `metric_snapshots(window=rolling_10)` | `approval_pass_rate < 0.5` 且 `sample_size ≥ 5` | `prompt` |
-| `eval_set` | `eval_runs` | 占位；SE-PR6 后启用 | n/a |
+| `eval_set` | `eval_runs` + `tests/eval_set/*.yaml` | 占位；SE-PR6 起 schema + CLI (`edagent eval`) + API (`POST /api/v1/evolution/eval/run`) 可用，runner 仍在后续 PR 中 | n/a |
 
 Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
 
@@ -4036,6 +4036,70 @@ evolution.trial.reverted       # abort_trial / max-age 触发
 
 - `tool` surface 永远不能进 A/B（`set_trial_enabled` 与 `start_trial` 双重拒绝）。
 - A/B 决策仍是"L1 自动应用"——variant_wins 自动把 shadow 升级为 active，无需人工二次确认。SPEC §22.11 的"10% / 3 窗口自动 rollback"独立于 A/B 决策依然生效，A/B 之后的劣化触发常规 rollback。
+
+### 22.6B Eval set 占位（SE-PR6）
+
+静态回归集是后续 A/B / drift detection 的"地面真值"，但 runner 还没写。SE-PR6 落地以下骨架，所有面都标注 `runner_implemented=false`，把"等运行器到位"和"已经能录入提案"解耦：
+
+**YAML 约定**（位于 `tests/eval_set/<name>.yaml`，文件名 stem 必须等于 `name` 字段；强制 `[a-z0-9_-]` 且 `cases` 非空、`cases[].id` 唯一、`cases[].question` 非空）：
+
+```yaml
+name: smoke
+description: 短描述（可选）
+cases:
+  - id: parse-synth-log
+    question: |
+      给 agent 的自然语言问题…
+    project_id: 可选；指定后 runner 使用该 project 的 overlay
+    expected:
+      contains: ["WNS", "timing"]      # 必须全部出现
+      not_contains: ["TODO"]
+      tool_calls_any: ["parse_timing_tool"]
+      tool_calls_all: []
+      max_task_tokens: 8000
+      min_first_run_success: null
+    metadata: {}                         # 自由字段（tag、owner、关联 candidate）
+```
+
+`expected` 中的字段为 forward-compatible 约定；SE-PR6 的 loader 只校验结构，runner 在落地时再消费打分语义。
+
+**存储**：
+
+`eval_runs` 表已经在 SE-PR1 schema 里，本 PR 写入 `state='placeholder'`、`metadata_json.spec_section='22.6B'`，并保留 `total_cases` / `case_ids` / `note` / `path` 等字段。Runner 实装后将复用同一表行迁移状态：
+
+```text
+placeholder ─► queued ─► running ─► completed | error
+```
+
+**API**：
+
+```
+GET    /api/v1/evolution/eval/sets           # discovery
+GET    /api/v1/evolution/eval/sets/{name}    # cases detail
+GET    /api/v1/evolution/eval/runs           # list eval_runs (filter by eval_set / state)
+GET    /api/v1/evolution/eval/runs/{id}
+POST   /api/v1/evolution/eval/run            # 写入 placeholder 行，返回 runner_implemented=false
+```
+
+**CLI**：
+
+```
+edagent eval                       # 列出 eval set 和最近 runs
+edagent eval smoke                 # 提交 smoke 为 placeholder
+edagent eval smoke --show-cases    # 展开 smoke 的 cases
+edagent eval --status placeholder  # 按 state 过滤 runs
+```
+
+**事件**：
+
+```
+evolution.eval.queued       # SE-PR6 起在每次 placeholder 写入时发出
+evolution.eval.started      # 占位事件名，等 runner
+evolution.eval.completed    # 占位事件名，等 runner
+evolution.eval.error        # 占位事件名，等 runner
+```
+
+`runner_implemented=false` 标记由 API 与 CLI 同时回传，明确告诉 reviewer "提案已记录但还不会真正执行"。当 runner 到位时唯一变化是该 flag 翻 true + state 进入 `queued / running / completed`，调用方不需改 schema。
 
 ### 22.7 度量与综合 score
 
@@ -4157,6 +4221,7 @@ evolution.signal.fired            # 信号源命中阈值
 | SE-PR4 | approve/reject/merge/rollback/retire 后端 API + overlay 生命周期 + reject suppression + default payload synthesis（prompt/kb/flow_template/routing/tool）|
 | SE-PR4b | React `/evolution` review UI |
 | SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
+| SE-PR6 | Eval set 占位：`tests/eval_set/*.yaml` 约定 + 加载/校验 + `/evolution/eval/{sets,runs,run}` + `edagent eval` CLI + UI 启动器（runner 桩，本 PR 不执行）|
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
 | SE-PR8 | tool surface（AST whitelist + sandbox loader）|

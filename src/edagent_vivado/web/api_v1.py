@@ -1819,6 +1819,92 @@ async def api_evolution_trial_abort(trial_id: str, body: TrialAbortReq):
     return {"trial": _trial_dto(out)}
 
 
+# ── Eval set placeholder (SPEC §22.6B SE-PR6) ────────────────
+
+
+@router.get("/evolution/eval/sets")
+async def api_evolution_eval_sets_list():
+    from edagent_vivado.evolution import list_eval_sets_dto
+
+    sets = list_eval_sets_dto()
+    return {"sets": sets, "count": len(sets), "runner_implemented": False}
+
+
+@router.get("/evolution/eval/sets/{name}")
+async def api_evolution_eval_set_get(name: str):
+    from edagent_vivado.evolution import EvalSetError, get_eval_set_dto
+
+    try:
+        return {"set": get_eval_set_dto(name), "runner_implemented": False}
+    except EvalSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/evolution/eval/runs")
+async def api_evolution_eval_runs_list(
+    eval_set: str = "",
+    state: str = "",
+    limit: int = Query(100, ge=1, le=500),
+):
+    from edagent_vivado.evolution import eval_run_list
+
+    rows = eval_run_list(
+        eval_set=eval_set or None,
+        state=state or None,
+        limit=limit,
+    )
+    return {"runs": rows, "count": len(rows), "runner_implemented": False}
+
+
+@router.get("/evolution/eval/runs/{run_id}")
+async def api_evolution_eval_run_get(run_id: str):
+    from edagent_vivado.evolution import eval_run_get
+
+    row = eval_run_get(run_id)
+    if not row:
+        raise HTTPException(404, "eval_run not found")
+    return {"run": row, "runner_implemented": False}
+
+
+class EvalRunReq(BaseModel):
+    eval_set: str
+    project_id: str | None = None
+    overlay_id: str | None = None
+    note: str = ""
+
+
+@router.post("/evolution/eval/run")
+async def api_evolution_eval_run(body: EvalRunReq):
+    """Queue a placeholder eval_run.
+
+    SE-PR6 ships schema + dispatch only; the runner that drives cases through
+    the agent loop is not yet implemented. The response is HTTP 200 (the
+    request itself succeeded — the row is in the table) and carries
+    ``state="placeholder"`` together with ``runner_implemented=false`` so
+    callers can distinguish "submitted but pending the future runner" from
+    "ran and finished".
+    """
+    from edagent_vivado.evolution import EvalSetError, enqueue_eval_run
+
+    if body.project_id and not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        row = enqueue_eval_run(
+            body.eval_set,
+            project_id=body.project_id,
+            overlay_id=body.overlay_id,
+            note=body.note,
+            event_sink=event_create,
+        )
+    except EvalSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "run": row,
+        "runner_implemented": False,
+        "note": "SE-PR6 placeholder — runner lands in a later PR (SPEC §22.6B)",
+    }
+
+
 class GeneratorRunReq(BaseModel):
     project_id: str | None = None
     session_id: str = ""
