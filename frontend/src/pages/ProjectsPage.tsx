@@ -14,7 +14,7 @@ import type { Project } from '../api/types'
 import { MigrationConflictsBanner } from '../components/projects/MigrationConflictsBanner'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
-import { Panel } from '../components/common/Panel'
+import { Modal } from '../components/common/Modal'
 import { globsToText, parseProjectGlobs, textToGlobs } from '../lib/projectStatus'
 import { formatNumber, formatRelative } from '../lib/time'
 
@@ -128,8 +128,7 @@ export default function ProjectsPage() {
     }) => updateProject(id, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setEditing(null)
-      setForm(DEFAULT_FORM)
+      closeForm()
     },
     onError: (err: Error) => alert(err.message || 'Failed to update project'),
   })
@@ -164,6 +163,14 @@ export default function ProjectsPage() {
     }
   }
 
+  const closeForm = () => {
+    setShowCreate(false)
+    setEditing(null)
+    setForm(DEFAULT_FORM)
+  }
+
+  const formOpen = showCreate || Boolean(editing)
+
   const openEdit = (p: Project, e: React.MouseEvent) => {
     e.stopPropagation()
     setEditing(p)
@@ -171,8 +178,7 @@ export default function ProjectsPage() {
     setShowCreate(false)
   }
 
-  const formPanel = (showCreate || editing) && (
-    <Panel title={editing ? `Edit project — ${editing.name}` : 'Create project'}>
+  const projectForm = (
       <div className="project-create-form">
         <label>
           <span>Name</span>
@@ -246,15 +252,7 @@ export default function ProjectsPage() {
           </select>
         </label>
         <div className="project-create-actions">
-          <Button
-            className="ghost"
-            type="button"
-            onClick={() => {
-              setShowCreate(false)
-              setEditing(null)
-              setForm(DEFAULT_FORM)
-            }}
-          >
+          <Button className="ghost" type="button" onClick={closeForm}>
             Cancel
           </Button>
           <Button className="primary" type="button" onClick={submitProject} disabled={create.isPending || saveEdit.isPending}>
@@ -262,7 +260,6 @@ export default function ProjectsPage() {
           </Button>
         </div>
       </div>
-    </Panel>
   )
 
   return (
@@ -292,7 +289,7 @@ export default function ProjectsPage() {
           onClick={() => {
             setEditing(null)
             setForm(DEFAULT_FORM)
-            setShowCreate((v) => !v)
+            setShowCreate(true)
           }}
         >
           <Plus size={16} /> New project
@@ -320,7 +317,14 @@ export default function ProjectsPage() {
         </label>
       </div>
 
-      {formPanel}
+      <Modal
+        open={formOpen}
+        title={editing ? `Edit project — ${editing.name}` : 'New project'}
+        onClose={closeForm}
+        className="modal-card-wide"
+      >
+        {projectForm}
+      </Modal>
 
       <section className="projects-grid">
         {projects.map((p) => (
