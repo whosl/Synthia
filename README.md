@@ -65,7 +65,7 @@ pip install -e .[dev]
 export ANTHROPIC_API_KEY=sk-ant-...
 
 # 或智谱 GLM (Anthropic 兼容接口)
-export ANTHROPIC_API_KEY=9ed5b817366148b6ac1f1f4cd6abd884.TtwwE7Otq4nxkMiJ
+export ANTHROPIC_API_KEY=your-zhipu-api-key
 export ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
 export EDAGENT_MODEL=GLM-5-turbo
 ```
@@ -511,7 +511,7 @@ print(response)
 
 ```bash
 # 智谱 GLM-5-turbo
-export ANTHROPIC_API_KEY=9ed5b817366148b6ac1f1f4cd6abd884.TtwwE7Otq4nxkMiJ
+export ANTHROPIC_API_KEY=your-zhipu-api-key
 export ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
 export EDAGENT_MODEL=GLM-5-turbo
 ```
@@ -687,8 +687,7 @@ python -m pytest tests/test_agent_smoke.py -v
 edagent-vivado/
 ├── pyproject.toml                     # 项目配置和依赖
 ├── README.md                          # 本文档
-├── .env.example                       # 环境变量模板
-├── .env                               # 环境变量（已配置 GLM-5-turbo）
+├── .env.example                       # 环境变量模板（复制为 .env 后填写）
 ├── configs/                           # YAML 工具配置
 │   ├── default.yaml                   # 默认配置
 │   └── vivado_2020_2.yaml             # Vivado 2020.2 配置
