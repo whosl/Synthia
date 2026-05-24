@@ -19,8 +19,48 @@ export function isToolEntry(entry: TimelineEntry): boolean {
   return entry.kind === 'tool'
 }
 
+function isPendingApprovalEntry(entry: TimelineEntry): boolean {
+  return (
+    isApprovalInteractionEntry(entry)
+    && (entry.payload as InteractionEntryPayload).status === 'pending'
+  )
+}
+
+/** Pending approvals start a new run batch so later cards are not merged above completed tools. */
 function canJoinRunBatch(entry: TimelineEntry): boolean {
+  if (isPendingApprovalEntry(entry)) return false
   return isToolEntry(entry) || isApprovalInteractionEntry(entry)
+}
+
+export type ToolRunSegment =
+  | { type: 'pending'; entry: TimelineEntry }
+  | { type: 'batch'; members: TimelineEntry[] }
+
+/** Split a tool run group at pending approvals so UI can follow timeline order. */
+export function splitToolRunSegments(members: TimelineEntry[]): ToolRunSegment[] {
+  const segments: ToolRunSegment[] = []
+  let batch: TimelineEntry[] = []
+
+  const flushBatch = () => {
+    if (!batch.length) return
+    segments.push({ type: 'batch', members: batch })
+    batch = []
+  }
+
+  for (const entry of members) {
+    if (isPendingApprovalEntry(entry)) {
+      flushBatch()
+      segments.push({ type: 'pending', entry })
+      continue
+    }
+    if (isToolEntry(entry) || isApprovalInteractionEntry(entry)) {
+      batch.push(entry)
+      continue
+    }
+    flushBatch()
+  }
+  flushBatch()
+  return segments
 }
 
 export function partitionRunGroupMembers(members: TimelineEntry[]) {
@@ -64,10 +104,7 @@ function sliceUntilNextUser(entries: TimelineEntry[], start: number) {
 }
 
 function hasPendingInteraction(entries: TimelineEntry[]): boolean {
-  return entries.some((e) => {
-    if (e.kind !== 'interaction') return false
-    return (e.payload as InteractionEntryPayload).status === 'pending'
-  })
+  return entries.some(isPendingApprovalEntry)
 }
 
 /** Work group summary is shown only after tools finish and final assistant text is complete. */

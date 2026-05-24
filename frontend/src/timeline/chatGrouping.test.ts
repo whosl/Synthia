@@ -92,6 +92,33 @@ describe('groupChatEntries', () => {
     expect(items.some((i) => i.type === 'work_group')).toBe(false)
   })
 
+  it('starts a new tool group after a pending approval', () => {
+    const items = groupChatEntries([
+      entry('interaction:done', 'interaction', {
+        interaction_type: 'approval',
+        title: 'First',
+        message: '',
+        status: 'approved',
+      }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+      entry('interaction:wait', 'interaction', {
+        interaction_type: 'approval',
+        title: 'Second',
+        message: '',
+        status: 'pending',
+      }),
+    ])
+    expect(items).toHaveLength(2)
+    expect(items[0]?.type).toBe('tool_group')
+    expect(items[1]?.type).toBe('entry')
+    if (items[0]?.type === 'tool_group') {
+      expect(items[0].members).toHaveLength(2)
+    }
+    if (items[1]?.type === 'entry') {
+      expect(items[1].entry.kind).toBe('interaction')
+    }
+  })
+
   it('does not show work group while an interaction is still pending', () => {
     const work = [
       entry('interaction:a', 'interaction', {

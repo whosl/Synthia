@@ -23,19 +23,33 @@ export function Composer({
   const send = () => { const q = text.trim(); if (!q || disabled) return; setText(''); onSend(q) }
   const inputPlaceholder =
     placeholder ??
-    (running ? 'Agent is running…' : 'Ask about synthesis, timing, constraints…')
+    (running ? 'synthia is running…' : 'Ask about synthesis, timing, constraints…')
   const showStatus = statusActive ?? (running || stopping)
   return (
     <div className="composer-anchor">
+      <div className="composer">
+    <div className={`composer-input-wrap${showStatus ? ' has-status' : ''}`}>
       {showStatus && (
         <span
           className="terminal-status-dot composer-status-dot"
           role="status"
-          aria-label={stopping ? 'Agent stopping' : 'Agent running'}
+          aria-label={stopping ? 'synthia stopping' : 'synthia running'}
         />
       )}
-      <div className="composer">
-    <input className="input mono" value={text} disabled={disabled} placeholder={inputPlaceholder} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+      <input
+        className="input mono"
+        value={text}
+        disabled={disabled}
+        placeholder={inputPlaceholder}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            send()
+          }
+        }}
+      />
+    </div>
     {running || stopping ? (
       <Button
         className="danger composer-action"

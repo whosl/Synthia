@@ -913,14 +913,6 @@
   z-index: 10;
 }
 
-.composer-status-dot {
-  position: absolute;
-  left: 10px;
-  bottom: calc(100% + 8px);
-  margin: 0;
-  z-index: 1;
-}
-
 .composer {
   position: relative;
   padding: 0;
@@ -930,6 +922,26 @@
   background: transparent;
   border: none;
   box-shadow: none;
+}
+
+.composer-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.composer-input-wrap .composer-status-dot {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 11px;
+  height: 11px;
+  margin: 0;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .composer input,
@@ -943,9 +955,14 @@
 .composer input {
   flex: 1;
   min-width: 0;
+  width: 100%;
   height: 44px;
   padding: 0 14px;
   color: var(--term-text);
+}
+
+.composer-input-wrap.has-status input {
+  padding-left: 36px;
 }
 
 .composer input:focus {
@@ -1261,9 +1278,14 @@
     bottom: 18px;
   }
 
-  .composer-status-dot {
-    left: 8px;
-    bottom: calc(100% + 6px);
+  .composer-input-wrap .composer-status-dot {
+    left: 14px;
+    width: 10px;
+    height: 10px;
+  }
+
+  .composer-input-wrap.has-status input {
+    padding-left: 32px;
   }
 
   .approval-detail-row {
@@ -1424,7 +1446,8 @@
   }
 }
 
-.timeline-entry.sticky-pending-approval {
+.timeline-entry.sticky-pending-approval,
+.tool-run-approval.sticky-pending-approval {
   position: sticky;
   bottom: 0;
   z-index: 2;
