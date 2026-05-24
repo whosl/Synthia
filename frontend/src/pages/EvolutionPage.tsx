@@ -16,16 +16,21 @@ import {
   abortEvolutionTrial,
   approveEvolutionCandidate,
   decideEvolutionTrial,
+  type EvalRun,
+  type EvalSetDescriptor,
   type EvolutionCandidate,
   type EvolutionCandidateStatus,
   type EvolutionOverlay,
   type EvolutionSurface,
   type EvolutionTrial,
   getEvolutionConfig,
+  listEvalRuns,
+  listEvalSets,
   listEvolutionCandidates,
   listEvolutionOverlays,
   listEvolutionTrials,
   mergeEvolutionCandidate,
+  queueEvalRun,
   rejectEvolutionCandidate,
   retireEvolutionOverlay,
   rollbackEvolutionCandidate,
@@ -145,6 +150,19 @@ export default function EvolutionPage() {
     refetchOnWindowFocus: true,
   })
 
+  const evalSetsQ = useQuery({
+    queryKey: ['evolution', 'eval-sets'],
+    queryFn: () => listEvalSets(),
+    refetchOnWindowFocus: false,
+  })
+
+  const evalRunsQ = useQuery({
+    queryKey: ['evolution', 'eval-runs', projectId],
+    queryFn: () => listEvalRuns({ limit: 20 }),
+    refetchInterval: 8000,
+    refetchOnWindowFocus: true,
+  })
+
   const candidates = candidatesQ.data?.candidates ?? []
   const overlays = overlaysQ.data?.overlays ?? []
   const selected = useMemo(
@@ -203,6 +221,15 @@ export default function EvolutionPage() {
   const abortTrialMut = useMutation({
     mutationFn: (args: { id: string; reason?: string }) =>
       abortEvolutionTrial(args.id, { reason: args.reason }),
+    onSuccess: refresh,
+  })
+  const queueEvalMut = useMutation({
+    mutationFn: (args: { eval_set: string; note?: string }) =>
+      queueEvalRun({
+        eval_set: args.eval_set,
+        project_id: projectId || undefined,
+        note: args.note,
+      }),
     onSuccess: refresh,
   })
 
@@ -365,6 +392,14 @@ export default function EvolutionPage() {
         />
       )}
 
+      <EvalSection
+        sets={evalSetsQ.data?.sets ?? []}
+        runs={evalRunsQ.data?.runs ?? []}
+        runnerImplemented={evalSetsQ.data?.runner_implemented === true}
+        onQueue={(set, note) => queueEvalMut.mutate({ eval_set: set, note })}
+        busy={queueEvalMut.isPending}
+      />
+
       {selected && (
         <CandidateDetailModal
           candidate={selected}
@@ -388,6 +423,110 @@ export default function EvolutionPage() {
         />
       )}
     </div>
+  )
+}
+
+function EvalSection({
+  sets,
+  runs,
+  runnerImplemented,
+  onQueue,
+  busy,
+}: {
+  sets: EvalSetDescriptor[]
+  runs: EvalRun[]
+  runnerImplemented: boolean
+  onQueue: (set: string, note?: string) => void
+  busy: boolean
+}) {
+  const [selected, setSelected] = useState<string>('')
+  const [note, setNote] = useState<string>('')
+
+  if (!sets.length && !runs.length) return null
+
+  const effectiveSet = selected || (sets[0]?.name ?? '')
+
+  return (
+    <Panel
+      title="Static eval set"
+      actions={
+        <span className="muted" style={{ fontSize: 11 }}>
+          {runnerImplemented ? 'runner enabled' : 'SPEC §22.6B — runner not yet implemented (SE-PR6 placeholder)'}
+        </span>
+      }
+    >
+      <div className="evolution-eval-launcher">
+        <label className="evolution-action-aux">
+          <span className="muted">Eval set</span>
+          <select
+            value={effectiveSet}
+            onChange={(e) => setSelected(e.target.value)}
+            disabled={!sets.length || busy}
+          >
+            {sets.map((s) => (
+              <option key={s.name} value={s.name}>{s.name} · {s.case_count} case(s)</option>
+            ))}
+          </select>
+        </label>
+        <label className="evolution-action-aux evolution-action-aux-grow">
+          <span className="muted">Note (optional)</span>
+          <input
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. pre-rollout check"
+            disabled={busy}
+          />
+        </label>
+        <Button
+          className="primary"
+          onClick={() => effectiveSet && onQueue(effectiveSet, note)}
+          disabled={!effectiveSet || busy}
+          title={
+            runnerImplemented
+              ? 'Run this eval set'
+              : 'Persist a placeholder eval_run (runner ships in a later PR)'
+          }
+        >
+          <Play size={14} /> {runnerImplemented ? 'Run' : 'Queue placeholder'}
+        </Button>
+      </div>
+
+      {!sets.length && (
+        <EmptyState
+          title="No eval sets discovered"
+          detail="Add YAML files under tests/eval_set/ to populate this list."
+        />
+      )}
+
+      {!!runs.length && (
+        <table className="table" style={{ marginTop: 12 }}>
+          <thead>
+            <tr>
+              <th>Eval run</th>
+              <th>Set</th>
+              <th>State</th>
+              <th>Cases</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((r) => {
+              const note = (r.metadata as Record<string, unknown> | undefined)?.note as string | undefined
+              return (
+                <tr key={r.id}>
+                  <td className="mono" style={{ fontSize: 11 }}>{r.id}</td>
+                  <td>{r.eval_set}</td>
+                  <td><StatusBadge status={r.state} /></td>
+                  <td className="mono">{r.total_cases ?? '—'}</td>
+                  <td className="muted">{note || ''}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </Panel>
   )
 }
 

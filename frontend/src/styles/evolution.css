@@ -422,3 +422,16 @@
   height: 16px;
   accent-color: var(--accent);
 }
+
+/* ── SE-PR6: eval set launcher ────────────────────────── */
+
+.evolution-eval-launcher {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.evolution-eval-launcher .evolution-action-aux {
+  margin-top: 0;
+}
