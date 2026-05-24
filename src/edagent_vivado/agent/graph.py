@@ -73,7 +73,7 @@ def _default_checkpointer():
         return _checkpointer
 
 
-def create_agent(checkpointer=None) -> Any:
+def create_agent(checkpointer=None, *, project_id: str | None = None) -> Any:
     """Create and return a configured LangChain agent graph.
 
     Uses ``langchain.agents.create_agent`` (the current recommended approach
@@ -84,14 +84,28 @@ def create_agent(checkpointer=None) -> Any:
         checkpointer: Optional LangGraph checkpointer. Defaults to an in-memory
                       MemorySaver (lost on process exit). Pass a SqliteSaver for
                       durable persistence.
+        project_id:   Optional project id used to look up active evolution
+                      overlays (SPEC §22). When None or no overlay is active,
+                      the baseline prompt and tool set are used unchanged.
     """
     llm = get_llm()
     chk = checkpointer or _default_checkpointer()
 
+    # Evolution surfaces: resolvers degrade to baseline when no overlay exists.
+    try:
+        from edagent_vivado.evolution import resolve_prompt, resolve_tools
+
+        system_prompt = resolve_prompt(SYSTEM_PROMPT, project_id=project_id)
+        tools = resolve_tools(_TOOLS, project_id=project_id)
+    except Exception as exc:  # pragma: no cover - resolver must never break agent boot
+        logger.debug("evolution resolvers unavailable: %s", exc)
+        system_prompt = SYSTEM_PROMPT
+        tools = _TOOLS
+
     agent = langchain_create_agent(
         model=llm,
-        tools=_TOOLS,
-        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
+        system_prompt=system_prompt,
         name="vivado_debug_agent",
         checkpointer=chk,
     )
