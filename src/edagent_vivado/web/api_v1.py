@@ -516,6 +516,8 @@ async def api_task_start(session_id: str, req: StartTaskReq):
 
     async def _run_agent():
         run = None
+        arm_token = None
+        arm_assignments: list[dict] = []
         try:
             run = run_create("task", f"task:{t['id']}", session_id=session_id, task_id=t["id"])
             event_create(session_id, "run.started", {"run_id": run["id"], "run_type": "task"},
@@ -534,7 +536,47 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 "retrieval_audit_id": ctx.retrieval_audit["id"] if ctx.retrieval_audit else None,
                 "token_counts": ctx.token_counts,
             }, task_id=t["id"], run_id=run["id"])
-            agent = create_agent()
+            # SE-PR5 — assign A/B trial arms for this task BEFORE the agent boots
+            # so create_agent / resolvers see the right overlay payloads.
+            try:
+                from edagent_vivado.evolution import (
+                    assign_arms_for_task,
+                    set_task_arms,
+                    task_arms_summary,
+                )
+
+                arms = assign_arms_for_task(
+                    project_id=sess.get("project_id") or None,
+                    task_id=t["id"],
+                )
+                if arms:
+                    arm_token = set_task_arms(arms)
+                    arm_assignments = task_arms_summary(arms)
+                    for entry in arm_assignments:
+                        event_create(
+                            session_id,
+                            "evolution.trial.assigned",
+                            entry,
+                            task_id=t["id"],
+                            run_id=run["id"] if run else "",
+                        )
+                    # Persist on the task so collect_task_metrics can read it back.
+                    try:
+                        from edagent_vivado.repository.store import task_update as _tu
+
+                        prev_meta_raw = (task_get(t["id"]) or {}).get("metadata_json") or "{}"
+                        try:
+                            prev_meta = json.loads(prev_meta_raw) or {}
+                        except json.JSONDecodeError:
+                            prev_meta = {}
+                        prev_meta["evolution_arms"] = arm_assignments
+                        _tu(t["id"], metadata_json=json.dumps(prev_meta))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            agent = create_agent(project_id=sess.get("project_id") or None)
             config = {"configurable": {"thread_id": f"session:{session_id}"}, "recursion_limit": 1000}
             from edagent_vivado.harness.run_context import set_agent_run_context
             set_agent_run_context(session_id, t["id"], run["id"])
@@ -1052,8 +1094,29 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     task_id=t["id"],
                     event_sink=event_create,
                 )
+
+                # SE-PR5 — give every trial this task contributed to a chance to decide.
+                if arm_assignments:
+                    from edagent_vivado.evolution import maybe_decide_trial
+
+                    seen_trials = {a.get("trial_id") for a in arm_assignments if a.get("trial_id")}
+                    for tid in seen_trials:
+                        try:
+                            maybe_decide_trial(tid, event_sink=event_create)
+                        except Exception:
+                            pass
             except Exception:
                 pass
+            finally:
+                # Always clear the per-task arm assignment so a follow-up
+                # task in the same process starts from a clean slate.
+                try:
+                    if arm_token is not None:
+                        from edagent_vivado.evolution import reset_task_arms
+
+                        reset_task_arms(arm_token)
+                except Exception:
+                    pass
         except Exception as e:
             task_update(t["id"], state="error", error=str(e), finished_at=int(time.time()))
             session_update(session_id, status="error")
@@ -1061,6 +1124,14 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             if run:
                 event_create(session_id, "run.error", {"run_id": run["id"], "error": str(e)}, task_id=t["id"], run_id=run["id"])
             event_create(session_id, "task.error", {"task_id": t["id"], "error": str(e)}, task_id=t["id"])
+            # SE-PR5 — drop arm assignment on the error path too.
+            try:
+                if arm_token is not None:
+                    from edagent_vivado.evolution import reset_task_arms
+
+                    reset_task_arms(arm_token)
+            except Exception:
+                pass
 
     asyncio.create_task(_run_agent())
     event_type = "task.started"  # noqa: F841
@@ -1594,6 +1665,158 @@ async def api_evolution_overlay_retire(overlay_id: str):
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"overlay": _overlay_dto(out)}
+
+
+# ── Trial config (SPEC §22 SE-PR5) ────────────────────────────
+
+
+@router.get("/evolution/config")
+async def api_evolution_config(project_id: str = ""):
+    from edagent_vivado.evolution import (
+        DECISION_MARGIN,
+        MIN_SAMPLES_PER_ARM,
+        TRIAL_FORBIDDEN_SURFACES,
+        project_trial_config,
+    )
+
+    if not project_id:
+        return {
+            "project_id": None,
+            "trials": {},
+            "forbidden_surfaces": sorted(TRIAL_FORBIDDEN_SURFACES),
+            "min_samples_per_arm": MIN_SAMPLES_PER_ARM,
+            "decision_margin": DECISION_MARGIN,
+        }
+    if not project_get(project_id):
+        raise HTTPException(404, "project not found")
+    return {
+        "project_id": project_id,
+        "trials": project_trial_config(project_id),
+        "forbidden_surfaces": sorted(TRIAL_FORBIDDEN_SURFACES),
+        "min_samples_per_arm": MIN_SAMPLES_PER_ARM,
+        "decision_margin": DECISION_MARGIN,
+    }
+
+
+class TrialConfigSetReq(BaseModel):
+    project_id: str
+    surface: str
+    enabled: bool
+
+
+@router.post("/evolution/config")
+async def api_evolution_config_set(body: TrialConfigSetReq):
+    from edagent_vivado.evolution import set_trial_enabled
+
+    if not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        out = set_trial_enabled(body.project_id, body.surface, body.enabled)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "project_id": body.project_id,
+        "surface": body.surface,
+        "enabled": out,
+    }
+
+
+# ── Trials (SPEC §22 SE-PR5) ─────────────────────────────────
+
+
+def _trial_dto(row: dict) -> dict:
+    """Serialise a trial row with decoded payload + per-arm score buckets."""
+    out = dict(row)
+    for col_json, col_decoded in (
+        ("metric_baseline_json", "metric_baseline"),
+        ("metric_variant_json", "metric_variant"),
+        ("metadata_json", "metadata"),
+    ):
+        if col_decoded in out:
+            continue
+        raw = out.get(col_json)
+        if isinstance(raw, str) and raw:
+            try:
+                out[col_decoded] = json.loads(raw)
+            except json.JSONDecodeError:
+                out[col_decoded] = {}
+        else:
+            out[col_decoded] = {}
+    return out
+
+
+@router.get("/evolution/trials")
+async def api_evolution_trials_list(
+    project_id: str = "",
+    state: str = "",
+    surface: str = "",
+    limit: int = Query(200, ge=1, le=500),
+):
+    from edagent_vivado.evolution import trial_list
+
+    rows = trial_list(
+        project_id=project_id or None,
+        state=state or None,
+        surface=surface or None,
+        limit=limit,
+    )
+    return {
+        "trials": [_trial_dto(r) for r in rows],
+        "filters": {
+            "project_id": project_id or None,
+            "state": state or None,
+            "surface": surface or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/trials/{trial_id}")
+async def api_evolution_trial_get(trial_id: str):
+    from edagent_vivado.evolution import trial_get
+
+    row = trial_get(trial_id)
+    if not row:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(row)}
+
+
+class TrialDecideReq(BaseModel):
+    decision: str
+    reviewed_by: str = "user"
+
+
+@router.post("/evolution/trials/{trial_id}/decide")
+async def api_evolution_trial_decide(trial_id: str, body: TrialDecideReq):
+    """Operator override that decides a trial regardless of sample count."""
+    from edagent_vivado.evolution import force_decision
+
+    try:
+        out = force_decision(
+            trial_id,
+            body.decision,
+            reviewed_by=body.reviewed_by or "user",
+            event_sink=event_create,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not out:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(out)}
+
+
+class TrialAbortReq(BaseModel):
+    reason: str = "manual_abort"
+
+
+@router.post("/evolution/trials/{trial_id}/abort")
+async def api_evolution_trial_abort(trial_id: str, body: TrialAbortReq):
+    from edagent_vivado.evolution import abort_trial
+
+    out = abort_trial(trial_id, reason=body.reason or "manual_abort", event_sink=event_create)
+    if not out:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(out)}
 
 
 class GeneratorRunReq(BaseModel):
