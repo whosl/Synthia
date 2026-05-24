@@ -4,15 +4,24 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Database,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Server,
   Trash2,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { getProject, listProjectSessions, createProjectSession } from '../api/projects'
+import {
+  deleteProject,
+  getProject,
+  getProjectSummary,
+  listProjectSessions,
+  createProjectSession,
+  reindexProject,
+} from '../api/projects'
 import { deleteSession, updateSession } from '../api/sessions'
 import type { Session } from '../api/types'
 import { Button } from '../components/common/Button'
@@ -83,6 +92,12 @@ export default function ProjectSessionsPage() {
   const [configOpen, setConfigOpen] = useState(true)
 
   const projectQ = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: Boolean(projectId) })
+  const summaryQ = useQuery({
+    queryKey: ['project-summary', projectId],
+    queryFn: () => getProjectSummary(projectId),
+    enabled: Boolean(projectId),
+    refetchInterval: 120_000,
+  })
   const sessionsQ = useQuery({
     queryKey: ['sessions', projectId],
     queryFn: () => listProjectSessions(projectId, { limit: 200 }),
@@ -102,8 +117,19 @@ export default function ProjectSessionsPage() {
     mutationFn: ({ id, name }: { id: string; name: string }) => updateSession(id, { name }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sessions', projectId] }),
   })
+  const reindex = useMutation({
+    mutationFn: () => reindexProject(projectId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['project-summary', projectId] }),
+    onError: (err: Error) => alert(err.message || 'Reindex failed'),
+  })
+  const hardDelete = useMutation({
+    mutationFn: (name: string) => deleteProject(projectId, true, name),
+    onSuccess: () => navigate('/'),
+    onError: (err: Error) => alert(err.message || 'Delete failed'),
+  })
 
   const project = projectQ.data?.project
+  const summary = summaryQ.data
   const isArchived = project?.status === 'archived'
   const isFetching = sessionsQ.isFetching
 
@@ -167,6 +193,48 @@ export default function ProjectSessionsPage() {
         </p>
       )}
 
+      {summary && (
+        <div className="project-summary-row">
+          <Panel title="Vivado target" className="project-summary-card">
+            <div className="project-health-line">
+              <Server size={16} />
+              <span className={`health-dot ${summary.vivado_health?.reachable ? 'ok' : 'bad'}`} />
+              <span>{summary.vivado_health?.reachable ? 'Reachable' : 'Unreachable'}</span>
+              {summary.vivado_health?.host && (
+                <span className="mono muted" style={{ fontSize: 11 }}>{summary.vivado_health.host}</span>
+              )}
+            </div>
+            {summary.vivado_health?.version && (
+              <p className="muted" style={{ fontSize: 11, margin: '6px 0 0' }}>Vivado {summary.vivado_health.version}</p>
+            )}
+            {summary.vivado_health?.error && (
+              <p className="muted" style={{ fontSize: 11, margin: '4px 0 0', color: 'var(--error)' }}>{summary.vivado_health.error}</p>
+            )}
+          </Panel>
+          <Panel
+            title="Project KB"
+            className="project-summary-card"
+            actions={
+              <Button className="ghost icon-btn" type="button" title="Reindex project KB" disabled={reindex.isPending} onClick={() => reindex.mutate()}>
+                <RefreshCw size={14} className={reindex.isPending ? 'is-spinning' : ''} />
+              </Button>
+            }
+          >
+            <div className="project-health-line">
+              <Database size={16} />
+              <span>{formatNumber(summary.kb?.sources)} sources · {formatNumber(summary.kb?.chunks)} chunks</span>
+            </div>
+            {(summary.kb_recent_sources ?? []).length > 0 && (
+              <ul className="project-kb-sources">
+                {summary.kb_recent_sources.slice(0, 4).map((s) => (
+                  <li key={s.id} className="mono muted">{s.title || s.path}</li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
+      )}
+
       {project && (
         <Panel
           title="Project configuration"
@@ -178,14 +246,30 @@ export default function ProjectSessionsPage() {
           }
         >
           {configOpen && (
+            <>
             <dl className="project-config-grid">
               <div><dt>Manifest</dt><dd className="mono">{project.manifest_path}</dd></div>
               <div><dt>Vivado .xpr</dt><dd className="mono">{project.xpr_path || '—'}</dd></div>
               <div><dt>Part</dt><dd className="mono">{project.part || '—'}</dd></div>
               <div><dt>Top</dt><dd className="mono">{project.top_module || '—'}</dd></div>
-              <div><dt>Sessions</dt><dd>{formatNumber(project.session_count)}</dd></div>
+              <div><dt>Sessions</dt><dd>{formatNumber(summary?.sessions?.active ?? project.session_count)} active</dd></div>
               <div><dt>Problems</dt><dd>{formatNumber(project.problem_count)}</dd></div>
             </dl>
+            <div className="project-danger-zone">
+              <Button
+                className="ghost danger-ghost"
+                type="button"
+                onClick={() => {
+                  const name = window.prompt(`Type project name "${project.name}" to permanently delete:`)
+                  if (name === project.name && confirm('This cannot be undone. Delete project and all sessions?')) {
+                    hardDelete.mutate(name)
+                  }
+                }}
+              >
+                <Trash2 size={14} /> Permanently delete project
+              </Button>
+            </div>
+            </>
           )}
         </Panel>
       )}

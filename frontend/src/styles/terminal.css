@@ -651,7 +651,12 @@
 }
 
 .message-turn.kind-tool-group {
-  gap: 4px;
+  gap: 2px;
+}
+
+.message-turn.kind-tool-group .trace-block,
+.message-turn.kind-tool-group .approval-trace-block {
+  margin: 0;
 }
 .assistant-blocks .message-bubble,
 .assistant-blocks .trace-block {
@@ -700,15 +705,30 @@
 .reasoning-block { border-color: var(--term-border); }
 .reasoning-block .trace-header { color: var(--term-muted); }
 
-.tool-block { border-color: rgba(245, 158, 11, 0.25); }
-.tool-block.completed { border-color: rgba(22, 163, 74, 0.25); }
-.tool-block.rejected { border-color: rgba(220, 38, 38, 0.25); }
-.tool-block.errored { border-color: rgba(220, 38, 38, 0.22); }
-.tool-block.stopped { border-color: rgba(245, 158, 11, 0.28); }
-.tool-block.completed .trace-header .tool-state { color: var(--success); }
-.tool-block.rejected .trace-header .tool-state { color: var(--error); }
-.tool-block.errored .trace-header .tool-state { color: var(--error); }
-.tool-block.stopped .trace-header .tool-state { color: var(--warning); }
+/* Tool trace blocks (degraded / collapsed) — monochrome */
+.tool-block { border-color: var(--term-border-soft); }
+.tool-block.completed,
+.tool-block.rejected,
+.tool-block.errored,
+.tool-block.stopped {
+  border-color: var(--term-border-soft);
+}
+.tool-block .trace-header .tool-state,
+.tool-block.completed .trace-header .tool-state,
+.tool-block.rejected .trace-header .tool-state,
+.tool-block.errored .trace-header .tool-state,
+.tool-block.stopped .trace-header .tool-state {
+  color: var(--term-muted);
+}
+.tool-block .tool-status-icon,
+.tool-block .tool-status-icon.is-done,
+.tool-block .tool-status-icon.is-rejected,
+.tool-block .tool-status-icon.is-stopped,
+.tool-block .tool-status-icon.is-errored,
+.tool-block .tool-status-icon.is-running {
+  color: var(--term-text);
+  flex-shrink: 0;
+}
 
 /* Tool run group — failure card + collapsed summary */
 .tool-failure-card {
@@ -803,12 +823,16 @@
 
 .tool-run-details {
   display: grid;
-  gap: 6px;
+  gap: 3px;
   margin-top: 0;
 }
 
 .message-turn.kind-tool-group .tool-run-summary + .tool-run-details {
-  margin-top: 2px;
+  margin-top: 0;
+}
+
+.message-turn.kind-tool-group .tool-run-details {
+  gap: 2px;
 }
 
 .tool-run-approval {
@@ -822,11 +846,15 @@
 }
 
 .tool-run-details .tool-block.completed {
-  opacity: 0.92;
+  opacity: 1;
+}
+
+.message-turn.kind-tool-group .tool-run-details .trace-header {
+  padding: 5px 10px;
 }
 
 .tool-run-details .tool-block.completed .trace-header {
-  padding: 7px 12px;
+  padding: 5px 10px;
 }
 
 .custom-entry-block {
@@ -861,11 +889,11 @@
   text-align: right;
 }
 .tool-elapsed-live {
-  color: var(--term-accent);
+  color: var(--term-muted);
 }
 .tool-block.rejected .tool-elapsed-live,
 .tool-block.rejected .tool-elapsed {
-  color: var(--error);
+  color: var(--term-muted);
 }
 
 /* Composer — floating input + action (no outer chrome) */
@@ -1255,13 +1283,20 @@
 .interaction-block.status-rejected { border-color: var(--error); opacity: 0.85; }
 .interaction-block.status-responded { border-color: var(--success); opacity: 0.85; }
 
-/* Approval blocks — muted blue (same visual weight as tool.completed green) */
-.interaction-block.approval-block,
-.trace-block.approval-trace-block {
+/* Pending approval — accent for actionable UI */
+.interaction-block.approval-block {
   --approval-accent: var(--info);
   --approval-border: var(--info-border);
   --approval-border-strong: rgba(37, 99, 235, 0.25);
   --approval-surface: var(--info-subtle);
+}
+
+/* Degraded approval trace — monochrome (matches tool trace blocks) */
+.trace-block.approval-trace-block {
+  --approval-accent: var(--term-muted);
+  --approval-border: var(--term-border-soft);
+  --approval-border-strong: var(--term-border-soft);
+  --approval-surface: transparent;
 }
 
 .interaction-block.approval-block {
@@ -1417,59 +1452,63 @@
 .approval-select-bar .sep { color: var(--term-subtle); }
 .approval-select-count { margin-left: auto; color: var(--term-muted); }
 
-.approval-block .approval-file.selected,
-.approval-trace-block .approval-file.selected {
+.approval-block .approval-file.selected {
   border-color: var(--info-border);
   background: var(--info-subtle);
 }
 
+.approval-trace-block .approval-file.selected {
+  border-color: var(--term-border-soft);
+  background: color-mix(in srgb, var(--term-text) 5%, transparent);
+}
+
 .approval-file.selected { border-color: rgba(245, 158, 11, 0.35); }
+.approval-trace-block .approval-file.file-approved,
+.approval-trace-block .approval-file.file-skipped {
+  border-color: var(--term-border-soft);
+}
 .approval-file.file-approved { border-color: rgba(22, 163, 74, 0.35); }
 .approval-file.file-skipped { opacity: 0.55; }
 .file-status-icon.approved { color: var(--success); flex-shrink: 0; }
+.approval-trace-block .file-status-icon.approved,
+.approval-trace-block .file-status-icon.skipped {
+  color: var(--term-text);
+  flex-shrink: 0;
+}
 .file-status-icon.skipped { color: var(--term-muted); flex-shrink: 0; }
 
 .interaction-block.approval-block.status-partial { border-color: rgba(37, 99, 235, 0.35); }
+.approval-trace-block.status-partial { border-color: var(--term-border-soft); }
 .interaction-block.status-partial { border-color: rgba(245, 158, 11, 0.55); }
 
 .trace-block.approval-trace-block {
-  border: 1px solid var(--approval-border-strong);
+  border: 1px solid var(--term-border-soft);
   border-radius: var(--radius-md);
-  margin: 8px 0;
+  margin: 0;
   overflow: hidden;
 }
 .trace-block.approval-trace-block .trace-header {
   color: var(--term-text);
 }
 .trace-block.approval-trace-block.completed,
-.trace-block.approval-trace-block.status-partial {
-  border-color: var(--approval-border-strong);
-}
+.trace-block.approval-trace-block.status-partial,
 .trace-block.approval-trace-block.rejected {
-  border-color: rgba(220, 38, 38, 0.25);
+  border-color: var(--term-border-soft);
 }
-.trace-block.approval-trace-block .approval-status-icon.approved {
-  color: var(--approval-accent);
-  flex-shrink: 0;
-}
+.trace-block.approval-trace-block .approval-status-icon.approved,
 .trace-block.approval-trace-block .approval-status-icon.rejected {
-  color: var(--error);
+  color: var(--term-text);
   flex-shrink: 0;
 }
-.trace-block.approval-trace-block .interaction-badge.approved {
-  background: var(--info-subtle);
-  color: var(--approval-accent);
-}
+.trace-block.approval-trace-block .interaction-badge.approved,
 .trace-block.approval-trace-block .interaction-badge.rejected {
-  background: var(--error-subtle);
-  color: var(--error);
+  background: color-mix(in srgb, var(--term-text) 8%, transparent);
+  color: var(--term-muted);
 }
-.trace-block.approval-trace-block.rejected .tool-state {
-  color: var(--error);
-}
+.trace-block.approval-trace-block.rejected .tool-state,
 .trace-block.approval-trace-block.completed .tool-state,
 .trace-block.approval-trace-block.status-partial .tool-state {
-  color: var(--approval-accent);
+  color: var(--term-muted);
 }
 
 .timeline-entry.kind-approval {
@@ -1481,15 +1520,22 @@
 .approval-trace-body .approval-detail-grid { margin-top: 0; }
 .approval-trace-body .interaction-rejected-hint { margin-top: 8px; }
 
-.approval-block .file-action-badge,
-.approval-trace-block .file-action-badge {
+.approval-block .file-action-badge {
   background: var(--approval-accent);
   color: var(--term-text-strong);
 }
 
-.approval-block .file-path,
-.approval-trace-block .file-path {
+.approval-trace-block .file-action-badge {
+  background: color-mix(in srgb, var(--term-text) 10%, transparent);
+  color: var(--term-muted);
+}
+
+.approval-block .file-path {
   color: var(--approval-accent);
+}
+
+.approval-trace-block .file-path {
+  color: var(--term-text);
 }
 
 .file-action-badge {

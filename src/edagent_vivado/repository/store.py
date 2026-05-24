@@ -3,9 +3,16 @@
 from __future__ import annotations
 import json, time, uuid as _uuid
 from edagent_vivado.repository.db import get_db, init_db
+from edagent_vivado.repository.project_scope import project_id_for_session
 
 # ensure tables exist on first import
 init_db()
+
+
+def _pid(session_id: str) -> str | None:
+    if not session_id:
+        return None
+    return project_id_for_session(get_db(), session_id)
 
 def _now() -> int: return int(time.time())
 def _uid() -> str: return _uuid.uuid4().hex[:12]
@@ -112,11 +119,13 @@ def project_update(pid: str, **fields) -> dict | None:
 
 
 def project_delete(pid: str, hard: bool = False) -> bool:
-    db = get_db()
     if hard:
-        db.execute("DELETE FROM projects WHERE id=?", (pid,))
-    else:
-        db.execute("UPDATE projects SET archived_at=?, status=? WHERE id=?", (_now(), "archived", pid))
+        from edagent_vivado.projects.lifecycle import project_hard_delete
+
+        project_hard_delete(pid)
+        return True
+    db = get_db()
+    db.execute("UPDATE projects SET archived_at=?, status=? WHERE id=?", (_now(), "archived", pid))
     db.commit()
     return True
 
@@ -235,15 +244,14 @@ def session_delete(sid: str, hard: bool = False) -> bool:
     row = session_get(sid)
     pid = row.get("project_id") if row else None
     if hard:
-        db.execute("DELETE FROM sessions WHERE id=?", (sid,))
-        db.execute("DELETE FROM messages WHERE session_id=?", (sid,))
-        db.execute("DELETE FROM events WHERE session_id=?", (sid,))
-        db.execute("DELETE FROM tasks WHERE session_id=?", (sid,))
-        db.execute("DELETE FROM runs WHERE session_id=?", (sid,))
-        db.execute("DELETE FROM tool_calls WHERE session_id=?", (sid,))
+        from edagent_vivado.projects.lifecycle import _archive_session_artifacts_dir, _hard_delete_session
+
+        _hard_delete_session(db, sid)
+        _archive_session_artifacts_dir(sid)
+        db.commit()
     else:
         db.execute("UPDATE sessions SET archived_at=?, status=? WHERE id=?", (_now(), "archived", sid))
-    db.commit()
+        db.commit()
     if pid:
         _refresh_project_session_count(pid)
     return True
@@ -271,8 +279,11 @@ def message_create(session_id: str, role: str, content: str, task_id: str = "",
                    agent_id: str = "", stopped: bool = False, partial: bool = False) -> dict:
     mid = _uid(); now = _now()
     db = get_db()
-    db.execute("INSERT INTO messages(id,session_id,task_id,agent_id,role,content,stopped,partial,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-               (mid, session_id, task_id or None, agent_id or None, role, content, int(stopped), int(partial), now))
+    pid = _pid(session_id)
+    db.execute(
+        "INSERT INTO messages(id,session_id,project_id,task_id,agent_id,role,content,stopped,partial,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (mid, session_id, pid, task_id or None, agent_id or None, role, content, int(stopped), int(partial), now),
+    )
     db.execute("UPDATE sessions SET updated_at=?, message_count=message_count+1 WHERE id=?", (now, session_id))
     db.commit()
     return dict(db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
@@ -282,8 +293,11 @@ def message_create(session_id: str, role: str, content: str, task_id: str = "",
 def task_create(session_id: str, user_message_id: str = "") -> dict:
     tid = _uid(); now = _now()
     db = get_db()
-    db.execute("INSERT INTO tasks(id,session_id,user_message_id,state,started_at,updated_at) VALUES(?,?,?,?,?,?)",
-               (tid, session_id, user_message_id or None, "created", now, now))
+    pid = _pid(session_id)
+    db.execute(
+        "INSERT INTO tasks(id,session_id,project_id,user_message_id,state,started_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+        (tid, session_id, pid, user_message_id or None, "created", now, now),
+    )
     db.execute("UPDATE sessions SET status='running', task_count=task_count+1 WHERE id=?", (session_id,))
     db.commit()
     return dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
@@ -313,9 +327,14 @@ def event_create(session_id: str, event_type: str, payload: dict, task_id: str =
     db = get_db()
     seq = (db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id=?", (session_id,)).fetchone()[0])
     eid = _uid(); now = _now()
-    db.execute("INSERT INTO events(id,session_id,task_id,run_id,parent_run_id,agent_id,seq,event_type,created_at,payload_json,artifact_id,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-               (eid, session_id, task_id or None, run_id or None, parent_run_id or None, agent_id or None,
-                seq, event_type, now, json.dumps(payload, ensure_ascii=False), artifact_id or None, visibility))
+    pid = _pid(session_id)
+    db.execute(
+        "INSERT INTO events(id,session_id,project_id,task_id,run_id,parent_run_id,agent_id,seq,event_type,created_at,payload_json,artifact_id,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            eid, session_id, pid, task_id or None, run_id or None, parent_run_id or None, agent_id or None,
+            seq, event_type, now, json.dumps(payload, ensure_ascii=False), artifact_id or None, visibility,
+        ),
+    )
     db.commit()
     return dict(db.execute("SELECT * FROM events WHERE id=?", (eid,)).fetchone())
 
@@ -339,8 +358,11 @@ def run_create(run_type: str, name: str, session_id: str = "", task_id: str = ""
                parent_run_id: str = "", agent_id: str = "") -> dict:
     rid = _uid(); now = _now()
     db = get_db()
-    db.execute("INSERT INTO runs(id,session_id,task_id,parent_run_id,agent_id,run_type,name,state,started_at) VALUES(?,?,?,?,?,?,?,?,?)",
-               (rid, session_id or None, task_id or None, parent_run_id or None, agent_id or None, run_type, name, "started", now))
+    pid = _pid(session_id) if session_id else None
+    db.execute(
+        "INSERT INTO runs(id,session_id,project_id,task_id,parent_run_id,agent_id,run_type,name,state,started_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (rid, session_id or None, pid, task_id or None, parent_run_id or None, agent_id or None, run_type, name, "started", now),
+    )
     db.commit()
     return dict(db.execute("SELECT * FROM runs WHERE id=?", (rid,)).fetchone())
 
@@ -370,8 +392,11 @@ def toolcall_create(run_id: str, tool_name: str, session_id: str = "", task_id: 
                     agent_id: str = "", input_summary: str = "") -> dict:
     cid = _uid(); now = _now()
     db = get_db()
-    db.execute("INSERT INTO tool_calls(id,run_id,session_id,task_id,agent_id,tool_name,state,started_at,input_summary) VALUES(?,?,?,?,?,?,?,?,?)",
-               (cid, run_id, session_id or None, task_id or None, agent_id or None, tool_name, "started", now, input_summary))
+    pid = _pid(session_id) if session_id else None
+    db.execute(
+        "INSERT INTO tool_calls(id,run_id,session_id,project_id,task_id,agent_id,tool_name,state,started_at,input_summary) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (cid, run_id, session_id or None, pid, task_id or None, agent_id or None, tool_name, "started", now, input_summary),
+    )
     db.execute("UPDATE sessions SET tool_call_count=tool_call_count+1 WHERE id=?", (session_id,))
     db.commit()
     return dict(db.execute("SELECT * FROM tool_calls WHERE id=?", (cid,)).fetchone())
@@ -404,9 +429,14 @@ def usage_create(run_id: str, model: str, provider: str = "", session_id: str = 
                  usage_source: str = "unknown") -> dict:
     uid = _uid(); now = _now()
     db = get_db()
-    db.execute("INSERT INTO llm_usage(id,run_id,session_id,task_id,agent_id,provider,model,model_role,input_tokens,output_tokens,total_tokens,usage_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-               (uid, run_id, session_id or None, task_id or None, agent_id or None, provider, model,
-                model_role, input_tokens, output_tokens, total_tokens, usage_source, now))
+    pid = _pid(session_id) if session_id else None
+    db.execute(
+        "INSERT INTO llm_usage(id,run_id,session_id,project_id,task_id,agent_id,provider,model,model_role,input_tokens,output_tokens,total_tokens,usage_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            uid, run_id, session_id or None, pid, task_id or None, agent_id or None, provider, model,
+            model_role, input_tokens, output_tokens, total_tokens, usage_source, now,
+        ),
+    )
     db.execute("UPDATE sessions SET token_input=token_input+?, token_output=token_output+? WHERE id=?",
                (input_tokens, output_tokens, session_id))
     db.commit()
@@ -427,10 +457,13 @@ def memory_create(session_id: str, summary: str, task_id: str = "", summary_mode
                   metadata: dict | None = None) -> dict:
     mid = _uid(); now = _now()
     db = get_db()
+    pid = _pid(session_id)
     db.execute(
-        "INSERT INTO memory_snapshots(id,session_id,task_id,summary,summary_model,source_message_until,source_event_until_seq,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",
-        (mid, session_id, task_id or None, summary, summary_model, source_message_until or None,
-         source_event_until_seq, now, json.dumps(metadata or {}, ensure_ascii=False)),
+        "INSERT INTO memory_snapshots(id,session_id,project_id,task_id,summary,summary_model,source_message_until,source_event_until_seq,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            mid, session_id, pid, task_id or None, summary, summary_model, source_message_until or None,
+            source_event_until_seq, now, json.dumps(metadata or {}, ensure_ascii=False),
+        ),
     )
     db.commit()
     return dict(db.execute("SELECT * FROM memory_snapshots WHERE id=?", (mid,)).fetchone())
@@ -455,9 +488,10 @@ def retrieval_audit_create(session_id: str, query: str, task_id: str = "", run_i
                            metadata: dict | None = None) -> dict:
     rid = _uid(); now = _now()
     db = get_db()
+    pid = _pid(session_id) if session_id else None
     db.execute(
-        "INSERT INTO retrieval_audits(id,session_id,task_id,run_id,agent_id,query,rewritten_query,intent_json,filters_json,candidate_count,selected_count,rejected_count,token_budget,token_used,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (rid, session_id or None, task_id or None, run_id or None, agent_id or None, query, rewritten_query or None,
+        "INSERT INTO retrieval_audits(id,session_id,project_id,task_id,run_id,agent_id,query,rewritten_query,intent_json,filters_json,candidate_count,selected_count,rejected_count,token_budget,token_used,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (rid, session_id or None, pid, task_id or None, run_id or None, agent_id or None, query, rewritten_query or None,
          json.dumps(intent or {}, ensure_ascii=False), json.dumps(filters or {}, ensure_ascii=False),
          candidate_count, selected_count, rejected_count, token_budget, token_used, now,
          json.dumps(metadata or {}, ensure_ascii=False)),
@@ -503,9 +537,10 @@ def context_package_create(session_id: str, task_id: str = "", run_id: str = "",
                            artifact_id: str = "", metadata: dict | None = None) -> dict:
     cid = _uid(); now = _now(); counts = token_counts or {}
     db = get_db()
+    pid = _pid(session_id)
     db.execute(
-        "INSERT INTO context_packages(id,session_id,task_id,run_id,agent_id,model,max_context_tokens,total_tokens,system_tokens,question_tokens,memory_tokens,recent_message_tokens,project_context_tokens,error_kb_tokens,semantic_kb_tokens,tool_summary_tokens,problem_summary_tokens,truncated,created_at,artifact_id,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, session_id, task_id or None, run_id or None, agent_id or None, model or None, max_context_tokens,
+        "INSERT INTO context_packages(id,session_id,project_id,task_id,run_id,agent_id,model,max_context_tokens,total_tokens,system_tokens,question_tokens,memory_tokens,recent_message_tokens,project_context_tokens,error_kb_tokens,semantic_kb_tokens,tool_summary_tokens,problem_summary_tokens,truncated,created_at,artifact_id,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, session_id, pid, task_id or None, run_id or None, agent_id or None, model or None, max_context_tokens,
          counts.get("total", 0), counts.get("system", 0), counts.get("question", 0), counts.get("memory", 0),
          counts.get("recent_messages", 0), counts.get("project_context", 0), counts.get("error_kb", 0),
          counts.get("semantic_kb", 0), counts.get("tool_summary", 0), counts.get("problem_summary", 0),
@@ -570,16 +605,19 @@ def problem_create(session_id: str, message: str, source: str = "harness", task_
                    run_id: str = "", severity: str = "warning", category: str = "",
                    signature: str = "", normalized_signature: str = "",
                    metadata: dict | None = None) -> dict:
-    pid = _uid(); now = _now(); db = get_db()
+    prob_id = _uid()
+    now = _now()
+    db = get_db()
+    proj_id = _pid(session_id) if session_id else None
     db.execute(
-        "INSERT INTO problems(id,session_id,task_id,run_id,source,severity,category,signature,normalized_signature,message,detected_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (pid, session_id or None, task_id or None, run_id or None, source, severity, category,
+        "INSERT INTO problems(id,session_id,project_id,task_id,run_id,source,severity,category,signature,normalized_signature,message,detected_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (prob_id, session_id or None, proj_id, task_id or None, run_id or None, source, severity, category,
          signature, normalized_signature, message, now, json.dumps(metadata or {}, ensure_ascii=False)),
     )
     if session_id:
         db.execute("UPDATE sessions SET problem_count=problem_count+1 WHERE id=?", (session_id,))
     db.commit()
-    return dict(db.execute("SELECT * FROM problems WHERE id=?", (pid,)).fetchone())
+    return dict(db.execute("SELECT * FROM problems WHERE id=?", (prob_id,)).fetchone())
 
 def problem_list(session_id: str = "", run_id: str = "", limit: int = 100) -> list[dict]:
     q = "SELECT * FROM problems WHERE 1=1"; params = []
@@ -599,9 +637,10 @@ def artifact_create(artifact_type: str, path: str, session_id: str = "", task_id
                     run_id: str = "", mime_type: str = "", size_bytes: int | None = None,
                     sha256: str = "", summary: str = "", metadata: dict | None = None) -> dict:
     aid = _uid(); now = _now(); db = get_db()
+    proj_id = _pid(session_id) if session_id else None
     db.execute(
-        "INSERT INTO artifacts(id,session_id,task_id,run_id,artifact_type,path,mime_type,size_bytes,sha256,summary,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (aid, session_id or None, task_id or None, run_id or None, artifact_type, path,
+        "INSERT INTO artifacts(id,session_id,project_id,task_id,run_id,artifact_type,path,mime_type,size_bytes,sha256,summary,created_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (aid, session_id or None, proj_id, task_id or None, run_id or None, artifact_type, path,
          mime_type or None, size_bytes, sha256 or None, summary or None, now,
          json.dumps(metadata or {}, ensure_ascii=False)))
     db.commit()

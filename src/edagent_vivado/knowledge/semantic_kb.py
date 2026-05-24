@@ -108,20 +108,87 @@ def reindex_global(extra_paths: list[str] | None = None) -> dict[str, Any]:
     return {"indexed_sources": sources, "chunks": total_chunks, "root": str(root), "scope": "global"}
 
 
+def _default_project_globs() -> tuple[str, ...]:
+    return ("**/*.md", "eda.yaml", "**/*.v", "**/*.sv", "**/*.xdc", "**/*.tcl", "README.md")
+
+
 def reindex_project(project_id: str = "uart_demo") -> dict[str, Any]:
+    """Legacy helper: resolve project row or examples/{id} path."""
+    from edagent_vivado.repository.store import project_get
+
+    project = project_get(project_id)
+    if project:
+        return reindex_project_record(project)
     root = _repo_root() / "examples" / project_id
     if not root.is_dir():
-        return {"indexed_sources": 0, "chunks": 0, "project_id": project_id}
+        return {"indexed_sources": 0, "chunks": 0, "project_id": project_id, "error": "project not found"}
+    return reindex_project_paths(project_id, root, _default_project_globs())
+
+
+def reindex_project_record(project: dict) -> dict[str, Any]:
+    import json as _json
+
+    root = Path(project.get("root_path") or "")
+    if not root.is_dir():
+        return {
+            "indexed_sources": 0,
+            "chunks": 0,
+            "project_id": project.get("id"),
+            "error": f"root_path not found: {root}",
+        }
+    globs = _default_project_globs()
+    try:
+        custom = _json.loads(project.get("source_globs_json") or "[]")
+        if isinstance(custom, list) and custom:
+            globs = tuple(str(g) for g in custom)
+    except Exception:
+        pass
+    manifest = project.get("manifest_path")
+    paths = list(globs)
+    if manifest:
+        paths = list(paths) + [manifest]
+    return reindex_project_paths(str(project["id"]), root, tuple(paths))
+
+
+def reindex_project_paths(project_id: str, root: Path, patterns: tuple[str, ...]) -> dict[str, Any]:
     total = 0
     sources = 0
-    for pattern in ("*.md", "eda.yaml", "constrs/*.xdc", "rtl/*.v"):
-        for path in root.glob(pattern):
-            n = _index_file(path, scope="project", project_id=project_id, source_type="project_doc", authority=0.75, trust=0.75)
+    seen: set[str] = set()
+    for pattern in patterns:
+        candidate = Path(pattern)
+        paths: list[Path] = []
+        if candidate.is_file():
+            paths = [candidate]
+        elif (root / pattern).is_file():
+            paths = [root / pattern]
+        else:
+            paths = list(root.glob(pattern))
+        for path in paths:
+            if not path.is_file():
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            n = _index_file(
+                path,
+                scope="project",
+                project_id=project_id,
+                source_type="project_doc",
+                authority=0.75,
+                trust=0.75,
+            )
             if n:
                 sources += 1
                 total += n
     get_db().commit()
-    return {"indexed_sources": sources, "chunks": total, "project_id": project_id, "scope": "project"}
+    return {
+        "indexed_sources": sources,
+        "chunks": total,
+        "project_id": project_id,
+        "scope": "project",
+        "root": str(root),
+    }
 
 
 def reindex_all(project_id: str = "uart_demo") -> dict[str, Any]:

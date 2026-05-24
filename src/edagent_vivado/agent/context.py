@@ -119,6 +119,7 @@ def _error_kb_context(question: str) -> tuple[str, list[dict]]:
 def _semantic_kb_context(
     question: str,
     *,
+    project_id: str = "",
     session_id: str = "",
     task_id: str = "",
     run_id: str = "",
@@ -133,6 +134,8 @@ def _semantic_kb_context(
         return search_semantic_kb(
             question,
             top_k=6,
+            scope="both" if project_id else "global",
+            project_id=project_id or "",
             session_id=session_id,
             task_id=task_id,
             run_id=run_id,
@@ -213,8 +216,10 @@ class AgentContextBuilder:
         if tool_lines:
             items.append(ContextItem("tool_summary", "Relevant Tool Summaries", "\n".join(tool_lines), priority=7, trust_score=0.72))
 
+        kb_project_id = str(snapshot.get("project_id") or (session_row or {}).get("project_id") or "")
         semantic_text, semantic_hits = _semantic_kb_context(
             question,
+            project_id=kb_project_id,
             session_id=session_id,
             task_id=task_id,
             run_id=run_id,

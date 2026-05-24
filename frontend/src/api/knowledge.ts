@@ -20,8 +20,12 @@ export interface KnowledgeSearchHit {
   trust_score?: number
 }
 
-export function reindexKnowledge() {
-  return request<{ indexed_sources: number; chunks: number; root: string }>('/knowledge/reindex', { method: 'POST' })
+export function reindexKnowledge(projectId?: string) {
+  return request<{ indexed_sources: number; chunks: number; root: string }>('/knowledge/reindex', {
+    method: 'POST',
+    body: JSON.stringify(projectId ? { project_id: projectId } : {}),
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 export function searchKnowledge(query: string, topK = 12) {

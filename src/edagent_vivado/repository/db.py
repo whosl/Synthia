@@ -332,6 +332,14 @@ def _migrate_projects(db: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    from edagent_vivado.repository.project_scope import (
+        backfill_project_ids,
+        migrate_project_id_columns,
+    )
+
+    migrate_project_id_columns(db)
+    backfill_project_ids(db)
+
 
 def init_db() -> None:
     db = get_db()

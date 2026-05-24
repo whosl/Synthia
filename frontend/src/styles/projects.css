@@ -202,6 +202,51 @@
   white-space: nowrap;
 }
 
+.project-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.project-summary-card .panel-body {
+  padding-top: 4px;
+}
+
+.project-health-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.health-dot.ok {
+  background: var(--success, #22c55e);
+}
+
+.health-dot.bad {
+  background: var(--error);
+}
+
+.project-kb-sources {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+}
+
+.project-danger-zone {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 @media (max-width: 768px) {
   .projects-grid {
     grid-template-columns: 1fr;

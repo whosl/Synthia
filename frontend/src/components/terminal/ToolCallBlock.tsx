@@ -55,11 +55,11 @@ export function ToolCallBlock({
   const rejected = tool.state === 'rejected'
   const errored = tool.state === 'error'
   const stopped = tool.state === 'stopped'
-  const icon = done ? <CheckCircle2 size={14} color="var(--success)" />
-    : rejected ? <XCircle size={14} color="var(--error)" />
-    : stopped ? <Octagon size={14} color="var(--warning)" />
-    : errored ? <AlertCircle size={14} color="var(--error)" />
-    : <CircleDotDashed size={14} color="var(--warning)" />
+  const icon = done ? <CheckCircle2 size={14} className="tool-status-icon is-done" />
+    : rejected ? <XCircle size={14} className="tool-status-icon is-rejected" />
+    : stopped ? <Octagon size={14} className="tool-status-icon is-stopped" />
+    : errored ? <AlertCircle size={14} className="tool-status-icon is-errored" />
+    : <CircleDotDashed size={14} className="tool-status-icon is-running" />
   return (
     <div
       className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}`}

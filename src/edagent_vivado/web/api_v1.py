@@ -182,7 +182,7 @@ async def api_projects_create(req: CreateProjectReq):
     except ProjectValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
     top = (req.top_module or "").strip() or validated.get("top_module")
-    p = project_create({
+    fields = {
         "name": req.name.strip() or Path(req.root_path).name,
         "root_path": validated["root_path"],
         "manifest_path": validated["manifest_path"],
@@ -197,8 +197,16 @@ async def api_projects_create(req: CreateProjectReq):
         "tcl_globs": req.tcl_globs,
         "default_vivado_target_id": req.default_vivado_target_id,
         "metadata": {**(req.metadata or {}), "flow": validated.get("flow")},
-    })
-    return {"project": p}
+    }
+    p = project_create(fields)
+    kb_index = None
+    try:
+        from edagent_vivado.knowledge.semantic_kb import reindex_project_record
+
+        kb_index = reindex_project_record(p)
+    except Exception as exc:
+        kb_index = {"error": str(exc)}
+    return {"project": p, "kb_index": kb_index}
 
 
 @router.get("/projects/{project_id}")
@@ -262,10 +270,40 @@ async def api_project_update(project_id: str, req: UpdateProjectReq):
     return {"project": p}
 
 
+@router.get("/projects/{project_id}/summary")
+async def api_project_summary(project_id: str):
+    from edagent_vivado.projects.lifecycle import project_summary
+
+    try:
+        return project_summary(project_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/reindex")
+async def api_project_reindex(project_id: str):
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(404, "project not found")
+    from edagent_vivado.knowledge.semantic_kb import reindex_project_record
+
+    return reindex_project_record(project)
+
+
 @router.delete("/projects/{project_id}")
-async def api_project_delete(project_id: str, hard: bool = False):
+async def api_project_delete(project_id: str, hard: bool = False, confirm: str = ""):
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(404, "project not found")
+    if hard:
+        expected = str(project.get("name") or project_id)
+        if confirm != expected:
+            raise HTTPException(
+                400,
+                f"hard delete requires confirm={expected!r} query parameter",
+            )
     project_delete(project_id, hard=hard)
-    return {"ok": True}
+    return {"ok": True, "hard": hard}
 
 
 @router.get("/projects/{project_id}/sessions")
@@ -1385,10 +1423,14 @@ async def api_knowledge_reindex(request: Request):
         body = await request.json()
     except Exception:
         pass
-    project_id = str(body.get("project_id") or "uart_demo")
-    from edagent_vivado.knowledge.semantic_kb import reindex_all
+    project_id = str(body.get("project_id") or "")
+    from edagent_vivado.knowledge.semantic_kb import reindex_all, reindex_global, reindex_project_record
 
-    return reindex_all(project_id=project_id)
+    if project_id:
+        project = project_get(project_id)
+        if project:
+            return {"project": reindex_project_record(project), "global": reindex_global()}
+    return reindex_all(project_id=project_id or "uart_demo")
 
 @router.get("/knowledge/sources")
 async def api_knowledge_sources(scope: str = "", project_id: str = "", limit: int = 100):

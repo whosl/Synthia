@@ -13,6 +13,32 @@ export function getProject(id: string) {
   return request<{ project: Project }>(`/projects/${id}`)
 }
 
+export type ProjectSummary = {
+  project: Project
+  kb: { sources: number; chunks: number }
+  kb_recent_sources: Array<{ id: string; title: string; path?: string; source_type?: string }>
+  sessions: { active: number; archived: number }
+  vivado_health: {
+    target_id?: string
+    reachable?: boolean
+    host?: string
+    version?: string | null
+    error?: string
+    checked_at?: number
+  }
+}
+
+export function getProjectSummary(id: string) {
+  return request<ProjectSummary>(`/projects/${id}/summary`)
+}
+
+export function reindexProject(id: string) {
+  return request<{ indexed_sources: number; chunks: number; project_id: string }>(
+    `/projects/${id}/reindex`,
+    { method: 'POST' },
+  )
+}
+
 export type CreateProjectPayload = {
   name: string
   root_path: string
@@ -37,8 +63,12 @@ export function updateProject(
   return request<{ project: Project }>(`/projects/${id}`, { method: 'PATCH', ...jsonBody(payload) })
 }
 
-export function deleteProject(id: string, hard = false) {
-  return request<{ ok: boolean }>(`/projects/${id}${hard ? '?hard=true' : ''}`, { method: 'DELETE' })
+export function deleteProject(id: string, hard = false, confirmName?: string) {
+  const qs = new URLSearchParams()
+  if (hard) qs.set('hard', 'true')
+  if (confirmName) qs.set('confirm', confirmName)
+  const q = qs.size ? `?${qs}` : ''
+  return request<{ ok: boolean }>(`/projects/${id}${q}`, { method: 'DELETE' })
 }
 
 export function listMigrationConflicts(limit = 100) {
