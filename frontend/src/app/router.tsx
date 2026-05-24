@@ -7,6 +7,7 @@ import MonitorPage from '../pages/MonitorPage'
 import RunDetailPage from '../pages/RunDetailPage'
 import VivadoPage from '../pages/VivadoPage'
 import KnowledgeBasePage from '../pages/KnowledgeBasePage'
+import EvolutionPage from '../pages/EvolutionPage'
 import SettingsPage from '../pages/SettingsPage'
 
 export function AppRouter() {
@@ -20,6 +21,7 @@ export function AppRouter() {
       <Route path="/vivado" element={<VivadoPage />} />
       <Route path="/kb" element={<KnowledgeBasePage />} />
       <Route path="/knowledge" element={<KnowledgeBasePage mode="knowledge" />} />
+      <Route path="/evolution" element={<EvolutionPage />} />
       <Route path="/settings" element={<SettingsPage />} />
     </Routes>
   </AppShell>
