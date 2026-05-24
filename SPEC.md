@@ -4143,17 +4143,21 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 
 ### 22.6 信号源
 
-| 信号 | 数据源 | 触发条件 |
-|---|---|---|
-| `user_feedback` | `feedback` 表 | 负面 thumb 在 rolling 10 turn 内 >= 3 |
-| `run_result` | `runs / vivado_commands / qor_checker` | `first_run_success=false` 且同一 project 内最近 5 个 task 中 >=3 失败 |
-| `recurrence` | `problems.normalized_signature` | 同一 signature 在 >=3 个 session 中出现 |
-| `approval_pass_rate` | `interactions` | rolling 20 个 interaction 通过率 < 0.5 |
-| `eval_set` | `eval_runs` | 占位；SE-PR6 后启用 |
+| 信号 | 数据源 | 触发条件（SE-PR3 实现常量） | 产生 surface |
+|---|---|---|---|
+| `recurrence` | `problems.normalized_signature`（最近 30 天） | 同一 normalized signature 在 ≥ 3 个 distinct session 中出现 | `kb` |
+| `repeated_failure` | latest project-scope `metric_snapshots(window=rolling_10)` | `first_run_success < 0.4` 且 `sample_size ≥ 5` | `prompt` |
+| `negative_feedback` | `feedback`（project 范围，最近 10 条非空 thumb） | 负面 thumb ≥ 3 | `prompt` |
+| `approval_drop` | latest project-scope `metric_snapshots(window=rolling_10)` | `approval_pass_rate < 0.5` 且 `sample_size ≥ 5` | `prompt` |
+| `eval_set` | `eval_runs` | 占位；SE-PR6 后启用 | n/a |
+
+Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
 
 ### 22.7 度量与综合 score
 
-每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`）。后台聚合器定期写 `rolling_10` / `rolling_50` / `all` 三档窗口。字段：
+每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`），紧接着对所在 project 触发 `rolling_10` 与 `rolling_50` 聚合写入。聚合器读取 task-scope 单点快照的最近 N 条，逐字段取均值（数值）/ 成功率（布尔）/ 求和（计数），并以 project-scope（或 global-scope，当 session 未绑定 project 时）写回。`all` 窗口可以按需在 monitor 查询时按需聚合，不要求每次 task.done 都写入。
+
+字段：
 
 ```json
 {
@@ -4264,7 +4268,7 @@ evolution.signal.fired            # 信号源命中阈值
 |---|---|
 | **SE-PR1** | 表结构 + resolver indirection（no-op）+ 本章 §22 |
 | SE-PR2 | feedback API + metric_snapshots post-task hook + rolling aggregator |
-| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）|
+| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）+ `/evolution/candidates` 只读 API + `/evolution/generators/run` 手动触发 |
 | SE-PR4 | `/evolution` review UI + approve/reject/merge/rollback API |
 | SE-PR5 | A/B trial engine（opt-in per surface） |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
