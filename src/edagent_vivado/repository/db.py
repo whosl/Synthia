@@ -264,6 +264,12 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
     model TEXT NOT NULL, dimension INTEGER, vector_store TEXT NOT NULL,
     vector_ref TEXT NOT NULL, indexed_at INTEGER NOT NULL, metadata_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
