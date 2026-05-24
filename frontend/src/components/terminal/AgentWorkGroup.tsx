@@ -1,10 +1,8 @@
 import { ChevronRight } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import {
   buildWorkGroupSummary,
-  collectWorkTools,
   formatWorkGroupSummaryLine,
-  isAssistantFinalComplete,
 } from '../../lib/workGroupPresentation'
 import { groupToolBatchEntries, type ChatDisplayItem } from '../../timeline/chatGrouping'
 import type { TimelineEntry } from '../../timeline/types'
@@ -15,14 +13,11 @@ import { ToolRunGroup } from './ToolRunGroup'
 interface AgentWorkGroupProps {
   groupKey: string
   members: TimelineEntry[]
-  finalEntry: TimelineEntry | null
-  taskActive?: boolean
   onInteractionRespond?: (interactionId: string, response: Record<string, unknown>) => void
 }
 
 function renderInnerItem(
   item: ChatDisplayItem,
-  taskActive: boolean,
   onInteractionRespond?: AgentWorkGroupProps['onInteractionRespond'],
 ) {
   if (item.type === 'tool_group') {
@@ -31,7 +26,7 @@ function renderInnerItem(
         key={item.key}
         groupKey={item.key}
         members={item.members}
-        taskActive={taskActive}
+        taskActive={false}
         onInteractionRespond={onInteractionRespond}
       />
     )
@@ -46,35 +41,16 @@ function renderInnerItem(
   )
 }
 
+/** Rendered only after the turn completes — collapsed summary by default. */
 export function AgentWorkGroup({
   groupKey,
   members,
-  finalEntry,
-  taskActive = false,
   onInteractionRespond,
 }: AgentWorkGroupProps) {
   const innerItems = useMemo(() => groupToolBatchEntries(members), [members])
-  const tools = useMemo(() => collectWorkTools(members), [members])
-  const hasRunning = tools.some((t) => t.state === 'running')
-  const finalComplete = isAssistantFinalComplete(finalEntry)
-
-  const summaryLine = formatWorkGroupSummaryLine(
-    buildWorkGroupSummary(members, finalEntry),
-  )
-
-  const [latchedOpen, setLatchedOpen] = useState(false)
-
-  useEffect(() => {
-    if (!finalComplete || taskActive || hasRunning) {
-      setLatchedOpen(true)
-      return
-    }
-    setLatchedOpen(false)
-  }, [finalComplete, taskActive, hasRunning])
-
-  const forceExpanded = latchedOpen || !finalEntry
+  const summaryLine = formatWorkGroupSummaryLine(buildWorkGroupSummary(members, null))
   const userCollapsed = useTerminalStore((s) => s.collapsed[groupKey] ?? true)
-  const expanded = forceExpanded ? true : !userCollapsed
+  const expanded = !userCollapsed
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
 
   return (
@@ -82,9 +58,7 @@ export function AgentWorkGroup({
       <button
         type="button"
         className={`tool-run-summary${expanded ? ' expanded' : ''}`}
-        onClick={() => {
-          if (!forceExpanded) toggle(groupKey, true)
-        }}
+        onClick={() => toggle(groupKey, true)}
         aria-expanded={expanded}
       >
         <ChevronRight size={14} className="tool-run-summary-chevron" />
@@ -92,7 +66,7 @@ export function AgentWorkGroup({
       </button>
       {expanded && (
         <div className="tool-run-details agent-work-details">
-          {innerItems.map((item) => renderInnerItem(item, taskActive, onInteractionRespond))}
+          {innerItems.map((item) => renderInnerItem(item, onInteractionRespond))}
         </div>
       )}
     </div>

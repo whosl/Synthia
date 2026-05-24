@@ -1,5 +1,6 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
 import { toolEntryToViewModel } from '../lib/toolPresentation'
+import { collectWorkTools, isAssistantFinalComplete } from '../lib/workGroupPresentation'
 import type { InteractionEntryPayload, TimelineEntry, ToolEntryPayload } from './types'
 
 export type ChatDisplayItem =
@@ -62,6 +63,17 @@ function sliceUntilNextUser(entries: TimelineEntry[], start: number) {
   return { slice: entries.slice(start, end), next: end }
 }
 
+/** Work group summary is shown only after tools finish and final assistant text is complete. */
+export function isWorkPhaseComplete(
+  workEntries: TimelineEntry[],
+  finalEntry: TimelineEntry | null,
+): boolean {
+  if (!workEntries.length || !finalEntry || !isAssistantFinalComplete(finalEntry)) {
+    return false
+  }
+  return !collectWorkTools(workEntries).some((t) => t.state === 'running')
+}
+
 function groupTurnAfterUser(slice: TimelineEntry[]): ChatDisplayItem[] {
   if (!slice.length) return []
 
@@ -74,12 +86,16 @@ function groupTurnAfterUser(slice: TimelineEntry[]): ChatDisplayItem[] {
   const out: ChatDisplayItem[] = []
 
   if (workEntries.length > 0) {
-    out.push({
-      type: 'work_group',
-      key: `work:${workEntries[0]!.key}`,
-      members: workEntries,
-      finalEntry,
-    })
+    if (isWorkPhaseComplete(workEntries, finalEntry)) {
+      out.push({
+        type: 'work_group',
+        key: `work:${workEntries[0]!.key}`,
+        members: workEntries,
+        finalEntry,
+      })
+    } else {
+      out.push(...groupToolBatchEntries(workEntries))
+    }
   }
 
   if (finalEntry) {

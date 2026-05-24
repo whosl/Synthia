@@ -33,8 +33,6 @@ export function TimelineChatList({ timeline, taskActive = false, onInteractionRe
             <AgentWorkGroup
               groupKey={item.key}
               members={item.members}
-              finalEntry={item.finalEntry}
-              taskActive={taskActive}
               onInteractionRespond={onInteractionRespond}
             />
           ) : item.type === 'tool_group' ? (
