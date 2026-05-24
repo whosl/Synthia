@@ -1,7 +1,7 @@
 ﻿import { Route, Routes } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import ProjectsPage from '../pages/ProjectsPage'
-import ProjectSessionsPage from '../pages/ProjectSessionsPage'
+import ProjectExpandRedirect from '../pages/ProjectExpandRedirect'
 import TerminalPage from '../pages/TerminalPage'
 import MonitorPage from '../pages/MonitorPage'
 import RunDetailPage from '../pages/RunDetailPage'
@@ -13,7 +13,7 @@ export function AppRouter() {
   return <AppShell>
     <Routes>
       <Route path="/" element={<ProjectsPage />} />
-      <Route path="/projects/:projectId" element={<ProjectSessionsPage />} />
+      <Route path="/projects/:projectId" element={<ProjectExpandRedirect />} />
       <Route path="/term" element={<TerminalPage />} />
       <Route path="/monitor" element={<MonitorPage />} />
       <Route path="/monitor/runs/:runId" element={<RunDetailPage />} />
