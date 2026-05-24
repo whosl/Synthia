@@ -20,6 +20,12 @@ from edagent_vivado.evolution.aggregator import (
     latest_snapshot,
     snapshot_series,
 )
+from edagent_vivado.evolution.candidates import (
+    candidate_create,
+    candidate_get,
+    candidate_list,
+    candidate_update_status,
+)
 from edagent_vivado.evolution.collector import collect_task_metrics
 from edagent_vivado.evolution.feedback import (
     feedback_create,
@@ -27,6 +33,14 @@ from edagent_vivado.evolution.feedback import (
     feedback_list_for_task,
     feedback_thumb_for_task,
     feedback_thumb_rolling,
+)
+from edagent_vivado.evolution.generators import (
+    GENERATORS,
+    gen_approval_drop,
+    gen_negative_feedback,
+    gen_recurrence,
+    gen_repeated_failure,
+    run_generators,
 )
 from edagent_vivado.evolution.overlays import (
     SURFACES,
@@ -64,4 +78,15 @@ __all__ = [
     "feedback_list_for_task",
     "feedback_thumb_for_task",
     "feedback_thumb_rolling",
+    # SE-PR3
+    "candidate_create",
+    "candidate_get",
+    "candidate_list",
+    "candidate_update_status",
+    "GENERATORS",
+    "gen_approval_drop",
+    "gen_negative_feedback",
+    "gen_recurrence",
+    "gen_repeated_failure",
+    "run_generators",
 ]
