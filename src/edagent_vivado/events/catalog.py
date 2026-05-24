@@ -90,6 +90,11 @@ EVOLUTION_EVENTS = (
     "evolution.trial.assigned",
     "evolution.trial.completed",
     "evolution.trial.reverted",
+    # SE-PR6 — eval set placeholder; runner lands in a later PR.
+    "evolution.eval.queued",
+    "evolution.eval.started",
+    "evolution.eval.completed",
+    "evolution.eval.error",
 )
 
 ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (

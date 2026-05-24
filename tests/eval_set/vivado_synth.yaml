@@ -1,0 +1,37 @@
+name: vivado_synth
+description: |
+  Synthesis-error diagnosis cases. The future runner will drive each case
+  through the full agent loop and score the result against `expected`.
+cases:
+  - id: timing-violation-wns
+    question: |
+      Vivado reports WNS=-2.35 ns after synthesis on uart_full. Diagnose
+      and propose two next steps. No file patches yet.
+    expected:
+      tool_calls_any:
+        - parse_timing_tool
+      contains:
+        - WNS
+        - -2.35
+      not_contains:
+        - I cannot
+      max_task_tokens: 7000
+      min_first_run_success: false
+    metadata:
+      tags: [vivado, timing]
+
+  - id: missing-module-elaboration
+    question: |
+      Synthesis fails with [Synth 8-439] Module 'uart_rx' not found.
+      Find and explain the cause; propose actions (no patches yet).
+    expected:
+      tool_calls_any:
+        - parse_vivado_log_tool
+        - match_error_cases_tool
+      contains:
+        - uart_rx
+        - read_verilog
+      not_contains:
+        - I do not know
+    metadata:
+      tags: [vivado, elaboration]
