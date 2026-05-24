@@ -15,6 +15,7 @@ from typing import Any
 
 from edagent_vivado.agent.summary import compact_text, estimate_tokens
 from edagent_vivado.kb.error_case_loader import load_effective_cases, match_cases
+from edagent_vivado.projects.snapshot import parse_snapshot, snapshot_context_lines, snapshot_manifest_path
 from edagent_vivado.repository.store import (
     context_package_create,
     context_package_item_create,
@@ -22,6 +23,7 @@ from edagent_vivado.repository.store import (
     message_list,
     retrieval_audit_create,
     retrieval_audit_item_create,
+    session_get,
     toolcall_list,
 )
 
@@ -160,9 +162,30 @@ class AgentContextBuilder:
         items: list[ContextItem] = []
         token_counts: dict[str, int] = {}
 
-        project = _project_context(manifest_path)
+        session_row = session_get(session_id) if session_id and session_id not in ("preview", "") else None
+        snapshot = parse_snapshot(session_row) if session_row else {}
+        resolved_manifest = snapshot_manifest_path(session_row, manifest_path)
+
+        project_parts: list[str] = []
+        snap_lines = snapshot_context_lines(snapshot)
+        if snap_lines:
+            project_parts.append(snap_lines)
+        manifest_block = _project_context(resolved_manifest)
+        if manifest_block:
+            project_parts.append(manifest_block)
+        project = "\n\n".join(project_parts).strip()
         if project:
-            items.append(ContextItem("project_context", "Project / Manifest Context", project, priority=3, trust_score=0.8))
+            items.append(
+                ContextItem(
+                    "project_context",
+                    "Project / Manifest Context",
+                    project,
+                    priority=3,
+                    source_id=str(snapshot.get("project_id") or ""),
+                    source_type="project_snapshot",
+                    trust_score=0.8,
+                )
+            )
 
         mem = memory_latest(session_id)
         if mem and mem.get("summary"):

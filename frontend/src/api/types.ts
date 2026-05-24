@@ -23,6 +23,7 @@ export interface Project {
 export interface Session {
   id: ID
   project_id?: ID
+  project_snapshot_json?: string | null
   name: string
   status?: 'idle' | 'running' | 'stopping' | 'stopped' | 'error' | 'archived' | string
   created_at?: number
@@ -38,6 +39,8 @@ export interface Session {
   token_output?: number
   total_cost?: number | null
   metadata_json?: string | null
+  migration_candidates?: Pick<Project, 'id' | 'name' | 'root_path' | 'manifest_path'>[]
+  migration_hint?: Record<string, string>
 }
 
 export interface Message {

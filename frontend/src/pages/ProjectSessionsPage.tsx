@@ -1,13 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ChevronRight, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+} from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { getProject, listProjectSessions, createProjectSession } from '../api/projects'
-import { deleteSession } from '../api/sessions'
+import { deleteSession, updateSession } from '../api/sessions'
 import type { Session } from '../api/types'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
+import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { parseProjectSnapshot } from '../lib/projectSnapshot'
 import { formatNumber, formatRelative } from '../lib/time'
 
 function SessionCard({
@@ -15,11 +27,13 @@ function SessionCard({
   projectId,
   onOpen,
   onDelete,
+  onRename,
 }: {
   session: Session
   projectId: string
   onOpen: () => void
   onDelete: () => void
+  onRename: () => void
 }) {
   const tokens = (session.token_input || 0) + (session.token_output || 0)
   return (
@@ -42,6 +56,9 @@ function SessionCard({
         <Button className="primary" onClick={onOpen}>
           Open <ChevronRight size={14} />
         </Button>
+        <Button className="ghost" onClick={onRename} title="Rename">
+          <Pencil size={14} />
+        </Button>
         <Button
           className="ghost danger-ghost"
           onClick={(e) => {
@@ -61,8 +78,9 @@ export default function ProjectSessionsPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [query, setQuery] = useState('')
-  const [sort, setSort] = useState<'updated' | 'name' | 'status'>('updated')
+  const [sort, setSort] = useState<'updated' | 'name' | 'status' | 'created'>('updated')
   const [sessionName, setSessionName] = useState('')
+  const [configOpen, setConfigOpen] = useState(true)
 
   const projectQ = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: Boolean(projectId) })
   const sessionsQ = useQuery({
@@ -74,13 +92,19 @@ export default function ProjectSessionsPage() {
   const create = useMutation({
     mutationFn: (name: string) => createProjectSession(projectId, { name: name.trim() || undefined }),
     onSuccess: ({ session }) => navigate(`/term?project=${projectId}&session=${session.id}`),
+    onError: (err: Error) => alert(err.message || 'Failed to create session'),
   })
   const del = useMutation({
     mutationFn: (id: string) => deleteSession(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sessions', projectId] }),
   })
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => updateSession(id, { name }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sessions', projectId] }),
+  })
 
   const project = projectQ.data?.project
+  const isArchived = project?.status === 'archived'
   const isFetching = sessionsQ.isFetching
 
   const sessions = useMemo(() => {
@@ -89,13 +113,25 @@ export default function ProjectSessionsPage() {
     return filtered.sort((a, b) => {
       if (sort === 'name') return a.name.localeCompare(b.name)
       if (sort === 'status') return String(a.status || '').localeCompare(String(b.status || ''))
+      if (sort === 'created') return (b.created_at || 0) - (a.created_at || 0)
       return (b.updated_at || 0) - (a.updated_at || 0)
     })
   }, [sessionsQ.data, query, sort])
 
   const createNow = () => {
+    if (isArchived) {
+      alert('This project is archived. Edit the project on the Projects page to restore it before creating sessions.')
+      return
+    }
     const name = sessionName.trim() || window.prompt('Session name (optional)') || ''
     create.mutate(name)
+  }
+
+  const promptRename = (s: Session) => {
+    const next = window.prompt('Session name', s.name)
+    if (next && next.trim() && next.trim() !== s.name) {
+      rename.mutate({ id: s.id, name: next.trim() })
+    }
   }
 
   if (!projectId) return null
@@ -109,6 +145,7 @@ export default function ProjectSessionsPage() {
               <ArrowLeft size={16} />
             </Link>
             <h1 className="page-title">{project?.name || 'Project'}</h1>
+            {isArchived && <span className="project-archived-badge">Archived</span>}
             <Button
               className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
               type="button"
@@ -124,6 +161,35 @@ export default function ProjectSessionsPage() {
         </div>
       </div>
 
+      {isArchived && (
+        <p className="project-archived-notice">
+          Project is archived — existing sessions are view-only; new tasks and sessions are disabled.
+        </p>
+      )}
+
+      {project && (
+        <Panel
+          title="Project configuration"
+          className="project-config-panel"
+          actions={
+            <Button className="ghost icon-btn" type="button" onClick={() => setConfigOpen((v) => !v)} aria-expanded={configOpen}>
+              {configOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </Button>
+          }
+        >
+          {configOpen && (
+            <dl className="project-config-grid">
+              <div><dt>Manifest</dt><dd className="mono">{project.manifest_path}</dd></div>
+              <div><dt>Vivado .xpr</dt><dd className="mono">{project.xpr_path || '—'}</dd></div>
+              <div><dt>Part</dt><dd className="mono">{project.part || '—'}</dd></div>
+              <div><dt>Top</dt><dd className="mono">{project.top_module || '—'}</dd></div>
+              <div><dt>Sessions</dt><dd>{formatNumber(project.session_count)}</dd></div>
+              <div><dt>Problems</dt><dd>{formatNumber(project.problem_count)}</dd></div>
+            </dl>
+          )}
+        </Panel>
+      )}
+
       <div className="toolbar sessions-toolbar">
         <input
           className="input"
@@ -131,6 +197,7 @@ export default function ProjectSessionsPage() {
           onChange={(e) => setSessionName(e.target.value)}
           placeholder="New session name (optional)"
           style={{ flex: '1 1 160px', minWidth: 0, maxWidth: 220 }}
+          disabled={isArchived}
         />
         <div className="sessions-search-wrap">
           <Search size={15} className="sessions-search-icon" />
@@ -143,6 +210,7 @@ export default function ProjectSessionsPage() {
         </div>
         <select className="select sessions-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
           <option value="updated">Sort: Updated desc</option>
+          <option value="created">Sort: Created desc</option>
           <option value="name">Sort: Name</option>
           <option value="status">Sort: Status</option>
         </select>
@@ -150,9 +218,9 @@ export default function ProjectSessionsPage() {
           className="primary sessions-create-btn"
           type="button"
           onClick={createNow}
-          disabled={create.isPending}
+          disabled={create.isPending || isArchived}
           aria-label="Create session"
-          title="Create session"
+          title={isArchived ? 'Project archived' : 'Create session'}
         >
           <Plus size={18} />
         </Button>
@@ -182,6 +250,9 @@ export default function ProjectSessionsPage() {
                 >
                   <td>
                     <div style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</div>
+                    {parseProjectSnapshot(s).legacy_migration && (
+                      <span className="muted" style={{ fontSize: 10 }}>legacy snapshot</span>
+                    )}
                   </td>
                   <td><StatusBadge status={s.status} /></td>
                   <td className="muted">{formatRelative(s.updated_at)}</td>
@@ -190,6 +261,16 @@ export default function ProjectSessionsPage() {
                   <td style={{ color: (s.problem_count || 0) > 0 ? 'var(--error)' : undefined }}>{formatNumber(s.problem_count)}</td>
                   <td>{formatNumber((s.token_input || 0) + (s.token_output || 0))}</td>
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <Button
+                      className="ghost icon-btn"
+                      title="Rename session"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        promptRename(s)
+                      }}
+                    >
+                      <Pencil size={14} />
+                    </Button>
                     <Button
                       className="ghost icon-btn"
                       title="Archive session"
@@ -216,6 +297,7 @@ export default function ProjectSessionsPage() {
               projectId={projectId}
               onOpen={() => navigate(`/term?project=${projectId}&session=${s.id}`)}
               onDelete={() => del.mutate(s.id)}
+              onRename={() => promptRename(s)}
             />
           ))}
         </div>

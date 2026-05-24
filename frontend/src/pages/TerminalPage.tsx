@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { getProject } from '../api/projects'
 import { getSession } from '../api/sessions'
 import { stopSessionTask } from '../api/tasks'
 import { request } from '../api/client'
@@ -43,6 +44,12 @@ export default function TerminalPage() {
     queryFn: () => getSession(sessionId),
     enabled: Boolean(sessionId),
   })
+  const projectId = projectIdFromUrl || sessionQ.data?.session?.project_id || ''
+  const projectQ = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => getProject(projectId),
+    enabled: Boolean(projectId),
+  })
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -64,8 +71,10 @@ export default function TerminalPage() {
     [timeline.auditLog],
   )
   const session = sessionQ.data?.session
-  const projectId = projectIdFromUrl || session?.project_id || ''
+  const project = projectQ.data?.project
   const backHref = projectId ? `/projects/${projectId}` : '/'
+  const headerTitle = session?.name || 'Session'
+  const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? 'Loading project…' : ''
 
   const handleInteractionRespond = async (interactionId: string, response: Record<string, unknown>) => {
     await request(`/interactions/${interactionId}/respond`, {
@@ -89,10 +98,15 @@ export default function TerminalPage() {
                 <ArrowLeft size={15} />
                 <span className="terminal-back-label">Back</span>
               </Link>
-              <h1 className="chat-panel-header-title">
-                {session?.name || 'Session'}
-                {(running || stopping) && <span className="terminal-status-dot" />}
-              </h1>
+              <div className="chat-panel-header-title-block">
+                <h1 className="chat-panel-header-title">
+                  {headerTitle}
+                  {(running || stopping) && <span className="terminal-status-dot" />}
+                </h1>
+                {headerSubtitle && (
+                  <p className="chat-panel-header-subtitle mono" title={headerSubtitle}>{headerSubtitle}</p>
+                )}
+              </div>
               <div className="chat-panel-header-tabs" role="tablist" aria-label="Chat views">
                 <button
                   type="button"

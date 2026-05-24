@@ -325,6 +325,13 @@ def _migrate_projects(db: sqlite3.Connection) -> None:
     if orphan:
         _migrate_orphan_sessions(db)
 
+    try:
+        from edagent_vivado.projects.migrate import migrate_sessions_to_projects
+
+        migrate_sessions_to_projects()
+    except Exception:
+        pass
+
 
 def init_db() -> None:
     db = get_db()

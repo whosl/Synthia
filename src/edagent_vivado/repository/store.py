@@ -27,14 +27,16 @@ def _project_snapshot_row(project: dict) -> dict:
 
 # ── Projects ─────────────────────────────────────────────────
 
-def project_list(status: str | None = None, limit: int = 100) -> list[dict]:
+def project_list(status: str | None = None, limit: int = 100, include_archived: bool = False) -> list[dict]:
     db = get_db()
     q = "SELECT * FROM projects WHERE deleted_at IS NULL"
     params: list = []
     if status:
         q += " AND status=?"
         params.append(status)
-    q += " AND archived_at IS NULL ORDER BY COALESCE(last_active_at, updated_at) DESC LIMIT ?"
+    if not include_archived:
+        q += " AND archived_at IS NULL"
+    q += " ORDER BY COALESCE(last_active_at, updated_at) DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in db.execute(q, params)]
 
@@ -79,17 +81,26 @@ def project_create(fields: dict) -> dict:
     return project_get(pid)
 
 
+def project_is_archived(project: dict | None) -> bool:
+    if not project:
+        return False
+    return bool(project.get("archived_at")) or str(project.get("status") or "").lower() == "archived"
+
+
 def project_update(pid: str, **fields) -> dict | None:
     if not fields:
         return project_get(pid)
     allowed = {
         "name", "status", "root_path", "manifest_path", "xpr_path", "part", "board_part",
         "top_module", "target_language", "simulator", "default_vivado_target_id", "metadata_json",
-        "archived_at", "last_active_at", "session_count", "problem_count", "run_count",
+        "archived_at", "deleted_at", "last_active_at", "session_count", "problem_count", "run_count",
+        "source_globs_json", "constraint_globs_json", "tcl_globs_json",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if "metadata" in fields and "metadata_json" not in updates:
         updates["metadata_json"] = json.dumps(fields["metadata"])
+    if updates.get("status") == "active":
+        updates["archived_at"] = None
     if not updates:
         return project_get(pid)
     updates["updated_at"] = _now()
@@ -221,6 +232,8 @@ def session_update(sid: str, **fields) -> dict | None:
 
 def session_delete(sid: str, hard: bool = False) -> bool:
     db = get_db()
+    row = session_get(sid)
+    pid = row.get("project_id") if row else None
     if hard:
         db.execute("DELETE FROM sessions WHERE id=?", (sid,))
         db.execute("DELETE FROM messages WHERE session_id=?", (sid,))
@@ -229,9 +242,18 @@ def session_delete(sid: str, hard: bool = False) -> bool:
         db.execute("DELETE FROM runs WHERE session_id=?", (sid,))
         db.execute("DELETE FROM tool_calls WHERE session_id=?", (sid,))
     else:
-        db.execute("UPDATE sessions SET archived_at=? WHERE id=?", (_now(), sid))
+        db.execute("UPDATE sessions SET archived_at=?, status=? WHERE id=?", (_now(), "archived", sid))
     db.commit()
+    if pid:
+        _refresh_project_session_count(pid)
     return True
+
+
+def session_rename(sid: str, name: str) -> dict | None:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("name is required")
+    return session_update(sid, name=name, updated_at=_now())
 
 # ── Messages ─────────────────────────────────────────────────
 

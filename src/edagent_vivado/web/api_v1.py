@@ -8,8 +8,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
+from edagent_vivado.projects.snapshot import snapshot_manifest_path
 from edagent_vivado.repository.store import (
     project_list, project_get, project_create, project_update, project_delete,
+    project_is_archived,
     session_list, session_get, session_create, session_update, session_delete,
     message_list, message_create,
     task_create, task_get, task_update, task_active_for_session,
@@ -163,8 +165,8 @@ class CreateSessionReq(BaseModel):
 
 
 @router.get("/projects")
-async def api_projects(status: str | None = None, limit: int = 100):
-    return {"projects": project_list(status=status, limit=limit)}
+async def api_projects(status: str | None = None, limit: int = 100, include_archived: bool = False):
+    return {"projects": project_list(status=status, limit=limit, include_archived=include_archived)}
 
 
 @router.post("/projects")
@@ -207,9 +209,54 @@ async def api_project_get(project_id: str):
     return {"project": p}
 
 
+class UpdateProjectReq(BaseModel):
+    name: str | None = None
+    status: str | None = None
+    root_path: str | None = None
+    manifest_path: str | None = None
+    xpr_path: str | None = None
+    part: str | None = None
+    board_part: str | None = None
+    top_module: str | None = None
+    target_language: str | None = None
+    simulator: str | None = None
+    default_vivado_target_id: str | None = None
+    metadata: dict | None = None
+
+
 @router.patch("/projects/{project_id}")
-async def api_project_update(project_id: str, body: dict):
-    p = project_update(project_id, **body)
+async def api_project_update(project_id: str, req: UpdateProjectReq):
+    existing = project_get(project_id)
+    if not existing:
+        raise HTTPException(404, "project not found")
+    updates = req.model_dump(exclude_unset=True)
+    if any(k in updates for k in ("root_path", "manifest_path", "xpr_path", "part", "board_part")):
+        try:
+            validated = validate_project_paths(
+                root_path=updates.get("root_path") or existing["root_path"],
+                manifest_path=updates.get("manifest_path") or existing["manifest_path"],
+                xpr_path=updates.get("xpr_path", existing.get("xpr_path") or ""),
+                part=updates.get("part") or existing.get("part"),
+                board_part=updates.get("board_part") or existing.get("board_part"),
+            )
+        except ProjectValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        updates["root_path"] = validated["root_path"]
+        updates["manifest_path"] = validated["manifest_path"]
+        updates["xpr_path"] = validated["xpr_path"]
+        updates["part"] = validated.get("part")
+        updates["board_part"] = validated.get("board_part")
+        if validated.get("top_module") and not updates.get("top_module"):
+            updates["top_module"] = validated.get("top_module")
+    meta = updates.pop("metadata", None)
+    if meta is not None:
+        prev = {}
+        try:
+            prev = json.loads(existing.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            prev = {}
+        updates["metadata_json"] = json.dumps({**prev, **meta})
+    p = project_update(project_id, **updates)
     if not p:
         raise HTTPException(404, "project not found")
     return {"project": p}
@@ -230,14 +277,48 @@ async def api_project_sessions(project_id: str, status: str | None = None, limit
 
 @router.post("/projects/{project_id}/sessions")
 async def api_project_sessions_create(project_id: str, req: CreateSessionReq):
-    if not project_get(project_id):
+    project = project_get(project_id)
+    if not project:
         raise HTTPException(404, "project not found")
+    if project_is_archived(project):
+        raise HTTPException(403, "project is archived; unarchive before creating sessions")
     try:
         s = session_create(name=req.name, project_id=project_id, metadata=req.metadata, manifest_path=req.manifest_path)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     event_create(s["id"], "session.created", {"name": s["name"], "project_id": project_id})
     return {"session": s}
+
+
+class ResolveMigrationReq(BaseModel):
+    project_id: str
+
+
+@router.get("/migration/conflicts")
+async def api_migration_conflicts(limit: int = 100):
+    from edagent_vivado.projects.migrate import list_migration_conflicts
+
+    sessions = list_migration_conflicts(limit=limit)
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@router.post("/migration/sessions/{session_id}/resolve")
+async def api_migration_resolve(session_id: str, req: ResolveMigrationReq):
+    from edagent_vivado.projects.migrate import resolve_migration_conflict
+
+    try:
+        s = resolve_migration_conflict(session_id, req.project_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"session": s}
+
+
+@router.post("/migration/run")
+async def api_migration_run():
+    from edagent_vivado.projects.migrate import migrate_sessions_to_projects
+
+    stats = migrate_sessions_to_projects()
+    return {"ok": True, "stats": stats}
 
 
 # ── Session API ──────────────────────────────────────────────
@@ -254,8 +335,11 @@ async def api_sessions(
 async def api_sessions_create(req: CreateSessionReq):
     if not req.project_id:
         raise HTTPException(400, "project_id is required; use POST /api/v1/projects/{project_id}/sessions")
-    if not project_get(req.project_id):
+    project = project_get(req.project_id)
+    if not project:
         raise HTTPException(404, "project not found")
+    if project_is_archived(project):
+        raise HTTPException(403, "project is archived")
     try:
         s = session_create(
             name=req.name,
@@ -274,17 +358,47 @@ async def api_session_get(session_id: str):
     if not s: raise HTTPException(404, "session not found")
     return {"session": s}
 
+class UpdateSessionReq(BaseModel):
+    name: str | None = None
+    status: str | None = None
+    metadata: dict | None = None
+
+
 @router.patch("/sessions/{session_id}")
-async def api_session_update(session_id: str, body: dict):
-    allowed = {"name", "status", "metadata_json"}
-    updates = {k: v for k, v in body.items() if k in allowed}
+async def api_session_update(session_id: str, req: UpdateSessionReq):
+    existing = session_get(session_id)
+    if not existing:
+        raise HTTPException(404, "session not found")
+    updates: dict = {}
+    if req.name is not None:
+        updates["name"] = req.name.strip() or existing["name"]
+        updates["updated_at"] = int(time.time())
+    if req.status is not None:
+        updates["status"] = req.status
+    if req.metadata is not None:
+        prev = {}
+        try:
+            prev = json.loads(existing.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            prev = {}
+        updates["metadata_json"] = json.dumps({**prev, **req.metadata})
+    if not updates:
+        return {"session": existing}
     s = session_update(session_id, **updates)
-    if not s: raise HTTPException(404)
-    event_create(session_id, "session.updated", updates)
+    if not s:
+        raise HTTPException(404)
+    event_create(session_id, "session.updated", {"fields": list(updates.keys())})
     return {"session": s}
 
 @router.delete("/sessions/{session_id}")
 async def api_session_delete(session_id: str, hard: bool = False):
+    s = session_get(session_id)
+    if not s:
+        raise HTTPException(404, "session not found")
+    if s.get("project_id"):
+        project = project_get(s["project_id"])
+        if project_is_archived(project):
+            pass  # allow archive/delete on archived project's sessions
     session_delete(session_id, hard=hard)
     event_type = "session.archived" if not hard else "session.deleted"
     try: event_create(session_id, event_type, {"hard": hard})
@@ -307,6 +421,15 @@ class StartTaskReq(BaseModel):
 
 @router.post("/sessions/{session_id}/tasks")
 async def api_task_start(session_id: str, req: StartTaskReq):
+    sess = session_get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if sess.get("archived_at"):
+        raise HTTPException(403, "session is archived")
+    if sess.get("project_id"):
+        project = project_get(sess["project_id"])
+        if project_is_archived(project):
+            raise HTTPException(403, "project is archived")
     active = task_active_for_session(session_id)
     if active:
         return JSONResponse({
@@ -334,12 +457,13 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             event_create(session_id, "run.started", {"run_id": run["id"], "run_type": "task"},
                          task_id=t["id"], run_id=run["id"])
             from edagent_vivado.agent.context import build_agent_context
+            manifest_path = req.manifest_path or snapshot_manifest_path(sess)
             ctx = build_agent_context(
                 session_id=session_id,
                 task_id=t["id"],
                 run_id=run["id"],
                 question=req.question,
-                manifest_path=req.manifest_path,
+                manifest_path=manifest_path,
             )
             event_create(session_id, "context.package.created", {
                 "context_package_id": ctx.context_package["id"],
@@ -1291,6 +1415,10 @@ async def api_knowledge_context_preview(request: Request):
     question = str(body.get("question") or body.get("query") or "")
     manifest_path = str(body.get("manifest_path") or "")
     session_id = str(body.get("session_id") or "")
+    if session_id and not manifest_path:
+        sess = session_get(session_id)
+        if sess:
+            manifest_path = snapshot_manifest_path(sess)
     from edagent_vivado.agent.context import AgentContextBuilder
 
     ctx = AgentContextBuilder().build(
@@ -1318,8 +1446,13 @@ async def api_vivado_run_flow(request: Request):
     """Run synth+impl from manifest (observed when session/run ids provided)."""
     body = await request.json()
     manifest_path = str(body.get("manifest_path") or "")
+    sid = str(body.get("session_id") or "")
+    if not manifest_path and sid:
+        sess = session_get(sid)
+        if sess:
+            manifest_path = snapshot_manifest_path(sess)
     if not manifest_path:
-        raise HTTPException(400, "manifest_path is required")
+        raise HTTPException(400, "manifest_path is required (or provide session_id with project snapshot)")
     from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter
 
     sid = str(body.get("session_id") or "")
