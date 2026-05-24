@@ -1506,6 +1506,8 @@ async def api_evolution_candidate_get(candidate_id: str):
 class CandidateApproveReq(BaseModel):
     reviewed_by: str = "user"
     payload: dict | None = None
+    force_active: bool = False
+    confirm_source_reviewed: bool = False
 
 
 @router.post("/evolution/candidates/{candidate_id}/approve")
@@ -1517,10 +1519,14 @@ async def api_evolution_candidate_approve(candidate_id: str, body: CandidateAppr
             candidate_id,
             reviewed_by=body.reviewed_by or "user",
             payload_override=body.payload,
+            force_active=body.force_active,
+            confirm_source_reviewed=body.confirm_source_reviewed,
             event_sink=event_create,
         )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     cand = candidate_get(candidate_id)
@@ -1528,6 +1534,40 @@ async def api_evolution_candidate_approve(candidate_id: str, body: CandidateAppr
         "candidate": _candidate_dto(updated or cand or {"id": candidate_id}),
         "overlay_id": (updated or {}).get("applied_overlay_id"),
     }
+
+
+class ToolValidateReq(BaseModel):
+    source: str
+    name: str | None = None
+
+
+@router.post("/evolution/tools/validate")
+async def api_evolution_tool_validate(body: ToolValidateReq):
+    """Pre-flight AST validation for evolved tool sources.
+
+    Returns ``ok=true`` plus ``tool_name`` / ``hash`` / ``source_bytes`` on
+    success. 400 on any sandbox rejection, with a structured ``reason`` so
+    the review UI can show a precise error before the user hits Approve.
+    """
+    from edagent_vivado.evolution import SandboxError, validate_evolved_tool_source
+
+    try:
+        result = validate_evolved_tool_source(body.source)
+    except SandboxError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"ok": False, "reason": exc.reason, "detail": exc.detail},
+        ) from exc
+    if body.name and result["tool_name"] != body.name:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "reason": "name_mismatch",
+                "detail": f"declared {body.name!r}, source defines {result['tool_name']!r}",
+            },
+        )
+    return result
 
 
 class CandidateRejectReq(BaseModel):

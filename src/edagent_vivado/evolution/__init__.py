@@ -114,6 +114,14 @@ from edagent_vivado.evolution.eval_runs import (
     get_eval_set_dto,
     list_eval_sets_dto,
 )
+from edagent_vivado.evolution.sandbox import (
+    AstWhitelistVisitor,
+    SandboxError,
+    cache_size as sandbox_cache_size,
+    clear_tool_cache as clear_sandbox_cache,
+    load_tool as load_evolved_tool,
+    validate_source as validate_evolved_tool_source,
+)
 
 __all__ = [
     "SURFACES",
@@ -198,4 +206,11 @@ __all__ = [
     "eval_run_list",
     "get_eval_set_dto",
     "list_eval_sets_dto",
+    # SE-PR8 — tool sandbox
+    "SandboxError",
+    "AstWhitelistVisitor",
+    "validate_evolved_tool_source",
+    "load_evolved_tool",
+    "sandbox_cache_size",
+    "clear_sandbox_cache",
 ]

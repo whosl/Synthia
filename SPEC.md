@@ -4156,6 +4156,7 @@ proposed ─approve──▶ approved ──apply──▶ overlay.active
 - rollback 必须发出 `evolution.candidate.rolled_back` 与 `evolution.overlay.retired` 事件，并把当前 `overlays.state` 改为 `retired`。
 - `tool` surface 的 candidate 必须额外通过 AST whitelist 检查（禁止 `exec` / `eval` / `subprocess` / `os.system` / 网络访问）并存为只读 artifact。
 - **Reject suppression**：reject API 接受可选的 `suppress_days`，被设置后 generator dedup 会同时把"已 reject 且 `metadata.suppressed_until > now()`"的候选视为占位，阻止同 `signal_key` 在窗口内重复生成。`suppress_days=0`（默认）保持现有"reject 不阻挡"语义。
+- **Tool 沙箱（SE-PR8）**：surface=`tool` 的 overlay payload 形如 `{disabled: [...], additional_tools: [{name, source, description?}]}`，每条 `source` 必须先通过 AST 白名单（允许的 import 集 = `re/json/math/hashlib/typing/dataclasses/pathlib/langchain_core.tools`；禁止 `exec / eval / open / __import__ / subprocess / os.* / 文件 IO / async / yield / 双下划线属性 / class 定义`），再通过 sandbox loader 在精简的 `__builtins__`（含一个 whitelist 化的 `__import__`）下 exec，最终拿到 LangChain `@tool` 函数注册到 agent 工具集合。`approve_candidate(surface=tool)` 必须传 `confirm_source_reviewed=True`（API 返回 403 否则），并对 `additional_tools[*].source` 在持久化前**再次**校验一遍，确保即便绕过 UI 预检也无法把不安全 payload 落库。Loader 按 sha256 缓存编译结果，resolver 端任何加载失败都被吞掉 + 警告日志，单条坏 tool 永远不会让 agent 启动失败。
 
 ### 22.9 API
 
@@ -4225,6 +4226,7 @@ evolution.signal.fired            # 信号源命中阈值
 | SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
 | SE-PR6 | Eval set 占位：`tests/eval_set/*.yaml` 约定 + 加载/校验 + `/evolution/eval/{sets,runs,run}` + `edagent eval` CLI + UI 启动器（runner 桩，本 PR 不执行）|
 | SE-PR7 | `routing_drift` 与 `flow_template_reuse` 两个真实 candidate 生成器；approve 时 default payload 直接读 `signal_source.suggested_payload` 把候选载体一次性应用为 overlay |
+| SE-PR8 | Tool surface 沙箱：AST 白名单 + 精简 `__builtins__` exec + sha256 缓存；`approve(surface=tool)` 强制 `confirm_source_reviewed` 二次确认；`POST /api/v1/evolution/tools/validate` 给前端预检；UI 在 detail modal 渲染源码与"我已阅读源码"复选框 |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
 | SE-PR8 | tool surface（AST whitelist + sandbox loader）|
