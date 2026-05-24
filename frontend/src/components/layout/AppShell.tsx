@@ -1,5 +1,14 @@
 ﻿import { NavLink } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, CircuitBoard, Database, Gauge, Home, Settings } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  CircuitBoard,
+  Database,
+  Gauge,
+  Home,
+  Settings,
+  Sparkles,
+} from 'lucide-react'
 import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
@@ -8,6 +17,7 @@ const nav = [
   { label: 'Monitor', path: '/monitor', icon: Gauge },
   { label: 'Vivado', path: '/vivado', icon: CircuitBoard },
   { label: 'Knowledge', path: '/knowledge', icon: Database },
+  { label: 'Evolution', path: '/evolution', icon: Sparkles },
   { label: 'Settings', path: '/settings', icon: Settings },
 ]
 
