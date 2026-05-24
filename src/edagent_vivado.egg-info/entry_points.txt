@@ -1,3 +1,0 @@
-[console_scripts]
-edagent = edagent_vivado.cli:app
-edagent-web = edagent_vivado.web.dashboard:start_server
