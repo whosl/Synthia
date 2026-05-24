@@ -63,6 +63,13 @@ function sliceUntilNextUser(entries: TimelineEntry[], start: number) {
   return { slice: entries.slice(start, end), next: end }
 }
 
+function hasPendingInteraction(entries: TimelineEntry[]): boolean {
+  return entries.some((e) => {
+    if (e.kind !== 'interaction') return false
+    return (e.payload as InteractionEntryPayload).status === 'pending'
+  })
+}
+
 /** Work group summary is shown only after tools finish and final assistant text is complete. */
 export function isWorkPhaseComplete(
   workEntries: TimelineEntry[],
@@ -71,6 +78,7 @@ export function isWorkPhaseComplete(
   if (!workEntries.length || !finalEntry || !isAssistantFinalComplete(finalEntry)) {
     return false
   }
+  if (hasPendingInteraction(workEntries)) return false
   return !collectWorkTools(workEntries).some((t) => t.state === 'running')
 }
 

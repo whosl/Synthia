@@ -92,6 +92,31 @@ describe('groupChatEntries', () => {
     expect(items.some((i) => i.type === 'work_group')).toBe(false)
   })
 
+  it('does not show work group while an interaction is still pending', () => {
+    const work = [
+      entry('interaction:a', 'interaction', {
+        interaction_type: 'approval',
+        title: 'Approve patch',
+        message: '',
+        status: 'pending',
+      }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+    ]
+    const final = entry('text:final', 'assistant_text', {
+      streamId: 's1',
+      text: 'Done',
+      partial: false,
+    } satisfies AssistantTextPayload)
+    expect(isWorkPhaseComplete(work, final)).toBe(false)
+
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }),
+      ...work,
+      final,
+    ])
+    expect(items.some((i) => i.type === 'work_group')).toBe(false)
+  })
+
   it('shows flat work items while final assistant is still streaming', () => {
     const items = groupChatEntries([
       entry('user:1', 'user', { text: 'go', messageId: 'm1' }),
