@@ -15,6 +15,19 @@ Later PRs (SE-PR2..8) will add:
 - sandboxed tool surface
 """
 
+from edagent_vivado.evolution.aggregator import (
+    aggregate_rolling,
+    latest_snapshot,
+    snapshot_series,
+)
+from edagent_vivado.evolution.collector import collect_task_metrics
+from edagent_vivado.evolution.feedback import (
+    feedback_create,
+    feedback_list_for_session,
+    feedback_list_for_task,
+    feedback_thumb_for_task,
+    feedback_thumb_rolling,
+)
 from edagent_vivado.evolution.overlays import (
     SURFACES,
     SURFACE_KB,
@@ -41,4 +54,14 @@ __all__ = [
     "resolve_flow_template",
     "resolve_routing",
     "active_overlay",
+    # SE-PR2
+    "collect_task_metrics",
+    "aggregate_rolling",
+    "latest_snapshot",
+    "snapshot_series",
+    "feedback_create",
+    "feedback_list_for_session",
+    "feedback_list_for_task",
+    "feedback_thumb_for_task",
+    "feedback_thumb_rolling",
 ]
