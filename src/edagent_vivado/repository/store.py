@@ -1006,6 +1006,30 @@ def monitor_retention_cleanup(retention_days: int = 90, dry_run: bool = False) -
         "deleted": deleted,
     }
 
+# ── Settings (key/value) ─────────────────────────────────────
+
+def settings_get(key: str, default=None):
+    row = get_db().execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    try:
+        return json.loads(row["value_json"])
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def settings_set(key: str, value) -> None:
+    db = get_db()
+    payload = json.dumps(value)
+    now = _now()
+    db.execute(
+        """INSERT INTO settings(key, value_json, updated_at) VALUES(?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at""",
+        (key, payload, now),
+    )
+    db.commit()
+
+
 # ── Vivado commands ───────────────────────────────────────────
 
 def vivado_command_create(

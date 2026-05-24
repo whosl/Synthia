@@ -72,7 +72,7 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
-# Evolution / metrics / feedback / candidates / overlays (SPEC §22.10)
+# Evolution / metrics / feedback / candidates / overlays / trials (SPEC §22.10)
 EVOLUTION_EVENTS = (
     "evolution.metric.snapshot",
     "evolution.feedback.created",
@@ -85,6 +85,11 @@ EVOLUTION_EVENTS = (
     "evolution.candidate.rolled_back",
     "evolution.overlay.applied",
     "evolution.overlay.retired",
+    # SE-PR5 — A/B trial engine
+    "evolution.trial.started",
+    "evolution.trial.assigned",
+    "evolution.trial.completed",
+    "evolution.trial.reverted",
 )
 
 ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
