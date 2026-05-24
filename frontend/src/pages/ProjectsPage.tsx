@@ -257,6 +257,13 @@ export default function ProjectsPage() {
     <div className="page projects-page projects-tree-page">
       <MigrationConflictsBanner />
 
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Projects</h1>
+          <p className="page-subtitle">Engineering workspaces — projects and debug sessions</p>
+        </div>
+      </div>
+
       <div className="toolbar sessions-toolbar project-tree-toolbar">
         <div className="sessions-search-wrap" style={{ flex: 1 }}>
           <Search size={15} className="sessions-search-icon" />
