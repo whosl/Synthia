@@ -183,6 +183,7 @@ export default function TerminalPage() {
           <TerminalRightPanel
             open={rightPanelOpen}
             sessionId={sessionId}
+            projectId={projectId}
             session={session}
             activeTask={activeTask}
             streamStatus={streamStatus}

@@ -132,6 +132,21 @@
   gap: 6px;
 }
 
+.session-card-clickable {
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.session-card-clickable:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card);
+}
+
+.session-card-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .session-card-head {
   display: flex;
   align-items: center;
@@ -175,26 +190,6 @@
   font-size: 12px;
   font-weight: 600;
   line-height: 1.25;
-}
-
-.session-card-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 2px;
-}
-
-.session-card-actions .btn {
-  flex: 1;
-  justify-content: center;
-  min-height: 34px;
-  padding: 6px 10px;
-  font-size: 13px;
-}
-
-.session-card-actions .btn.danger-ghost {
-  color: var(--error);
-  border-color: var(--error-border);
-  background: var(--error-subtle);
 }
 
 @media (max-width: 768px) {

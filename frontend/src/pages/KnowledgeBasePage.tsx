@@ -14,7 +14,7 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
   const candidatesQ = useQuery({ queryKey: ['kb-candidates'], queryFn: listKbCandidates, enabled: mode === 'kb' })
   const invalidateCandidates = () => queryClient.invalidateQueries({ queryKey: ['kb-candidates'] })
   const reindex = useMutation({
-    mutationFn: reindexKnowledge,
+    mutationFn: () => reindexKnowledge(),
     onSuccess: (r) => {
       const g = (r as { global?: { indexed_sources?: number; chunks?: number } }).global
       const totalChunks = g?.chunks ?? (r as { chunks?: number }).chunks ?? 0

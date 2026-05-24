@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Bug, CircuitBoard, ExternalLink, FileText, FolderOpen, RefreshCw, Shield, Wrench, X } from 'lucide-react'
+import { Activity, Bug, CircuitBoard, ExternalLink, FileText, FolderOpen, Pencil, RefreshCw, Shield, Trash2, Wrench, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { getApprovals, setPatchApproval, setVivadoApproval } from '../../api/settings'
+import { deleteSession, updateSession } from '../../api/sessions'
 import type { Session } from '../../api/types'
 import { getVivadoHealth, runVivadoTcl } from '../../api/vivado'
 import { formatNumber, formatRelative } from '../../lib/time'
@@ -21,6 +22,7 @@ const TABS: { id: RightPanelTab; label: string; icon: typeof FileText }[] = [
 export function TerminalRightPanel({
   open,
   sessionId,
+  projectId,
   session,
   activeTask,
   streamStatus,
@@ -32,6 +34,7 @@ export function TerminalRightPanel({
 }: {
   open: boolean
   sessionId: string
+  projectId?: string
   session?: Session
   activeTask?: { id?: string; state?: string } | null
   streamStatus: string
@@ -111,6 +114,7 @@ export function TerminalRightPanel({
         {tab === 'run' && (
           <RunTab
             sessionId={sessionId}
+            projectId={projectId}
             session={session}
             activeTask={activeTask}
             streamStatus={streamStatus}
@@ -143,6 +147,7 @@ export function TerminalRightPanel({
 
 function RunTab({
   sessionId,
+  projectId,
   session,
   activeTask,
   streamStatus,
@@ -157,6 +162,7 @@ function RunTab({
   onVivadoApprovalChange,
 }: {
   sessionId: string
+  projectId?: string
   session?: Session
   activeTask?: { id?: string; state?: string } | null
   streamStatus: string
@@ -170,18 +176,56 @@ function RunTab({
   onPatchApprovalChange: (approved: boolean) => void
   onVivadoApprovalChange: (approved: boolean) => void
 }) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const recentTools = timeline.tools.slice(-5).reverse()
+
+  const rename = useMutation({
+    mutationFn: (name: string) => updateSession(sessionId, { name }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
+      if (projectId) queryClient.invalidateQueries({ queryKey: ['sessions', projectId] })
+    },
+    onError: (err: Error) => alert(err.message || 'Rename failed'),
+  })
+  const del = useMutation({
+    mutationFn: () => deleteSession(sessionId),
+    onSuccess: () => {
+      if (projectId) queryClient.invalidateQueries({ queryKey: ['sessions', projectId] })
+      navigate(projectId ? `/projects/${projectId}` : '/')
+    },
+    onError: (err: Error) => alert(err.message || 'Delete failed'),
+  })
+
+  const promptRename = () => {
+    const next = window.prompt('Session name', session?.name || '')
+    if (next && next.trim() && next.trim() !== session?.name) {
+      rename.mutate(next.trim())
+    }
+  }
+
+  const promptDelete = () => {
+    if (confirm('Archive this session?')) del.mutate()
+  }
 
   return (
     <>
       <section className="drawer-section">
-        <div className="side-title">Run</div>
+        <div className="side-title">Session info</div>
         <div className="kv"><span>Status</span><span><StatusBadge status={activeTask?.state || session?.status} /></span></div>
         <div className="kv"><span>Session</span><span className="mono">{session?.name || sessionId}</span></div>
         <div className="kv"><span>Updated</span><span>{formatRelative(session?.updated_at)}</span></div>
         <div className="kv"><span>Messages</span><span>{formatNumber(session?.message_count)}</span></div>
         <div className="kv"><span>Tools</span><span>{formatNumber(timeline.tools.length || session?.tool_call_count)}</span></div>
         <div className="kv"><span>Problems</span><span style={{ color: problemCount ? 'var(--error)' : undefined }}>{formatNumber(problemCount || session?.problem_count)}</span></div>
+        <div className="session-info-actions">
+          <button type="button" className="btn ghost" onClick={promptRename} disabled={rename.isPending}>
+            <Pencil size={14} /> Rename
+          </button>
+          <button type="button" className="btn ghost danger-ghost" onClick={promptDelete} disabled={del.isPending}>
+            <Trash2 size={14} /> Delete
+          </button>
+        </div>
       </section>
 
       <section className="drawer-section">
