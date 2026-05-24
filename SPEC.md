@@ -4043,9 +4043,10 @@ proposed ─approve──▶ approved ──apply──▶ overlay.active
 
 强制要求：
 
-- 任何 surface 的 candidate 在被 apply 前必须把当前 baseline 持久化为 `baseline_artifact_id`；rollback 时使用该 artifact 还原。
-- rollback 必须发出 `evolution.overlay.rolled_back` 事件，并把 `overlays.state` 改为 `retired`。
+- 任何 surface 的 candidate 在被 apply 前必须保留先前 baseline 的恢复路径。SE-PR4 起的实现使用 `overlays.parent_overlay_id`：在 apply 新 overlay 前先 retire 当前 active overlay，并把它的 id 写入新 overlay 的 `parent_overlay_id`；rollback 时 retire 当前 overlay 并把 `parent_overlay_id` 指向的行重新置为 `active`。`baseline_artifact_id` 字段仍保留给未来需要"快照非 overlay 形态 baseline"的场景（如重写 system prompt 时的整文件快照）。
+- rollback 必须发出 `evolution.candidate.rolled_back` 与 `evolution.overlay.retired` 事件，并把当前 `overlays.state` 改为 `retired`。
 - `tool` surface 的 candidate 必须额外通过 AST whitelist 检查（禁止 `exec` / `eval` / `subprocess` / `os.system` / 网络访问）并存为只读 artifact。
+- **Reject suppression**：reject API 接受可选的 `suppress_days`，被设置后 generator dedup 会同时把"已 reject 且 `metadata.suppressed_until > now()`"的候选视为占位，阻止同 `signal_key` 在窗口内重复生成。`suppress_days=0`（默认）保持现有"reject 不阻挡"语义。
 
 ### 22.9 API
 
@@ -4110,7 +4111,8 @@ evolution.signal.fired            # 信号源命中阈值
 | **SE-PR1** | 表结构 + resolver indirection（no-op）+ 本章 §22 |
 | SE-PR2 | feedback API + metric_snapshots post-task hook + rolling aggregator |
 | SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）+ `/evolution/candidates` 只读 API + `/evolution/generators/run` 手动触发 |
-| SE-PR4 | `/evolution` review UI + approve/reject/merge/rollback API |
+| SE-PR4 | approve/reject/merge/rollback/retire 后端 API + overlay 生命周期 + reject suppression + default payload synthesis（prompt/kb/flow_template/routing/tool）|
+| SE-PR4b | React `/evolution` review UI |
 | SE-PR5 | A/B trial engine（opt-in per surface） |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|

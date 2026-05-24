@@ -58,28 +58,48 @@ def _existing_pending_candidate(
     project_id: str | None,
     signal_key: str,
 ) -> dict | None:
-    """Return a pending candidate row matching (surface, project, signal_key) or None.
+    """Return an open candidate that blocks re-generation, or None.
 
-    Uses sqlite's ``json_extract`` over ``signal_source_json`` so the dedup
-    semantics live in SQL rather than Python loops.
+    A candidate blocks re-generation when:
+      - status='pending' (waiting for user) OR status='trialing' (in A/B); OR
+      - status='rejected' AND metadata_json.suppressed_until > now()
+
+    Uses sqlite's ``json_extract`` so the dedup semantics live in SQL.
     """
+    import time as _time
+
     db = get_db()
+    now = int(_time.time())
     if project_id:
         row = db.execute(
             """SELECT * FROM evolution_candidates
-                 WHERE status='pending' AND surface=? AND project_id=?
+                 WHERE surface=? AND project_id=?
                    AND json_extract(signal_source_json, '$.signal_key')=?
+                   AND (
+                         status IN ('pending', 'trialing')
+                         OR (
+                             status='rejected'
+                             AND CAST(IFNULL(json_extract(metadata_json, '$.suppressed_until'), 0) AS INTEGER) > ?
+                         )
+                   )
                  ORDER BY created_at DESC LIMIT 1""",
-            (surface, project_id, signal_key),
+            (surface, project_id, signal_key, now),
         ).fetchone()
     else:
         row = db.execute(
             """SELECT * FROM evolution_candidates
-                 WHERE status='pending' AND surface=?
+                 WHERE surface=?
                    AND (project_id IS NULL OR project_id='')
                    AND json_extract(signal_source_json, '$.signal_key')=?
+                   AND (
+                         status IN ('pending', 'trialing')
+                         OR (
+                             status='rejected'
+                             AND CAST(IFNULL(json_extract(metadata_json, '$.suppressed_until'), 0) AS INTEGER) > ?
+                         )
+                   )
                  ORDER BY created_at DESC LIMIT 1""",
-            (surface, signal_key),
+            (surface, signal_key, now),
         ).fetchone()
     return dict(row) if row else None
 
