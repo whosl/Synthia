@@ -83,12 +83,42 @@ export function getEvolutionCandidate(id: string) {
 
 export function approveEvolutionCandidate(
   id: string,
-  body: { reviewed_by?: string; payload?: Record<string, unknown> } = {},
+  body: {
+    reviewed_by?: string
+    payload?: Record<string, unknown>
+    force_active?: boolean
+    confirm_source_reviewed?: boolean
+  } = {},
 ) {
   return request<{ candidate: EvolutionCandidate; overlay_id?: string }>(
     `/evolution/candidates/${id}/approve`,
     { method: 'POST', ...jsonBody(body) },
   )
+}
+
+export interface ToolValidateResult {
+  ok: boolean
+  tool_name?: string
+  hash?: string
+  source_bytes?: number
+  reason?: string
+  detail?: string
+}
+
+export async function validateEvolvedTool(body: { source: string; name?: string }): Promise<ToolValidateResult> {
+  try {
+    return await request<ToolValidateResult>(`/evolution/tools/validate`, {
+      method: 'POST',
+      ...jsonBody(body),
+    })
+  } catch (err: unknown) {
+    const anyErr = err as { status?: number; body?: { detail?: ToolValidateResult } | unknown }
+    if (anyErr.status === 400 && anyErr.body && typeof anyErr.body === 'object') {
+      const detail = (anyErr.body as { detail?: ToolValidateResult }).detail
+      if (detail) return detail
+    }
+    throw err
+  }
 }
 
 export function rejectEvolutionCandidate(

@@ -435,3 +435,52 @@
 .evolution-eval-launcher .evolution-action-aux {
   margin-top: 0;
 }
+
+/* ── SE-PR8: tool surface source review ─────────────── */
+
+.evolution-tool-sources {
+  border: 1px solid var(--warning-border);
+  background: var(--warning-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px;
+}
+
+.evolution-tool-sources .evolution-modal-section-title {
+  color: var(--warning);
+}
+
+.evolution-tool-source-block {
+  margin-top: 10px;
+}
+
+.evolution-tool-source-block:first-of-type {
+  margin-top: 4px;
+}
+
+.evolution-tool-source-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.evolution-tool-sources .evolution-payload {
+  max-height: 320px;
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.evolution-source-reviewed-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.evolution-source-reviewed-toggle input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--warning);
+}

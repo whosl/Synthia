@@ -96,6 +96,38 @@ function previewPayload(candidate: EvolutionCandidate): string {
   return JSON.stringify(body, null, 2)
 }
 
+interface ToolSourceEntry {
+  name: string
+  description: string
+  source: string
+}
+
+function extractToolSources(candidate: EvolutionCandidate): ToolSourceEntry[] {
+  const signal = candidate.signal_source as Record<string, unknown> | undefined
+  const meta = candidate.metadata as Record<string, unknown> | undefined
+  const containers: unknown[] = []
+  const fromSignal = (signal?.suggested_payload as Record<string, unknown> | undefined)?.additional_tools
+  if (Array.isArray(fromSignal)) containers.push(...fromSignal)
+  const fromMeta = (meta?.suggested_payload as Record<string, unknown> | undefined)?.additional_tools
+  if (Array.isArray(fromMeta)) containers.push(...fromMeta)
+  const seen = new Set<string>()
+  const out: ToolSourceEntry[] = []
+  for (const raw of containers) {
+    if (!raw || typeof raw !== 'object') continue
+    const entry = raw as Record<string, unknown>
+    const name = typeof entry.name === 'string' ? entry.name : ''
+    const source = typeof entry.source === 'string' ? entry.source : ''
+    if (!name || !source || seen.has(name)) continue
+    seen.add(name)
+    out.push({
+      name,
+      description: typeof entry.description === 'string' ? entry.description : '',
+      source,
+    })
+  }
+  return out
+}
+
 export default function EvolutionPage() {
   const [status, setStatus] = useState<EvolutionCandidateStatus | ''>('pending')
   const [surface, setSurface] = useState<EvolutionSurface | ''>('')
@@ -175,7 +207,11 @@ export default function EvolutionPage() {
   }
 
   const approveMut = useMutation({
-    mutationFn: (id: string) => approveEvolutionCandidate(id, { reviewed_by: 'user' }),
+    mutationFn: (args: { id: string; confirmSourceReviewed?: boolean }) =>
+      approveEvolutionCandidate(args.id, {
+        reviewed_by: 'user',
+        confirm_source_reviewed: args.confirmSourceReviewed,
+      }),
     onSuccess: refresh,
   })
   const rejectMut = useMutation({
@@ -404,7 +440,11 @@ export default function EvolutionPage() {
         <CandidateDetailModal
           candidate={selected}
           onClose={() => setSelectedId(null)}
-          onApprove={() => approveMut.mutateAsync(selected.id).then(() => setSelectedId(null))}
+          onApprove={(confirmSourceReviewed) =>
+            approveMut
+              .mutateAsync({ id: selected.id, confirmSourceReviewed })
+              .then(() => setSelectedId(null))
+          }
           onReject={(suppressDays, reason) =>
             rejectMut
               .mutateAsync({ id: selected.id, suppressDays, reason })
@@ -737,7 +777,7 @@ function CandidateDetailModal({
 }: {
   candidate: EvolutionCandidate
   onClose: () => void
-  onApprove: () => Promise<unknown>
+  onApprove: (confirmSourceReviewed?: boolean) => Promise<unknown>
   onReject: (suppressDays: number, reason: string) => Promise<unknown>
   onMerge: () => Promise<unknown>
   onRollback: (reason: string) => Promise<unknown>
@@ -746,11 +786,18 @@ function CandidateDetailModal({
   const [suppressDays, setSuppressDays] = useState<number>(0)
   const [rejectReason, setRejectReason] = useState<string>('')
   const [rollbackReason, setRollbackReason] = useState<string>('')
+  const [sourceReviewed, setSourceReviewed] = useState<boolean>(false)
 
   const canApprove = candidate.status === 'pending' || candidate.status === 'trialing'
   const canReject = canApprove
   const canMerge = (candidate.status === 'pending' || candidate.status === 'approved') && candidate.scope !== 'global'
   const canRollback = candidate.status === 'approved'
+
+  const isToolSurface = candidate.surface === 'tool'
+  const toolSources = isToolSurface
+    ? extractToolSources(candidate)
+    : []
+  const approveDisabled = !canApprove || busy || (isToolSurface && !sourceReviewed)
 
   return (
     <Modal open title={candidate.title} onClose={onClose} className="evolution-modal">
@@ -796,14 +843,46 @@ function CandidateDetailModal({
         </section>
       )}
 
+      {isToolSurface && toolSources.length > 0 && (
+        <section className="evolution-modal-section evolution-tool-sources">
+          <h3 className="evolution-modal-section-title">
+            <AlertTriangle size={14} /> Evolved tool source — review carefully
+          </h3>
+          {toolSources.map((entry, idx) => (
+            <div key={`${entry.name}-${idx}`} className="evolution-tool-source-block">
+              <div className="evolution-tool-source-header">
+                <span className="mono"><strong>{entry.name}</strong></span>
+                {entry.description && (
+                  <span className="muted" style={{ fontSize: 11 }}>{entry.description}</span>
+                )}
+              </div>
+              <pre className="evolution-payload mono">{entry.source}</pre>
+            </div>
+          ))}
+          <label className="evolution-source-reviewed-toggle">
+            <input
+              type="checkbox"
+              checked={sourceReviewed}
+              onChange={(e) => setSourceReviewed(e.target.checked)}
+              disabled={busy}
+            />
+            <span>I have read this source and accept the risk of running it (SPEC §22.11).</span>
+          </label>
+        </section>
+      )}
+
       <section className="evolution-modal-section evolution-actions-section">
         <div className="evolution-action-row">
           <Button
             className="primary"
-            disabled={!canApprove || busy}
-            onClick={() => onApprove()}
+            disabled={approveDisabled}
+            onClick={() => onApprove(isToolSurface ? sourceReviewed : undefined)}
             title={
-              canApprove ? 'Apply this candidate as an active overlay' : 'Only pending/trialing candidates can be approved'
+              !canApprove
+                ? 'Only pending/trialing candidates can be approved'
+                : isToolSurface && !sourceReviewed
+                  ? 'Tool surface requires source-review confirmation'
+                  : 'Apply this candidate as an active overlay'
             }
           >
             <Check size={14} /> Approve &amp; apply
