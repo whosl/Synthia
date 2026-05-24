@@ -228,6 +228,9 @@ class UpdateProjectReq(BaseModel):
     top_module: str | None = None
     target_language: str | None = None
     simulator: str | None = None
+    source_globs: list[str] | None = None
+    constraint_globs: list[str] | None = None
+    tcl_globs: list[str] | None = None
     default_vivado_target_id: str | None = None
     metadata: dict | None = None
 
@@ -264,6 +267,9 @@ async def api_project_update(project_id: str, req: UpdateProjectReq):
         except json.JSONDecodeError:
             prev = {}
         updates["metadata_json"] = json.dumps({**prev, **meta})
+    for glob_key in ("source_globs", "constraint_globs", "tcl_globs"):
+        if glob_key in updates:
+            updates[f"{glob_key}_json"] = json.dumps(updates.pop(glob_key) or [])
     p = project_update(project_id, **updates)
     if not p:
         raise HTTPException(404, "project not found")
@@ -307,10 +313,22 @@ async def api_project_delete(project_id: str, hard: bool = False, confirm: str =
 
 
 @router.get("/projects/{project_id}/sessions")
-async def api_project_sessions(project_id: str, status: str | None = None, limit: int = 50):
+async def api_project_sessions(
+    project_id: str,
+    status: str | None = None,
+    limit: int = 50,
+    include_archived: bool = False,
+):
     if not project_get(project_id):
         raise HTTPException(404, "project not found")
-    return {"sessions": session_list(status=status, limit=limit, project_id=project_id)}
+    return {
+        "sessions": session_list(
+            status=status,
+            limit=limit,
+            project_id=project_id,
+            include_archived=include_archived,
+        ),
+    }
 
 
 @router.post("/projects/{project_id}/sessions")
@@ -366,8 +384,16 @@ async def api_sessions(
     status: str | None = None,
     limit: int = 50,
     project_id: str | None = Query(None),
+    include_archived: bool = False,
 ):
-    return {"sessions": session_list(status=status, limit=limit, project_id=project_id)}
+    return {
+        "sessions": session_list(
+            status=status,
+            limit=limit,
+            project_id=project_id,
+            include_archived=include_archived,
+        ),
+    }
 
 @router.post("/sessions")
 async def api_sessions_create(req: CreateSessionReq):

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { groupChatEntries, partitionRunGroupMembers } from './chatGrouping'
+import { groupChatEntries, isWorkPhaseComplete, partitionRunGroupMembers } from './chatGrouping'
+import type { AssistantTextPayload } from './types'
 import type { TimelineEntry } from './types'
 
 function entry(
@@ -53,5 +54,76 @@ describe('groupChatEntries', () => {
     if (items[0]?.type === 'tool_group') {
       expect(partitionRunGroupMembers(items[0].members).tools).toHaveLength(0)
     }
+  })
+
+  it('wraps middle blocks in work group only after final assistant completes', () => {
+    const work = [
+      entry('reason:1', 'reasoning', { text: 'thinking', state: 'done' }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+    ]
+    const final = entry('text:final', 'assistant_text', {
+      streamId: 's1',
+      text: 'All done',
+      partial: false,
+    } satisfies AssistantTextPayload)
+    expect(isWorkPhaseComplete(work, final)).toBe(true)
+
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }),
+      ...work,
+      final,
+    ])
+    expect(items).toHaveLength(3)
+    expect(items[0]?.type).toBe('entry')
+    expect(items[1]?.type).toBe('work_group')
+    expect(items[2]?.type).toBe('entry')
+    if (items[1]?.type === 'work_group') {
+      expect(items[1].members).toHaveLength(2)
+    }
+  })
+
+  it('shows flat tool batches while turn is still running', () => {
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'go', messageId: 'm1' }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'running' }),
+    ])
+    expect(items).toHaveLength(2)
+    expect(items[1]?.type).toBe('tool_group')
+    expect(items.some((i) => i.type === 'work_group')).toBe(false)
+  })
+
+  it('does not show work group while an interaction is still pending', () => {
+    const work = [
+      entry('interaction:a', 'interaction', {
+        interaction_type: 'approval',
+        title: 'Approve patch',
+        message: '',
+        status: 'pending',
+      }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+    ]
+    const final = entry('text:final', 'assistant_text', {
+      streamId: 's1',
+      text: 'Done',
+      partial: false,
+    } satisfies AssistantTextPayload)
+    expect(isWorkPhaseComplete(work, final)).toBe(false)
+
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }),
+      ...work,
+      final,
+    ])
+    expect(items.some((i) => i.type === 'work_group')).toBe(false)
+  })
+
+  it('shows flat work items while final assistant is still streaming', () => {
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'go', messageId: 'm1' }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+      entry('text:partial', 'assistant_text', { streamId: 's1', text: 'Typing…', partial: true }),
+    ])
+    expect(items.some((i) => i.type === 'work_group')).toBe(false)
+    expect(items.filter((i) => i.type === 'entry')).toHaveLength(2)
   })
 })

@@ -18,9 +18,31 @@ def _now() -> int: return int(time.time())
 def _uid() -> str: return _uuid.uuid4().hex[:12]
 
 
+def _parse_globs_field(project: dict, json_key: str) -> list:
+    raw = project.get(json_key)
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _path_mappings_for_project(project_id: str) -> list[dict]:
+    rows = get_db().execute(
+        "SELECT id, target_id, local_root, remote_root FROM path_mappings WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _project_snapshot_row(project: dict) -> dict:
+    pid = project["id"]
     return {
-        "project_id": project["id"],
+        "project_id": pid,
         "name": project.get("name"),
         "root_path": project.get("root_path"),
         "manifest_path": project.get("manifest_path"),
@@ -28,7 +50,14 @@ def _project_snapshot_row(project: dict) -> dict:
         "part": project.get("part"),
         "board_part": project.get("board_part"),
         "top_module": project.get("top_module"),
+        "target_language": project.get("target_language"),
+        "simulator": project.get("simulator"),
+        "source_globs": _parse_globs_field(project, "source_globs_json"),
+        "constraint_globs": _parse_globs_field(project, "constraint_globs_json"),
+        "tcl_globs": _parse_globs_field(project, "tcl_globs_json"),
         "default_vivado_target_id": project.get("default_vivado_target_id"),
+        "default_path_mapping_id": project.get("default_path_mapping_id"),
+        "path_mappings": _path_mappings_for_project(pid),
     }
 
 
@@ -185,6 +214,7 @@ def session_list(
     status: str | None = None,
     limit: int = 50,
     project_id: str | None = None,
+    include_archived: bool = False,
 ) -> list[dict]:
     db = get_db()
     q = "SELECT * FROM sessions WHERE deleted_at IS NULL"
@@ -195,7 +225,9 @@ def session_list(
     if status:
         q += " AND status=?"
         params.append(status)
-    q += " AND archived_at IS NULL ORDER BY updated_at DESC LIMIT ?"
+    if not include_archived:
+        q += " AND archived_at IS NULL"
+    q += " ORDER BY updated_at DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in db.execute(q, params)]
 

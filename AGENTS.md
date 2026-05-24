@@ -22,7 +22,7 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 3. **`edagent` CLI:** Installed to `~/.local/bin/edagent`. Ensure `$HOME/.local/bin` is on PATH.
 
-4. **Agent features require LLM API key:** The `edagent ask` and `edagent ask-multi` commands require `ANTHROPIC_API_KEY` to be set. The `.env` ships with a Zhipu GLM-5-turbo key that may or may not be valid.
+4. **Agent features require LLM API key:** The `edagent ask` and `edagent ask-multi` commands require `ANTHROPIC_API_KEY` to be set (copy `.env.example` to `.env` and fill in your key).
 
 5. **Pre-existing test failures (3):** `test_e2e_cases.py::test_case6_remote_runner_check` (missing class export), `test_integration.py::test_vivado_runner_mock_synth_with_parse` and `test_vivado_runner_mock_synth_failure_parse` (tests expect keys not present in runner return dict). These are code issues, not env issues.
 

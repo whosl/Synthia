@@ -194,18 +194,11 @@ def _create_project_from_hint(hint: dict[str, str], db) -> dict | None:
 
 
 def _snapshot_for_project(project: dict) -> dict:
-    return {
-        "project_id": project["id"],
-        "name": project.get("name"),
-        "root_path": project.get("root_path"),
-        "manifest_path": project.get("manifest_path"),
-        "xpr_path": project.get("xpr_path"),
-        "part": project.get("part"),
-        "board_part": project.get("board_part"),
-        "top_module": project.get("top_module"),
-        "default_vivado_target_id": project.get("default_vivado_target_id"),
-        "migration_resolved_at": int(time.time()),
-    }
+    from edagent_vivado.repository.store import _project_snapshot_row
+
+    snap = _project_snapshot_row(project)
+    snap["migration_resolved_at"] = int(time.time())
+    return snap
 
 
 def migrate_sessions_to_projects(*, force_legacy: bool = False) -> dict[str, int]:

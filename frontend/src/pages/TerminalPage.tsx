@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getProject } from '../api/projects'
 import { getSession } from '../api/sessions'
@@ -13,6 +13,8 @@ import { ChatEnterProvider } from '../components/terminal/ChatEnterAnimation'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
+import { isProjectArchived } from '../lib/projectStatus'
+import { useStickToBottomScroll } from '../lib/useStickToBottomScroll'
 import { useStreamStore } from '../stores/streamStore'
 import { useTerminalStore } from '../stores/terminalStore'
 
@@ -38,7 +40,14 @@ export default function TerminalPage() {
     start,
   } = useSessionTimeline(sessionId)
 
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const { ref: scrollRef, onScroll: onChatScroll, pinToBottom } = useStickToBottomScroll(
+    [timeline.entries, timeline.auditLog, view, sessionId],
+  )
+
+  useEffect(() => {
+    pinToBottom()
+  }, [sessionId, pinToBottom])
+
   const sessionQ = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => getSession(sessionId),
@@ -50,10 +59,6 @@ export default function TerminalPage() {
     queryFn: () => getProject(projectId),
     enabled: Boolean(projectId),
   })
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [timeline.entries, timeline.auditLog, view])
 
   const stop = useMutation({
     mutationFn: () => stopSessionTask(sessionId),
@@ -72,6 +77,8 @@ export default function TerminalPage() {
   )
   const session = sessionQ.data?.session
   const project = projectQ.data?.project
+  const projectArchived = isProjectArchived(project)
+  const composerDisabled = projectArchived || stopping || start.isPending || running
   const backHref = projectId ? `/projects/${projectId}` : '/'
   const headerTitle = session?.name || 'Session'
   const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? 'Loading project…' : ''
@@ -99,12 +106,12 @@ export default function TerminalPage() {
                 <span className="terminal-back-label">Back</span>
               </Link>
               <div className="chat-panel-header-title-block">
-                <h1 className="chat-panel-header-title">
-                  {headerTitle}
-                  {(running || stopping) && <span className="terminal-status-dot" />}
-                </h1>
+                <h1 className="chat-panel-header-title">{headerTitle}</h1>
                 {headerSubtitle && (
                   <p className="chat-panel-header-subtitle mono" title={headerSubtitle}>{headerSubtitle}</p>
+                )}
+                {projectArchived && (
+                  <p className="terminal-archived-notice">Project archived — view only; restore the project to send messages.</p>
                 )}
               </div>
               <div className="chat-panel-header-tabs" role="tablist" aria-label="Chat views">
@@ -149,6 +156,7 @@ export default function TerminalPage() {
             <div
               className={`chat-panel-scroll${view === 'chat' ? ' message-list' : ' timeline-view'}`}
               ref={scrollRef}
+              onScroll={onChatScroll}
             >
               {view === 'chat' ? (
                 <ChatEnterProvider sessionId={sessionId}>
@@ -165,8 +173,17 @@ export default function TerminalPage() {
             <Composer
               running={running}
               stopping={stopping}
-              disabled={stopping || start.isPending || running}
-              onSend={(q) => start.mutate(q)}
+              statusActive={running || stopping}
+              disabled={composerDisabled}
+              placeholder={
+                projectArchived
+                  ? 'Project archived — read-only'
+                  : undefined
+              }
+              onSend={(q) => {
+                pinToBottom()
+                start.mutate(q)
+              }}
               onStop={() => stop.mutate()}
             />
           </section>

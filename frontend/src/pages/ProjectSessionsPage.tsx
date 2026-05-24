@@ -28,6 +28,7 @@ import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { isProjectArchived } from '../lib/projectStatus'
 import { parseProjectSnapshot } from '../lib/projectSnapshot'
 import { formatNumber, formatRelative } from '../lib/time'
 
@@ -41,7 +42,7 @@ function SessionCard({
   const tokens = (session.token_input || 0) + (session.token_output || 0)
   return (
     <article
-      className="session-card session-card-clickable"
+      className={`session-card session-card-clickable${session.archived_at ? ' session-card-archived' : ''}`}
       role="button"
       tabIndex={0}
       onClick={onOpen}
@@ -78,6 +79,7 @@ export default function ProjectSessionsPage() {
   const [sort, setSort] = useState<'updated' | 'name' | 'status' | 'created'>('updated')
   const [sessionName, setSessionName] = useState('')
   const [configOpen, setConfigOpen] = useState(true)
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false)
 
   const projectQ = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: Boolean(projectId) })
   const summaryQ = useQuery({
@@ -87,8 +89,9 @@ export default function ProjectSessionsPage() {
     refetchInterval: 120_000,
   })
   const sessionsQ = useQuery({
-    queryKey: ['sessions', projectId],
-    queryFn: () => listProjectSessions(projectId, { limit: 200 }),
+    queryKey: ['sessions', projectId, showArchivedSessions],
+    queryFn: () =>
+      listProjectSessions(projectId, { limit: 200, include_archived: showArchivedSessions }),
     enabled: Boolean(projectId),
   })
 
@@ -118,7 +121,7 @@ export default function ProjectSessionsPage() {
 
   const project = projectQ.data?.project
   const summary = summaryQ.data
-  const isArchived = project?.status === 'archived'
+  const isArchived = isProjectArchived(project)
   const isFetching = sessionsQ.isFetching
 
   const sessions = useMemo(() => {
@@ -286,6 +289,14 @@ export default function ProjectSessionsPage() {
           <option value="name">Sort: Name</option>
           <option value="status">Sort: Status</option>
         </select>
+        <label className="projects-show-archived sessions-show-archived">
+          <input
+            type="checkbox"
+            checked={showArchivedSessions}
+            onChange={(e) => setShowArchivedSessions(e.target.checked)}
+          />
+          Show archived
+        </label>
         <Button
           className="primary sessions-create-btn"
           type="button"

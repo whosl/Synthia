@@ -10,6 +10,12 @@ export interface Project {
   part?: string | null
   board_part?: string | null
   top_module?: string | null
+  target_language?: string | null
+  simulator?: string | null
+  source_globs_json?: string | null
+  constraint_globs_json?: string | null
+  tcl_globs_json?: string | null
+  archived_at?: number | null
   created_at?: number
   updated_at?: number
   last_active_at?: number | null

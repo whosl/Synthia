@@ -1,10 +1,12 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
 import { toolEntryToViewModel } from '../lib/toolPresentation'
+import { collectWorkTools, isAssistantFinalComplete } from '../lib/workGroupPresentation'
 import type { InteractionEntryPayload, TimelineEntry, ToolEntryPayload } from './types'
 
 export type ChatDisplayItem =
   | { type: 'entry'; key: string; entry: TimelineEntry }
   | { type: 'tool_group'; key: string; members: TimelineEntry[] }
+  | { type: 'work_group'; key: string; members: TimelineEntry[]; finalEntry: TimelineEntry | null }
 
 export function isApprovalInteractionEntry(entry: TimelineEntry): boolean {
   return (
@@ -32,7 +34,7 @@ export function partitionRunGroupMembers(members: TimelineEntry[]) {
 }
 
 /** Consecutive Vivado approvals + tool calls → one collapsible run group. */
-export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
+export function groupToolBatchEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
   const out: ChatDisplayItem[] = []
   let batch: TimelineEntry[] = []
 
@@ -52,6 +54,89 @@ export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
     out.push({ type: 'entry', key: entry.key, entry })
   }
   flushBatch()
+  return out
+}
+
+function sliceUntilNextUser(entries: TimelineEntry[], start: number) {
+  let end = start
+  while (end < entries.length && entries[end].kind !== 'user') end++
+  return { slice: entries.slice(start, end), next: end }
+}
+
+function hasPendingInteraction(entries: TimelineEntry[]): boolean {
+  return entries.some((e) => {
+    if (e.kind !== 'interaction') return false
+    return (e.payload as InteractionEntryPayload).status === 'pending'
+  })
+}
+
+/** Work group summary is shown only after tools finish and final assistant text is complete. */
+export function isWorkPhaseComplete(
+  workEntries: TimelineEntry[],
+  finalEntry: TimelineEntry | null,
+): boolean {
+  if (!workEntries.length || !finalEntry || !isAssistantFinalComplete(finalEntry)) {
+    return false
+  }
+  if (hasPendingInteraction(workEntries)) return false
+  return !collectWorkTools(workEntries).some((t) => t.state === 'running')
+}
+
+function groupTurnAfterUser(slice: TimelineEntry[]): ChatDisplayItem[] {
+  if (!slice.length) return []
+
+  const assistants = slice.filter((e) => e.kind === 'assistant_text')
+  const finalEntry = assistants.length ? assistants[assistants.length - 1]! : null
+  const workEntries = finalEntry
+    ? slice.filter((e) => e.key !== finalEntry.key)
+    : [...slice]
+
+  const out: ChatDisplayItem[] = []
+
+  if (workEntries.length > 0) {
+    if (isWorkPhaseComplete(workEntries, finalEntry)) {
+      out.push({
+        type: 'work_group',
+        key: `work:${workEntries[0]!.key}`,
+        members: workEntries,
+        finalEntry,
+      })
+    } else {
+      out.push(...groupToolBatchEntries(workEntries))
+    }
+  }
+
+  if (finalEntry) {
+    out.push({ type: 'entry', key: finalEntry.key, entry: finalEntry })
+  }
+
+  return out
+}
+
+/**
+ * Chat layout: user → [work group: tools/reasoning/intermediate blocks] → final assistant text.
+ * Within the work group, consecutive tool/approval rows still form tool_run groups.
+ */
+export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
+  const out: ChatDisplayItem[] = []
+  let i = 0
+
+  while (i < entries.length) {
+    const entry = entries[i]!
+    if (entry.kind !== 'user') {
+      const { slice, next } = sliceUntilNextUser(entries, i)
+      out.push(...groupToolBatchEntries(slice))
+      i = next
+      continue
+    }
+
+    out.push({ type: 'entry', key: entry.key, entry })
+    i++
+    const { slice, next } = sliceUntilNextUser(entries, i)
+    out.push(...groupTurnAfterUser(slice))
+    i = next
+  }
+
   return out
 }
 
