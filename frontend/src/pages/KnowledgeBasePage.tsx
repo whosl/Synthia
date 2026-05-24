@@ -62,26 +62,28 @@ export default function KnowledgeBasePage({ mode = 'kb' }: { mode?: 'kb' | 'know
         <p className="page-subtitle">Built-in cases, user cases, and pending candidates</p>
       </div>
     </div>
-    <div className="dashboard-grid">
-      <Panel title="KB Candidates">
+    <div className="kb-review-layout">
+      <Panel title="KB Candidates" className="kb-candidates-panel">
         {(candidatesQ.data?.candidates ?? []).length > 0
-          ? <table className="table"><thead><tr><th>ID</th><th>Pattern</th><th>Category</th><th>Likely causes</th><th>Score</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}>
-            <td className="mono" style={{ fontSize: 11 }}>{c.id.slice(0, 8)}…</td>
-            <td>{c.title || c.pattern}</td>
-            <td className="muted">{c.category}</td>
-            <td className="muted" style={{ fontSize: 12, maxWidth: 280 }}>{(c.likely_causes ?? []).slice(0, 2).join('; ') || '—'}</td>
-            <td>{c.confidence?.toFixed?.(2) ?? c.confidence}</td>
-            <td style={{ whiteSpace: 'nowrap' }}>
-              <Button className="success" onClick={async () => { await approveKbCandidate(c.id); invalidateCandidates() }}><CheckCircle2 size={13} /></Button>{' '}
-              <Button className="danger" onClick={async () => { await rejectKbCandidate(c.id); invalidateCandidates() }}><XCircle size={13} /></Button>{' '}
-              <Button className="ghost" onClick={async () => { await mergeKbCandidate(c.id); invalidateCandidates() }}><GitMerge size={13} /></Button>
-            </td>
-          </tr>)}</tbody></table>
+          ? <div className="kb-table-wrap">
+            <table className="table kb-candidates-table"><thead><tr><th>ID</th><th>Pattern</th><th>Category</th><th>Likely causes</th><th>Score</th><th>Action</th></tr></thead><tbody>{(candidatesQ.data?.candidates ?? []).map((c) => <tr key={c.id}>
+              <td className="mono kb-col-id">{c.id.slice(0, 8)}…</td>
+              <td className="kb-col-pattern">{c.title || c.pattern}</td>
+              <td className="muted kb-col-category">{c.category}</td>
+              <td className="muted kb-col-causes">{(c.likely_causes ?? []).slice(0, 2).join('; ') || '—'}</td>
+              <td className="kb-col-score">{c.confidence?.toFixed?.(2) ?? c.confidence}</td>
+              <td className="kb-col-actions">
+                <Button className="success" onClick={async () => { await approveKbCandidate(c.id); invalidateCandidates() }}><CheckCircle2 size={13} /></Button>{' '}
+                <Button className="danger" onClick={async () => { await rejectKbCandidate(c.id); invalidateCandidates() }}><XCircle size={13} /></Button>{' '}
+                <Button className="ghost" onClick={async () => { await mergeKbCandidate(c.id); invalidateCandidates() }}><GitMerge size={13} /></Button>
+              </td>
+            </tr>)}</tbody></table>
+          </div>
           : <EmptyState title="No pending candidates" detail="Candidates are auto-generated from failed runs." />}
       </Panel>
-      <Panel title="Built-in Error KB">
+      <Panel title="Built-in Error KB" className="kb-builtin-panel">
         {kbCasesQ.data?.cases?.length
-          ? <div style={{ display: 'grid', gap: 10 }}>{kbCasesQ.data!.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}>
+          ? <div className="kb-builtin-grid">{kbCasesQ.data!.cases.slice(0, 10).map((c) => <div className="metric-card" key={c.pattern}>
             <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>{c.category}</div>
             <div className="muted mono" style={{ fontSize: 11, marginTop: 4 }}>{c.pattern}</div>
           </div>)}</div>
