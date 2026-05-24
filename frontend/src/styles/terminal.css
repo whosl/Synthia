@@ -836,6 +836,13 @@
   gap: 2px;
 }
 
+.message-turn.kind-work-group .agent-work-details {
+  padding-top: 4px;
+  border-left: 2px solid var(--term-border-soft);
+  margin-left: 6px;
+  padding-left: 8px;
+}
+
 .tool-run-approval {
   width: 100%;
   min-width: 0;
