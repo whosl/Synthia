@@ -29,6 +29,9 @@ frontend/tsconfig.tsbuildinfo
 
 # Vivado / generated run artifacts
 examples/**/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*_agent_synth/
+examples/**/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*_agent_impl/
+examples/**/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*_batch_*/
+examples/**/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*_test_*/
 examples/**/remote_results/
 *.jou
 *.log
