@@ -68,6 +68,33 @@ from edagent_vivado.evolution.workflows import (
     rollback_candidate,
     retire_overlay,
 )
+from edagent_vivado.evolution.trial_config import (
+    is_trial_enabled,
+    project_trial_config,
+    set_trial_enabled,
+)
+from edagent_vivado.evolution.trials import (
+    abort_trial,
+    active_trial_for,
+    assign_arms_for_task,
+    force_decision,
+    maybe_decide_trial,
+    record_snapshot as record_trial_snapshot,
+    start_trial,
+    trial_get,
+    trial_list,
+    MIN_SAMPLES_PER_ARM,
+    DECISION_MARGIN,
+    TRIAL_FORBIDDEN_SURFACES,
+)
+from edagent_vivado.evolution.task_arms import (
+    clear_task_arms,
+    current_task_arms,
+    get_task_arm,
+    reset_task_arms,
+    set_task_arms,
+    task_arms_summary,
+)
 
 __all__ = [
     "SURFACES",
@@ -114,4 +141,26 @@ __all__ = [
     "merge_candidate",
     "rollback_candidate",
     "retire_overlay",
+    # SE-PR5
+    "is_trial_enabled",
+    "set_trial_enabled",
+    "project_trial_config",
+    "start_trial",
+    "trial_get",
+    "trial_list",
+    "active_trial_for",
+    "assign_arms_for_task",
+    "maybe_decide_trial",
+    "abort_trial",
+    "force_decision",
+    "record_trial_snapshot",
+    "MIN_SAMPLES_PER_ARM",
+    "DECISION_MARGIN",
+    "TRIAL_FORBIDDEN_SURFACES",
+    "set_task_arms",
+    "reset_task_arms",
+    "clear_task_arms",
+    "get_task_arm",
+    "current_task_arms",
+    "task_arms_summary",
 ]
