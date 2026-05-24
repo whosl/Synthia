@@ -3994,7 +3994,9 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 
 ### 22.7 度量与综合 score
 
-每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`）。后台聚合器定期写 `rolling_10` / `rolling_50` / `all` 三档窗口。字段：
+每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`），紧接着对所在 project 触发 `rolling_10` 与 `rolling_50` 聚合写入。聚合器读取 task-scope 单点快照的最近 N 条，逐字段取均值（数值）/ 成功率（布尔）/ 求和（计数），并以 project-scope（或 global-scope，当 session 未绑定 project 时）写回。`all` 窗口可以按需在 monitor 查询时按需聚合，不要求每次 task.done 都写入。
+
+字段：
 
 ```json
 {

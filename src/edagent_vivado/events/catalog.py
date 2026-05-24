@@ -72,12 +72,19 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
+# Evolution / metrics / feedback (SPEC §22.10)
+EVOLUTION_EVENTS = (
+    "evolution.metric.snapshot",
+    "evolution.feedback.created",
+)
+
 ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *LIFECYCLE_EVENTS,
     *MESSAGE_EVENTS,
     *TOOL_EVENTS,
     *INTERACTION_EVENTS,
     *MONITOR_EVENTS,
+    *EVOLUTION_EVENTS,
 )
 
 # Legacy / internal type → AG-UI–style canonical category
