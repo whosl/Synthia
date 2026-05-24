@@ -264,3 +264,339 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* —— Project tree home (mobile tree + desktop nested table) —— */
+
+.projects-tree-page {
+  max-width: 920px;
+}
+
+.project-tree-toolbar {
+  margin-bottom: 8px;
+}
+
+.sort-compact-wrap {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sort-compact-icon {
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.sort-compact {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.project-tree-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px 12px;
+}
+
+.project-tree-stats {
+  margin: 0;
+  font-size: 13px;
+}
+
+.project-tree-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-tree-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-tree-section + .project-tree-section {
+  margin-top: 2px;
+}
+
+.project-tree-project {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 48px;
+  padding: 4px 4px 4px 0;
+  border-radius: var(--radius-md);
+  touch-action: manipulation;
+}
+
+.project-tree-project:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.project-tree-chevron {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: transform var(--transition);
+}
+
+.project-tree-project.expanded .project-tree-chevron {
+  transform: rotate(90deg);
+}
+
+.project-tree-project-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 6px 0;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.project-tree-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-tree-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.project-tree-count {
+  font-size: 13px;
+  min-width: 1.5em;
+  text-align: right;
+}
+
+.project-tree-add {
+  color: var(--muted);
+}
+
+.project-tree-children {
+  padding: 0 0 8px 28px;
+}
+
+.project-tree-loading,
+.project-tree-empty {
+  padding: 8px 4px 12px;
+  font-size: 13px;
+}
+
+.project-tree-session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 4px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.project-tree-session:hover {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.project-tree-session.is-archived {
+  opacity: 0.65;
+}
+
+.project-tree-session-avatar {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.project-tree-session.is-archived .project-tree-session-avatar {
+  background: var(--border);
+  color: var(--muted);
+}
+
+.project-tree-session-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.project-tree-session-meta {
+  flex-shrink: 0;
+  font-size: 12px;
+  text-align: right;
+}
+
+.session-meta-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--info);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.session-running-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(22, 163, 74, 0.55);
+  animation: session-running-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes session-running-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.92); }
+}
+
+.project-sessions-table-wrap {
+  overflow-x: auto;
+  margin: 4px 0 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.project-sessions-table {
+  margin: 0;
+}
+
+.project-sessions-row {
+  cursor: pointer;
+}
+
+.project-sessions-row:hover {
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.project-sessions-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.project-row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mobile-actions-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px;
+}
+
+.mobile-actions-sheet {
+  width: min(100%, 420px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.mobile-actions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mobile-actions-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.mobile-actions-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+}
+
+.mobile-actions-item {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.mobile-actions-item:hover {
+  background: var(--bg-subtle);
+}
+
+.mobile-actions-item.destructive {
+  color: var(--error);
+}
+
+@media (min-width: 769px) {
+  .project-tree-children {
+    padding-left: 36px;
+  }
+}
+
+@media (max-width: 768px) {
+  .project-tree-toolbar .projects-show-archived {
+    font-size: 11px;
+  }
+
+  .project-tree-project-actions .project-row-actions,
+  .project-tree-project-actions .btn:not(.project-tree-add) {
+    display: none;
+  }
+}

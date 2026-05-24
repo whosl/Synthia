@@ -79,7 +79,7 @@ export default function TerminalPage() {
   const project = projectQ.data?.project
   const projectArchived = isProjectArchived(project)
   const composerDisabled = projectArchived || stopping || start.isPending || running
-  const backHref = projectId ? `/projects/${projectId}` : '/'
+  const backHref = projectId ? `/?expand=${encodeURIComponent(projectId)}` : '/'
   const headerTitle = session?.name || 'Session'
   const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? 'Loading project…' : ''
 
