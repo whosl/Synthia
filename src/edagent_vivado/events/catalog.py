@@ -72,10 +72,13 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
-# Evolution / metrics / feedback (SPEC §22.10)
+# Evolution / metrics / feedback / candidates (SPEC §22.10)
 EVOLUTION_EVENTS = (
     "evolution.metric.snapshot",
     "evolution.feedback.created",
+    "evolution.signal.fired",
+    "evolution.candidate.created",
+    "evolution.candidate.updated",
 )
 
 ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
