@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getProject } from '../api/projects'
 import { getSession } from '../api/sessions'
@@ -14,6 +14,7 @@ import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
 import { isProjectArchived } from '../lib/projectStatus'
+import { useStickToBottomScroll } from '../lib/useStickToBottomScroll'
 import { useStreamStore } from '../stores/streamStore'
 import { useTerminalStore } from '../stores/terminalStore'
 
@@ -39,7 +40,14 @@ export default function TerminalPage() {
     start,
   } = useSessionTimeline(sessionId)
 
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const { ref: scrollRef, onScroll: onChatScroll, pinToBottom } = useStickToBottomScroll(
+    [timeline.entries, timeline.auditLog, view, sessionId],
+  )
+
+  useEffect(() => {
+    pinToBottom()
+  }, [sessionId, pinToBottom])
+
   const sessionQ = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => getSession(sessionId),
@@ -51,10 +59,6 @@ export default function TerminalPage() {
     queryFn: () => getProject(projectId),
     enabled: Boolean(projectId),
   })
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [timeline.entries, timeline.auditLog, view])
 
   const stop = useMutation({
     mutationFn: () => stopSessionTask(sessionId),
@@ -155,6 +159,7 @@ export default function TerminalPage() {
             <div
               className={`chat-panel-scroll${view === 'chat' ? ' message-list' : ' timeline-view'}`}
               ref={scrollRef}
+              onScroll={onChatScroll}
             >
               {view === 'chat' ? (
                 <ChatEnterProvider sessionId={sessionId}>
@@ -177,7 +182,10 @@ export default function TerminalPage() {
                   ? 'Project archived — read-only'
                   : undefined
               }
-              onSend={(q) => start.mutate(q)}
+              onSend={(q) => {
+                pinToBottom()
+                start.mutate(q)
+              }}
               onStop={() => stop.mutate()}
             />
           </section>
