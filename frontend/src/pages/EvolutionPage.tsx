@@ -13,18 +13,24 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import {
+  abortEvolutionTrial,
   approveEvolutionCandidate,
+  decideEvolutionTrial,
   type EvolutionCandidate,
   type EvolutionCandidateStatus,
   type EvolutionOverlay,
   type EvolutionSurface,
+  type EvolutionTrial,
+  getEvolutionConfig,
   listEvolutionCandidates,
   listEvolutionOverlays,
+  listEvolutionTrials,
   mergeEvolutionCandidate,
   rejectEvolutionCandidate,
   retireEvolutionOverlay,
   rollbackEvolutionCandidate,
   runEvolutionGenerators,
+  setEvolutionTrialFlag,
 } from '../api/evolution'
 import { listProjects } from '../api/projects'
 import { Button } from '../components/common/Button'
@@ -121,6 +127,24 @@ export default function EvolutionPage() {
     refetchOnWindowFocus: true,
   })
 
+  const configQ = useQuery({
+    queryKey: ['evolution', 'config', projectId],
+    queryFn: () => getEvolutionConfig(projectId || undefined),
+    refetchOnWindowFocus: true,
+  })
+
+  const trialsQ = useQuery({
+    queryKey: ['evolution', 'trials', projectId],
+    queryFn: () =>
+      listEvolutionTrials({
+        project_id: projectId || undefined,
+        state: 'running',
+        limit: 50,
+      }),
+    refetchInterval: 6000,
+    refetchOnWindowFocus: true,
+  })
+
   const candidates = candidatesQ.data?.candidates ?? []
   const overlays = overlaysQ.data?.overlays ?? []
   const selected = useMemo(
@@ -160,6 +184,25 @@ export default function EvolutionPage() {
   })
   const runGeneratorsMut = useMutation({
     mutationFn: () => runEvolutionGenerators({ project_id: projectId || undefined }),
+    onSuccess: refresh,
+  })
+  const trialFlagMut = useMutation({
+    mutationFn: (args: { surface: EvolutionSurface; enabled: boolean }) =>
+      setEvolutionTrialFlag({
+        project_id: projectId,
+        surface: args.surface,
+        enabled: args.enabled,
+      }),
+    onSuccess: refresh,
+  })
+  const decideTrialMut = useMutation({
+    mutationFn: (args: { id: string; decision: 'variant_wins' | 'baseline_wins' | 'tie' }) =>
+      decideEvolutionTrial(args.id, { decision: args.decision, reviewed_by: 'user' }),
+    onSuccess: refresh,
+  })
+  const abortTrialMut = useMutation({
+    mutationFn: (args: { id: string; reason?: string }) =>
+      abortEvolutionTrial(args.id, { reason: args.reason }),
     onSuccess: refresh,
   })
 
@@ -306,6 +349,22 @@ export default function EvolutionPage() {
         </Panel>
       </div>
 
+      <TrialsSection
+        trials={trialsQ.data?.trials ?? []}
+        loading={trialsQ.isLoading}
+        onDecide={(id, decision) => decideTrialMut.mutate({ id, decision })}
+        onAbort={(id, reason) => abortTrialMut.mutate({ id, reason })}
+        busy={decideTrialMut.isPending || abortTrialMut.isPending}
+      />
+
+      {projectId && configQ.data && (
+        <TrialConfigPanel
+          config={configQ.data}
+          busy={trialFlagMut.isPending}
+          onToggle={(surface, enabled) => trialFlagMut.mutate({ surface, enabled })}
+        />
+      )}
+
       {selected && (
         <CandidateDetailModal
           candidate={selected}
@@ -329,6 +388,163 @@ export default function EvolutionPage() {
         />
       )}
     </div>
+  )
+}
+
+function TrialsSection({
+  trials,
+  loading,
+  onDecide,
+  onAbort,
+  busy,
+}: {
+  trials: EvolutionTrial[]
+  loading: boolean
+  onDecide: (id: string, decision: 'variant_wins' | 'baseline_wins' | 'tie') => void
+  onAbort: (id: string, reason?: string) => void
+  busy: boolean
+}) {
+  if (loading) return null
+  if (!trials.length) return null
+  return (
+    <Panel
+      title="Active A/B trials"
+      actions={
+        <span className="muted" style={{ fontSize: 11 }}>{trials.length} running</span>
+      }
+    >
+      <ul className="evolution-trial-list">
+        {trials.map((t) => {
+          const baselineMean = t.metric_baseline?.mean ?? null
+          const variantMean = t.metric_variant?.mean ?? null
+          const delta = baselineMean != null && variantMean != null ? variantMean - baselineMean : null
+          return (
+            <li key={t.id} className="evolution-trial-card">
+              <div className="evolution-trial-head">
+                <span className={`evolution-surface tag-${t.surface}`}>
+                  {SURFACE_LABELS[t.surface] || t.surface}
+                </span>
+                <StatusBadge status={t.state} />
+                <span className="muted" style={{ fontSize: 11 }}>
+                  started {formatTime(t.started_at)}
+                </span>
+              </div>
+              <div className="evolution-trial-arms">
+                <div className="evolution-trial-arm">
+                  <span className="muted">Baseline</span>
+                  <strong>{t.n_baseline} samples</strong>
+                  <span className="mono">{baselineMean != null ? baselineMean.toFixed(3) : '—'}</span>
+                </div>
+                <div className="evolution-trial-arm">
+                  <span className="muted">Variant</span>
+                  <strong>{t.n_variant} samples</strong>
+                  <span className="mono">{variantMean != null ? variantMean.toFixed(3) : '—'}</span>
+                </div>
+                <div className="evolution-trial-delta">
+                  <span className="muted">Δ score</span>
+                  <strong className={delta != null ? (delta > 0 ? 'positive' : delta < 0 ? 'negative' : '') : ''}>
+                    {delta != null ? (delta >= 0 ? `+${delta.toFixed(3)}` : delta.toFixed(3)) : '—'}
+                  </strong>
+                </div>
+              </div>
+              <div className="evolution-trial-actions">
+                <Button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => onDecide(t.id, 'variant_wins')}
+                  title="Force the trial to conclude that the variant wins"
+                >
+                  Decide: variant wins
+                </Button>
+                <Button
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() => onDecide(t.id, 'baseline_wins')}
+                  title="Force the trial to conclude that the baseline wins"
+                >
+                  Decide: baseline wins
+                </Button>
+                <Button
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() => onDecide(t.id, 'tie')}
+                  title="Force a tie (variant is retired)"
+                >
+                  Tie
+                </Button>
+                <Button
+                  className="danger"
+                  disabled={busy}
+                  onClick={() => onAbort(t.id, 'manual_abort')}
+                  title="Stop the trial; variant overlay retires, candidate returns to pending"
+                >
+                  Abort
+                </Button>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </Panel>
+  )
+}
+
+function TrialConfigPanel({
+  config,
+  busy,
+  onToggle,
+}: {
+  config: {
+    project_id: string | null
+    trials: Record<EvolutionSurface, boolean>
+    forbidden_surfaces: EvolutionSurface[]
+    min_samples_per_arm: number
+    decision_margin: number
+  }
+  busy: boolean
+  onToggle: (surface: EvolutionSurface, enabled: boolean) => void
+}) {
+  const forbidden = new Set(config.forbidden_surfaces)
+  const order: EvolutionSurface[] = ['prompt', 'kb', 'flow_template', 'routing', 'tool']
+  return (
+    <Panel
+      title="A/B trial settings"
+      actions={
+        <span className="muted" style={{ fontSize: 11 }}>
+          {config.min_samples_per_arm} samples/arm · {Math.round(config.decision_margin * 100)}% margin
+        </span>
+      }
+    >
+      <ul className="evolution-trial-config">
+        {order.map((surface) => {
+          const isForbidden = forbidden.has(surface)
+          const enabled = !!config.trials?.[surface]
+          return (
+            <li key={surface} className={`evolution-trial-config-row${isForbidden ? ' forbidden' : ''}`}>
+              <div className="evolution-trial-config-label">
+                <span className={`evolution-surface tag-${surface}`}>
+                  {SURFACE_LABELS[surface] || surface}
+                </span>
+                {isForbidden && (
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    Locked — Level 0 only (SPEC §22.2)
+                  </span>
+                )}
+              </div>
+              <label className="evolution-trial-toggle">
+                <input
+                  type="checkbox"
+                  checked={enabled && !isForbidden}
+                  disabled={isForbidden || busy}
+                  onChange={(e) => onToggle(surface, e.target.checked)}
+                />
+                <span>{enabled && !isForbidden ? 'A/B enabled' : 'Direct apply'}</span>
+              </label>
+            </li>
+          )
+        })}
+      </ul>
+    </Panel>
   )
 }
 

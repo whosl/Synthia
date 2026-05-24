@@ -149,6 +149,93 @@ export function retireEvolutionOverlay(id: string) {
   )
 }
 
+// ── trials (SE-PR5) ────────────────────────────────────────
+
+export type TrialState = 'running' | 'completed' | 'reverted'
+export type TrialDecision = 'variant_wins' | 'baseline_wins' | 'tie' | 'aborted' | null
+
+export interface EvolutionTrial {
+  id: string
+  candidate_id: string
+  project_id: string
+  surface: EvolutionSurface
+  baseline_overlay_id?: string | null
+  variant_overlay_id?: string | null
+  state: TrialState
+  started_at: number
+  finished_at?: number | null
+  n_baseline: number
+  n_variant: number
+  metric_baseline?: { scores?: number[]; mean?: number | null }
+  metric_variant?: { scores?: number[]; mean?: number | null }
+  decision?: TrialDecision
+  decided_at?: number | null
+  metadata?: Record<string, unknown>
+}
+
+export interface EvolutionTrialConfig {
+  project_id: string | null
+  trials: Record<EvolutionSurface, boolean>
+  forbidden_surfaces: EvolutionSurface[]
+  min_samples_per_arm: number
+  decision_margin: number
+}
+
+export function getEvolutionConfig(projectId?: string) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''
+  return request<EvolutionTrialConfig>(`/evolution/config${qs}`)
+}
+
+export function setEvolutionTrialFlag(body: {
+  project_id: string
+  surface: EvolutionSurface
+  enabled: boolean
+}) {
+  return request<{ project_id: string; surface: EvolutionSurface; enabled: boolean }>(
+    `/evolution/config`,
+    { method: 'POST', ...jsonBody(body) },
+  )
+}
+
+export function listEvolutionTrials(
+  params: {
+    project_id?: string
+    state?: TrialState | ''
+    surface?: EvolutionSurface | ''
+    limit?: number
+  } = {},
+) {
+  const qs = new URLSearchParams()
+  if (params.project_id) qs.set('project_id', params.project_id)
+  if (params.state) qs.set('state', params.state)
+  if (params.surface) qs.set('surface', params.surface)
+  if (params.limit) qs.set('limit', String(params.limit))
+  return request<{ trials: EvolutionTrial[]; filters: Record<string, string | null>; count: number }>(
+    `/evolution/trials${qs.size ? `?${qs}` : ''}`,
+  )
+}
+
+export function getEvolutionTrial(id: string) {
+  return request<{ trial: EvolutionTrial }>(`/evolution/trials/${id}`)
+}
+
+export function decideEvolutionTrial(
+  id: string,
+  body: { decision: 'variant_wins' | 'baseline_wins' | 'tie'; reviewed_by?: string },
+) {
+  return request<{ trial: EvolutionTrial }>(
+    `/evolution/trials/${id}/decide`,
+    { method: 'POST', ...jsonBody(body) },
+  )
+}
+
+export function abortEvolutionTrial(id: string, body: { reason?: string } = {}) {
+  return request<{ trial: EvolutionTrial }>(
+    `/evolution/trials/${id}/abort`,
+    { method: 'POST', ...jsonBody(body) },
+  )
+}
+
 // ── on-demand generator trigger ────────────────────────────
 
 export function runEvolutionGenerators(

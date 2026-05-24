@@ -38,7 +38,10 @@ from edagent_vivado.evolution.overlays import (
     overlay_get,
     overlay_retire,
     overlay_retire_active_for,
+    active_overlay as _resolver_active_overlay,
 )
+from edagent_vivado.evolution.trial_config import is_trial_enabled
+from edagent_vivado.evolution.trials import start_trial as _start_trial
 from edagent_vivado.repository.db import get_db
 
 logger = logging.getLogger(__name__)
@@ -183,12 +186,20 @@ def approve_candidate(
     *,
     reviewed_by: str = "user",
     payload_override: dict | None = None,
+    force_active: bool = False,
     event_sink: EventSink | None = None,
 ) -> dict:
-    """Apply a candidate: retire any conflicting active overlay, create the new
-    overlay (state=active), and flip the candidate to ``approved``.
+    """Apply a candidate.
 
-    Returns the updated candidate dict (with ``applied_overlay_id`` populated).
+    Normal path (no trial): retire any conflicting active overlay, create the
+    new overlay (state=active), flip the candidate to ``approved``.
+
+    Trial path (SE-PR5): when the (project, surface) pair has trials enabled
+    (see :func:`trial_config.is_trial_enabled`), create the new overlay in
+    state=shadow, open an ``evolution_trials`` row keyed by the candidate, and
+    flip the candidate to ``trialing``. The previously-active overlay keeps
+    serving baseline-arm tasks. Pass ``force_active=True`` to bypass the
+    trial path even when it is enabled (useful for emergency rollouts).
     """
     cand = candidate_get(candidate_id)
     if not cand:
@@ -225,7 +236,46 @@ def approve_candidate(
             raise ValueError(f"no default payload builder for surface {surface!r}")
         payload = builder(cand)
 
-    # Retire the previously active overlay (if any) so the resolver picks up the new one.
+    # ── Trial gate ─────────────────────────────────────────
+    trial_enabled = (
+        not force_active
+        and scope == "project"
+        and project_id
+        and is_trial_enabled(project_id, surface)
+    )
+    if trial_enabled:
+        # Identify the current active overlay (if any) — it becomes the baseline arm.
+        existing_active = _resolver_active_overlay(surface, project_id)
+        baseline_overlay_id = (existing_active or {}).get("id") if existing_active else None
+        trial = _start_trial(
+            candidate_id=cand["id"],
+            variant_payload=payload,
+            project_id=project_id,
+            surface=surface,
+            baseline_overlay_id=baseline_overlay_id,
+            metadata={"applied_by": reviewed_by, "kb_case_id": kb_case_id} if kb_case_id else {"applied_by": reviewed_by},
+        )
+        updated = candidate_update_status(
+            cand["id"],
+            "trialing",
+            reviewed_by=reviewed_by,
+            applied_overlay_id=trial.get("variant_overlay_id"),
+        )
+        sid = _candidate_session_id(cand)
+        trial_payload = {
+            "trial_id": trial["id"],
+            "candidate_id": cand["id"],
+            "surface": surface,
+            "project_id": project_id,
+            "baseline_overlay_id": baseline_overlay_id,
+            "variant_overlay_id": trial.get("variant_overlay_id"),
+            "min_samples": (trial.get("metadata") or {}).get("min_samples"),
+            "reviewed_by": reviewed_by,
+        }
+        _emit(event_sink, session_id=sid, event_type="evolution.trial.started", payload=trial_payload)
+        return updated
+
+    # ── Normal Level-0 path: replace the active overlay ───
     parent = overlay_retire_active_for(surface=surface, project_id=project_id, scope=scope)
 
     overlay = overlay_create(
@@ -240,6 +290,7 @@ def approve_candidate(
             "candidate_title": cand.get("title"),
             "candidate_created_by": cand.get("created_by"),
             **({"kb_case_id": kb_case_id} if kb_case_id else {}),
+            **({"force_active": True} if force_active else {}),
         },
     )
 

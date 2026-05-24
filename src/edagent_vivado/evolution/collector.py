@@ -168,6 +168,11 @@ def collect_task_metrics(
     """Compute and persist one ``metric_snapshots`` row for a finished task.
 
     Returns the snapshot dict, or None on failure. Never raises.
+
+    SE-PR5 hook: when the task's metadata holds A/B arm assignments (written
+    by ``_run_agent`` at task start), this collector emits one snapshot per
+    arm assignment so the trial engine can record per-arm composite scores.
+    The legacy ``trial_id`` / ``arm`` kwargs still win when explicitly set.
     """
     try:
         task = task_get(task_id) or {}
@@ -237,7 +242,25 @@ def collect_task_metrics(
         }
 
         project_id = _project_id_for_task(task_id)
-        snap = metric_snapshot_create(
+
+        # SE-PR5: read per-task arm assignments saved by _run_agent.
+        arm_assignments: list[dict] = []
+        try:
+            meta = json.loads(task.get("metadata_json") or "{}") or {}
+        except json.JSONDecodeError:
+            meta = {}
+        evo = meta.get("evolution_arms")
+        if isinstance(evo, list):
+            for entry in evo:
+                if isinstance(entry, dict) and entry.get("trial_id"):
+                    arm_assignments.append({
+                        "surface": str(entry.get("surface") or ""),
+                        "arm": str(entry.get("arm") or ""),
+                        "overlay_id": entry.get("overlay_id"),
+                        "trial_id": str(entry.get("trial_id") or ""),
+                    })
+
+        base_snap = metric_snapshot_create(
             scope="task",
             window="single",
             metrics=metrics,
@@ -248,8 +271,39 @@ def collect_task_metrics(
             overlay_id=overlay_id,
             trial_id=trial_id,
             arm=arm,
-            metadata={"collector_version": 1},
+            metadata={"collector_version": 1, "arm_assignments": arm_assignments},
         )
+
+        # Per-arm snapshots so the trial engine can compute means without
+        # cross-referencing tasks.metadata_json on every aggregation.
+        for entry in arm_assignments:
+            metric_snapshot_create(
+                scope="task",
+                window="single",
+                metrics=metrics,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id or None,
+                overlay_id=entry.get("overlay_id"),
+                trial_id=entry.get("trial_id"),
+                arm=entry.get("arm"),
+                metadata={
+                    "collector_version": 1,
+                    "trial_surface": entry.get("surface"),
+                    "parent_snapshot_id": base_snap["id"],
+                },
+            )
+            try:
+                from edagent_vivado.evolution.trials import record_snapshot
+
+                record_snapshot(
+                    entry["trial_id"],
+                    entry.get("arm") or "",
+                    base_snap.get("composite_score"),
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.debug("trial record_snapshot failed: %s", exc)
 
         if event_sink is not None:
             try:
@@ -257,19 +311,20 @@ def collect_task_metrics(
                     session_id,
                     "evolution.metric.snapshot",
                     {
-                        "snapshot_id": snap["id"],
+                        "snapshot_id": base_snap["id"],
                         "scope": "task",
                         "window": "single",
-                        "composite_score": snap["composite_score"],
+                        "composite_score": base_snap["composite_score"],
                         "project_id": project_id,
                         "task_id": task_id,
+                        "arm_assignments": arm_assignments,
                     },
                     task_id=task_id,
                     run_id=run_id or "",
                 )
             except Exception as exc:  # pragma: no cover
                 logger.debug("metric.snapshot event emit failed: %s", exc)
-        return snap
+        return base_snap
     except Exception as exc:  # pragma: no cover - never propagate
         logger.exception("collect_task_metrics failed: %s", exc)
         return None

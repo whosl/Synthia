@@ -324,3 +324,101 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* ── SE-PR5: A/B trials section ───────────────────────── */
+
+.evolution-trial-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.evolution-trial-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evolution-trial-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.evolution-trial-arms {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.evolution-trial-arm,
+.evolution-trial-delta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.evolution-trial-delta strong.positive { color: var(--success); }
+.evolution-trial-delta strong.negative { color: var(--error); }
+
+.evolution-trial-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── A/B trial config panel ───────────────────────────── */
+
+.evolution-trial-config {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.evolution-trial-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.evolution-trial-config-row.forbidden {
+  opacity: 0.7;
+}
+
+.evolution-trial-config-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.evolution-trial-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.evolution-trial-toggle input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}

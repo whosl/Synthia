@@ -3994,6 +3994,49 @@ Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本
 
 Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
 
+### 22.6A A/B Trial 引擎（SE-PR5）
+
+每个 surface 可选 opt-in 到 A/B 模式（per-project flag，存于 `settings`：`evolution.trial.<surface>.<project_id>`）。`tool` surface 永远拒绝（SPEC §22.2）。
+
+启用后，`approve_candidate` 不再直接写 active overlay：
+
+1. 创建 `state=shadow` 的 overlay，记录 candidate 已合成的 payload。
+2. 写一条 `evolution_trials(state='running')`：`baseline_overlay_id` 指向当前 active overlay（可为空），`variant_overlay_id` 指向 shadow overlay。
+3. candidate.status = `trialing`。
+4. 发出 `evolution.trial.started` 事件；先前 active overlay **不退役**，继续服务 baseline 分支的任务。
+
+调用方仍可传 `force_active=True` 绕过 trial 直接 apply（紧急回滚或人工裁定）。
+
+**Arm 分配**：`_run_agent` 在调用 agent 之前为该 project 下所有 running trial 调用 `assign_arms_for_task(project_id, task_id)`，按 `md5(task_id || trial_id) % 2` 确定 baseline / variant。结果以 `{surface: (arm, overlay_id, trial_id)}` 形式放入 contextvar `evolution_task_arms`，同时落库到 `tasks.metadata_json.evolution_arms`。
+
+**Resolver 优先级**：`active_overlay(surface, project_id)` 优先读取 contextvar。如果该 surface 在当前 task 中有 arm 分配，则直接返回 `overlay_id` 对应的行（variant 分支 → shadow overlay；baseline 分支 → 老 active overlay）。无 arm 时回退到 §22.5 的原始优先级。每个事件发出 `evolution.trial.assigned`。
+
+**Metric 收集**：SE-PR2 的 `collect_task_metrics` 读取 `tasks.metadata_json.evolution_arms`，除了写 task-scope 主 snapshot 外，还为每个 arm 写一条额外 snapshot 并调用 `trials.record_snapshot(trial_id, arm, composite_score)`。Trial 行内的 `n_baseline / n_variant / metric_baseline_json / metric_variant_json` 滚动更新。
+
+**判定**：每个 `task.done` 后，`_run_agent` 对该 task 涉及的 trial 调用 `maybe_decide_trial`：
+
+- `n_baseline ≥ MIN_SAMPLES_PER_ARM` **且** `n_variant ≥ MIN_SAMPLES_PER_ARM`（默认 10）→ 计算 `delta = mean(variant) - mean(baseline)`：
+  - `delta ≥ DECISION_MARGIN`（默认 0.05）→ `variant_wins`：retire baseline overlay，把 variant overlay 由 `shadow` 升级为 `active`，candidate.status=approved。
+  - `delta ≤ -DECISION_MARGIN` → `baseline_wins`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`baseline_wins`）。
+  - 其他 → `tie`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`tie`）。
+- 启动 14 天后未决 → 自动 `abort_trial`，candidate 回到 pending。
+
+**操作覆盖**：`POST /api/v1/evolution/trials/{id}/decide { decision }` 允许 operator 在样本不足时强制决策；`POST /api/v1/evolution/trials/{id}/abort` 手动放弃 trial，variant 退役、candidate 回 pending。
+
+**事件**：
+
+```text
+evolution.trial.started        # approve_candidate 进入 trial 路径时
+evolution.trial.assigned       # 每个 task 启动时，每个 arm 一条
+evolution.trial.completed      # decide 落定（自动或 force）
+evolution.trial.reverted       # abort_trial / max-age 触发
+```
+
+**约束**：
+
+- `tool` surface 永远不能进 A/B（`set_trial_enabled` 与 `start_trial` 双重拒绝）。
+- A/B 决策仍是"L1 自动应用"——variant_wins 自动把 shadow 升级为 active，无需人工二次确认。SPEC §22.11 的"10% / 3 窗口自动 rollback"独立于 A/B 决策依然生效，A/B 之后的劣化触发常规 rollback。
+
 ### 22.7 度量与综合 score
 
 每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`），紧接着对所在 project 触发 `rolling_10` 与 `rolling_50` 聚合写入。聚合器读取 task-scope 单点快照的最近 N 条，逐字段取均值（数值）/ 成功率（布尔）/ 求和（计数），并以 project-scope（或 global-scope，当 session 未绑定 project 时）写回。`all` 窗口可以按需在 monitor 查询时按需聚合，不要求每次 task.done 都写入。
@@ -4113,7 +4156,7 @@ evolution.signal.fired            # 信号源命中阈值
 | SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）+ `/evolution/candidates` 只读 API + `/evolution/generators/run` 手动触发 |
 | SE-PR4 | approve/reject/merge/rollback/retire 后端 API + overlay 生命周期 + reject suppression + default payload synthesis（prompt/kb/flow_template/routing/tool）|
 | SE-PR4b | React `/evolution` review UI |
-| SE-PR5 | A/B trial engine（opt-in per surface） |
+| SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
 | SE-PR6 | eval set placeholder（schema + CLI 桩）|
 | SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
 | SE-PR8 | tool surface（AST whitelist + sandbox loader）|

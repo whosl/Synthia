@@ -36,11 +36,14 @@ def active_overlay(surface: str, project_id: str | None) -> dict | None:
     """Return the active overlay row for (surface, project_id) or None.
 
     Order of precedence (SPEC §22.5):
-      1. project-scope active overlay
-      2. global-scope active overlay
-      3. None (= baseline)
+      1. A/B trial arm assignment from the current task (SE-PR5).
+      2. project-scope active overlay.
+      3. global-scope active overlay.
+      4. None (= baseline).
 
-    SE-PR1 is read-only and never returns anything; subsequent PRs flip this on.
+    SE-PR1 was a no-op; SE-PR4 lit up (2)+(3); SE-PR5 adds (1) on top so the
+    A/B engine can route a single task to either baseline or variant without
+    touching any caller of this resolver.
     """
     if surface not in SURFACES:
         raise ValueError(f"Unknown evolution surface: {surface!r}")
@@ -54,6 +57,35 @@ def active_overlay(surface: str, project_id: str | None) -> dict | None:
         db = get_db()
     except Exception:
         return None
+
+    # ── (1) trial arm assignment from contextvar ──────────────
+    try:
+        from edagent_vivado.evolution.task_arms import get_task_arm
+
+        arm = get_task_arm(surface)
+    except Exception:  # pragma: no cover
+        arm = None
+    if arm is not None:
+        _arm_label, overlay_id, _trial_id = arm
+        if overlay_id:
+            row = db.execute("SELECT * FROM overlays WHERE id=?", (overlay_id,)).fetchone()
+            if row:
+                out = dict(row)
+                try:
+                    out["payload"] = json.loads(out.get("payload_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    out["payload"] = {}
+                # Mark for downstream observability.
+                meta_raw = out.get("metadata_json") or "{}"
+                try:
+                    meta = json.loads(meta_raw)
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+                meta.setdefault("_trial_arm", _arm_label)
+                meta.setdefault("_trial_id", _trial_id)
+                out["metadata"] = meta
+                return out
+        # arm=baseline with no overlay → fall through (no baseline yet exists)
 
     try:
         rows: list[Any] = []
