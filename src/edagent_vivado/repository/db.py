@@ -265,6 +265,109 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
     vector_ref TEXT NOT NULL, indexed_at INTEGER NOT NULL, metadata_json TEXT
 );
 
+-- ── Self-evolution (SPEC §22) ─────────────────────────────
+-- Schema is forward-compatible with the full SE-PR2..8 roadmap;
+-- SE-PR1 only writes resolver indirection (no behavior change yet).
+
+CREATE TABLE IF NOT EXISTS evolution_candidates (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL DEFAULT 'project',           -- session|project|global
+    project_id TEXT,
+    session_id TEXT,
+    surface TEXT NOT NULL,                            -- kb|prompt|tool|flow_template|routing
+    candidate_type TEXT NOT NULL DEFAULT 'overlay',
+    title TEXT NOT NULL,
+    rationale TEXT,
+    signal_source_json TEXT,
+    diff_artifact_id TEXT,
+    baseline_artifact_id TEXT,
+    confidence REAL,
+    status TEXT NOT NULL DEFAULT 'pending',           -- pending|approved|rejected|merged|rolled_back|trialing
+    created_by TEXT NOT NULL DEFAULT 'evolver',       -- harness|evolver|user|run|recurrence
+    created_at INTEGER NOT NULL,
+    reviewed_by TEXT,
+    reviewed_at INTEGER,
+    applied_overlay_id TEXT,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS overlays (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL DEFAULT 'project',            -- project|global
+    project_id TEXT,
+    surface TEXT NOT NULL,
+    name TEXT,
+    state TEXT NOT NULL DEFAULT 'active',             -- active|shadow|retired
+    payload_json TEXT NOT NULL,
+    source_candidate_id TEXT,
+    parent_overlay_id TEXT,
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS evolution_trials (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    project_id TEXT,
+    surface TEXT NOT NULL,
+    baseline_overlay_id TEXT,
+    variant_overlay_id TEXT,
+    state TEXT NOT NULL DEFAULT 'running',            -- running|completed|reverted
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    n_baseline INTEGER NOT NULL DEFAULT 0,
+    n_variant INTEGER NOT NULL DEFAULT 0,
+    metric_baseline_json TEXT,
+    metric_variant_json TEXT,
+    decision TEXT,                                    -- variant_wins|baseline_wins|tie|insufficient_data
+    decided_at INTEGER,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    task_id TEXT,
+    message_id TEXT,
+    user_thumb INTEGER,                               -- +1 | 0 | -1
+    comment TEXT,
+    tags_json TEXT,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS metric_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    session_id TEXT,
+    task_id TEXT,
+    run_id TEXT,
+    overlay_id TEXT,
+    trial_id TEXT,
+    arm TEXT,                                         -- baseline|variant|none
+    scope TEXT NOT NULL DEFAULT 'task',               -- task|session|project|global
+    window TEXT NOT NULL DEFAULT 'single',            -- single|rolling_10|rolling_50|all
+    metrics_json TEXT NOT NULL,
+    composite_score REAL,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id TEXT PRIMARY KEY,
+    eval_set TEXT NOT NULL,
+    overlay_id TEXT,
+    state TEXT NOT NULL DEFAULT 'placeholder',        -- placeholder|queued|running|completed|error
+    started_at INTEGER,
+    finished_at INTEGER,
+    total_cases INTEGER,
+    passed INTEGER,
+    failed INTEGER,
+    metric_summary_json TEXT,
+    metadata_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value_json TEXT NOT NULL,

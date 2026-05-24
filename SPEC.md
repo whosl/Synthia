@@ -3987,6 +3987,294 @@ LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
 
 ---
 
+## 22. 自进化（Self-Evolution）
+
+### 22.1 目标
+
+让 EdAgent-Vivado 在长期使用中从两类来源积累"经验"，并以受控、可观测、可回滚的方式把经验注入到下一次 Agent 执行：
+
+- 显式信号：用户反馈、Run 结果（QoR/timing/log）、问题累积、审批通过率、回归 eval set。
+- 隐式信号：reasoning summary、tool 摘要、memory snapshot 中的高置信片段。
+
+自进化是**附加层**，从不强制覆盖；任何 surface 都必须可在不变更 SPEC §8 主流程的前提下被禁用或回滚。
+
+### 22.2 进化面（Surface）
+
+| Surface | 影响 | 默认级别 | A/B 是否允许 | 沙箱要求 |
+|---|---|---|---|---|
+| `kb` | Error/Semantic KB 条目 | Level 0 / 1 | 否（用 KB candidate 既有审批流） | 无 |
+| `prompt` | Per-project system prompt overlay | Level 0 | 可选 Level 1 | 无 |
+| `tool` | 启用/禁用工具、新增进化工具 | **Level 0 only** | 否 | AST whitelist + sandbox import |
+| `flow_template` | Per-project Tcl 流程模板 | Level 0 / 1 | 可选 Level 1 | 单元测试通过后才能 promote |
+| `routing` | Supervisor 多 agent routing 权重/规则 | Level 0 / 1 | 可选 Level 1 | 无 |
+
+> Level 0 = 仅生成 candidate，必须人工审批；Level 1 = 自动应用为 shadow overlay 进 A/B 实验，胜出后进入"待 merge" 状态等待人工确认；Level 2/3 spec 暂不支持。
+
+### 22.3 Overlay 解析与优先级
+
+任何 surface 的有效配置由 **resolver** 统一返回，调用顺序如下：
+
+```text
+project-scope active overlay  →  global-scope active overlay  →  baseline (codebase 内嵌)
+```
+
+每个 surface 的 resolver 必须满足：
+
+- 无 overlay 时返回 baseline，且不抛异常。
+- 必须可以由配置开关临时禁用，例如 `EDAGENT_EVOLUTION_DISABLE=prompt,tool`。
+- 每次解析必须写一条 `evolution.overlay.resolved` 事件（payload: surface/project_id/overlay_id 或 null），供 monitor 追溯。
+
+### 22.4 数据模型
+
+```sql
+CREATE TABLE evolution_candidates (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,                -- session | project | global
+  project_id TEXT,
+  session_id TEXT,
+  surface TEXT NOT NULL,              -- kb | prompt | tool | flow_template | routing
+  candidate_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT,
+  signal_source_json TEXT,            -- 触发本 candidate 的信号快照
+  diff_artifact_id TEXT,              -- 改动正文（overlay payload diff）
+  baseline_artifact_id TEXT,          -- 应用前的 overlay snapshot
+  confidence REAL,
+  status TEXT NOT NULL,               -- pending|approved|rejected|merged|rolled_back|trialing
+  created_by TEXT NOT NULL,           -- harness|evolver|user|run|recurrence
+  created_at INTEGER NOT NULL,
+  reviewed_by TEXT,
+  reviewed_at INTEGER,
+  applied_overlay_id TEXT,
+  metadata_json TEXT
+);
+
+CREATE TABLE overlays (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,                -- project | global
+  project_id TEXT,
+  surface TEXT NOT NULL,
+  name TEXT,
+  state TEXT NOT NULL,                -- active | shadow | retired
+  payload_json TEXT NOT NULL,
+  source_candidate_id TEXT,
+  parent_overlay_id TEXT,
+  created_at INTEGER NOT NULL,
+  retired_at INTEGER,
+  metadata_json TEXT
+);
+
+CREATE TABLE evolution_trials (
+  id TEXT PRIMARY KEY,
+  candidate_id TEXT NOT NULL,
+  project_id TEXT,
+  surface TEXT NOT NULL,
+  baseline_overlay_id TEXT,
+  variant_overlay_id TEXT,
+  state TEXT NOT NULL,                -- running | completed | reverted
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  n_baseline INTEGER NOT NULL DEFAULT 0,
+  n_variant INTEGER NOT NULL DEFAULT 0,
+  metric_baseline_json TEXT,
+  metric_variant_json TEXT,
+  decision TEXT,                      -- variant_wins|baseline_wins|tie|insufficient_data
+  decided_at INTEGER,
+  metadata_json TEXT
+);
+
+CREATE TABLE feedback (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  message_id TEXT,
+  user_thumb INTEGER,                 -- +1 | 0 | -1
+  comment TEXT,
+  tags_json TEXT,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+
+CREATE TABLE metric_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  overlay_id TEXT,
+  trial_id TEXT,
+  arm TEXT,                           -- baseline|variant|none
+  scope TEXT NOT NULL,                -- task|session|project|global
+  window TEXT NOT NULL,               -- single|rolling_10|rolling_50|all
+  metrics_json TEXT NOT NULL,
+  composite_score REAL,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+
+CREATE TABLE eval_runs (
+  id TEXT PRIMARY KEY,
+  eval_set TEXT NOT NULL,
+  overlay_id TEXT,
+  state TEXT NOT NULL,                -- placeholder|queued|running|completed|error
+  started_at INTEGER,
+  finished_at INTEGER,
+  total_cases INTEGER,
+  passed INTEGER,
+  failed INTEGER,
+  metric_summary_json TEXT,
+  metadata_json TEXT
+);
+```
+
+### 22.5 进化范围与晋升路径
+
+```text
+session 行为
+  → session-scope candidate（pending；仅 session 内可影响 retrieval/prompt 临时层）
+  → 用户在 review UI 中 approve / session 结束指标改善触发自动晋升
+  → project-scope overlay（active，作用于该 Project 所有新 session）
+  → 多 Project 反复 approve 同一 normalized candidate
+  → global candidate（pending；必须人工审批）
+  → global overlay（与 built-in baseline 同级，但优先级低于 project overlay）
+```
+
+Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本次 task 临时注入。Project / global overlay 才会写入 overlays 表并被 resolver 长期使用。
+
+### 22.6 信号源
+
+| 信号 | 数据源 | 触发条件 |
+|---|---|---|
+| `user_feedback` | `feedback` 表 | 负面 thumb 在 rolling 10 turn 内 >= 3 |
+| `run_result` | `runs / vivado_commands / qor_checker` | `first_run_success=false` 且同一 project 内最近 5 个 task 中 >=3 失败 |
+| `recurrence` | `problems.normalized_signature` | 同一 signature 在 >=3 个 session 中出现 |
+| `approval_pass_rate` | `interactions` | rolling 20 个 interaction 通过率 < 0.5 |
+| `eval_set` | `eval_runs` | 占位；SE-PR6 后启用 |
+
+### 22.7 度量与综合 score
+
+每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`）。后台聚合器定期写 `rolling_10` / `rolling_50` / `all` 三档窗口。字段：
+
+```json
+{
+  "vivado_success_rate": 0.0,
+  "first_run_success": false,
+  "wns_ps": 120,
+  "tns_ps": 0,
+  "lut_util_pct": 18.4,
+  "ff_util_pct": 9.1,
+  "drc_clean": true,
+  "task_tokens_total": 12450,
+  "task_elapsed_sec": 42.1,
+  "approval_pass_rate": 0.91,
+  "user_thumb_score": 1,
+  "composite_score": 0.78
+}
+```
+
+`composite_score` 计算：
+
+```text
+0.40 · norm(WNS)
++ 0.25 · norm(first_run_success)
++ 0.15 · norm(approval_pass_rate)
++ 0.10 · norm(1 / task_tokens_total)
++ 0.10 · norm(user_thumb_score)
+```
+
+权重在 `evolution_config` 中可调（per-project metadata）。缺失值贡献中性 0.5，部分遥测不会导致 score 崩塌。
+
+### 22.8 候选生命周期
+
+```text
+proposed ─approve──▶ approved ──apply──▶ overlay.active
+   │
+   ├──reject──▶ rejected
+   │
+   ├──trial (Level 1)──▶ trialing ──decision──▶ approved / rejected
+   │
+   └─auto_rollback─▶ rolled_back
+```
+
+强制要求：
+
+- 任何 surface 的 candidate 在被 apply 前必须把当前 baseline 持久化为 `baseline_artifact_id`；rollback 时使用该 artifact 还原。
+- rollback 必须发出 `evolution.overlay.rolled_back` 事件，并把 `overlays.state` 改为 `retired`。
+- `tool` surface 的 candidate 必须额外通过 AST whitelist 检查（禁止 `exec` / `eval` / `subprocess` / `os.system` / 网络访问）并存为只读 artifact。
+
+### 22.9 API
+
+```http
+GET    /api/v1/evolution/candidates
+GET    /api/v1/evolution/candidates/{id}
+POST   /api/v1/evolution/candidates/{id}/approve
+POST   /api/v1/evolution/candidates/{id}/reject
+POST   /api/v1/evolution/candidates/{id}/merge
+POST   /api/v1/evolution/candidates/{id}/rollback
+
+GET    /api/v1/evolution/overlays?project_id=...&surface=...
+POST   /api/v1/evolution/overlays/{id}/retire
+
+GET    /api/v1/evolution/trials?project_id=...
+POST   /api/v1/evolution/trials/{id}/decide
+
+POST   /api/v1/feedback
+GET    /api/v1/sessions/{id}/feedback
+
+GET    /api/v1/metrics/summary?project_id=...&window=rolling_10
+GET    /api/v1/metrics/series?project_id=...&surface=...
+
+POST   /api/v1/evolution/eval/run      (SE-PR6 起占位返回 501)
+GET    /api/v1/evolution/eval/runs
+```
+
+### 22.10 事件
+
+```text
+evolution.candidate.created
+evolution.candidate.updated
+evolution.candidate.approved
+evolution.candidate.rejected
+evolution.candidate.merged
+evolution.candidate.rolled_back
+
+evolution.overlay.applied
+evolution.overlay.retired
+evolution.overlay.resolved        # 每次 resolver 命中 overlay 时发一条（可被 EDAGENT_EVOLUTION_LOG_RESOLVE=0 关闭）
+
+evolution.trial.started
+evolution.trial.assigned          # task 被分入 baseline / variant
+evolution.trial.completed
+evolution.trial.reverted
+
+evolution.metric.snapshot         # 每条 metric_snapshots
+evolution.signal.fired            # 信号源命中阈值
+```
+
+### 22.11 安全护栏
+
+- 任何 surface 在生产环境下默认 Level 0；Level 1 必须在 `/api/v1/settings/approvals`（或 evolution 设置面板）显式 opt-in，per surface 独立。
+- `tool` surface 永远不允许 Level 1；候选必须由人审，并在二次确认对话中再次声明"我已阅读源码"。
+- 任何 overlay 应用后 24 小时内必须有 metric_snapshot 写入；否则视为 "应用未生效"，自动 retire 并报警。
+- 复合 score 在应用 overlay 后的 rolling_10 窗口内相对 baseline 下降 >= 10% 且持续 3 个窗口，触发自动 rollback。
+
+### 22.12 SE-PR 实施分期
+
+| PR | 范围 |
+|---|---|
+| **SE-PR1** | 表结构 + resolver indirection（no-op）+ 本章 §22 |
+| SE-PR2 | feedback API + metric_snapshots post-task hook + rolling aggregator |
+| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）|
+| SE-PR4 | `/evolution` review UI + approve/reject/merge/rollback API |
+| SE-PR5 | A/B trial engine（opt-in per surface） |
+| SE-PR6 | eval set placeholder（schema + CLI 桩）|
+| SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
+| SE-PR8 | tool surface（AST whitelist + sandbox loader）|
+
+每个 SE-PR 都必须保证：当对应 overlay 不存在时，系统行为与本 SPEC 主体（§1–§19）一致。
+
+---
+
 ## 20. 术语表
 
 - **Session**：用户长期会话。
@@ -4013,3 +4301,8 @@ LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
 - **PathMapper**：本地路径与远程路径互相转换的映射层。
 - **TclPolicy**：Vivado Tcl 命令安全策略与审批层。
 - **Long-lived Tcl Session**：持续运行的 `vivado -mode tcl` 进程，可连续执行命令。
+- **Evolution Surface**：自进化可改动的一类系统配置，包括 `kb / prompt / tool / flow_template / routing`。
+- **Overlay**：单一 surface 在 project 或 global 范围内的有效覆盖层，应用于 baseline 之上。
+- **Evolution Candidate**：尚未应用的 overlay 提案，必须经过 approve / merge / trial 才能生效。
+- **Evolution Trial**：一组 baseline / variant overlay 的 A/B 实验，基于 `metric_snapshots` 评判胜负。
+- **Composite Score**：综合 timing / first-run / approval / token / user 反馈的 0..1 分数，用于 A/B 与回滚判断。

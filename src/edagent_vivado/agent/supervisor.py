@@ -57,6 +57,7 @@ class TeamState(TypedDict, total=False):
     next_agent: str
     specialist_output: str
     parent_thread_id: str
+    project_id: str
 
 
 # ── specialist agent caches ──────────────────────────────────
@@ -86,7 +87,25 @@ def _get_specialist(name: str) -> Any:
 # ── routing ──────────────────────────────────────────────────
 
 
-def _route_question(question: str) -> str:
+def _route_question(question: str, project_id: str | None = None) -> str:
+    # Evolution routing overlay (SPEC §22.3): rule-based overrides bypass the LLM
+    # round-trip when an evolved rule clearly matches; weights tilt the default.
+    overlay: dict | None = None
+    try:
+        from edagent_vivado.evolution import resolve_routing
+
+        overlay = resolve_routing(project_id=project_id)
+    except Exception:
+        overlay = None
+    if overlay:
+        q_lower = (question or "").lower()
+        for rule in overlay.get("rules") or []:
+            phrases = [str(p).lower() for p in (rule.get("if_contains_any") or [])]
+            target = str(rule.get("route_to") or "").strip().lower()
+            if target and any(p and p in q_lower for p in phrases):
+                if target in ("synthesis", "timing", "constraint"):
+                    return target
+
     llm = get_llm()
     response = llm.invoke([SystemMessage(content=ROUTING_PROMPT), HumanMessage(content=question)])
     choice = (response.content or "").strip().lower()
@@ -163,7 +182,7 @@ def _extract_response(result: dict) -> dict:
 
 def _supervisor_router(state: TeamState) -> dict:
     question = _extract_question(state.get("messages", []))
-    choice = _route_question(question)
+    choice = _route_question(question, project_id=state.get("project_id"))
     logger.info("Supervisor routing to: %s", choice)
     return {"next_agent": choice}
 
