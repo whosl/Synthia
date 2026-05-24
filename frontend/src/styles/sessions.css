@@ -147,6 +147,16 @@
   outline-offset: 2px;
 }
 
+.session-card-archived {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.sessions-show-archived {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .session-card-head {
   display: flex;
   align-items: center;

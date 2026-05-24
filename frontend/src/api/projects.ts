@@ -49,6 +49,10 @@ export type CreateProjectPayload = {
   top_module?: string
   target_language?: string
   simulator?: string
+  source_globs?: string[]
+  constraint_globs?: string[]
+  tcl_globs?: string[]
+  default_vivado_target_id?: string
   metadata?: Record<string, unknown>
 }
 
@@ -82,9 +86,13 @@ export function resolveMigration(sessionId: string, projectId: string) {
   )
 }
 
-export function listProjectSessions(projectId: string, params: { limit?: number } = {}) {
+export function listProjectSessions(
+  projectId: string,
+  params: { limit?: number; include_archived?: boolean } = {},
+) {
   const qs = new URLSearchParams()
   if (params.limit) qs.set('limit', String(params.limit))
+  if (params.include_archived) qs.set('include_archived', 'true')
   return request<{ sessions: import('./types').Session[] }>(
     `/projects/${projectId}/sessions${qs.size ? `?${qs}` : ''}`,
   )

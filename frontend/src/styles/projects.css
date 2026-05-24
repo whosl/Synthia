@@ -76,6 +76,18 @@
   gap: 12px;
 }
 
+.project-form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 520px) {
+  .project-form-row-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
 .project-create-form label {
   display: grid;
   gap: 4px;

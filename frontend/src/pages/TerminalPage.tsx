@@ -13,6 +13,7 @@ import { ChatEnterProvider } from '../components/terminal/ChatEnterAnimation'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
+import { isProjectArchived } from '../lib/projectStatus'
 import { useStreamStore } from '../stores/streamStore'
 import { useTerminalStore } from '../stores/terminalStore'
 
@@ -72,6 +73,8 @@ export default function TerminalPage() {
   )
   const session = sessionQ.data?.session
   const project = projectQ.data?.project
+  const projectArchived = isProjectArchived(project)
+  const composerDisabled = projectArchived || stopping || start.isPending || running
   const backHref = projectId ? `/projects/${projectId}` : '/'
   const headerTitle = session?.name || 'Session'
   const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? 'Loading project…' : ''
@@ -105,6 +108,9 @@ export default function TerminalPage() {
                 </h1>
                 {headerSubtitle && (
                   <p className="chat-panel-header-subtitle mono" title={headerSubtitle}>{headerSubtitle}</p>
+                )}
+                {projectArchived && (
+                  <p className="terminal-archived-notice">Project archived — view only; restore the project to send messages.</p>
                 )}
               </div>
               <div className="chat-panel-header-tabs" role="tablist" aria-label="Chat views">
@@ -165,7 +171,12 @@ export default function TerminalPage() {
             <Composer
               running={running}
               stopping={stopping}
-              disabled={stopping || start.isPending || running}
+              disabled={composerDisabled}
+              placeholder={
+                projectArchived
+                  ? 'Project archived — read-only'
+                  : undefined
+              }
               onSend={(q) => start.mutate(q)}
               onStop={() => stop.mutate()}
             />
