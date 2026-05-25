@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
+import { ArrowLeft, SlidersHorizontal, X } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -204,7 +204,7 @@ export default function TerminalPage() {
               <div className={`terminal-toast terminal-toast-${toast.kind}`} role="alert">
                 <span>{toast.message}</span>
                 <button type="button" className="terminal-toast-dismiss" onClick={clearToast} aria-label={t('terminal.dismissToast')}>
-                  ×
+                  <X size={16} aria-hidden />
                 </button>
               </div>
             )}
