@@ -1824,3 +1824,144 @@
 .context-truncated { color: var(--warning); font-size: 11px; }
 .kv.compact { font-size: 11px; margin-bottom: 4px; }
 .drawer-hint { font-size: 12px; padding: 8px 0; }
+
+/* Memory graph tab (Phase A) */
+.memory-graph-view-scroll {
+  padding: 16px 20px 24px;
+}
+
+.memory-graph-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 960px;
+}
+
+.memory-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--term-muted);
+  margin-bottom: 10px;
+}
+
+.memory-canvas-active,
+.memory-canvas-history,
+.memory-ref-panel,
+.memory-persona-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.memory-persona-meta {
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.memory-persona-md {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--term-fg);
+}
+
+.memory-persona-md h1,
+.memory-persona-md h2,
+.memory-persona-md h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+
+.memory-persona-md h1:first-child {
+  margin-top: 0;
+}
+
+.memory-persona-md p,
+.memory-persona-md ul {
+  margin: 0 0 8px;
+}
+
+.memory-persona-md ul {
+  padding-left: 18px;
+}
+
+.memory-canvas-meta {
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.mermaid-graph {
+  overflow-x: auto;
+  padding: 8px 0;
+}
+
+.mermaid-graph svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-node-clickable {
+  cursor: pointer;
+}
+
+.mermaid-fallback {
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--term-muted);
+}
+
+.memory-ref-label {
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.memory-ref-content {
+  margin: 0;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.memory-history-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+.memory-history-item:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.memory-history-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--term-fg);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.memory-history-header .spacer,
+.memory-history-header .muted {
+  margin-left: auto;
+}
+
+.memory-persona-card {
+  border-style: dashed;
+}

@@ -342,6 +342,7 @@ async def api_project_sessions_create(project_id: str, req: CreateSessionReq):
         s = session_create(name=req.name, project_id=project_id, metadata=req.metadata, manifest_path=req.manifest_path)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    _ensure_project_persona(project_id)
     event_create(s["id"], "session.created", {"name": s["name"], "project_id": project_id})
     return {"session": s}
 
@@ -413,6 +414,7 @@ async def api_sessions_create(req: CreateSessionReq):
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    _ensure_project_persona(req.project_id)
     event_create(s["id"], "session.created", {"name": s["name"], "project_id": req.project_id})
     return {"session": s}
 
@@ -502,6 +504,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
         }, status_code=409)
     # Save user message
     msg = message_create(session_id, "user", req.question)
+    _memory_pipeline_on_message(session_id, role="user")
     event_create(session_id, "message.user.created", {"message_id": msg["id"], "text": req.question})
     # Create task
     t = task_create(session_id, msg["id"])
@@ -1023,6 +1026,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             if full_response:
                 _emit_stream_completed(stream_mgr.current_stream_id)
                 message_create(session_id, "assistant", full_response, task_id=t["id"])
+                _memory_pipeline_on_message(session_id, role="assistant")
                 event_create(
                     session_id,
                     "message.assistant.completed",
@@ -1047,6 +1051,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                              task_id=t["id"], run_id=run["id"])
             # Complete
             task_update(t["id"], state="done", finished_at=int(time.time()))
+            _archive_task_canvas(t["id"])
             session_update(session_id, status="idle")
             if run: run_update(run["id"], state="done", finished_at=int(time.time()),
                               elapsed_ms=int((time.time() - run["started_at"]) * 1000))
@@ -1119,6 +1124,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                     pass
         except Exception as e:
             task_update(t["id"], state="error", error=str(e), finished_at=int(time.time()))
+            _archive_task_canvas(t["id"])
             session_update(session_id, status="error")
             if run: run_update(run["id"], state="error", error=str(e), finished_at=int(time.time()))
             if run:
@@ -2400,3 +2406,187 @@ async def api_vivado_run_script(request: Request):
     return {"ok": result.success, "exit_code": result.exit_code, "stdout": result.stdout[:5000],
             "stderr": result.stderr[:2000], "elapsed_sec": result.elapsed_sec, "error": result.error,
             "tool_output": tagged}
+
+
+# ── Memory (Phase A — task canvas) ────────────────────────────
+
+
+def _archive_task_canvas(task_id: str | None) -> None:
+    """Archive active task canvas on task completion (Phase A history tab)."""
+    if not task_id:
+        return
+    try:
+        from edagent_vivado.memory.canvas import archive_active_canvas_for_task
+
+        archive_active_canvas_for_task(task_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("archive task canvas failed for %s", task_id)
+
+
+def _ensure_project_persona(project_id: str | None) -> None:
+    """Phase D3: load latest project persona when a session starts."""
+    if not project_id:
+        return
+    try:
+        from edagent_vivado.memory.personas import ensure_project_persona_for_session
+
+        ensure_project_persona_for_session(project_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("ensure project persona failed for %s", project_id)
+
+
+def _memory_pipeline_on_message(session_id: str, *, role: str = "user") -> None:
+    """Fire L1 extraction pipeline after a persisted message (Phase B)."""
+    try:
+        from edagent_vivado.memory.pipeline import on_message as memory_on_message
+
+        sess = session_get(session_id)
+        memory_on_message(session_id, (sess or {}).get("project_id"), role=role)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("memory pipeline failed for session %s", session_id)
+
+
+@router.get("/memory/canvas/active")
+async def api_memory_canvas_active(task_id: str = Query(...)):
+    from edagent_vivado.memory.canvas import get_active_canvas
+
+    data = get_active_canvas(task_id)
+    if not data:
+        return {"mermaid": "graph TD\n", "version": 0, "node_count": 0, "nodes": []}
+    canvas = data["canvas"]
+    nodes = [
+        {
+            "node_id": n["node_id"],
+            "label": n.get("label") or "",
+            "ref_type": n.get("ref_type") or "",
+            "ref_id": n.get("ref_id") or "",
+        }
+        for n in data["nodes"]
+    ]
+    return {
+        "mermaid": data["mermaid"],
+        "version": canvas.get("version") or 1,
+        "node_count": canvas.get("node_count") or len(nodes),
+        "nodes": nodes,
+    }
+
+
+@router.get("/memory/canvas/history")
+async def api_memory_canvas_history(session_id: str = Query(...), limit: int = Query(3, ge=1, le=20)):
+    from edagent_vivado.memory.canvas import list_canvas_history
+
+    rows = list_canvas_history(session_id, limit=limit)
+    return {
+        "canvases": [
+            {
+                "id": r["id"],
+                "task_id": r["task_id"],
+                "session_id": r["session_id"],
+                "version": r.get("version") or 1,
+                "node_count": r.get("node_count") or 0,
+                "state": r.get("state") or "archived",
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+                "mermaid": r.get("mermaid") or "graph TD\n",
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/memory/refs/{node_id}")
+async def api_memory_ref(node_id: str):
+    from edagent_vivado.memory.refs import read_ref
+    from edagent_vivado.repository.store import canvas_get, canvas_node_ref_get_by_node_id
+
+    ref_row = canvas_node_ref_get_by_node_id(node_id)
+    if not ref_row:
+        raise HTTPException(404, "ref not found")
+    canvas = canvas_get(ref_row["canvas_id"]) or {}
+    session_id = str(canvas.get("session_id") or "")
+    content = read_ref(node_id, session_id=session_id) or ""
+    return {
+        "content": content,
+        "ref_type": ref_row.get("ref_type") or "",
+        "ref_id": ref_row.get("ref_id") or "",
+        "label": ref_row.get("label") or "",
+    }
+
+
+@router.get("/memory/atoms")
+async def api_memory_atoms(
+    project_id: str = Query(...),
+    atom_type: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+):
+    from edagent_vivado.memory.atoms import list_atoms_for_project
+
+    rows = list_atoms_for_project(project_id, atom_type=atom_type, limit=limit)
+    return {
+        "atoms": [
+            {
+                "id": r["id"],
+                "scope": r.get("scope") or "project",
+                "project_id": r.get("project_id") or "",
+                "atom_type": r.get("atom_type") or "",
+                "subject": r.get("subject") or "",
+                "predicate": r.get("predicate") or "",
+                "object": r.get("object") or "",
+                "confidence": r.get("confidence"),
+                "source_session_id": r.get("source_session_id") or "",
+                "created_at": r.get("created_at"),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.get("/memory/persona")
+async def api_memory_persona(project_id: str = Query(...)):
+    from edagent_vivado.memory.personas import get_project_persona
+
+    return get_project_persona(project_id)
+
+
+@router.get("/memory/scenarios")
+async def api_memory_scenarios(project_id: str = Query(...), limit: int = Query(20, ge=1, le=100)):
+    from edagent_vivado.memory.scenarios import list_scenarios_for_project
+
+    rows = list_scenarios_for_project(project_id, limit=limit)
+    return {
+        "scenarios": [
+            {
+                "id": r["id"],
+                "title": r.get("title") or "",
+                "trigger_pattern": r.get("trigger_pattern") or "",
+                "occurrence_count": r.get("occurrence_count") or 0,
+                "atom_ids": r.get("atom_ids") or [],
+                "updated_at": r.get("updated_at"),
+                "markdown": r.get("markdown") or "",
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/memory/rebuild")
+async def api_memory_rebuild(
+    project_id: str = Query(...),
+    level: str = Query("all"),
+):
+    from edagent_vivado.memory.personas import build_project_persona
+    from edagent_vivado.memory.scenarios import aggregate_scenarios
+
+    result: dict = {"project_id": project_id, "level": level}
+    if level in ("scenario", "scenarios", "l2", "all"):
+        result["scenarios"] = len(aggregate_scenarios(project_id, min_interval_seconds=0))
+    if level in ("persona", "l3", "all"):
+        row = build_project_persona(project_id, force=True)
+        result["persona_version"] = (row or {}).get("version")
+        result["persona_built"] = row is not None
+    return result

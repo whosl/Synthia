@@ -200,7 +200,7 @@ def reindex_all(project_id: str = "uart_demo") -> dict[str, Any]:
 def search_semantic_kb(
     query: str,
     top_k: int = 6,
-    min_score: float = 0.15,
+    min_score: float | None = None,
     scope: str = "both",
     project_id: str = "uart_demo",
     session_id: str = "",

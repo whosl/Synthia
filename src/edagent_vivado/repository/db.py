@@ -382,6 +382,91 @@ CREATE TABLE IF NOT EXISTS settings (
     value_json TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- Task canvas (short-term memory, Phase A)
+CREATE TABLE IF NOT EXISTS task_canvases (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    mermaid_artifact_id TEXT NOT NULL,
+    node_count INTEGER NOT NULL DEFAULT 0,
+    token_count INTEGER,
+    version INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS canvas_node_refs (
+    id TEXT PRIMARY KEY,
+    canvas_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    ref_type TEXT NOT NULL,
+    ref_id TEXT NOT NULL,
+    label TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE(canvas_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_canvas_task ON task_canvases(task_id, state);
+CREATE INDEX IF NOT EXISTS idx_canvas_session ON task_canvases(session_id, state);
+CREATE INDEX IF NOT EXISTS idx_canvas_node_refs_node_id ON canvas_node_refs(node_id);
+
+-- L1 memory atoms (Phase B)
+CREATE TABLE IF NOT EXISTS memory_atoms (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL DEFAULT 'project',
+    project_id TEXT,
+    atom_type TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    predicate TEXT,
+    object TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.7,
+    source_session_id TEXT,
+    source_message_id TEXT,
+    source_run_id TEXT,
+    evidence_artifact_id TEXT,
+    superseded_by TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_atoms_project ON memory_atoms(project_id, atom_type);
+CREATE INDEX IF NOT EXISTS idx_memory_atoms_session ON memory_atoms(source_session_id, created_at);
+
+-- L2 scenarios + L3 personas (Phase C)
+CREATE TABLE IF NOT EXISTS memory_scenarios (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL DEFAULT 'project',
+    project_id TEXT,
+    title TEXT NOT NULL,
+    summary_md_path TEXT NOT NULL,
+    atom_ids_json TEXT NOT NULL,
+    trigger_pattern TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    last_seen_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS memory_personas (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    project_id TEXT,
+    persona_md_path TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    atom_count_at_build INTEGER,
+    scenario_count_at_build INTEGER,
+    built_at INTEGER NOT NULL,
+    superseded_by TEXT,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_scenarios_project ON memory_scenarios(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_personas_project_version ON memory_personas(scope, project_id, version);
 """
 
 

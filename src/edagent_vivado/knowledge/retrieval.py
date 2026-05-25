@@ -1,8 +1,9 @@
-"""Unified knowledge retrieval with audit records — Phase 2A."""
+"""Unified knowledge retrieval with audit records — Phase 2A / Phase E RRF."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -14,6 +15,9 @@ from edagent_vivado.repository.store import (
     retrieval_audit_create,
     retrieval_audit_item_create,
 )
+
+DEFAULT_RRF_K = 60
+RRF_DEFAULT_MIN_SCORE = 0.014
 
 
 def rewrite_query(query: str) -> str:
@@ -39,21 +43,63 @@ def extract_entities(query: str) -> dict[str, Any]:
     }
 
 
+def _rrf_k() -> int:
+    try:
+        return max(1, int(os.environ.get("EDAGENT_RRF_K", str(DEFAULT_RRF_K))))
+    except ValueError:
+        return DEFAULT_RRF_K
+
+
+def _rank_by_score(scores: dict[str, float]) -> dict[str, int]:
+    """Map chunk_id → 1-based rank (higher score = lower rank number)."""
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return {chunk_id: idx + 1 for idx, (chunk_id, _) in enumerate(ordered)}
+
+
+def fuse_rrf(
+    chunk_ids: set[str],
+    *,
+    keyword_scores: dict[str, float],
+    vector_scores: dict[str, float],
+    authority_scores: dict[str, float] | None = None,
+    k: int | None = None,
+) -> dict[str, float]:
+    """Reciprocal Rank Fusion across keyword, vector, and authority rank lists."""
+    rrf_k = k if k is not None else _rrf_k()
+    kw_ranks = _rank_by_score({cid: keyword_scores.get(cid, 0.0) for cid in chunk_ids})
+    vec_ranks = _rank_by_score({cid: vector_scores.get(cid, 0.0) for cid in chunk_ids})
+    auth = authority_scores or {}
+    auth_ranks = _rank_by_score({cid: auth.get(cid, 0.0) for cid in chunk_ids}) if auth else {}
+
+    fused: dict[str, float] = {}
+    for cid in chunk_ids:
+        score = 0.0
+        if cid in kw_ranks and keyword_scores.get(cid, 0.0) > 0:
+            score += 1.0 / (rrf_k + kw_ranks[cid])
+        if cid in vec_ranks and vector_scores.get(cid, 0.0) > 0:
+            score += 1.0 / (rrf_k + vec_ranks[cid])
+        if auth_ranks and auth.get(cid, 0.0) > 0:
+            score += 0.5 / (rrf_k + auth_ranks[cid])
+        fused[cid] = score
+    return fused
+
+
 def hybrid_search(
     query: str,
     *,
     scope: str = "global",
     project_id: str = "",
     top_k: int = 8,
-    min_score: float = 0.15,
+    min_score: float | None = None,
     session_id: str = "",
     task_id: str = "",
     run_id: str = "",
     persist_audit: bool = True,
 ) -> dict[str, Any]:
-    """Keyword + vector hybrid search with retrieval audit."""
+    """Keyword + vector hybrid search with RRF fusion and retrieval audit."""
     from edagent_vivado.repository.db import get_db
 
+    score_floor = RRF_DEFAULT_MIN_SCORE if min_score is None else min_score
     rewritten = rewrite_query(query)
     db = get_db()
     n = db.execute("SELECT COUNT(*) AS n FROM knowledge_chunks").fetchone()
@@ -83,20 +129,47 @@ def hybrid_search(
 
     vector_hits = {h.chunk_id: h.vector_score for h in vstore.search(rewritten, top_k=top_k * 2, provider=provider)}
 
-    scored: list[dict[str, Any]] = []
+    keyword_scores: dict[str, float] = {}
+    vector_scores: dict[str, float] = {}
+    authority_scores: dict[str, float] = {}
+    row_by_id: dict[str, dict[str, Any]] = {}
+
     for row in rows:
         r = dict(row)
         cid = r["id"]
         content = r.get("content") or ""
         title = r.get("title") or ""
         c_tokens = tokenize(content + " " + title)
-        kw = len(q_tokens & c_tokens) / max(len(q_tokens), 1) if q_tokens else 0
-        vec = vector_hits.get(cid, 0.0)
+        kw = len(q_tokens & c_tokens) / max(len(q_tokens), 1) if q_tokens else 0.0
+        vec = float(vector_hits.get(cid, 0.0))
         authority = float(r.get("authority_score") or 0.7)
-        trust = float(r.get("trust_score") or 0.7)
-        final = 0.45 * kw + 0.45 * vec + 0.1 * authority
-        if final < min_score:
+        keyword_scores[cid] = kw
+        vector_scores[cid] = vec
+        authority_scores[cid] = authority
+        row_by_id[cid] = r
+
+    candidate_ids = {
+        cid
+        for cid in row_by_id
+        if keyword_scores.get(cid, 0.0) > 0 or vector_scores.get(cid, 0.0) > 0
+    }
+    fused = fuse_rrf(
+        candidate_ids,
+        keyword_scores=keyword_scores,
+        vector_scores=vector_scores,
+        authority_scores=authority_scores,
+    )
+
+    scored: list[dict[str, Any]] = []
+    for cid, final in fused.items():
+        if final < score_floor:
             continue
+        r = row_by_id[cid]
+        content = r.get("content") or ""
+        title = r.get("title") or ""
+        kw = keyword_scores[cid]
+        vec = vector_scores[cid]
+        authority = authority_scores[cid]
         scored.append({
             "chunk_id": cid,
             "source_id": r.get("source_id", ""),
@@ -105,9 +178,9 @@ def hybrid_search(
             "excerpt": content[:320].replace("\n", " "),
             "vector_score": round(vec, 3),
             "keyword_score": round(kw, 3),
-            "final_score": round(final, 3),
+            "final_score": round(final, 4),
             "authority_score": authority,
-            "trust_score": trust,
+            "trust_score": float(r.get("trust_score") or 0.7),
             "scope": r.get("scope", "global"),
         })
 
@@ -129,7 +202,7 @@ def hybrid_search(
             rejected_count=max(0, len(scored) - len(results)),
             token_budget=0,
             token_used=0,
-            metadata={"phase": "2a", "vector_backend": "sqlite-json", "embedding": provider.model},
+            metadata={"phase": "2e", "vector_backend": "sqlite-json", "embedding": provider.model, "retrieval": "rrf", "rrf_k": _rrf_k()},
         )
         audit_id = audit["id"]
         for hit in results:

@@ -1113,3 +1113,355 @@ def vivado_command_list(
     q += " ORDER BY started_at DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in get_db().execute(q, params)]
+
+# ── Task canvases (Phase A memory) ───────────────────────────
+
+def canvas_create(
+    task_id: str,
+    session_id: str,
+    mermaid_artifact_id: str,
+    *,
+    node_count: int = 0,
+    token_count: int | None = None,
+    version: int = 1,
+    state: str = "active",
+    metadata: dict | None = None,
+) -> dict:
+    cid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO task_canvases(
+          id,task_id,session_id,mermaid_artifact_id,node_count,token_count,version,state,created_at,updated_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            cid,
+            task_id,
+            session_id,
+            mermaid_artifact_id,
+            node_count,
+            token_count,
+            version,
+            state,
+            now,
+            now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM task_canvases WHERE id=?", (cid,)).fetchone())
+
+
+def canvas_update(canvas_id: str, **fields) -> dict | None:
+    if not fields:
+        return canvas_get(canvas_id)
+    if "metadata" in fields and "metadata_json" not in fields:
+        fields["metadata_json"] = json.dumps(fields.pop("metadata"), ensure_ascii=False)
+    fields["updated_at"] = _now()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [canvas_id]
+    get_db().execute(f"UPDATE task_canvases SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return canvas_get(canvas_id)
+
+
+def canvas_get(canvas_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM task_canvases WHERE id=?", (canvas_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def canvas_get_active_for_task(task_id: str) -> dict | None:
+    row = get_db().execute(
+        "SELECT * FROM task_canvases WHERE task_id=? AND state='active' ORDER BY updated_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def canvas_list_for_session(session_id: str, limit: int = 3, state: str = "archived") -> list[dict]:
+    return [
+        dict(r)
+        for r in get_db().execute(
+            "SELECT * FROM task_canvases WHERE session_id=? AND state=? ORDER BY updated_at DESC LIMIT ?",
+            (session_id, state, limit),
+        )
+    ]
+
+
+def canvas_node_ref_create(
+    canvas_id: str,
+    node_id: str,
+    ref_type: str,
+    ref_id: str,
+    *,
+    label: str = "",
+) -> dict:
+    rid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO canvas_node_refs(id,canvas_id,node_id,ref_type,ref_id,label,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (rid, canvas_id, node_id, ref_type, ref_id, label or None, now),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM canvas_node_refs WHERE id=?", (rid,)).fetchone())
+
+
+def canvas_node_ref_list(canvas_id: str) -> list[dict]:
+    return [
+        dict(r)
+        for r in get_db().execute(
+            "SELECT * FROM canvas_node_refs WHERE canvas_id=? ORDER BY created_at ASC",
+            (canvas_id,),
+        )
+    ]
+
+
+def canvas_node_ref_get_by_node_id(node_id: str) -> dict | None:
+    row = get_db().execute(
+        "SELECT * FROM canvas_node_refs WHERE node_id=? ORDER BY created_at DESC LIMIT 1",
+        (node_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# ── Memory atoms (Phase B — L1) ──────────────────────────────
+
+def atom_create(
+    *,
+    scope: str = "project",
+    project_id: str = "",
+    atom_type: str,
+    subject: str,
+    object: str,
+    predicate: str = "",
+    confidence: float = 0.7,
+    source_session_id: str = "",
+    source_message_id: str = "",
+    source_run_id: str = "",
+    evidence_artifact_id: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    aid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO memory_atoms(
+          id,scope,project_id,atom_type,subject,predicate,object,confidence,
+          source_session_id,source_message_id,source_run_id,evidence_artifact_id,
+          created_at,updated_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            aid,
+            scope,
+            project_id or None,
+            atom_type,
+            subject,
+            predicate or None,
+            object,
+            confidence,
+            source_session_id or None,
+            source_message_id or None,
+            source_run_id or None,
+            evidence_artifact_id or None,
+            now,
+            now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM memory_atoms WHERE id=?", (aid,)).fetchone())
+
+
+def atom_get(atom_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM memory_atoms WHERE id=?", (atom_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def atom_list(
+    project_id: str = "",
+    *,
+    scope: str = "",
+    atom_type: str = "",
+    session_id: str = "",
+    limit: int = 50,
+) -> list[dict]:
+    q = "SELECT * FROM memory_atoms WHERE superseded_by IS NULL"
+    params: list = []
+    if project_id:
+        q += " AND project_id=?"
+        params.append(project_id)
+    if scope:
+        q += " AND scope=?"
+        params.append(scope)
+    if atom_type:
+        q += " AND atom_type=?"
+        params.append(atom_type)
+    if session_id:
+        q += " AND source_session_id=?"
+        params.append(session_id)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]
+
+
+def atom_count(project_id: str = "", *, atom_type: str = "") -> int:
+    q = "SELECT COUNT(*) AS n FROM memory_atoms WHERE superseded_by IS NULL"
+    params: list = []
+    if project_id:
+        q += " AND project_id=?"
+        params.append(project_id)
+    if atom_type:
+        q += " AND atom_type=?"
+        params.append(atom_type)
+    row = get_db().execute(q, params).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def atom_find_duplicate(
+    project_id: str,
+    subject: str,
+    predicate: str,
+    object: str,
+) -> dict | None:
+    row = get_db().execute(
+        """SELECT * FROM memory_atoms
+           WHERE project_id=? AND subject=? AND IFNULL(predicate,'')=IFNULL(?,'')
+             AND object=? AND superseded_by IS NULL
+           ORDER BY created_at DESC LIMIT 1""",
+        (project_id, subject, predicate or "", object),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# ── Memory scenarios (Phase C — L2) ──────────────────────────
+
+def scenario_create(
+    *,
+    project_id: str,
+    title: str,
+    summary_md_path: str,
+    atom_ids: list[str],
+    scope: str = "project",
+    trigger_pattern: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    sid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO memory_scenarios(
+          id,scope,project_id,title,summary_md_path,atom_ids_json,trigger_pattern,
+          occurrence_count,last_seen_at,created_at,updated_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            sid,
+            scope,
+            project_id or None,
+            title,
+            summary_md_path,
+            json.dumps(atom_ids, ensure_ascii=False),
+            trigger_pattern or None,
+            1,
+            now,
+            now,
+            now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM memory_scenarios WHERE id=?", (sid,)).fetchone())
+
+
+def scenario_update(scenario_id: str, **fields) -> dict | None:
+    if not fields:
+        return scenario_get(scenario_id)
+    if "atom_ids" in fields:
+        fields["atom_ids_json"] = json.dumps(fields.pop("atom_ids"), ensure_ascii=False)
+    if "metadata" in fields:
+        fields["metadata_json"] = json.dumps(fields.pop("metadata"), ensure_ascii=False)
+    fields["updated_at"] = _now()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [scenario_id]
+    get_db().execute(f"UPDATE memory_scenarios SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return scenario_get(scenario_id)
+
+
+def scenario_get(scenario_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM memory_scenarios WHERE id=?", (scenario_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def scenario_find_by_title(project_id: str, title: str) -> dict | None:
+    row = get_db().execute(
+        "SELECT * FROM memory_scenarios WHERE project_id=? AND title=? ORDER BY updated_at DESC LIMIT 1",
+        (project_id, title),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def scenario_list(project_id: str = "", *, limit: int = 50) -> list[dict]:
+    q = "SELECT * FROM memory_scenarios WHERE 1=1"
+    params: list = []
+    if project_id:
+        q += " AND project_id=?"
+        params.append(project_id)
+    q += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params)]
+
+
+# ── Memory personas (Phase C — L3) ───────────────────────────
+
+def persona_create(
+    *,
+    scope: str,
+    project_id: str,
+    persona_md_path: str,
+    version: int = 1,
+    atom_count_at_build: int = 0,
+    scenario_count_at_build: int = 0,
+    metadata: dict | None = None,
+) -> dict:
+    pid = _uid()
+    now = _now()
+    db = get_db()
+    db.execute(
+        """INSERT INTO memory_personas(
+          id,scope,project_id,persona_md_path,version,atom_count_at_build,
+          scenario_count_at_build,built_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            pid,
+            scope,
+            project_id or None,
+            persona_md_path,
+            version,
+            atom_count_at_build,
+            scenario_count_at_build,
+            now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM memory_personas WHERE id=?", (pid,)).fetchone())
+
+
+def persona_latest(project_id: str, *, scope: str = "project") -> dict | None:
+    row = get_db().execute(
+        """SELECT * FROM memory_personas
+           WHERE scope=? AND project_id=? AND superseded_by IS NULL
+           ORDER BY version DESC LIMIT 1""",
+        (scope, project_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def persona_next_version(project_id: str, *, scope: str = "project") -> int:
+    row = get_db().execute(
+        "SELECT MAX(version) AS v FROM memory_personas WHERE scope=? AND project_id=?",
+        (scope, project_id),
+    ).fetchone()
+    return int(row["v"] or 0) + 1 if row else 1

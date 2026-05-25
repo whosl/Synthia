@@ -145,10 +145,89 @@ def _semantic_kb_context(
         return "", []
 
 
+def _load_project_persona(project_id: str) -> str:
+    if not project_id:
+        return ""
+    try:
+        from edagent_vivado.memory.personas import load_project_persona_text
+
+        return load_project_persona_text(project_id)
+    except Exception:
+        return ""
+
+
+def _load_task_canvas(task_id: str) -> str:
+    if not task_id:
+        return ""
+    try:
+        from edagent_vivado.memory.canvas import build_canvas_for_prompt
+
+        return build_canvas_for_prompt(task_id)
+    except Exception:
+        return ""
+
+
+# Phase E — context offload keep-ratios (1 - offload_ratio)
+OFFLOAD_KEEP_MILD = 0.5          # offload 50%
+OFFLOAD_KEEP_AGGRESSIVE = 0.15   # offload 85%
+
+
+def _offload_keep_ratios(mode: str) -> list[float]:
+    """Return keep-ratio phases tried in order when fitting context items."""
+    mode = (mode or "auto").lower()
+    if mode == "off":
+        return [1.0]
+    if mode == "mild":
+        return [1.0, OFFLOAD_KEEP_MILD]
+    if mode == "aggressive":
+        return [1.0, OFFLOAD_KEEP_MILD, OFFLOAD_KEEP_AGGRESSIVE]
+    # auto: try full → mild → aggressive before excluding
+    return [1.0, OFFLOAD_KEEP_MILD, OFFLOAD_KEEP_AGGRESSIVE]
+
+
+def _fit_context_item(
+    item: ContextItem,
+    *,
+    running_tokens: int,
+    budget: int,
+    keep_ratios: list[float],
+) -> tuple[bool, int]:
+    """Try to include item at full or offloaded size within token budget."""
+    for ratio in keep_ratios:
+        if ratio >= 1.0:
+            content = item.content
+            reason = ""
+        else:
+            max_chars = max(48, int(len(item.content) * ratio))
+            content = compact_text(item.content, max_chars)
+            if ratio <= OFFLOAD_KEEP_AGGRESSIVE + 1e-9:
+                reason = "offload_aggressive"
+            else:
+                reason = "offload_mild"
+
+        tokens = estimate_tokens(content)
+        if running_tokens + tokens > budget:
+            continue
+
+        if ratio < 1.0:
+            item.content = content
+            item.truncation_reason = reason
+        return True, tokens
+
+    return False, 0
+
+
 class AgentContextBuilder:
-    def __init__(self, max_context_tokens: int | None = None, recent_message_limit: int | None = None):
+    def __init__(
+        self,
+        max_context_tokens: int | None = None,
+        recent_message_limit: int | None = None,
+        offload_mode: str | None = None,
+    ):
         self.max_context_tokens = max_context_tokens or int(os.environ.get("EDAGENT_MAX_CONTEXT_TOKENS", "64000"))
         self.recent_message_limit = recent_message_limit or int(os.environ.get("EDAGENT_RECENT_MESSAGE_LIMIT", "20"))
+        self.offload_mode = offload_mode or os.environ.get("EDAGENT_CONTEXT_OFFLOAD", "auto")
+        self._offload_keep_ratios = _offload_keep_ratios(self.offload_mode)
 
     def build(
         self,
@@ -190,6 +269,35 @@ class AgentContextBuilder:
                 )
             )
 
+        kb_project_id = str(snapshot.get("project_id") or (session_row or {}).get("project_id") or "")
+        persona_block = _load_project_persona(kb_project_id)
+        if persona_block:
+            items.append(
+                ContextItem(
+                    "project_persona",
+                    "Project Memory (Persona)",
+                    persona_block,
+                    priority=2,
+                    source_id=kb_project_id,
+                    source_type="memory_persona",
+                    trust_score=0.85,
+                )
+            )
+
+        canvas_block = _load_task_canvas(task_id)
+        if canvas_block:
+            items.append(
+                ContextItem(
+                    "task_canvas",
+                    "Task Canvas",
+                    canvas_block,
+                    priority=1,
+                    source_id=task_id,
+                    source_type="task_canvas",
+                    trust_score=0.9,
+                )
+            )
+
         mem = memory_latest(session_id)
         if mem and mem.get("summary"):
             items.append(ContextItem("memory", "Session Memory Summary", mem["summary"], priority=4, source_id=mem["id"], source_type="memory_snapshot", trust_score=0.75))
@@ -216,7 +324,6 @@ class AgentContextBuilder:
         if tool_lines:
             items.append(ContextItem("tool_summary", "Relevant Tool Summaries", "\n".join(tool_lines), priority=7, trust_score=0.72))
 
-        kb_project_id = str(snapshot.get("project_id") or (session_row or {}).get("project_id") or "")
         semantic_text, semantic_hits = _semantic_kb_context(
             question,
             project_id=kb_project_id,
@@ -228,13 +335,19 @@ class AgentContextBuilder:
         if semantic_text:
             items.append(ContextItem("semantic_kb", "Retrieved Semantic Knowledge", semantic_text, priority=8, source_type="semantic_kb", authority_score=0.7, trust_score=0.65, relevance_score=0.6))
 
-        # Token budget selection. Phase 2 uses priority ordering and truncates low-priority items first.
+        # Token budget selection: priority order; offload before hard exclusion (Phase E).
         selected: list[ContextItem] = []
         running_tokens = estimate_tokens(question)
         for item in sorted(items, key=lambda x: x.priority):
-            if running_tokens + item.token_count <= self.max_context_tokens:
+            fitted, tokens = _fit_context_item(
+                item,
+                running_tokens=running_tokens,
+                budget=self.max_context_tokens,
+                keep_ratios=self._offload_keep_ratios,
+            )
+            if fitted:
                 selected.append(item)
-                running_tokens += item.token_count
+                running_tokens += tokens
             else:
                 item.included = False
                 item.truncation_reason = "max_context_tokens"
@@ -261,7 +374,7 @@ class AgentContextBuilder:
                 rejected_count=0,
                 token_budget=self.max_context_tokens,
                 token_used=token_counts["total"],
-                metadata={"phase": "2a", "vector_backend": "sqlite-json", "retrieval": "hybrid"},
+                metadata={"phase": "2e", "vector_backend": "sqlite-json", "retrieval": "rrf", "offload_mode": self.offload_mode},
             )
             for hit in semantic_hits:
                 retrieval_audit_item_create(
@@ -309,7 +422,7 @@ class AgentContextBuilder:
                 max_context_tokens=self.max_context_tokens,
                 token_counts=token_counts,
                 truncated=truncated,
-                metadata={"retrieval_audit_id": audit["id"], "phase": "2"},
+                metadata={"retrieval_audit_id": audit["id"], "phase": "2e", "offload_mode": self.offload_mode},
             )
             for item in selected:
                 context_package_item_create(

@@ -524,6 +524,21 @@ def approve_candidate(
         "project_id": project_id,
         "source_candidate_id": cand["id"],
     })
+
+    if project_id:
+        try:
+            from edagent_vivado.memory.evolution_link import record_direct_approval
+
+            record_direct_approval(
+                candidate_id=cand["id"],
+                overlay_id=overlay["id"],
+                project_id=project_id,
+                surface=surface,
+                source_session_id=sid,
+            )
+        except Exception:  # pragma: no cover
+            logger.debug("memory config atom from approval failed", exc_info=True)
+
     return updated
 
 

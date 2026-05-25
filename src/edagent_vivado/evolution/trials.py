@@ -325,6 +325,15 @@ def _apply_decision(
             )
         except Exception:  # pragma: no cover
             logger.debug("trial.completed event emit failed", exc_info=True)
+
+    if decision == "variant_wins":
+        try:
+            from edagent_vivado.memory.evolution_link import record_trial_outcome
+
+            record_trial_outcome(trial_id, decision)
+        except Exception:  # pragma: no cover
+            logger.debug("memory config atom from trial failed", exc_info=True)
+
     return trial_get(trial_id)
 
 

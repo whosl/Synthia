@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-type TerminalView = 'chat' | 'timeline'
+type TerminalView = 'chat' | 'timeline' | 'memory'
 export type RightPanelTab = 'run' | 'artifacts' | 'vivado' | 'debug'
 
 interface TerminalStore {

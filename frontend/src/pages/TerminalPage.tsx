@@ -13,6 +13,7 @@ import { TerminalRightPanel } from '../components/terminal/TerminalRightPanel'
 import { ChatEnterProvider } from '../components/terminal/ChatEnterAnimation'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
 import { TimelineView } from '../components/terminal/TimelineView'
+import { MemoryGraphView } from '../components/terminal/MemoryGraphView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
 import { isProjectArchived } from '../lib/projectStatus'
 import { useStickToBottomScroll } from '../lib/useStickToBottomScroll'
@@ -136,6 +137,15 @@ export default function TerminalPage() {
                 >
                   {t('terminal.timelineTab')}
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={view === 'memory'}
+                  className={`tab ${view === 'memory' ? 'active' : ''}`}
+                  onClick={() => setView('memory')}
+                >
+                  {t('terminal.memoryTab')}
+                </button>
               </div>
               <div className="chat-panel-header-actions">
                 <Button
@@ -158,7 +168,9 @@ export default function TerminalPage() {
               </header>
             </div>
             <div
-              className={`chat-panel-scroll${view === 'chat' ? ' message-list' : ' timeline-view'}`}
+              className={`chat-panel-scroll${
+                view === 'chat' ? ' message-list' : view === 'memory' ? ' memory-graph-view-scroll' : ' timeline-view'
+              }`}
               ref={scrollRef}
               onScroll={onChatScroll}
             >
@@ -170,6 +182,16 @@ export default function TerminalPage() {
                     onInteractionRespond={handleInteractionRespond}
                   />
                 </ChatEnterProvider>
+              ) : view === 'memory' ? (
+                <MemoryGraphView
+                  sessionId={sessionId}
+                  taskId={activeTask?.id}
+                  projectId={projectId}
+                  onOpenArtifacts={() => {
+                    setRightPanelTab('artifacts')
+                    setRightPanelOpen(true)
+                  }}
+                />
               ) : (
                 <TimelineView items={timeline.auditLog} />
               )}
