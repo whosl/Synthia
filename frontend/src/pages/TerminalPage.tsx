@@ -4,6 +4,7 @@ import { useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getProject } from '../api/projects'
+import { ApiError } from '../api/client'
 import { getSession } from '../api/sessions'
 import { stopSessionTask } from '../api/tasks'
 import { request } from '../api/client'
@@ -32,6 +33,9 @@ export default function TerminalPage() {
   const setRightPanelOpen = useTerminalStore((s) => s.setRightPanelOpen)
   const rightPanelTab = useTerminalStore((s) => s.rightPanelTab)
   const setRightPanelTab = useTerminalStore((s) => s.setRightPanelTab)
+  const toast = useTerminalStore((s) => s.toast)
+  const showToast = useTerminalStore((s) => s.showToast)
+  const clearToast = useTerminalStore((s) => s.clearToast)
   const streamStatus = useStreamStore((s) => s.statusBySession[sessionId] || 'idle')
 
   const {
@@ -196,6 +200,14 @@ export default function TerminalPage() {
                 <TimelineView items={timeline.auditLog} />
               )}
             </div>
+            {toast && (
+              <div className={`terminal-toast terminal-toast-${toast.kind}`} role="alert">
+                <span>{toast.message}</span>
+                <button type="button" className="terminal-toast-dismiss" onClick={clearToast} aria-label={t('terminal.dismissToast')}>
+                  ×
+                </button>
+              </div>
+            )}
             <Composer
               running={running}
               stopping={stopping}
@@ -208,7 +220,16 @@ export default function TerminalPage() {
               }
               onSend={(q) => {
                 pinToBottom()
-                start.mutate(q)
+                start.mutate(q, {
+                  onError: (err) => {
+                    if (err instanceof ApiError && err.status === 409) {
+                      const body = err.body && typeof err.body === 'object' ? err.body : null
+                      if (body?.error === 'session_task_running') {
+                        showToast(t('terminal.taskAlreadyRunning'), 'error')
+                      }
+                    }
+                  },
+                })
               }}
               onStop={() => stop.mutate()}
             />

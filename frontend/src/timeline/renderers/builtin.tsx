@@ -36,6 +36,7 @@ function UserEntryRenderer({ entry }: TimelineRenderContext) {
 function AssistantTextRenderer({ entry }: TimelineRenderContext) {
   const { t } = useTranslation()
   const p = entry.payload as AssistantTextPayload
+  const showEmpty = Boolean(p.emptyTurn) || (!p.partial && !p.text.trim())
   return (
     <div className="assistant-stack">
       <div className="message-meta assistant-meta">
@@ -46,6 +47,10 @@ function AssistantTextRenderer({ entry }: TimelineRenderContext) {
       {p.text.trim() ? (
         <div className="message-bubble assistant-text-bubble">
           <Markdown text={p.text} />
+        </div>
+      ) : showEmpty ? (
+        <div className="message-bubble assistant-text-bubble assistant-empty-turn muted">
+          {t('terminal.emptyTurn')}
         </div>
       ) : null}
     </div>

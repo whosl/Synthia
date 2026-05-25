@@ -119,7 +119,7 @@ export function isWorkPhaseComplete(
   return !collectWorkTools(workEntries).some((t) => t.state === 'running')
 }
 
-function groupTurnAfterUser(slice: TimelineEntry[]): ChatDisplayItem[] {
+function groupTurnAfterUser(slice: TimelineEntry[], userKey: string): ChatDisplayItem[] {
   if (!slice.length) return []
 
   const assistants = slice.filter((e) => e.kind === 'assistant_text')
@@ -134,7 +134,7 @@ function groupTurnAfterUser(slice: TimelineEntry[]): ChatDisplayItem[] {
     if (isWorkPhaseComplete(workEntries, finalEntry)) {
       out.push({
         type: 'work_group',
-        key: `work:${workEntries[0]!.key}`,
+        key: `work:${userKey}`,
         members: workEntries,
         finalEntry,
       })
@@ -170,7 +170,7 @@ export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
     out.push({ type: 'entry', key: entry.key, entry })
     i++
     const { slice, next } = sliceUntilNextUser(entries, i)
-    out.push(...groupTurnAfterUser(slice))
+    out.push(...groupTurnAfterUser(slice, entry.key))
     i = next
   }
 

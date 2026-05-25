@@ -164,9 +164,48 @@ export function handleMessageAssistantDelta(ctx: TimelineHandlerContext): Sessio
 export function handleMessageAssistantCompleted(ctx: TimelineHandlerContext): SessionTimelineState {
   const { event, payload, taskId, state: next } = ctx
   const streamId = taskId ? resolveStreamIdForCompletion(next, event, taskId) : ''
+  const isEmpty = Boolean(payload.empty)
   let state = next
-  if (streamId) state = completeAssistantStream(state, streamId)
-  pushAudit(state, event, 'Synthia response completed', streamId || String(payload.text || '').slice(0, 80), 'done')
+  if (streamId) {
+    const key = assistantEntryKey(streamId)
+    if (state.indexByKey[key] !== undefined) {
+      state = completeAssistantStream(state, streamId)
+      if (isEmpty) {
+        state = updateEntry(state, key, (e) => {
+          const p = e.payload as AssistantTextPayload
+          return {
+            ...e,
+            payload: { ...p, partial: false, emptyTurn: true },
+          }
+        })
+      }
+    } else if (isEmpty && taskId) {
+      const entry: TimelineEntry = {
+        key,
+        id: key,
+        seq: event.seq || state.lastSeq,
+        kind: 'assistant_text',
+        taskId,
+        createdAt: event.created_at,
+        payload: {
+          streamId,
+          text: '',
+          partial: false,
+          emptyTurn: true,
+        } satisfies AssistantTextPayload,
+      }
+      state = insertEntry(state, entry)
+    } else {
+      state = completeAssistantStream(state, streamId)
+    }
+  }
+  pushAudit(
+    state,
+    event,
+    isEmpty ? 'Synthia response (tools only)' : 'Synthia response completed',
+    streamId || String(payload.text || '').slice(0, 80),
+    'done',
+  )
   return state
 }
 

@@ -19,6 +19,8 @@ export interface AssistantTextPayload {
   text: string
   partial?: boolean
   stopped?: boolean
+  /** Task finished with tools only — no visible assistant prose */
+  emptyTurn?: boolean
 }
 
 export interface ReasoningEntryPayload {

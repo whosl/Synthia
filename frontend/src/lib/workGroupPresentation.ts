@@ -69,5 +69,6 @@ export function formatWorkGroupSummaryLine(summary: WorkGroupSummary): string {
 export function isAssistantFinalComplete(entry: TimelineEntry | null | undefined): boolean {
   if (!entry || entry.kind !== 'assistant_text') return false
   const p = entry.payload as AssistantTextPayload
+  if (p.emptyTurn) return true
   return !p.partial
 }

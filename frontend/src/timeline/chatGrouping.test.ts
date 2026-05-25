@@ -78,7 +78,28 @@ describe('groupChatEntries', () => {
     expect(items[1]?.type).toBe('work_group')
     expect(items[2]?.type).toBe('entry')
     if (items[1]?.type === 'work_group') {
+      expect(items[1].key).toBe('work:user:1')
       expect(items[1].members).toHaveLength(2)
+    }
+  })
+
+  it('groups tool-only turn with empty assistant placeholder', () => {
+    const items = groupChatEntries([
+      entry('user:1', 'user', { text: 'run synth', messageId: 'm1' }),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'run_vivado_synth_tool', state: 'completed' }),
+      entry('text:empty', 'assistant_text', {
+        streamId: 's-empty',
+        text: '',
+        partial: false,
+        emptyTurn: true,
+      } satisfies AssistantTextPayload),
+    ])
+    expect(items).toHaveLength(3)
+    expect(items[0]?.type).toBe('entry')
+    expect(items[1]?.type).toBe('work_group')
+    expect(items[2]?.type).toBe('entry')
+    if (items[1]?.type === 'work_group') {
+      expect(items[1].key).toBe('work:user:1')
     }
   })
 

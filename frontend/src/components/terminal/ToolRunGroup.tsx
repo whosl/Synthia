@@ -164,11 +164,14 @@ function ToolRunBatchSegment({
       {showSummary && (
         <button
           type="button"
-          className={`tool-run-summary${expanded ? ' expanded' : ''}`}
+          className={`tool-run-summary${expanded ? ' expanded' : ''}${forceExpanded ? ' force-expanded' : ''}`}
           onClick={() => {
             if (!forceExpanded) toggle(segmentKey, true)
           }}
           aria-expanded={expanded}
+          aria-disabled={forceExpanded || undefined}
+          disabled={forceExpanded}
+          title={forceExpanded ? undefined : undefined}
         >
           <ChevronRight size={14} className="tool-run-summary-chevron" />
           <span>{summaryLine}</span>

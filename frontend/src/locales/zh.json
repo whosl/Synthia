@@ -216,6 +216,9 @@
     "you": "你",
     "synthia": "Synthia",
     "partial": "部分完成",
+    "emptyTurn": "工具执行已完成，无额外文字回复。",
+    "taskAlreadyRunning": "已有任务在运行，请等待完成或先停止当前任务。",
+    "dismissToast": "关闭",
     "unknownEntry": "未知条目类型: {{kind}}"
   },
 

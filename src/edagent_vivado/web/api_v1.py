@@ -1022,9 +1022,9 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             if latest_task and latest_task.get("stop_requested"):
                 return
 
-            # Save assistant message (denormalized snapshot for search/export — not used for chat timeline)
+            # Save assistant message (denormalized snapshot for search/export — chat timeline uses events)
+            _emit_stream_completed(stream_mgr.current_stream_id)
             if full_response:
-                _emit_stream_completed(stream_mgr.current_stream_id)
                 message_create(session_id, "assistant", full_response, task_id=t["id"])
                 _memory_pipeline_on_message(session_id, role="assistant")
                 event_create(
@@ -1049,6 +1049,15 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                     source_event_until_seq=latest_event_seq)
                 event_create(session_id, "memory.updated", {"memory_id": mem["id"], "summary": summary.summary[:240]},
                              task_id=t["id"], run_id=run["id"])
+            else:
+                # Tool-only turn — still emit completion so chat UI can close the turn
+                event_create(
+                    session_id,
+                    "message.assistant.completed",
+                    {"stream_id": stream_mgr.current_stream_id, "empty": True},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
             # Complete
             task_update(t["id"], state="done", finished_at=int(time.time()))
             _archive_task_canvas(t["id"])

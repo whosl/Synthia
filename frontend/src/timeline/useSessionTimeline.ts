@@ -11,6 +11,7 @@ import { useStreamStore } from '../stores/streamStore'
 import {
   applyOptimisticUser,
   applyTimelineEvent,
+  removeOptimisticUserEntries,
   rebuildTimelineFromSources,
 } from './reducer'
 import type { SessionTimelineState } from './types'
@@ -28,12 +29,12 @@ export function useSessionTimeline(sessionId: string) {
 
   const messagesQ = useQuery({
     queryKey: ['messages', sessionId],
-    queryFn: () => listMessages(sessionId, 500),
+    queryFn: () => listMessages(sessionId, 2000),
     enabled: Boolean(sessionId),
   })
   const eventsQ = useQuery({
     queryKey: ['events', sessionId],
-    queryFn: () => listEvents(sessionId, 0, 5000, true),
+    queryFn: () => listEvents(sessionId, 0, 10000, true),
     enabled: Boolean(sessionId),
   })
   const activeQ = useQuery({
@@ -134,6 +135,7 @@ export function useSessionTimeline(sessionId: string) {
     },
     onError: () => {
       sendingRef.current = false
+      setTimeline((prev) => removeOptimisticUserEntries(prev))
     },
     onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })

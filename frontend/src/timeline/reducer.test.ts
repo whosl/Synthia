@@ -3,8 +3,11 @@ import type { SessionEvent } from '../api/types'
 import {
   applyOptimisticUser,
   applyTimelineEvent,
+  ensureEmptyTurnPlaceholders,
   getChatEntries,
+  mergeAssistantMessagesFromDb,
   rebuildTimelineFromSources,
+  removeOptimisticUserEntries,
 } from './reducer'
 import { emptyTimelineState } from './types'
 
@@ -42,11 +45,12 @@ describe('timeline reducer', () => {
     expect((entries[2].payload as { text: string }).text).toBe('After tool')
   })
 
-  it('does not merge full assistant message from DB into timeline', () => {
+  it('prefers event stream over DB when both exist for same task', () => {
     const events = [
       evt(1, 'assistant.stream.opened', { stream_id: 'task-1-s0' }),
       evt(2, 'message.assistant.delta', { text: 'Short', stream_id: 'task-1-s0' }),
       evt(3, 'assistant.stream.completed', { stream_id: 'task-1-s0' }),
+      evt(4, 'message.assistant.completed', { stream_id: 'task-1-s0' }),
     ]
     const messages = [{
       id: 'm1',
@@ -60,6 +64,47 @@ describe('timeline reducer', () => {
       .filter((e) => e.kind === 'assistant_text')
       .map((e) => (e.payload as { text: string }).text)
     expect(texts).toEqual(['Short'])
+  })
+
+  it('backfills assistant text from DB when events are missing', () => {
+    const messages = [{
+      id: 'm1',
+      role: 'assistant' as const,
+      content: 'Recovered from messages table',
+      task_id: 'task-1',
+      created_at: 200,
+    }]
+    const state = rebuildTimelineFromSources([], messages as any, [])
+    const assistant = getChatEntries(state).find((e) => e.kind === 'assistant_text')
+    expect((assistant!.payload as { text: string }).text).toBe('Recovered from messages table')
+  })
+
+  it('injects empty-turn placeholder for legacy tool-only turns', () => {
+    let state = emptyTimelineState()
+    state = applyTimelineEvent(state, evt(1, 'message.user.created', { message_id: 'u1', text: 'run synth' }), {
+      ignoreSeqGuard: true,
+    })
+    state = applyTimelineEvent(state, evt(2, 'tool.started', { toolcall_id: 'tc1', tool_name: 'grep_tool' }))
+    state = applyTimelineEvent(state, evt(3, 'tool.completed', { toolcall_id: 'tc1', tool_name: 'grep_tool', result: 'ok' }))
+    state = applyTimelineEvent(state, evt(4, 'task.done', { task_id: 'task-1' }))
+    state = ensureEmptyTurnPlaceholders(state)
+    const assistant = getChatEntries(state).find((e) => e.kind === 'assistant_text')
+    expect((assistant!.payload as { emptyTurn?: boolean }).emptyTurn).toBe(true)
+  })
+
+  it('creates empty assistant entry on message.assistant.completed with empty flag', () => {
+    let state = emptyTimelineState()
+    state = applyTimelineEvent(state, evt(1, 'assistant.stream.opened', { stream_id: 'task-1-s0' }))
+    state = applyTimelineEvent(state, evt(2, 'message.assistant.completed', { stream_id: 'task-1-s0', empty: true }))
+    const assistant = getChatEntries(state).find((e) => e.kind === 'assistant_text')
+    expect((assistant!.payload as { emptyTurn?: boolean }).emptyTurn).toBe(true)
+  })
+
+  it('removes optimistic user entries', () => {
+    let state = applyOptimisticUser(emptyTimelineState(), 'hi')
+    expect(getChatEntries(state).some((e) => e.key.startsWith('optimistic-user:'))).toBe(true)
+    state = removeOptimisticUserEntries(state)
+    expect(getChatEntries(state).some((e) => e.key.startsWith('optimistic-user:'))).toBe(false)
   })
 
   it('replaces optimistic user with server message', () => {

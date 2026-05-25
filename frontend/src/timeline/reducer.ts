@@ -4,10 +4,12 @@ import { CHAT_ENTRY_KINDS } from '../lib/events/catalog'
 import {
   cloneStateForEvent,
   insertEntry,
+  removeKeys,
   type ApplyEventOptions,
 } from './context'
 import { resolveTimelineEventHandler } from './handlers'
 import type {
+  AssistantTextPayload,
   InteractionEntryPayload,
   SessionTimelineState,
   TimelineEntry,
@@ -66,6 +68,94 @@ export function applyOptimisticUser(
   return insertEntry(state, entry)
 }
 
+/** Drop optimistic user bubbles after send failure or server ack. */
+export function removeOptimisticUserEntries(state: SessionTimelineState): SessionTimelineState {
+  return removeKeys(state, (k) => k.startsWith('optimistic-user:'))
+}
+
+function taskHasCompleteAssistant(state: SessionTimelineState, taskId: string): boolean {
+  return state.entries.some((e) => {
+    if (e.kind !== 'assistant_text' || e.taskId !== taskId) return false
+    const p = e.payload as AssistantTextPayload
+    return !p.partial
+  })
+}
+
+/** When event stream was truncated, backfill assistant text from messages table. */
+export function mergeAssistantMessagesFromDb(
+  state: SessionTimelineState,
+  messages: Message[],
+): SessionTimelineState {
+  let next = state
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !m.task_id || !m.content?.trim()) continue
+    if (taskHasCompleteAssistant(next, m.task_id)) continue
+    const key = `assistant:msg:${m.id}`
+    if (next.indexByKey[key] !== undefined) continue
+    const entry: TimelineEntry = {
+      key,
+      id: key,
+      seq: m.created_at || next.lastSeq,
+      kind: 'assistant_text',
+      taskId: m.task_id,
+      createdAt: m.created_at,
+      payload: {
+        streamId: `msg:${m.id}`,
+        text: m.content,
+        partial: false,
+      } satisfies AssistantTextPayload,
+    }
+    next = insertEntry(next, entry)
+  }
+  return next
+}
+
+function sliceHasWork(entries: TimelineEntry[]): boolean {
+  return entries.some((e) => e.kind === 'tool' || e.kind === 'reasoning' || e.kind === 'interaction')
+}
+
+/** Legacy sessions: tool-only turns with no assistant completion event. */
+export function ensureEmptyTurnPlaceholders(state: SessionTimelineState): SessionTimelineState {
+  const chat = getChatEntries(state)
+  let next = state
+  for (let i = 0; i < chat.length; i++) {
+    const user = chat[i]
+    if (user.kind !== 'user') continue
+    const slice: TimelineEntry[] = []
+    let j = i + 1
+    while (j < chat.length && chat[j].kind !== 'user') {
+      slice.push(chat[j])
+      j++
+    }
+    if (!slice.length || !sliceHasWork(slice)) continue
+    const hasFinal = slice.some((e) => {
+      if (e.kind !== 'assistant_text') return false
+      return !(e.payload as AssistantTextPayload).partial
+    })
+    if (hasFinal) continue
+    const taskId = slice.find((e) => e.taskId)?.taskId ?? user.taskId
+    const key = `assistant:empty:${taskId || user.id}`
+    if (next.indexByKey[key] !== undefined) continue
+    const lastSeq = slice.reduce((max, e) => Math.max(max, e.seq), user.seq)
+    const entry: TimelineEntry = {
+      key,
+      id: key,
+      seq: lastSeq + 1,
+      kind: 'assistant_text',
+      taskId,
+      createdAt: slice[slice.length - 1]?.createdAt ?? user.createdAt,
+      payload: {
+        streamId: key,
+        text: '',
+        partial: false,
+        emptyTurn: true,
+      } satisfies AssistantTextPayload,
+    }
+    next = insertEntry(next, entry)
+  }
+  return next
+}
+
 export function mergePendingInteractions(
   state: SessionTimelineState,
   pending: Record<string, unknown>[],
@@ -103,7 +193,7 @@ export function mergePendingInteractions(
   return next
 }
 
-/** Rebuild chat timeline from events (canonical). Messages table supplies user rows only; assistant text comes from events. */
+/** Rebuild chat timeline from events + messages (user rows + assistant DB fallback). */
 export function rebuildTimelineFromSources(
   events: SessionEvent[],
   messages: Message[],
@@ -131,6 +221,8 @@ export function rebuildTimelineFromSources(
     }
     state = insertEntry(state, entry)
   }
+  state = mergeAssistantMessagesFromDb(state, messages)
+  state = ensureEmptyTurnPlaceholders(state)
   state = mergePendingInteractions(state, pending)
   if (activeTask) {
     state.activeTaskId = activeTask.id

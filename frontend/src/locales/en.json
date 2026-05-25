@@ -204,6 +204,9 @@
     "you": "You",
     "synthia": "Synthia",
     "partial": "partial",
+    "emptyTurn": "Completed tool run — no additional reply.",
+    "taskAlreadyRunning": "A task is already running. Wait for it to finish or stop it first.",
+    "dismissToast": "Dismiss",
     "unknownEntry": "Unsupported entry kind: {{kind}}"
   },
 
