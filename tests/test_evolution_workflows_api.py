@@ -52,6 +52,30 @@ def _seed_project_with_pending_candidate() -> tuple[dict, dict, dict]:
     return pid, s, cand
 
 
+def test_preview_via_api_shows_prompt_text_before_approve():
+    client = _client()
+    _, _, cand = _seed_project_with_pending_candidate()
+
+    resp = client.get(f"/api/v1/evolution/candidates/{cand['id']}/preview")
+    assert resp.status_code == 200, resp.text
+    preview = resp.json()["preview"]
+    assert preview["surface"] == "prompt"
+    assert preview["prompt_mode"] == "append"
+    assert "15%" in preview["prompt_text"]
+    assert "parse_vivado_log_tool" in preview["prompt_text"]
+
+
+def test_get_candidate_includes_apply_preview():
+    client = _client()
+    _, _, cand = _seed_project_with_pending_candidate()
+
+    resp = client.get(f"/api/v1/evolution/candidates/{cand['id']}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["candidate"]
+    assert body.get("apply_preview")
+    assert body["apply_preview"]["prompt_text"]
+
+
 def test_approve_via_api_creates_active_overlay_and_emits_events():
     client = _client()
     pid, s, cand = _seed_project_with_pending_candidate()

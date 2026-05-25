@@ -69,6 +69,7 @@ from edagent_vivado.evolution.workflows import (
     merge_candidate,
     rollback_candidate,
     retire_overlay,
+    preview_candidate_payload,
 )
 from edagent_vivado.evolution.trial_config import (
     is_trial_enabled,
@@ -170,6 +171,7 @@ __all__ = [
     "merge_candidate",
     "rollback_candidate",
     "retire_overlay",
+    "preview_candidate_payload",
     # SE-PR5
     "is_trial_enabled",
     "set_trial_enabled",

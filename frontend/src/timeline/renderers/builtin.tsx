@@ -1,4 +1,5 @@
 import { User } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Markdown } from '../../components/common/Markdown'
 import { ApprovalBlock } from '../../components/terminal/ApprovalBlock'
 import { CustomEntryBlock } from '../../components/terminal/CustomEntryBlock'
@@ -18,12 +19,13 @@ import type {
 import type { TimelineEntryRenderer, TimelineRenderContext } from './types'
 
 function UserEntryRenderer({ entry }: TimelineRenderContext) {
+  const { t } = useTranslation()
   const p = entry.payload as UserEntryPayload
   return (
     <div className="message-turn user">
       <div className="message-bubble">
         <div className="message-meta">
-          <User size={14} /> You {entry.createdAt && <span>{formatTime(entry.createdAt)}</span>}
+          <User size={14} /> {t('terminal.you')} {entry.createdAt && <span>{formatTime(entry.createdAt)}</span>}
         </div>
         {p.text}
       </div>
@@ -32,13 +34,14 @@ function UserEntryRenderer({ entry }: TimelineRenderContext) {
 }
 
 function AssistantTextRenderer({ entry }: TimelineRenderContext) {
+  const { t } = useTranslation()
   const p = entry.payload as AssistantTextPayload
   return (
     <div className="assistant-stack">
       <div className="message-meta assistant-meta">
-        Synthia
-        {p.stopped && <span className="status stopped">stopped</span>}
-        {p.partial && !p.stopped && <span className="status stopped">partial</span>}
+        {t('terminal.synthia')}
+        {p.stopped && <span className="status stopped">{t('status.stopped')}</span>}
+        {p.partial && !p.stopped && <span className="status stopped">{t('terminal.partial')}</span>}
       </div>
       {p.text.trim() ? (
         <div className="message-bubble assistant-text-bubble">
@@ -132,14 +135,19 @@ export function resolveTimelineEntryRenderer(kind: string): TimelineEntryRendere
   return builtinRenderers[kind as TimelineEntryKind] ?? null
 }
 
+function UnknownEntryRenderer({ entry }: TimelineRenderContext) {
+  const { t } = useTranslation()
+  return (
+    <div className="trace-block">
+      <div className="trace-body muted">{t('terminal.unknownEntry', { kind: entry.kind })}</div>
+    </div>
+  )
+}
+
 export function renderTimelineEntry(ctx: TimelineRenderContext) {
   const renderer = resolveTimelineEntryRenderer(ctx.entry.kind)
   if (!renderer) {
-    return (
-      <div className="trace-block">
-        <div className="trace-body muted">Unsupported entry kind: {ctx.entry.kind}</div>
-      </div>
-    )
+    return <UnknownEntryRenderer {...ctx} />
   }
   return renderer(ctx)
 }

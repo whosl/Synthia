@@ -14,6 +14,20 @@ export type EvolutionCandidateStatus =
 
 export type EvolutionScope = 'session' | 'project' | 'global'
 
+export interface EvolutionCandidatePreview {
+  candidate_id: string
+  surface: EvolutionSurface
+  scope: EvolutionScope
+  payload: Record<string, unknown>
+  prompt_mode?: string
+  prompt_text?: string
+  prompt_effect?: string
+  flow_templates?: Record<string, string>
+  routing_rules?: Array<Record<string, unknown>>
+  routing_weights?: Record<string, number>
+  validation_error?: string
+}
+
 export interface EvolutionCandidate {
   id: string
   scope: EvolutionScope
@@ -36,6 +50,7 @@ export interface EvolutionCandidate {
   applied_overlay_id?: string | null
   metadata?: Record<string, unknown>
   metadata_json?: string | null
+  apply_preview?: EvolutionCandidatePreview | null
 }
 
 export interface EvolutionOverlay {
@@ -79,6 +94,10 @@ export function listEvolutionCandidates(
 
 export function getEvolutionCandidate(id: string) {
   return request<{ candidate: EvolutionCandidate }>(`/evolution/candidates/${id}`)
+}
+
+export function getEvolutionCandidatePreview(id: string) {
+  return request<{ preview: EvolutionCandidatePreview }>(`/evolution/candidates/${id}/preview`)
 }
 
 export function approveEvolutionCandidate(

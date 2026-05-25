@@ -12,6 +12,8 @@ import {
   X,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import {
   abortEvolutionTrial,
   approveEvolutionCandidate,
@@ -24,6 +26,9 @@ import {
   type EvolutionSurface,
   type EvolutionTrial,
   getEvolutionConfig,
+  getEvolutionCandidate,
+  getEvolutionCandidatePreview,
+  type EvolutionCandidatePreview,
   listEvalRuns,
   listEvalSets,
   listEvolutionCandidates,
@@ -40,48 +45,209 @@ import {
 import { listProjects } from '../api/projects'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
+import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Modal } from '../components/common/Modal'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { formatTime } from '../lib/time'
+import { buildLocalApplyPreview } from '../lib/evolutionPreview'
+import { EvolutionKbTab } from './EvolutionKbTab'
 
-const SURFACE_LABELS: Record<EvolutionSurface, string> = {
-  kb: 'Knowledge Base',
-  prompt: 'System Prompt',
-  tool: 'Tool Set',
-  flow_template: 'Tcl Flow Template',
-  routing: 'Agent Routing',
+type EvolutionTab = 'candidates' | 'overlays' | 'trials' | 'kb'
+
+const TAB_IDS: EvolutionTab[] = ['candidates', 'overlays', 'trials', 'kb']
+
+function parseTab(value: string | null): EvolutionTab {
+  if (value && TAB_IDS.includes(value as EvolutionTab)) return value as EvolutionTab
+  return 'candidates'
 }
 
-const SURFACE_OPTIONS: Array<{ value: '' | EvolutionSurface; label: string }> = [
-  { value: '', label: 'All surfaces' },
-  { value: 'prompt', label: 'Prompt' },
-  { value: 'kb', label: 'KB' },
-  { value: 'flow_template', label: 'Flow template' },
-  { value: 'routing', label: 'Routing' },
-  { value: 'tool', label: 'Tool' },
-]
-
-const STATUS_OPTIONS: Array<{ value: '' | EvolutionCandidateStatus; label: string }> = [
-  { value: 'pending', label: 'Pending review' },
-  { value: 'approved', label: 'Approved' },
-  { value: 'rejected', label: 'Rejected' },
-  { value: 'merged', label: 'Merged' },
-  { value: 'rolled_back', label: 'Rolled back' },
-  { value: 'trialing', label: 'In trial' },
-  { value: '', label: 'All statuses' },
-]
-
-const SUPPRESS_OPTIONS = [
-  { value: 0, label: 'No suppression' },
-  { value: 7, label: 'Silence 7 days' },
-  { value: 14, label: '14 days' },
-  { value: 30, label: '30 days' },
-  { value: 90, label: '90 days' },
-]
+const SURFACE_KEY_MAP: Record<EvolutionSurface, string> = {
+  kb: 'evolution.surfaces.knowledgeBase',
+  prompt: 'evolution.surfaces.systemPrompt',
+  tool: 'evolution.surfaces.toolSet',
+  flow_template: 'evolution.surfaces.tclFlowTemplate',
+  routing: 'evolution.surfaces.agentRouting',
+}
 
 function pickProject<T extends { id: string; name?: string }>(rows: T[], id: string): T | undefined {
   return rows.find((r) => r.id === id)
+}
+
+function ApplyPreviewSection({
+  candidate,
+}: {
+  candidate: EvolutionCandidate
+}) {
+  const { t } = useTranslation()
+  const showPreview = candidate.status === 'pending' || candidate.status === 'trialing'
+  const previewQ = useQuery({
+    queryKey: ['evolution-candidate-preview', candidate.id],
+    queryFn: async () => {
+      try {
+        const remote = await getEvolutionCandidatePreview(candidate.id)
+        return { preview: remote.preview, source: 'server' as const }
+      } catch {
+        try {
+          const detail = await getEvolutionCandidate(candidate.id)
+          if (detail.candidate.apply_preview) {
+            return { preview: detail.candidate.apply_preview, source: 'server' as const }
+          }
+        } catch {
+          // fall through to local synthesis
+        }
+        return { preview: buildLocalApplyPreview(candidate), source: 'local' as const }
+      }
+    },
+    enabled: showPreview,
+  })
+
+  if (!showPreview) return null
+
+  const preview = previewQ.data?.preview
+  const previewSource = previewQ.data?.source
+
+  return (
+    <section className="evolution-modal-section evolution-apply-preview">
+      <h3 className="evolution-modal-section-title">
+        <Check size={14} /> {t('evolution.applyPreview')}
+        {previewSource === 'local' && (
+          <span className="evolution-apply-preview-tag" title={t('evolution.previewTooltip')}>
+            {t('evolution.localEstimate')}
+          </span>
+        )}
+      </h3>
+      {previewQ.isLoading && (
+        <p className="muted evolution-apply-preview-loading">{t('evolution.loadingPreview')}</p>
+      )}
+      {previewQ.isError && !preview && (
+        <p className="evolution-apply-preview-error">
+          {t('evolution.previewError')}
+        </p>
+      )}
+      {preview && (
+        <ApplyPreviewBody preview={preview} candidate={candidate} />
+      )}
+    </section>
+  )
+}
+
+function ApplyPreviewBody({
+  preview,
+  candidate,
+}: {
+  preview: EvolutionCandidatePreview
+  candidate: EvolutionCandidate
+}) {
+  const { t } = useTranslation()
+
+  if (candidate.surface === 'prompt') {
+    const mode = preview.prompt_mode || 'append'
+    const text = preview.prompt_text || ''
+    return (
+      <>
+        <p className="muted evolution-apply-preview-hint">
+          {preview.prompt_effect || t('evolution.promptEffect')}
+        </p>
+        <div className="evolution-apply-preview-meta">
+          <span className="evolution-apply-preview-tag">{t('evolution.mode')}: {mode}</span>
+        </div>
+        {text ? (
+          <pre className="evolution-payload mono evolution-prompt-preview">{text}</pre>
+        ) : (
+          <p className="muted">{t('evolution.noPromptText')}</p>
+        )}
+      </>
+    )
+  }
+
+  if (candidate.surface === 'flow_template' && preview.flow_templates) {
+    const entries = Object.entries(preview.flow_templates)
+    if (!entries.length) {
+      return <p className="muted">{t('evolution.noFlowTemplates')}</p>
+    }
+    return (
+      <>
+        <p className="muted evolution-apply-preview-hint">
+          {t('evolution.flowTemplateHint')}
+        </p>
+        {entries.map(([name, body]) => (
+          <div key={name} className="evolution-flow-template-block">
+            <div className="evolution-apply-preview-meta">
+              <span className="evolution-apply-preview-tag">{name}</span>
+            </div>
+            <pre className="evolution-payload mono">{body}</pre>
+          </div>
+        ))}
+      </>
+    )
+  }
+
+  if (candidate.surface === 'routing') {
+    const rules = preview.routing_rules || []
+    const weights = preview.routing_weights || {}
+    return (
+      <>
+        <p className="muted evolution-apply-preview-hint">
+          {t('evolution.routingHint')}
+        </p>
+        {!!Object.keys(weights).length && (
+          <>
+            <div className="evolution-apply-preview-meta">
+              <span className="evolution-apply-preview-tag">{t('evolution.weights')}</span>
+            </div>
+            <pre className="evolution-payload mono">{JSON.stringify(weights, null, 2)}</pre>
+          </>
+        )}
+        {!!rules.length && (
+          <>
+            <div className="evolution-apply-preview-meta">
+              <span className="evolution-apply-preview-tag">{t('evolution.rules')}</span>
+            </div>
+            <pre className="evolution-payload mono">{JSON.stringify(rules, null, 2)}</pre>
+          </>
+        )}
+        {!rules.length && !Object.keys(weights).length && (
+          <p className="muted">{t('evolution.routingEmpty')}</p>
+        )}
+      </>
+    )
+  }
+
+  if (candidate.surface === 'kb') {
+    const kbPreview = (preview.payload.kb_case_preview || {}) as Record<string, unknown>
+    return (
+      <>
+        <p className="muted evolution-apply-preview-hint">
+          {t('evolution.kbHint')}
+        </p>
+        <pre className="evolution-payload mono">{JSON.stringify(kbPreview, null, 2)}</pre>
+      </>
+    )
+  }
+
+  if (candidate.surface === 'tool') {
+    if (preview.validation_error) {
+      return (
+        <>
+          <p className="evolution-apply-preview-error">{preview.validation_error}</p>
+          <pre className="evolution-payload mono">{JSON.stringify(preview.payload, null, 2)}</pre>
+        </>
+      )
+    }
+    return (
+      <>
+        <p className="muted evolution-apply-preview-hint">
+          {t('evolution.toolHint')}
+        </p>
+        <pre className="evolution-payload mono">{JSON.stringify(preview.payload, null, 2)}</pre>
+      </>
+    )
+  }
+
+  return (
+    <pre className="evolution-payload mono">{JSON.stringify(preview.payload, null, 2)}</pre>
+  )
 }
 
 function previewPayload(candidate: EvolutionCandidate): string {
@@ -129,10 +295,22 @@ function extractToolSources(candidate: EvolutionCandidate): ToolSourceEntry[] {
 }
 
 export default function EvolutionPage() {
+  const { t } = useTranslation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = parseTab(searchParams.get('tab'))
   const [status, setStatus] = useState<EvolutionCandidateStatus | ''>('pending')
   const [surface, setSurface] = useState<EvolutionSurface | ''>('')
   const [projectId, setProjectId] = useState<string>('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+
+  const setActiveTab = (tab: EvolutionTab) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (tab === 'candidates') next.delete('tab')
+      else next.set('tab', tab)
+      return next
+    }, { replace: true })
+  }
 
   const qc = useQueryClient()
 
@@ -196,14 +374,27 @@ export default function EvolutionPage() {
   })
 
   const candidates = candidatesQ.data?.candidates ?? []
-  const overlays = overlaysQ.data?.overlays ?? []
-  const selected = useMemo(
+  const evolutionCandidates = useMemo(
+    () => candidates.filter((c) => c.surface !== 'kb'),
+    [candidates],
+  )
+  const selectedFromList = useMemo(
     () => candidates.find((c) => c.id === selectedId) ?? null,
     [candidates, selectedId],
   )
+  const selectedDetailQ = useQuery({
+    queryKey: ['evolution', 'candidate-detail', selectedId],
+    queryFn: () => getEvolutionCandidate(selectedId!),
+    enabled: !!selectedId && !selectedFromList,
+  })
+  const selected = selectedFromList ?? selectedDetailQ.data?.candidate ?? null
+  const overlays = overlaysQ.data?.overlays ?? []
+  const trials = trialsQ.data?.trials ?? []
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['evolution'] })
+    qc.invalidateQueries({ queryKey: ['kb-candidates'] })
+    qc.invalidateQueries({ queryKey: ['legacy-kb'] })
   }
 
   const approveMut = useMutation({
@@ -269,132 +460,219 @@ export default function EvolutionPage() {
     onSuccess: refresh,
   })
 
+  const surfaceOptions: Array<{ value: '' | EvolutionSurface; label: string }> = [
+    { value: '', label: t('evolution.surfaceOptions.all') },
+    { value: 'prompt', label: t('evolution.surfaceOptions.prompt') },
+    { value: 'flow_template', label: t('evolution.surfaceOptions.flowTemplate') },
+    { value: 'routing', label: t('evolution.surfaceOptions.routing') },
+    { value: 'tool', label: t('evolution.surfaceOptions.tool') },
+  ]
+
+  const tabLabels: Record<EvolutionTab, string> = {
+    candidates: t('evolution.tabs.candidates'),
+    overlays: t('evolution.tabs.overlays'),
+    trials: t('evolution.tabs.trials'),
+    kb: t('evolution.tabs.kb'),
+  }
+
+  const tabCounts: Record<EvolutionTab, number | undefined> = {
+    candidates: evolutionCandidates.length,
+    overlays: overlays.length,
+    trials: trials.length,
+    kb: undefined,
+  }
+
+  const statusOptions: Array<{ value: '' | EvolutionCandidateStatus; label: string }> = [
+    { value: 'pending', label: t('evolution.statusOptions.pendingReview') },
+    { value: 'approved', label: t('evolution.statusOptions.approved') },
+    { value: 'rejected', label: t('evolution.statusOptions.rejected') },
+    { value: 'merged', label: t('evolution.statusOptions.merged') },
+    { value: 'rolled_back', label: t('evolution.statusOptions.rolledBack') },
+    { value: 'trialing', label: t('evolution.statusOptions.inTrial') },
+    { value: '', label: t('evolution.statusOptions.all') },
+  ]
+
   return (
     <div className="page evolution-page">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Evolution</h1>
-          <p className="page-subtitle">
-            Review what Synthia learned. Approve a candidate to apply an overlay; rollback restores
-            the previous behavior immediately.
-          </p>
+      <PageStickyTop>
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">{t('evolution.title')}</h1>
+            <p className="page-subtitle">
+              {t('evolution.subtitle')}
+            </p>
+          </div>
+          <div className="evolution-toolbar">
+            <Button
+              className="ghost"
+              onClick={() => runGeneratorsMut.mutate()}
+              disabled={runGeneratorsMut.isPending}
+              title={t('evolution.runGeneratorsTooltip')}
+            >
+              <Play size={14} /> {t('evolution.runGenerators')}
+            </Button>
+          </div>
         </div>
-        <div className="evolution-toolbar">
-          <Button
-            className="ghost"
-            onClick={() => runGeneratorsMut.mutate()}
-            disabled={runGeneratorsMut.isPending}
-            title="Re-run all generators against the latest signals"
-          >
-            <Play size={14} /> Run generators
-          </Button>
-        </div>
-      </div>
 
-      <Panel
-        title="Filters"
-        className="evolution-filters-panel"
-      >
-        <div className="evolution-filters">
+        <div className="evolution-tabs" role="tablist" aria-label={t('evolution.tabs.label')}>
+          {TAB_IDS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
+              className={`evolution-tab${activeTab === tab ? ' active' : ''}`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tabLabels[tab]}
+              {tabCounts[tab] != null && tabCounts[tab]! > 0 && (
+                <span className="evolution-tab-count">{tabCounts[tab]}</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'candidates' && (
+        <Panel
+          title={t('evolution.filters')}
+          className="evolution-filters-panel"
+        >
+          <div className="evolution-filters">
+            <label className="evolution-filter">
+              <span className="muted">{t('evolution.status')}</span>
+              <select value={status} onChange={(e) => setStatus(e.target.value as EvolutionCandidateStatus | '')}>
+                {statusOptions.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="evolution-filter">
+              <span className="muted">{t('evolution.surface')}</span>
+              <select value={surface} onChange={(e) => setSurface(e.target.value as EvolutionSurface | '')}>
+                {surfaceOptions.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="evolution-filter">
+              <span className="muted">{t('evolution.project')}</span>
+              <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                <option value="">{t('evolution.allProjects')}</option>
+                {(projectsQ.data?.projects ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name || p.id}</option>
+                ))}
+              </select>
+            </label>
+            <span className="muted evolution-filter-count">
+              {candidatesQ.isLoading
+                ? t('evolution.loading')
+                : evolutionCandidates.length === 1
+                  ? t('evolution.candidateCount', { n: evolutionCandidates.length, count: evolutionCandidates.length })
+                  : t('evolution.candidateCount_plural', { n: evolutionCandidates.length, count: evolutionCandidates.length })
+              }
+            </span>
+          </div>
+        </Panel>
+        )}
+      </PageStickyTop>
+
+      {activeTab === 'candidates' && (
+        <>
+          <Panel title={t('evolution.candidates')}>
+            {!evolutionCandidates.length && !candidatesQ.isLoading && (
+              <EmptyState
+                title={t('evolution.nothingToReview')}
+                detail={
+                  status === 'pending'
+                    ? t('evolution.noPendingCandidatesDetail')
+                    : t('evolution.noMatchingCandidates')
+                }
+              />
+            )}
+            {!!evolutionCandidates.length && (
+              <ul className="evolution-list">
+                {evolutionCandidates.map((c) => {
+                  const confPct = Math.round(Number(c.confidence) * 100)
+                  return (
+                    <li
+                      key={c.id}
+                      className={`evolution-list-item${c.id === selectedId ? ' active' : ''}`}
+                    >
+                      <button
+                        type="button"
+                        className="evolution-list-row"
+                        onClick={() => setSelectedId(c.id)}
+                      >
+                        <div className="evolution-list-row-top">
+                          <span className={`evolution-surface tag-${c.surface}`}>
+                            {t(SURFACE_KEY_MAP[c.surface]) || c.surface}
+                          </span>
+                          <StatusBadge status={c.status} />
+                        </div>
+                        <div className="evolution-list-row-title">{c.title}</div>
+                        <div className="evolution-list-row-meta muted">
+                          <span>{c.scope}</span>
+                          <span>·</span>
+                          <span>{c.created_by}</span>
+                          <span>·</span>
+                          <span>{formatTime(c.created_at)}</span>
+                          {c.confidence != null && (
+                            <>
+                              <span>·</span>
+                              <span>{t('evolution.conf', { pct: confPct, n: confPct })}</span>
+                            </>
+                          )}
+                        </div>
+                      </button>
+                      <ChevronRight size={14} className="evolution-list-chevron muted" />
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </Panel>
+
+          <EvalSection
+            sets={evalSetsQ.data?.sets ?? []}
+            runs={evalRunsQ.data?.runs ?? []}
+            runnerImplemented={evalSetsQ.data?.runner_implemented === true}
+            onQueue={(set, note) => queueEvalMut.mutate({ eval_set: set, note })}
+            busy={queueEvalMut.isPending}
+          />
+        </>
+      )}
+
+      {activeTab === 'overlays' && (
+        <div className="evolution-tab-toolbar">
           <label className="evolution-filter">
-            <span className="muted">Status</span>
-            <select value={status} onChange={(e) => setStatus(e.target.value as EvolutionCandidateStatus | '')}>
-              {STATUS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </label>
-          <label className="evolution-filter">
-            <span className="muted">Surface</span>
-            <select value={surface} onChange={(e) => setSurface(e.target.value as EvolutionSurface | '')}>
-              {SURFACE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </label>
-          <label className="evolution-filter">
-            <span className="muted">Project</span>
+            <span className="muted">{t('evolution.project')}</span>
             <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-              <option value="">All projects</option>
+              <option value="">{t('evolution.allProjects')}</option>
               {(projectsQ.data?.projects ?? []).map((p) => (
                 <option key={p.id} value={p.id}>{p.name || p.id}</option>
               ))}
             </select>
           </label>
-          <span className="muted evolution-filter-count">
-            {candidatesQ.isLoading ? 'Loading…' : `${candidates.length} candidate${candidates.length === 1 ? '' : 's'}`}
-          </span>
         </div>
-      </Panel>
+      )}
 
-      <div className="evolution-grid">
-        <Panel title="Candidates">
-          {!candidates.length && !candidatesQ.isLoading && (
-            <EmptyState
-              title="Nothing to review"
-              detail={
-                status === 'pending'
-                  ? 'No pending candidates. Run a few tasks or click Run generators to backfill.'
-                  : 'No candidates match this filter.'
-              }
-            />
-          )}
-          {!!candidates.length && (
-            <ul className="evolution-list">
-              {candidates.map((c) => (
-                <li
-                  key={c.id}
-                  className={`evolution-list-item${c.id === selectedId ? ' active' : ''}`}
-                >
-                  <button
-                    type="button"
-                    className="evolution-list-row"
-                    onClick={() => setSelectedId(c.id)}
-                  >
-                    <div className="evolution-list-row-top">
-                      <span className={`evolution-surface tag-${c.surface}`}>
-                        {SURFACE_LABELS[c.surface] || c.surface}
-                      </span>
-                      <StatusBadge status={c.status} />
-                    </div>
-                    <div className="evolution-list-row-title">{c.title}</div>
-                    <div className="evolution-list-row-meta muted">
-                      <span>{c.scope}</span>
-                      <span>·</span>
-                      <span>{c.created_by}</span>
-                      <span>·</span>
-                      <span>{formatTime(c.created_at)}</span>
-                      {c.confidence != null && (
-                        <>
-                          <span>·</span>
-                          <span>conf {Math.round(Number(c.confidence) * 100)}%</span>
-                        </>
-                      )}
-                    </div>
-                  </button>
-                  <ChevronRight size={14} className="evolution-list-chevron muted" />
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-
+      {activeTab === 'overlays' && (
         <Panel
-          title="Active overlays"
+          title={t('evolution.activeOverlays')}
           actions={
             projectId ? (
               <span className="muted" style={{ fontSize: 11 }}>
-                Project: {pickProject(projectsQ.data?.projects ?? [], projectId)?.name || projectId}
+                {t('evolution.project')}: {pickProject(projectsQ.data?.projects ?? [], projectId)?.name || projectId}
               </span>
             ) : (
-              <span className="muted" style={{ fontSize: 11 }}>All projects</span>
+              <span className="muted" style={{ fontSize: 11 }}>{t('evolution.allProjects')}</span>
             )
           }
         >
           {!overlays.length && (
             <EmptyState
-              title="No overlays active"
-              detail="Resolvers fall through to baseline until a candidate is approved."
+              title={t('evolution.noOverlaysActive')}
+              detail={t('evolution.noOverlaysDetail')}
             />
           )}
           {!!overlays.length && (
@@ -410,31 +688,51 @@ export default function EvolutionPage() {
             </ul>
           )}
         </Panel>
-      </div>
-
-      <TrialsSection
-        trials={trialsQ.data?.trials ?? []}
-        loading={trialsQ.isLoading}
-        onDecide={(id, decision) => decideTrialMut.mutate({ id, decision })}
-        onAbort={(id, reason) => abortTrialMut.mutate({ id, reason })}
-        busy={decideTrialMut.isPending || abortTrialMut.isPending}
-      />
-
-      {projectId && configQ.data && (
-        <TrialConfigPanel
-          config={configQ.data}
-          busy={trialFlagMut.isPending}
-          onToggle={(surface, enabled) => trialFlagMut.mutate({ surface, enabled })}
-        />
       )}
 
-      <EvalSection
-        sets={evalSetsQ.data?.sets ?? []}
-        runs={evalRunsQ.data?.runs ?? []}
-        runnerImplemented={evalSetsQ.data?.runner_implemented === true}
-        onQueue={(set, note) => queueEvalMut.mutate({ eval_set: set, note })}
-        busy={queueEvalMut.isPending}
-      />
+      {activeTab === 'trials' && (
+        <div className="evolution-tab-toolbar">
+          <label className="evolution-filter">
+            <span className="muted">{t('evolution.project')}</span>
+            <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              <option value="">{t('evolution.allProjects')}</option>
+              {(projectsQ.data?.projects ?? []).map((p) => (
+                <option key={p.id} value={p.id}>{p.name || p.id}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+
+      {activeTab === 'trials' && (
+        <>
+          <TrialsSection
+            trials={trials}
+            loading={trialsQ.isLoading}
+            onDecide={(id, decision) => decideTrialMut.mutate({ id, decision })}
+            onAbort={(id, reason) => abortTrialMut.mutate({ id, reason })}
+            busy={decideTrialMut.isPending || abortTrialMut.isPending}
+          />
+          {projectId && configQ.data ? (
+            <TrialConfigPanel
+              config={configQ.data}
+              busy={trialFlagMut.isPending}
+              onToggle={(surface, enabled) => trialFlagMut.mutate({ surface, enabled })}
+            />
+          ) : (
+            <Panel title={t('evolution.abTrialSettings')}>
+              <EmptyState
+                title={t('evolution.trialPickProject')}
+                detail={t('evolution.trialPickProjectDetail')}
+              />
+            </Panel>
+          )}
+        </>
+      )}
+
+      {activeTab === 'kb' && (
+        <EvolutionKbTab onOpenEvolutionCandidate={(id) => setSelectedId(id)} />
+      )}
 
       {selected && (
         <CandidateDetailModal
@@ -479,6 +777,7 @@ function EvalSection({
   onQueue: (set: string, note?: string) => void
   busy: boolean
 }) {
+  const { t } = useTranslation()
   const [selected, setSelected] = useState<string>('')
   const [note, setNote] = useState<string>('')
 
@@ -488,33 +787,33 @@ function EvalSection({
 
   return (
     <Panel
-      title="Static eval set"
+      title={t('evolution.staticEvalSet')}
       actions={
         <span className="muted" style={{ fontSize: 11 }}>
-          {runnerImplemented ? 'runner enabled' : 'SPEC §22.6B — runner not yet implemented (SE-PR6 placeholder)'}
+          {runnerImplemented ? t('evolution.runnerEnabled') : t('evolution.runnerPlaceholder')}
         </span>
       }
     >
       <div className="evolution-eval-launcher">
         <label className="evolution-action-aux">
-          <span className="muted">Eval set</span>
+          <span className="muted">{t('evolution.evalSet')}</span>
           <select
             value={effectiveSet}
             onChange={(e) => setSelected(e.target.value)}
             disabled={!sets.length || busy}
           >
             {sets.map((s) => (
-              <option key={s.name} value={s.name}>{s.name} · {s.case_count} case(s)</option>
+              <option key={s.name} value={s.name}>{s.name} · {t('evolution.caseCount', { count: s.case_count })}</option>
             ))}
           </select>
         </label>
         <label className="evolution-action-aux evolution-action-aux-grow">
-          <span className="muted">Note (optional)</span>
+          <span className="muted">{t('evolution.noteOptional')}</span>
           <input
             type="text"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="e.g. pre-rollout check"
+            placeholder={t('evolution.notePlaceholder')}
             disabled={busy}
           />
         </label>
@@ -524,18 +823,18 @@ function EvalSection({
           disabled={!effectiveSet || busy}
           title={
             runnerImplemented
-              ? 'Run this eval set'
-              : 'Persist a placeholder eval_run (runner ships in a later PR)'
+              ? t('evolution.runTooltip')
+              : t('evolution.queueTooltip')
           }
         >
-          <Play size={14} /> {runnerImplemented ? 'Run' : 'Queue placeholder'}
+          <Play size={14} /> {runnerImplemented ? t('evolution.run') : t('evolution.queuePlaceholder')}
         </Button>
       </div>
 
       {!sets.length && (
         <EmptyState
-          title="No eval sets discovered"
-          detail="Add YAML files under tests/eval_set/ to populate this list."
+          title={t('evolution.noEvalSets')}
+          detail={t('evolution.noEvalSetsDetail')}
         />
       )}
 
@@ -543,11 +842,11 @@ function EvalSection({
         <table className="table" style={{ marginTop: 12 }}>
           <thead>
             <tr>
-              <th>Eval run</th>
-              <th>Set</th>
-              <th>State</th>
-              <th>Cases</th>
-              <th>Note</th>
+              <th>{t('evolution.tableEvalRun')}</th>
+              <th>{t('evolution.tableSet')}</th>
+              <th>{t('evolution.tableState')}</th>
+              <th>{t('evolution.tableCases')}</th>
+              <th>{t('evolution.tableNote')}</th>
             </tr>
           </thead>
           <tbody>
@@ -583,44 +882,63 @@ function TrialsSection({
   onAbort: (id: string, reason?: string) => void
   busy: boolean
 }) {
-  if (loading) return null
-  if (!trials.length) return null
+  const { t } = useTranslation()
+
+  if (loading) {
+    return (
+      <Panel title={t('evolution.activeABTrials')}>
+        <p className="muted">{t('evolution.loading')}</p>
+      </Panel>
+    )
+  }
+
+  if (!trials.length) {
+    return (
+      <Panel title={t('evolution.activeABTrials')}>
+        <EmptyState
+          title={t('evolution.noActiveTrials')}
+          detail={t('evolution.noActiveTrialsDetail')}
+        />
+      </Panel>
+    )
+  }
+
   return (
     <Panel
-      title="Active A/B trials"
+      title={t('evolution.activeABTrials')}
       actions={
-        <span className="muted" style={{ fontSize: 11 }}>{trials.length} running</span>
+        <span className="muted" style={{ fontSize: 11 }}>{trials.length} {t('evolution.running')}</span>
       }
     >
       <ul className="evolution-trial-list">
-        {trials.map((t) => {
-          const baselineMean = t.metric_baseline?.mean ?? null
-          const variantMean = t.metric_variant?.mean ?? null
+        {trials.map((trial) => {
+          const baselineMean = trial.metric_baseline?.mean ?? null
+          const variantMean = trial.metric_variant?.mean ?? null
           const delta = baselineMean != null && variantMean != null ? variantMean - baselineMean : null
           return (
-            <li key={t.id} className="evolution-trial-card">
+            <li key={trial.id} className="evolution-trial-card">
               <div className="evolution-trial-head">
-                <span className={`evolution-surface tag-${t.surface}`}>
-                  {SURFACE_LABELS[t.surface] || t.surface}
+                <span className={`evolution-surface tag-${trial.surface}`}>
+                  {t(SURFACE_KEY_MAP[trial.surface]) || trial.surface}
                 </span>
-                <StatusBadge status={t.state} />
+                <StatusBadge status={trial.state} />
                 <span className="muted" style={{ fontSize: 11 }}>
-                  started {formatTime(t.started_at)}
+                  {t('evolution.started')} {formatTime(trial.started_at)}
                 </span>
               </div>
               <div className="evolution-trial-arms">
                 <div className="evolution-trial-arm">
-                  <span className="muted">Baseline</span>
-                  <strong>{t.n_baseline} samples</strong>
+                  <span className="muted">{t('evolution.baseline')}</span>
+                  <strong>{t('evolution.samples', { n: trial.n_baseline })}</strong>
                   <span className="mono">{baselineMean != null ? baselineMean.toFixed(3) : '—'}</span>
                 </div>
                 <div className="evolution-trial-arm">
-                  <span className="muted">Variant</span>
-                  <strong>{t.n_variant} samples</strong>
+                  <span className="muted">{t('evolution.variant')}</span>
+                  <strong>{t('evolution.samples', { n: trial.n_variant })}</strong>
                   <span className="mono">{variantMean != null ? variantMean.toFixed(3) : '—'}</span>
                 </div>
                 <div className="evolution-trial-delta">
-                  <span className="muted">Δ score</span>
+                  <span className="muted">{t('evolution.deltaScore')}</span>
                   <strong className={delta != null ? (delta > 0 ? 'positive' : delta < 0 ? 'negative' : '') : ''}>
                     {delta != null ? (delta >= 0 ? `+${delta.toFixed(3)}` : delta.toFixed(3)) : '—'}
                   </strong>
@@ -630,34 +948,34 @@ function TrialsSection({
                 <Button
                   className="primary"
                   disabled={busy}
-                  onClick={() => onDecide(t.id, 'variant_wins')}
-                  title="Force the trial to conclude that the variant wins"
+                  onClick={() => onDecide(trial.id, 'variant_wins')}
+                  title={t('evolution.decideVariantWinsTooltip')}
                 >
-                  Decide: variant wins
+                  {t('evolution.decideVariantWins')}
                 </Button>
                 <Button
                   className="ghost"
                   disabled={busy}
-                  onClick={() => onDecide(t.id, 'baseline_wins')}
-                  title="Force the trial to conclude that the baseline wins"
+                  onClick={() => onDecide(trial.id, 'baseline_wins')}
+                  title={t('evolution.decideBaselineWinsTooltip')}
                 >
-                  Decide: baseline wins
+                  {t('evolution.decideBaselineWins')}
                 </Button>
                 <Button
                   className="ghost"
                   disabled={busy}
-                  onClick={() => onDecide(t.id, 'tie')}
-                  title="Force a tie (variant is retired)"
+                  onClick={() => onDecide(trial.id, 'tie')}
+                  title={t('evolution.decideTieTooltip')}
                 >
-                  Tie
+                  {t('evolution.decideTie')}
                 </Button>
                 <Button
                   className="danger"
                   disabled={busy}
-                  onClick={() => onAbort(t.id, 'manual_abort')}
-                  title="Stop the trial; variant overlay retires, candidate returns to pending"
+                  onClick={() => onAbort(trial.id, 'manual_abort')}
+                  title={t('evolution.abortTooltip')}
                 >
-                  Abort
+                  {t('evolution.abort')}
                 </Button>
               </div>
             </li>
@@ -683,14 +1001,15 @@ function TrialConfigPanel({
   busy: boolean
   onToggle: (surface: EvolutionSurface, enabled: boolean) => void
 }) {
+  const { t } = useTranslation()
   const forbidden = new Set(config.forbidden_surfaces)
   const order: EvolutionSurface[] = ['prompt', 'kb', 'flow_template', 'routing', 'tool']
   return (
     <Panel
-      title="A/B trial settings"
+      title={t('evolution.abTrialSettings')}
       actions={
         <span className="muted" style={{ fontSize: 11 }}>
-          {config.min_samples_per_arm} samples/arm · {Math.round(config.decision_margin * 100)}% margin
+          {t('evolution.trialConfig', { samples: config.min_samples_per_arm, margin: Math.round(config.decision_margin * 100) })}
         </span>
       }
     >
@@ -702,11 +1021,11 @@ function TrialConfigPanel({
             <li key={surface} className={`evolution-trial-config-row${isForbidden ? ' forbidden' : ''}`}>
               <div className="evolution-trial-config-label">
                 <span className={`evolution-surface tag-${surface}`}>
-                  {SURFACE_LABELS[surface] || surface}
+                  {t(SURFACE_KEY_MAP[surface]) || surface}
                 </span>
                 {isForbidden && (
                   <span className="muted" style={{ fontSize: 11 }}>
-                    Locked — Level 0 only (SPEC §22.2)
+                    {t('evolution.lockedLevel0')}
                   </span>
                 )}
               </div>
@@ -717,7 +1036,7 @@ function TrialConfigPanel({
                   disabled={isForbidden || busy}
                   onChange={(e) => onToggle(surface, e.target.checked)}
                 />
-                <span>{enabled && !isForbidden ? 'A/B enabled' : 'Direct apply'}</span>
+                <span>{enabled && !isForbidden ? t('evolution.abEnabled') : t('evolution.directApply')}</span>
               </label>
             </li>
           )
@@ -736,12 +1055,13 @@ function OverlayCard({
   onRetire: () => void
   retiring: boolean
 }) {
+  const { t } = useTranslation()
   const payload = overlay.payload || {}
   return (
     <li className="evolution-overlay-card">
       <div className="evolution-overlay-card-head">
         <span className={`evolution-surface tag-${overlay.surface}`}>
-          {SURFACE_LABELS[overlay.surface] || overlay.surface}
+          {t(SURFACE_KEY_MAP[overlay.surface]) || overlay.surface}
         </span>
         <StatusBadge status={overlay.state} />
         <span className="muted" style={{ fontSize: 11 }}>{overlay.scope}</span>
@@ -750,16 +1070,16 @@ function OverlayCard({
       <pre className="evolution-payload mono">{JSON.stringify(payload, null, 2)}</pre>
       <div className="evolution-overlay-card-foot">
         <span className="muted" style={{ fontSize: 11 }}>
-          Applied {formatTime(overlay.created_at)}
+          {t('evolution.applied')} {formatTime(overlay.created_at)}
           {overlay.parent_overlay_id && (
             <>
               {' · '}
-              <span title={overlay.parent_overlay_id}>has parent</span>
+              <span title={overlay.parent_overlay_id}>{t('evolution.hasParent')}</span>
             </>
           )}
         </span>
-        <Button className="ghost" onClick={onRetire} disabled={retiring} title="Manually retire">
-          <X size={14} /> Retire
+        <Button className="ghost" onClick={onRetire} disabled={retiring} title={t('evolution.retireTooltip')}>
+          <X size={14} /> {t('evolution.retire')}
         </Button>
       </div>
     </li>
@@ -783,6 +1103,7 @@ function CandidateDetailModal({
   onRollback: (reason: string) => Promise<unknown>
   busy: boolean
 }) {
+  const { t } = useTranslation()
   const [suppressDays, setSuppressDays] = useState<number>(0)
   const [rejectReason, setRejectReason] = useState<string>('')
   const [rollbackReason, setRollbackReason] = useState<string>('')
@@ -799,11 +1120,19 @@ function CandidateDetailModal({
     : []
   const approveDisabled = !canApprove || busy || (isToolSurface && !sourceReviewed)
 
+  const suppressOptions = [
+    { value: 0, label: t('evolution.suppressionOptions.none') },
+    { value: 7, label: t('evolution.suppressionOptions.7days') },
+    { value: 14, label: t('evolution.suppressionOptions.14days') },
+    { value: 30, label: t('evolution.suppressionOptions.30days') },
+    { value: 90, label: t('evolution.suppressionOptions.90days') },
+  ]
+
   return (
     <Modal open title={candidate.title} onClose={onClose} className="evolution-modal">
       <div className="evolution-modal-meta">
         <span className={`evolution-surface tag-${candidate.surface}`}>
-          {SURFACE_LABELS[candidate.surface] || candidate.surface}
+          {t(SURFACE_KEY_MAP[candidate.surface]) || candidate.surface}
         </span>
         <StatusBadge status={candidate.status} />
         <span className="muted" style={{ fontSize: 11 }}>
@@ -811,7 +1140,7 @@ function CandidateDetailModal({
         </span>
         {candidate.applied_overlay_id && (
           <span className="muted mono" style={{ fontSize: 11 }} title={candidate.applied_overlay_id}>
-            overlay {candidate.applied_overlay_id.slice(0, 8)}…
+            {t('evolution.overlayId', { id: candidate.applied_overlay_id.slice(0, 8) })}
           </span>
         )}
       </div>
@@ -819,15 +1148,17 @@ function CandidateDetailModal({
       {candidate.rationale && (
         <section className="evolution-modal-section">
           <h3 className="evolution-modal-section-title">
-            <Sparkles size={14} /> Why this candidate fired
+            <Sparkles size={14} /> {t('evolution.whyFired')}
           </h3>
           <p className="evolution-rationale">{candidate.rationale}</p>
         </section>
       )}
 
+      <ApplyPreviewSection candidate={candidate} />
+
       <section className="evolution-modal-section">
         <h3 className="evolution-modal-section-title">
-          <Layers size={14} /> Signal &amp; payload
+          <Layers size={14} /> {t('evolution.signalPayload')}
         </h3>
         <pre className="evolution-payload mono">{previewPayload(candidate)}</pre>
       </section>
@@ -846,7 +1177,7 @@ function CandidateDetailModal({
       {isToolSurface && toolSources.length > 0 && (
         <section className="evolution-modal-section evolution-tool-sources">
           <h3 className="evolution-modal-section-title">
-            <AlertTriangle size={14} /> Evolved tool source — review carefully
+            <AlertTriangle size={14} /> {t('evolution.toolSourceReview')}
           </h3>
           {toolSources.map((entry, idx) => (
             <div key={`${entry.name}-${idx}`} className="evolution-tool-source-block">
@@ -866,7 +1197,7 @@ function CandidateDetailModal({
               onChange={(e) => setSourceReviewed(e.target.checked)}
               disabled={busy}
             />
-            <span>I have read this source and accept the risk of running it (SPEC §22.11).</span>
+            <span>{t('evolution.acceptRisk')}</span>
           </label>
         </section>
       )}
@@ -879,22 +1210,28 @@ function CandidateDetailModal({
             onClick={() => onApprove(isToolSurface ? sourceReviewed : undefined)}
             title={
               !canApprove
-                ? 'Only pending/trialing candidates can be approved'
+                ? t('evolution.approveDisabledNotPending')
                 : isToolSurface && !sourceReviewed
-                  ? 'Tool surface requires source-review confirmation'
-                  : 'Apply this candidate as an active overlay'
+                  ? t('evolution.approveDisabledNoReview')
+                  : t('evolution.approveEnabled')
             }
           >
-            <Check size={14} /> Approve &amp; apply
+            <Check size={14} /> {t('evolution.approveApply')}
           </Button>
           {canMerge && (
             <Button
               className="ghost"
               disabled={busy}
               onClick={() => onMerge()}
-              title={`Promote scope (${candidate.scope} → ${candidate.scope === 'session' ? 'project' : 'global'})`}
+              title={t('evolution.mergeTooltip', {
+                scope: candidate.scope,
+                target: candidate.scope === 'session' ? 'project' : 'global',
+              })}
             >
-              <ArrowUpRight size={14} /> Merge to {candidate.scope === 'session' ? 'project' : 'global'}
+              <ArrowUpRight size={14} />{' '}
+              {candidate.scope === 'session'
+                ? t('evolution.mergeToProject')
+                : t('evolution.mergeToGlobal')}
             </Button>
           )}
           {canRollback && (
@@ -902,21 +1239,21 @@ function CandidateDetailModal({
               className="ghost"
               disabled={busy}
               onClick={() => onRollback(rollbackReason)}
-              title="Retire the applied overlay and restore the parent overlay (if any)"
+              title={t('evolution.rollbackTooltip')}
             >
-              <RotateCcw size={14} /> Rollback overlay
+              <RotateCcw size={14} /> {t('evolution.rollbackOverlay')}
             </Button>
           )}
         </div>
 
         {canRollback && (
           <label className="evolution-action-aux">
-            <span className="muted">Rollback reason (optional)</span>
+            <span className="muted">{t('evolution.rollbackReason')}</span>
             <input
               type="text"
               value={rollbackReason}
               onChange={(e) => setRollbackReason(e.target.value)}
-              placeholder="e.g. metrics regressed"
+              placeholder={t('evolution.rollbackReasonPlaceholder')}
             />
           </label>
         )}
@@ -924,27 +1261,27 @@ function CandidateDetailModal({
         {canReject && (
           <div className="evolution-reject-block">
             <h4 className="evolution-modal-section-title evolution-reject-title">
-              <AlertTriangle size={14} /> Reject this candidate
+              <AlertTriangle size={14} /> {t('evolution.rejectCandidate')}
             </h4>
             <div className="evolution-reject-row">
               <label className="evolution-action-aux">
-                <span className="muted">Suppression window</span>
+                <span className="muted">{t('evolution.suppressionWindow')}</span>
                 <select
                   value={suppressDays}
                   onChange={(e) => setSuppressDays(Number(e.target.value))}
                 >
-                  {SUPPRESS_OPTIONS.map((o) => (
+                  {suppressOptions.map((o) => (
                     <option key={o.value} value={o.value}>{o.label}</option>
                   ))}
                 </select>
               </label>
               <label className="evolution-action-aux evolution-action-aux-grow">
-                <span className="muted">Reason (optional)</span>
+                <span className="muted">{t('evolution.rejectReason')}</span>
                 <input
                   type="text"
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
-                  placeholder="e.g. noisy signal"
+                  placeholder={t('evolution.rejectReasonPlaceholder')}
                 />
               </label>
               <Button
@@ -952,12 +1289,12 @@ function CandidateDetailModal({
                 disabled={busy}
                 onClick={() => onReject(suppressDays, rejectReason)}
               >
-                <X size={14} /> Reject
+                <X size={14} /> {t('evolution.reject')}
               </Button>
             </div>
             {suppressDays > 0 && (
               <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                Generator will not re-fire the same signal for {suppressDays} day{suppressDays === 1 ? '' : 's'}.
+                {t('evolution.suppressionDetail', { n: suppressDays })}
               </p>
             )}
           </div>
@@ -965,7 +1302,7 @@ function CandidateDetailModal({
 
         {candidate.status === 'rejected' && (candidate.metadata as Record<string, unknown> | undefined)?.suppressed_until ? (
           <p className="muted" style={{ fontSize: 12 }}>
-            <GitBranch size={12} /> Suppressed until{' '}
+            <GitBranch size={12} /> {t('evolution.suppressedUntil')}{' '}
             {formatTime(Number((candidate.metadata as Record<string, unknown>).suppressed_until))}
           </p>
         ) : null}

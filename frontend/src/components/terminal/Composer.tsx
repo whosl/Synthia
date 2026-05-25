@@ -1,5 +1,6 @@
 import { Send, Square } from 'lucide-react'
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '../common/Button'
 
 export function Composer({
@@ -19,11 +20,12 @@ export function Composer({
   onSend: (text: string) => void
   onStop: () => void
 }) {
+  const { t } = useTranslation()
   const [text, setText] = useState('')
   const send = () => { const q = text.trim(); if (!q || disabled) return; setText(''); onSend(q) }
   const inputPlaceholder =
     placeholder ??
-    (running ? 'synthia is running…' : 'Ask about synthesis, timing, constraints…')
+    (running ? t('terminal.composerRunning') : t('terminal.composerPlaceholder'))
   const showStatus = statusActive ?? (running || stopping)
   return (
     <div className="composer-anchor">
@@ -33,7 +35,7 @@ export function Composer({
         <span
           className="terminal-status-dot composer-status-dot"
           role="status"
-          aria-label={stopping ? 'synthia stopping' : 'synthia running'}
+          aria-label={stopping ? t('terminal.synthiaStopping') : t('terminal.synthiaRunning')}
         />
       )}
       <input
@@ -55,13 +57,13 @@ export function Composer({
         className="danger composer-action"
         onClick={onStop}
         disabled={stopping}
-        aria-label={stopping ? 'Stopping agent' : 'Stop agent'}
-        title={stopping ? 'Stopping…' : 'Stop'}
+        aria-label={stopping ? t('terminal.stopAgent') : t('terminal.stopAgent')}
+        title={stopping ? t('terminal.stopping') : t('terminal.stop')}
       >
         <Square size={16} />
       </Button>
     ) : (
-      <Button className="primary composer-action" onClick={send} aria-label="Send message" title="Send">
+      <Button className="primary composer-action" onClick={send} aria-label={t('terminal.send')} title={t('terminal.send')}>
         <Send size={16} />
       </Button>
     )}

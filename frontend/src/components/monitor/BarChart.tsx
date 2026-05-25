@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next'
+
 export interface BarChartItem {
   label: string
   value: number
@@ -10,10 +12,12 @@ interface BarChartProps {
   emptyLabel?: string
 }
 
-export function BarChart({ items, valueFormatter = (n) => String(n), emptyLabel = 'No data' }: BarChartProps) {
+export function BarChart({ items, valueFormatter = (n) => String(n), emptyLabel }: BarChartProps) {
+  const { t } = useTranslation()
+  const label = emptyLabel ?? t('monitor.noData')
   const max = Math.max(1, ...items.map((i) => i.value))
   if (!items.length) {
-    return <div className="chart-empty muted">{emptyLabel}</div>
+    return <div className="chart-empty muted">{label}</div>
   }
   return (
     <div className="bar-chart" role="img" aria-label="Bar chart">

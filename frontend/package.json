@@ -12,10 +12,12 @@
   "dependencies": {
     "@tanstack/react-query": "^5.0.0",
     "clsx": "^2.1.1",
+    "i18next": "^26.2.0",
     "lucide-react": "^1.16.0",
     "marked": "^15.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-i18next": "^17.0.8",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.0.0",
     "remark-gfm": "^4.0.1",

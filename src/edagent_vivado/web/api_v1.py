@@ -1451,7 +1451,7 @@ async def api_metrics_series(
 
 # ── Evolution Candidates API (SPEC §22.9 — SE-PR3 read-only) ───
 
-def _candidate_dto(row: dict) -> dict:
+def _candidate_dto(row: dict, *, include_apply_preview: bool = False) -> dict:
     """Decode JSON fields so the frontend can use them directly."""
     try:
         signal = json.loads(row.get("signal_source_json") or "{}")
@@ -1464,6 +1464,13 @@ def _candidate_dto(row: dict) -> dict:
     out = dict(row)
     out["signal_source"] = signal
     out["metadata"] = meta
+    if include_apply_preview:
+        try:
+            from edagent_vivado.evolution import preview_candidate_payload
+
+            out["apply_preview"] = preview_candidate_payload(row["id"])
+        except Exception:
+            out["apply_preview"] = None
     return out
 
 
@@ -1500,7 +1507,21 @@ async def api_evolution_candidate_get(candidate_id: str):
     row = candidate_get(candidate_id)
     if not row:
         raise HTTPException(404, "candidate not found")
-    return {"candidate": _candidate_dto(row)}
+    return {"candidate": _candidate_dto(row, include_apply_preview=True)}
+
+
+@router.get("/evolution/candidates/{candidate_id}/preview")
+async def api_evolution_candidate_preview(candidate_id: str):
+    """Return the overlay payload that would be applied on approve (read-only)."""
+    from edagent_vivado.evolution import preview_candidate_payload
+
+    try:
+        preview = preview_candidate_payload(candidate_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"preview": preview}
 
 
 class CandidateApproveReq(BaseModel):

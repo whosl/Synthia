@@ -822,8 +822,36 @@
   transition: transform var(--transition);
 }
 
-.tool-run-details {
+/* Expand/collapse animation via grid trick */
+.trace-body.collapsible-body {
   display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+  padding: 0;
+  border-top: none;
+}
+.trace-body.collapsible-body.expanded {
+  grid-template-rows: 1fr;
+  padding: 10px 12px;
+  border-top: 1px solid var(--term-border-soft);
+}
+.trace-body.collapsible-body > * {
+  overflow: clip;
+}
+
+.tool-run-details.collapsible-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+.tool-run-details.collapsible-body.expanded {
+  grid-template-rows: 1fr;
+}
+.tool-run-details.collapsible-body > * {
+  overflow: clip;
+}
+
+.tool-run-details {
   gap: 3px;
   margin-top: 0;
 }
@@ -1309,6 +1337,20 @@
   .right-panel-close {
     width: 34px;
     height: 34px;
+  }
+
+  .trace-body {
+    padding: 8px 10px;
+    font-size: var(--font-size-xs);
+    overflow-x: auto;
+    word-break: break-all;
+  }
+
+  .trace-block.tool-block .trace-header,
+  .trace-block.approval-trace-block .trace-header {
+    font-size: var(--font-size-xs);
+    padding: 8px 10px;
+    gap: 4px;
   }
 
 }

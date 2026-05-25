@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useSearchParams } from 'react-router-dom'
 import { getProject } from '../api/projects'
 import { getSession } from '../api/sessions'
@@ -19,6 +20,7 @@ import { useStreamStore } from '../stores/streamStore'
 import { useTerminalStore } from '../stores/terminalStore'
 
 export default function TerminalPage() {
+  const { t } = useTranslation()
   const [searchParams] = useSearchParams()
   const sessionId = searchParams.get('session') || ''
   const projectIdFromUrl = searchParams.get('project') || ''
@@ -72,7 +74,7 @@ export default function TerminalPage() {
   })
 
   const problemCount = useMemo(
-    () => timeline.auditLog.filter((t) => t.type.includes('problem') || t.state === 'error').length,
+    () => timeline.auditLog.filter((tl) => tl.type.includes('problem') || tl.state === 'error').length,
     [timeline.auditLog],
   )
   const session = sessionQ.data?.session
@@ -80,8 +82,8 @@ export default function TerminalPage() {
   const projectArchived = isProjectArchived(project)
   const composerDisabled = projectArchived || stopping || start.isPending || running
   const backHref = projectId ? `/?expand=${encodeURIComponent(projectId)}` : '/'
-  const headerTitle = session?.name || 'Session'
-  const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? 'Loading project…' : ''
+  const headerTitle = session?.name || t('terminal.session')
+  const headerSubtitle = project ? `${project.name} · ${project.root_path}` : projectId ? t('terminal.loadingProject') : ''
 
   const handleInteractionRespond = async (interactionId: string, response: Record<string, unknown>) => {
     await request(`/interactions/${interactionId}/respond`, {
@@ -101,9 +103,9 @@ export default function TerminalPage() {
         <div className={`terminal-layout ${rightPanelOpen ? 'right-open' : 'right-closed'}`}>
           <section className="chat-panel">
             <header className="chat-panel-header">
-              <Link to={backHref} className="btn ghost terminal-back-link" aria-label="Back to project sessions">
+              <Link to={backHref} className="btn ghost terminal-back-link" aria-label={t('terminal.backToProject')}>
                 <ArrowLeft size={15} />
-                <span className="terminal-back-label">Back</span>
+                <span className="terminal-back-label">{t('terminal.back')}</span>
               </Link>
               <div className="chat-panel-header-title-block">
                 <h1 className="chat-panel-header-title">{headerTitle}</h1>
@@ -111,10 +113,10 @@ export default function TerminalPage() {
                   <p className="chat-panel-header-subtitle mono" title={headerSubtitle}>{headerSubtitle}</p>
                 )}
                 {projectArchived && (
-                  <p className="terminal-archived-notice">Project archived — view only; restore the project to send messages.</p>
+                  <p className="terminal-archived-notice">{t('terminal.archivedNotice')}</p>
                 )}
               </div>
-              <div className="chat-panel-header-tabs" role="tablist" aria-label="Chat views">
+              <div className="chat-panel-header-tabs" role="tablist" aria-label={t('terminal.chatViews')}>
                 <button
                   type="button"
                   role="tab"
@@ -122,7 +124,7 @@ export default function TerminalPage() {
                   className={`tab ${view === 'chat' ? 'active' : ''}`}
                   onClick={() => setView('chat')}
                 >
-                  Chat
+                  {t('terminal.chatTab')}
                 </button>
                 <button
                   type="button"
@@ -131,7 +133,7 @@ export default function TerminalPage() {
                   className={`tab ${view === 'timeline' ? 'active' : ''}`}
                   onClick={() => setView('timeline')}
                 >
-                  Timeline
+                  {t('terminal.timelineTab')}
                 </button>
               </div>
               <div className="chat-panel-header-actions">
@@ -141,14 +143,14 @@ export default function TerminalPage() {
                     setRightPanelTab('run')
                     setRightPanelOpen(true)
                   }}
-                  aria-label="Open run controls"
-                  title="Controls"
+                  aria-label={t('terminal.openRunControls')}
+                  title={t('terminal.controls')}
                 >
                   <SlidersHorizontal size={16} />
                 </Button>
                 {(running || stopping) && (
                   <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>
-                    Stop
+                    {t('terminal.stop')}
                   </Button>
                 )}
               </div>
@@ -177,7 +179,7 @@ export default function TerminalPage() {
               disabled={composerDisabled}
               placeholder={
                 projectArchived
-                  ? 'Project archived — read-only'
+                  ? t('terminal.composerArchived')
                   : undefined
               }
               onSend={(q) => {
@@ -191,7 +193,7 @@ export default function TerminalPage() {
           <button
             type="button"
             className={`right-panel-backdrop${rightPanelOpen ? ' is-open' : ''}`}
-            aria-label="Close side panel"
+            aria-label={t('rightPanel.close')}
             aria-hidden={!rightPanelOpen}
             tabIndex={rightPanelOpen ? 0 : -1}
             onClick={() => setRightPanelOpen(false)}

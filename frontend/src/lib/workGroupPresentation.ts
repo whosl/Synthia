@@ -1,4 +1,5 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
+import i18n from './i18n'
 import { computeToolGroupElapsedSec } from './toolPresentation'
 import { isToolEntry, memberToToolViewModel } from '../timeline/chatGrouping'
 import type { AssistantTextPayload, TimelineEntry } from '../timeline/types'
@@ -58,11 +59,10 @@ export function formatWorkedDuration(totalSec: number): string {
 
 export function formatWorkGroupSummaryLine(summary: WorkGroupSummary): string {
   const duration = formatWorkedDuration(summary.elapsedSec)
-  const tools =
-    summary.toolCount === 1
-      ? '1 tool called'
-      : `${summary.toolCount} tools called`
-  return `worked for ${duration} · ${tools}`
+  if (summary.toolCount === 1) {
+    return i18n.t('agentWork.workedForOne', { duration })
+  }
+  return i18n.t('agentWork.workedFor', { duration, count: summary.toolCount })
 }
 
 export function isAssistantFinalComplete(entry: TimelineEntry | null | undefined): boolean {

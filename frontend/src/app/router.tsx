@@ -20,7 +20,7 @@ export function AppRouter() {
       <Route path="/monitor/runs/:runId" element={<RunDetailPage />} />
       <Route path="/vivado" element={<VivadoPage />} />
       <Route path="/kb" element={<KnowledgeBasePage />} />
-      <Route path="/knowledge" element={<KnowledgeBasePage mode="knowledge" />} />
+      <Route path="/knowledge" element={<KnowledgeBasePage />} />
       <Route path="/evolution" element={<EvolutionPage />} />
       <Route path="/settings" element={<SettingsPage />} />
     </Routes>

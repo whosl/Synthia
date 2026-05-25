@@ -18,6 +18,7 @@ from edagent_vivado.evolution import (
     overlay_get,
     overlay_list,
     overlay_retire_active_for,
+    preview_candidate_payload,
     reject_candidate,
     resolve_flow_template,
     resolve_prompt,
@@ -82,6 +83,21 @@ def _make_kb_candidate(pid: str, signature: str = "synth-8-439:echo") -> dict:
 
 
 # ── approve --------------------------------------------------------------
+
+
+def test_preview_candidate_payload_prompt_matches_approve():
+    pid = _make_project()
+    cand = _make_prompt_candidate(pid["id"])
+
+    preview = preview_candidate_payload(cand["id"])
+    assert preview["surface"] == "prompt"
+    assert preview["prompt_mode"] == "append"
+    assert "first-run success" in preview["prompt_text"]
+    assert "20%" in preview["prompt_text"]
+
+    updated = approve_candidate(cand["id"])
+    overlay = overlay_get(updated["applied_overlay_id"])
+    assert overlay["payload"]["text"] == preview["prompt_text"]
 
 
 def test_approve_creates_active_overlay_for_prompt():

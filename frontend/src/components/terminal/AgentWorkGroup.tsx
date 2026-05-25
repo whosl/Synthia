@@ -64,11 +64,11 @@ export function AgentWorkGroup({
         <ChevronRight size={14} className="tool-run-summary-chevron" />
         <span>{summaryLine}</span>
       </button>
-      {expanded && (
-        <div className="tool-run-details agent-work-details">
+      <div className={`tool-run-details agent-work-details collapsible-body${expanded ? ' expanded' : ''}`}>
+        <div>
           {innerItems.map((item) => renderInnerItem(item, onInteractionRespond))}
         </div>
-      )}
+      </div>
     </div>
   )
 }

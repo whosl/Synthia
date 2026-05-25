@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { BarChart } from './BarChart'
 import { getMonitorOverview, runMonitorCleanup, type MonitorOverview } from '../../api/monitor'
 import { Button } from '../common/Button'
@@ -24,6 +25,7 @@ function overviewCharts(overview: MonitorOverview) {
 }
 
 export function MonitorOverviewPanel() {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({
     queryKey: ['monitor-overview', 14],
@@ -40,11 +42,11 @@ export function MonitorOverviewPanel() {
     <div className="monitor-overview">
       <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
         <div className="metric-card">
-          <div className="metric-label">Runs (14d)</div>
+          <div className="metric-label">{t('monitor.runs14d')}</div>
           <div className="metric-value">{isLoading ? '…' : formatNumber(overview?.run_count ?? 0)}</div>
         </div>
         <div className="metric-card">
-          <div className="metric-label">Tokens (14d)</div>
+          <div className="metric-label">{t('monitor.tokens14d')}</div>
           <div className="metric-value">
             {isLoading ? '…' : formatNumber(
               (overview?.usage_totals.input_tokens ?? 0) + (overview?.usage_totals.output_tokens ?? 0),
@@ -52,25 +54,27 @@ export function MonitorOverviewPanel() {
           </div>
         </div>
         <div className="metric-card">
-          <div className="metric-label">Tool error rate</div>
+          <div className="metric-label">{t('monitor.toolErrorRate')}</div>
           <div className="metric-value">
             {isLoading ? '…' : pct(overview?.tool_calls.error_rate ?? 0)}
           </div>
           <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-            {overview?.tool_calls.errors ?? 0} / {overview?.tool_calls.total ?? 0} calls
+            {overview
+              ? t('monitor.errorRateDetail', { errors: overview.tool_calls.errors ?? 0, total: overview.tool_calls.total ?? 0 })
+              : ''}
           </div>
         </div>
         <div className="metric-card">
-          <div className="metric-label">Problems (14d)</div>
+          <div className="metric-label">{t('monitor.problems14d')}</div>
           <div className="metric-value">{isLoading ? '…' : formatNumber(overview?.problems ?? 0)}</div>
         </div>
       </div>
       <div className="dashboard-grid">
-        <Panel title="Token trend (14 days)">
-          <BarChart items={tokenItems} valueFormatter={formatNumber} emptyLabel="No LLM usage in window" />
+        <Panel title={t('monitor.tokenTrend14d')}>
+          <BarChart items={tokenItems} valueFormatter={formatNumber} emptyLabel={t('monitor.noLLMUsage')} />
         </Panel>
-        <Panel title="Tokens by model">
-          <BarChart items={modelItems} valueFormatter={formatNumber} emptyLabel="No model breakdown yet" />
+        <Panel title={t('monitor.tokensByModel')}>
+          <BarChart items={modelItems} valueFormatter={formatNumber} emptyLabel={t('monitor.noModelBreakdown')} />
         </Panel>
       </div>
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -78,14 +82,18 @@ export function MonitorOverviewPanel() {
           className="ghost"
           disabled={cleanup.isPending}
           onClick={() => cleanup.mutate()}
-          title="Preview rows older than 90 days (dry run)"
+          title={t('monitor.previewRetentionTooltip')}
         >
-          {cleanup.isPending ? 'Checking…' : 'Preview retention cleanup'}
+          {cleanup.isPending ? t('monitor.checking') : t('monitor.previewRetention')}
         </Button>
         {cleanup.data && (
           <span className="muted" style={{ fontSize: 12, alignSelf: 'center' }}>
-            Would delete: events {cleanup.data.deleted.events}, usage {cleanup.data.deleted.llm_usage},
-            tools {cleanup.data.deleted.tool_calls}, problems {cleanup.data.deleted.problems}
+            {t('monitor.wouldDelete', {
+              events: cleanup.data.deleted.events,
+              usage: cleanup.data.deleted.llm_usage,
+              tools: cleanup.data.deleted.tool_calls,
+              problems: cleanup.data.deleted.problems,
+            })}
           </span>
         )}
       </div>

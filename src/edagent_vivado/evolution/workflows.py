@@ -198,15 +198,8 @@ DEFAULT_PAYLOAD_BUILDERS = {
 # ── KB surface bridge ─────────────────────────────────────────
 
 
-def _apply_kb_candidate(candidate: dict) -> dict:
-    """KB-surface candidates land in the existing ``kb_cases`` table.
-
-    Per SPEC §22.2 the KB surface reuses the existing approved-KB workflow.
-    The overlay row still gets created so we can track which evolution
-    candidate produced which kb_case (for rollback / audit).
-    """
-    from edagent_vivado.repository.store import kb_case_create
-
+def _kb_case_fields(candidate: dict) -> dict:
+    """Fields that would be written to ``kb_cases`` when a KB candidate is approved."""
     signal = _signal(candidate)
     pattern = (
         str(signal.get("normalized_signature") or "").strip()
@@ -222,13 +215,32 @@ def _apply_kb_candidate(candidate: dict) -> dict:
     if not actions:
         actions = ["Investigate using parse_vivado_log_tool and match_error_cases_tool"]
     category = str(signal.get("sample_category") or "vivado")
+    return {
+        "pattern": pattern,
+        "likely_causes": likely,
+        "suggested_actions": actions,
+        "category": category,
+        "normalized_signature": pattern,
+    }
 
+
+def _apply_kb_candidate(candidate: dict) -> dict:
+    """KB-surface candidates land in the existing ``kb_cases`` table.
+
+    Per SPEC §22.2 the KB surface reuses the existing approved-KB workflow.
+    The overlay row still gets created so we can track which evolution
+    candidate produced which kb_case (for rollback / audit).
+    """
+    from edagent_vivado.repository.store import kb_case_create
+
+    fields = _kb_case_fields(candidate)
+    signal = _signal(candidate)
     case = kb_case_create(
-        pattern=pattern,
-        likely_causes=likely,
-        suggested_actions=actions,
-        category=category,
-        normalized_signature=pattern,
+        pattern=fields["pattern"],
+        likely_causes=fields["likely_causes"],
+        suggested_actions=fields["suggested_actions"],
+        category=fields["category"],
+        normalized_signature=fields["normalized_signature"],
         source_candidate_id=candidate["id"],
         metadata={
             "origin": "evolution_candidate",
@@ -237,6 +249,91 @@ def _apply_kb_candidate(candidate: dict) -> dict:
         },
     )
     return case
+
+
+def _synthesize_overlay_payload(
+    candidate: dict,
+    *,
+    payload_override: dict | None = None,
+) -> dict:
+    """Build the overlay payload that ``approve_candidate`` would persist."""
+    surface = candidate["surface"]
+    if payload_override is not None:
+        return dict(payload_override)
+    if surface == SURFACE_KB:
+        fields = _kb_case_fields(candidate)
+        return {
+            "kb_case_id": None,
+            "pattern": fields["pattern"],
+            "kb_case_preview": fields,
+        }
+    builder = DEFAULT_PAYLOAD_BUILDERS.get(surface)
+    if builder is None:
+        raise ValueError(f"no default payload builder for surface {surface!r}")
+    return builder(candidate)
+
+
+def preview_candidate_payload(
+    candidate_id: str,
+    *,
+    payload_override: dict | None = None,
+) -> dict:
+    """Return the overlay body that would be applied on approve (read-only).
+
+    Uses the same synthesis path as :func:`approve_candidate` so the review UI
+    can show the exact prompt / routing rules / templates before the operator
+    clicks Approve. Never writes overlays or kb_cases.
+    """
+    cand = candidate_get(candidate_id)
+    if not cand:
+        raise LookupError(f"candidate {candidate_id} not found")
+
+    surface = cand["surface"]
+    scope = cand.get("scope") or "project"
+    validation_error: str | None = None
+    try:
+        payload = _synthesize_overlay_payload(cand, payload_override=payload_override)
+    except Exception as exc:
+        if surface != SURFACE_TOOL:
+            raise
+        validation_error = str(exc)
+        suggested = _suggested_payload(cand) or {}
+        payload = {
+            "disabled": list(suggested.get("disabled") or []),
+            "additional_tools": list(suggested.get("additional_tools") or []),
+        }
+
+    out: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "surface": surface,
+        "scope": scope,
+        "payload": payload,
+    }
+    if validation_error:
+        out["validation_error"] = validation_error
+
+    if surface == SURFACE_PROMPT:
+        mode = str(payload.get("mode") or "append").lower()
+        text = str(payload.get("text") or "").strip()
+        out["prompt_mode"] = mode
+        out["prompt_text"] = text
+        if mode == "replace":
+            out["prompt_effect"] = "Replaces the baseline system prompt entirely."
+        elif mode == "prepend":
+            out["prompt_effect"] = "Prepended before the baseline system prompt."
+        else:
+            out["prompt_effect"] = "Appended after the baseline system prompt."
+    elif surface == SURFACE_FLOW_TEMPLATE:
+        templates = payload.get("templates") or {}
+        out["flow_templates"] = {
+            name: body for name, body in templates.items()
+            if isinstance(name, str) and isinstance(body, str) and body.strip()
+        }
+    elif surface == SURFACE_ROUTING:
+        out["routing_rules"] = list(payload.get("rules") or [])
+        out["routing_weights"] = dict(payload.get("weights") or {})
+
+    return out
 
 
 # ── shared helpers ────────────────────────────────────────────
@@ -335,18 +432,13 @@ def approve_candidate(
         kb_case_id = kb_case["id"]
 
     # Compute the overlay payload (caller override > default builder > kb-only marker).
-    if payload_override is not None:
-        payload = dict(payload_override)
-    elif surface == SURFACE_KB:
+    if surface == SURFACE_KB and payload_override is None:
         payload = {
             "kb_case_id": kb_case_id,
-            "pattern": _signal(cand).get("normalized_signature"),
+            "pattern": _kb_case_fields(cand)["pattern"],
         }
     else:
-        builder = DEFAULT_PAYLOAD_BUILDERS.get(surface)
-        if builder is None:
-            raise ValueError(f"no default payload builder for surface {surface!r}")
-        payload = builder(cand)
+        payload = _synthesize_overlay_payload(cand, payload_override=payload_override)
 
     # ── Trial gate ─────────────────────────────────────────
     trial_enabled = (

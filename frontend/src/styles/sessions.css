@@ -4,6 +4,10 @@
   margin-bottom: 12px;
 }
 
+.page-sticky-top .sessions-page-header {
+  margin-bottom: 12px;
+}
+
 .sessions-title-row {
   display: flex;
   align-items: center;

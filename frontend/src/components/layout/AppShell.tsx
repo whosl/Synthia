@@ -1,9 +1,9 @@
 ﻿import { NavLink } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import {
   ChevronLeft,
   ChevronRight,
   CircuitBoard,
-  Database,
   Gauge,
   Home,
   Settings,
@@ -13,26 +13,26 @@ import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
-  { label: 'Projects', path: '/', icon: Home },
-  { label: 'Monitor', path: '/monitor', icon: Gauge },
-  { label: 'Vivado', path: '/vivado', icon: CircuitBoard },
-  { label: 'Knowledge', path: '/knowledge', icon: Database },
-  { label: 'Evolution', path: '/evolution', icon: Sparkles },
-  { label: 'Settings', path: '/settings', icon: Settings },
+  { key: 'nav.projects', path: '/', icon: Home },
+  { key: 'nav.monitor', path: '/monitor', icon: Gauge },
+  { key: 'nav.vivado', path: '/vivado', icon: CircuitBoard },
+  { key: 'nav.evolution', path: '/evolution', icon: Sparkles },
+  { key: 'nav.settings', path: '/settings', icon: Settings },
 ]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const { t } = useTranslation()
   const navCollapsed = useShellStore((s) => s.navCollapsed)
   const toggleNavCollapsed = useShellStore((s) => s.toggleNavCollapsed)
 
   return (
     <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}`}>
-      <aside className="nav-rail" aria-label="Main navigation">
+      <aside className="nav-rail" aria-label={t('nav.projects')}>
         <div className="nav-top">
           <div className="nav-header">
             <div className="brand">
               <BrandMark fill={navCollapsed} />
-              <span className="brand-label">Synthia</span>
+              <span className="brand-label">{t('app.brand')}</span>
             </div>
           </div>
           <div className="nav-collapse-bar">
@@ -40,33 +40,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               type="button"
               className="nav-collapse-btn"
               onClick={toggleNavCollapsed}
-              aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title={navCollapsed ? 'Expand' : 'Collapse'}
+              aria-label={navCollapsed ? t('projects.expand') : t('projects.collapse')}
+              title={navCollapsed ? t('projects.expand') : t('projects.collapse')}
             >
               {navCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
             </button>
           </div>
         </div>
         <nav className="nav-items">
-          {nav.map((item) => (
-            <NavLink
-              key={item.label}
-              to={item.path}
-              end={item.path === '/'}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              title={item.label}
-            >
-              <item.icon size={16} />
-              <span className="nav-item-label">{item.label}</span>
-            </NavLink>
-          ))}
+          {nav.map((item) => {
+            const label = t(item.key)
+            return (
+              <NavLink
+                key={item.key}
+                to={item.path}
+                end={item.path === '/'}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                title={label}
+              >
+                <item.icon size={16} />
+                <span className="nav-item-label">{label}</span>
+              </NavLink>
+            )
+          })}
         </nav>
         <div className="nav-footer">
           <div className="user-card">
             <span className="avatar">SY</span>
-            <span className="nav-footer-label">Engineer</span>
+            <span className="nav-footer-label">{t('app.userRole')}</span>
           </div>
-          <div className="nav-version">v0.3.0</div>
+          <div className="nav-version">{t('app.version')}</div>
         </div>
       </aside>
       <main className="app-main">{children}</main>

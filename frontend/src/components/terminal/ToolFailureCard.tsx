@@ -1,4 +1,5 @@
 import type { ToolFailureCardModel } from '../../lib/toolPresentation'
+import { useTranslation } from 'react-i18next'
 
 function formatElapsed(ms?: number) {
   if (ms == null) return null
@@ -7,6 +8,7 @@ function formatElapsed(ms?: number) {
 }
 
 export function ToolFailureCard({ model }: { model: ToolFailureCardModel }) {
+  const { t } = useTranslation()
   const elapsed = formatElapsed(model.elapsedMs)
   return (
     <div className="tool-failure-card" role="alert">
@@ -14,22 +16,22 @@ export function ToolFailureCard({ model }: { model: ToolFailureCardModel }) {
       <dl className="tool-failure-card-grid">
         {model.stage && (
           <div className="tool-failure-row">
-            <dt>Stage</dt>
+            <dt>{t('toolFailure.stage')}</dt>
             <dd><code>{model.stage}</code></dd>
           </div>
         )}
         <div className="tool-failure-row">
-          <dt>Error</dt>
+          <dt>{t('toolFailure.error')}</dt>
           <dd className="tool-failure-error">{model.error}</dd>
         </div>
         {elapsed && (
           <div className="tool-failure-row">
-            <dt>Elapsed</dt>
+            <dt>{t('toolFailure.elapsed')}</dt>
             <dd>{elapsed}</dd>
           </div>
         )}
         <div className="tool-failure-row">
-          <dt>Action</dt>
+          <dt>{t('toolFailure.action')}</dt>
           <dd>{model.action}</dd>
         </div>
       </dl>

@@ -1,4 +1,5 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
+import i18n from './i18n'
 import { resolveToolElapsedMs } from './toolElapsed'
 
 export type ToolOutcome =
@@ -97,19 +98,19 @@ export function extractVivadoErrorLine(blob: string): string {
 
 export function suggestFailureAction(tool: ToolCallViewModel, parsed: ParsedToolOutcome): string {
   if (tool.state === 'rejected' || parsed.outcome === 'user_rejected') {
-    return 'Re-run after approving Vivado execution in Controls'
+    return i18n.t('toolFailure.actionReRun')
   }
   const blob = `${parsed.error || ''}\n${parsed.stderr || ''}\n${parsed.summary}`.toLowerCase()
   if (blob.includes('file not found') || blob.includes('no such file')) {
-    return 'Check missing RTL source path in the manifest'
+    return i18n.t('toolFailure.actionCheckRTL')
   }
   if (blob.includes('read_verilog') || parsed.stage === 'read_verilog') {
-    return 'Verify RTL paths in eda.yaml and remote workspace sync'
+    return i18n.t('toolFailure.actionVerifyRTL')
   }
   if (blob.includes('timing') || blob.includes('setup')) {
-    return 'Review timing constraints and clock definitions'
+    return i18n.t('toolFailure.actionReviewTiming')
   }
-  return 'Expand tool details below or open Vivado log in the right panel'
+  return i18n.t('toolFailure.actionExpandDetails')
 }
 
 export interface ToolFailureCardModel {
@@ -136,23 +137,23 @@ export function buildFailureCard(tool: ToolCallViewModel): ToolFailureCardModel 
 
   const scope = parsed.scope || ''
   const vivado = isVivadoToolName(tool.name)
-  let title = 'Tool failed'
+  let title = i18n.t('toolFailure.toolFailed')
   if (tool.state === 'rejected' || parsed.outcome === 'user_rejected') {
-    title = vivado ? 'Vivado run declined' : 'Action declined'
+    title = vivado ? i18n.t('toolFailure.vivadoDeclined') : i18n.t('toolFailure.actionDeclined')
   } else if (scope === 'vivado_synth' || tool.name.includes('synth')) {
-    title = 'Synthesis Failed'
+    title = i18n.t('toolFailure.synthesisFailed')
   } else if (scope === 'vivado_impl' || tool.name.includes('impl')) {
-    title = 'Implementation Failed'
+    title = i18n.t('toolFailure.implementationFailed')
   } else if (scope === 'vivado_flow' || tool.name.includes('flow')) {
-    title = 'Vivado Flow Failed'
+    title = i18n.t('toolFailure.vivadoFlowFailed')
   } else if (vivado) {
-    title = 'Vivado step failed'
+    title = i18n.t('toolFailure.vivadoStepFailed')
   } else if (tool.state === 'stopped') {
-    title = 'Tool stopped'
+    title = i18n.t('toolFailure.toolStopped')
   }
 
   const blob = `${parsed.error || ''}\n${parsed.stderr || ''}\n${tool.result || ''}`
-  const error = extractVivadoErrorLine(blob) || parsed.summary || tool.error || 'Execution failed'
+  const error = extractVivadoErrorLine(blob) || parsed.summary || tool.error || i18n.t('toolFailure.executionFailed')
 
   return {
     toolId: tool.id,
@@ -209,7 +210,7 @@ export function buildToolGroupSummary(
   }
   let tail: string | undefined
   if (primaryFailure?.stage) {
-    tail = `Vivado failed at ${primaryFailure.stage}`
+    tail = i18n.t('toolFailure.vivadoFailedAt', { stage: primaryFailure.stage })
   } else if (primaryFailure) {
     tail = primaryFailure.title
   }
@@ -250,9 +251,8 @@ export function computeToolGroupElapsedSec(tools: ToolCallViewModel[]): number {
 }
 
 export function formatToolGroupSummaryLine(s: ToolGroupSummary): string {
-  const line = `${s.completed} tools completed in ${s.elapsedSec} s`
-  if (s.running > 0) return `${line} · ${s.running} running`
-  return line
+  if (s.running > 0) return i18n.t('toolBlock.toolsCompletedRunning', { completed: s.completed, seconds: s.elapsedSec, running: s.running })
+  return i18n.t('toolBlock.toolsCompleted', { completed: s.completed, seconds: s.elapsedSec })
 }
 
 export function toolEntryToViewModel(
