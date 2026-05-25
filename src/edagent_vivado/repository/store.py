@@ -434,12 +434,21 @@ def toolcall_create(run_id: str, tool_name: str, session_id: str = "", task_id: 
     return dict(db.execute("SELECT * FROM tool_calls WHERE id=?", (cid,)).fetchone())
 
 def toolcall_update(cid: str, **fields) -> dict | None:
-    if not fields: return toolcall_get(cid)
+    if not fields:
+        return toolcall_get(cid)
+    prev = toolcall_get(cid)
     sets = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values()) + [cid]
     get_db().execute(f"UPDATE tool_calls SET {sets} WHERE id=?", vals)
     get_db().commit()
-    return toolcall_get(cid)
+    row = toolcall_get(cid)
+    try:
+        from edagent_vivado.memory.hooks import on_toolcall_updated
+
+        on_toolcall_updated(row, previous_state=(prev or {}).get("state"))
+    except Exception:  # pragma: no cover
+        pass
+    return row
 
 def toolcall_get(cid: str) -> dict | None:
     row = get_db().execute("SELECT * FROM tool_calls WHERE id=?", (cid,)).fetchone()
@@ -1165,6 +1174,28 @@ def canvas_update(canvas_id: str, **fields) -> dict | None:
     return canvas_get(canvas_id)
 
 
+def canvas_update_if_version(canvas_id: str, expected_version: int, **fields) -> dict | None:
+    """Optimistic update; returns None when version mismatches (concurrent writer)."""
+    if not fields:
+        return canvas_get(canvas_id)
+    if "metadata" in fields and "metadata_json" not in fields:
+        fields["metadata_json"] = json.dumps(fields.pop("metadata"), ensure_ascii=False)
+    fields = dict(fields)
+    fields["updated_at"] = _now()
+    if "version" not in fields:
+        fields["version"] = int(expected_version) + 1
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [canvas_id, expected_version]
+    cur = get_db().execute(
+        f"UPDATE task_canvases SET {sets} WHERE id=? AND version=?",
+        vals,
+    )
+    get_db().commit()
+    if cur.rowcount == 0:
+        return None
+    return canvas_get(canvas_id)
+
+
 def canvas_get(canvas_id: str) -> dict | None:
     row = get_db().execute("SELECT * FROM task_canvases WHERE id=?", (canvas_id,)).fetchone()
     return dict(row) if row else None
@@ -1331,6 +1362,42 @@ def atom_find_duplicate(
              AND object=? AND superseded_by IS NULL
            ORDER BY created_at DESC LIMIT 1""",
         (project_id, subject, predicate or "", object),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def atom_find_by_overlay_id(project_id: str, overlay_id: str) -> dict | None:
+    row = get_db().execute(
+        """SELECT * FROM memory_atoms
+           WHERE project_id=? AND atom_type='config' AND superseded_by IS NULL
+             AND json_extract(metadata_json, '$.overlay_id')=?
+           ORDER BY created_at DESC LIMIT 1""",
+        (project_id, overlay_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def atom_find_similar(
+    project_id: str,
+    atom_type: str,
+    subject: str,
+    predicate: str,
+    object: str,
+    *,
+    prefix_len: int = 48,
+) -> dict | None:
+    """Prefix-level dedup for noisy event atoms with near-identical objects."""
+    if not project_id or not object:
+        return None
+    prefix = object[:prefix_len]
+    row = get_db().execute(
+        """SELECT * FROM memory_atoms
+           WHERE project_id=? AND atom_type=? AND subject=?
+             AND IFNULL(predicate,'')=IFNULL(?,'')
+             AND superseded_by IS NULL
+             AND (object LIKE ? OR ? LIKE object || '%')
+           ORDER BY created_at DESC LIMIT 1""",
+        (project_id, atom_type, subject, predicate or "", f"{prefix}%", object),
     ).fetchone()
     return dict(row) if row else None
 

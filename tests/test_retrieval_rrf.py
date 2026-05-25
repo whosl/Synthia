@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from edagent_vivado.knowledge.retrieval import DEFAULT_RRF_K, fuse_rrf, hybrid_search
+from edagent_vivado.knowledge.retrieval import DEFAULT_RRF_K, fuse_rrf, hybrid_search, rrf_default_min_score
 from edagent_vivado.knowledge.semantic_kb import reindex_global, search_semantic_kb
 from edagent_vivado.repository.db import get_db, init_db
 
@@ -24,6 +24,10 @@ def test_rrf_formula_matches_reciprocal_rank():
     fused = fuse_rrf({"a", "b"}, keyword_scores=scores, vector_scores=scores)
     expected = 2.0 / (DEFAULT_RRF_K + 1)
     assert abs(fused["a"] - expected) < 1e-9
+
+
+def test_rrf_min_score_scales_with_k():
+    assert rrf_default_min_score(60) < rrf_default_min_score(10)
 
 
 def test_hybrid_search_returns_rrf_scores(tmp_path, monkeypatch):

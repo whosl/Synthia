@@ -9,14 +9,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from edagent_vivado.memory.project_state import load_project_memory_state, merge_project_memory_state
 from edagent_vivado.repository.store import (
     atom_list,
     scenario_create,
     scenario_find_by_title,
     scenario_list,
     scenario_update,
-    settings_get,
-    settings_set,
 )
 
 
@@ -30,17 +29,12 @@ def _scenarios_dir(project_id: str) -> Path:
     return d
 
 
-def _project_state_key(project_id: str) -> str:
-    return f"memory_project:{project_id}"
-
-
 def _load_project_state(project_id: str) -> dict[str, Any]:
-    state = settings_get(_project_state_key(project_id), default=None)
-    return state if isinstance(state, dict) else {"last_l2_at": 0}
+    return load_project_memory_state(project_id)
 
 
 def _save_project_state(project_id: str, state: dict[str, Any]) -> None:
-    settings_set(_project_state_key(project_id), state)
+    merge_project_memory_state(project_id, state)
 
 
 def _scenario_title(subject: str, atom_type: str) -> str:

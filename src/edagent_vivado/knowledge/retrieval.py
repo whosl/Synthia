@@ -17,7 +17,14 @@ from edagent_vivado.repository.store import (
 )
 
 DEFAULT_RRF_K = 60
-RRF_DEFAULT_MIN_SCORE = 0.014
+RRF_AUTHORITY_MIN = 0.85
+RRF_AUTHORITY_WEIGHT = 0.5
+
+
+def rrf_default_min_score(k: int | None = None) -> float:
+    """Scale floor with K so filtering stays meaningful when K changes."""
+    rrf_k = k if k is not None else _rrf_k()
+    return 0.5 / (rrf_k + 10)
 
 
 def rewrite_query(query: str) -> str:
@@ -78,8 +85,9 @@ def fuse_rrf(
             score += 1.0 / (rrf_k + kw_ranks[cid])
         if cid in vec_ranks and vector_scores.get(cid, 0.0) > 0:
             score += 1.0 / (rrf_k + vec_ranks[cid])
-        if auth_ranks and auth.get(cid, 0.0) > 0:
-            score += 0.5 / (rrf_k + auth_ranks[cid])
+        authority = float(auth.get(cid, 0.0) or 0.0)
+        if auth_ranks and authority >= RRF_AUTHORITY_MIN:
+            score += RRF_AUTHORITY_WEIGHT / (rrf_k + auth_ranks[cid])
         fused[cid] = score
     return fused
 
@@ -99,7 +107,7 @@ def hybrid_search(
     """Keyword + vector hybrid search with RRF fusion and retrieval audit."""
     from edagent_vivado.repository.db import get_db
 
-    score_floor = RRF_DEFAULT_MIN_SCORE if min_score is None else min_score
+    score_floor = rrf_default_min_score() if min_score is None else min_score
     rewritten = rewrite_query(query)
     db = get_db()
     n = db.execute("SELECT COUNT(*) AS n FROM knowledge_chunks").fetchone()

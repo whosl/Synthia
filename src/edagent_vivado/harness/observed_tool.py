@@ -41,26 +41,6 @@ class ObservedToolRunner:
             return max(1, int((time.perf_counter() - t0) * 1000))
         return max(1, int((finished_at_sec - started_at_sec) * 1000))
 
-    def _update_canvas(self, tool_name: str, toolcall_id: str, state: str, output: str) -> None:
-        if not self.task_id or not toolcall_id:
-            return
-        try:
-            from edagent_vivado.memory.canvas import update_task_canvas
-
-            update_task_canvas(
-                self.task_id,
-                self.session_id,
-                event="tool_call_completed",
-                payload={
-                    "toolcall_id": toolcall_id,
-                    "tool_name": tool_name,
-                    "state": state,
-                    "output": output,
-                },
-            )
-        except Exception:
-            pass
-
     def on_tool_rejected(
         self,
         langgraph_run_id: str,
@@ -95,7 +75,6 @@ class ObservedToolRunner:
             elapsed_ms=elapsed_ms,
             output_summary=output[:500],
         )
-        self._update_canvas(tool_name, tcid, "rejected", output)
         self.event_sink(
             self.session_id,
             "tool.completed",
@@ -171,7 +150,6 @@ class ObservedToolRunner:
                 elapsed_ms=elapsed_ms,
                 output_summary=output[:500],
             )
-            self._update_canvas(tool_name, tcid, ui_state, output)
         self.event_sink(
             self.session_id,
             "tool.completed",

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
 from edagent_vivado.repository.project_scope import project_id_for_session
 from edagent_vivado.repository.db import get_db
+from edagent_vivado.repository.store import artifact_create
 
 
 def _runtime_root() -> Path:
@@ -32,6 +34,8 @@ def write_ref(
     project_id: str | None = None,
     tool_name: str = "",
     state: str = "",
+    toolcall_id: str = "",
+    task_id: str = "",
 ) -> Path:
     pid = _resolve_project_id(project_id, session_id)
     path = ref_path(pid, node_id)
@@ -45,6 +49,27 @@ def write_ref(
         header_lines.append("")
     body = "\n".join(header_lines) + content
     path.write_text(body, encoding="utf-8")
+
+    if toolcall_id and session_id:
+        rel = f"projects/{pid}/refs/{node_id}.md"
+        encoded = body.encode("utf-8")
+        art = artifact_create(
+            "tool_ref",
+            rel,
+            session_id=session_id,
+            task_id=task_id or None,
+            mime_type="text/markdown",
+            size_bytes=len(encoded),
+            sha256=hashlib.sha256(encoded).hexdigest(),
+            summary=(content or tool_name or "tool ref")[:240],
+            metadata={"node_id": node_id, "toolcall_id": toolcall_id},
+        )
+        get_db().execute(
+            "UPDATE tool_calls SET output_artifact_id=COALESCE(output_artifact_id, ?) WHERE id=?",
+            (art["id"], toolcall_id),
+        )
+        get_db().commit()
+
     return path
 
 

@@ -14,34 +14,6 @@ from edagent_vivado.repository.store import toolcall_create, toolcall_update
 EventCreate = Callable[..., Any]
 
 
-def _update_canvas_for_tool(
-    task_id: str,
-    session_id: str,
-    tool_name: str,
-    toolcall_id: str,
-    state: str,
-    output: str,
-) -> None:
-    if not task_id or not toolcall_id:
-        return
-    try:
-        from edagent_vivado.memory.canvas import update_task_canvas
-
-        update_task_canvas(
-            task_id,
-            session_id,
-            event="tool_call_completed",
-            payload={
-                "toolcall_id": toolcall_id,
-                "tool_name": tool_name,
-                "state": state,
-                "output": output,
-            },
-        )
-    except Exception:
-        pass
-
-
 def observe_vivado_command(
     *,
     session_id: str,
@@ -79,7 +51,6 @@ def observe_vivado_command(
         finished_at=int(time.time()),
         output_summary=output[:500],
     )
-    _update_canvas_for_tool(task_id, session_id, tool_name, tcid, ui_state, output)
 
     if event_create and session_id:
         event_create(

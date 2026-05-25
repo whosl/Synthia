@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
@@ -19,7 +20,12 @@ from edagent_vivado.repository.store import (
     canvas_node_ref_create,
     canvas_node_ref_list,
     canvas_update,
+    canvas_update_if_version,
 )
+
+logger = logging.getLogger(__name__)
+
+_CANVAS_UPDATE_RETRIES = 4
 
 
 def _runtime_root() -> Path:
@@ -132,9 +138,25 @@ def update_task_canvas(
     event: str,
     payload: dict,
 ) -> dict | None:
-    """Append a tool-call node to the active task canvas."""
+    """Append a tool-call node to the active task canvas (optimistic-lock retries)."""
     if event != "tool_call_completed":
         return None
+    for attempt in range(_CANVAS_UPDATE_RETRIES):
+        result = _update_task_canvas_once(task_id, session_id, payload=payload)
+        if result is not False:
+            return result
+        if attempt + 1 == _CANVAS_UPDATE_RETRIES:
+            logger.debug("canvas update lost version race for task %s", task_id)
+    return canvas_get_active_for_task(task_id)
+
+
+def _update_task_canvas_once(
+    task_id: str,
+    session_id: str,
+    *,
+    payload: dict,
+) -> dict | None | bool:
+    """Return canvas dict, None for skip, False on version conflict."""
     toolcall_id = str(payload.get("toolcall_id") or "")
     tool_name = str(payload.get("tool_name") or "tool")
     state = str(payload.get("state") or "completed")
@@ -196,6 +218,8 @@ def update_task_canvas(
         project_id=project_id,
         tool_name=tool_name,
         state=state,
+        toolcall_id=toolcall_id,
+        task_id=task_id,
     )
     canvas_node_ref_create(
         canvas_id,
@@ -205,12 +229,16 @@ def update_task_canvas(
         label=label,
     )
     node_count = len(canvas_node_ref_list(canvas_id))
-    return canvas_update(
+    updated = canvas_update_if_version(
         canvas_id,
+        version,
         mermaid_artifact_id=art["id"],
         node_count=node_count,
         token_count=_estimate_tokens(mermaid),
     )
+    if updated is None:
+        return False
+    return updated
 
 
 def get_active_canvas(task_id: str) -> dict | None:

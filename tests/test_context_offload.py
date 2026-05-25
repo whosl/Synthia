@@ -30,7 +30,8 @@ def test_fit_context_item_mild_offload():
     assert fitted is True
     assert tokens > 0
     assert item.truncation_reason == "offload_mild"
-    assert len(item.content) < len("word " * 80)
+    assert item.original_content
+    assert len(item.content) < len(item.original_content)
 
 
 def test_fit_context_item_aggressive_offload():

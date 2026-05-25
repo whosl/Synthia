@@ -41,6 +41,8 @@ class ContextItem:
     relevance_score: float | None = None
     included: bool = True
     truncation_reason: str = ""
+    original_content: str = ""
+    offload_keep_ratio: float | None = None
 
     @property
     def token_count(self) -> int:
@@ -210,8 +212,10 @@ def _fit_context_item(
             continue
 
         if ratio < 1.0:
+            item.original_content = item.content
             item.content = content
             item.truncation_reason = reason
+            item.offload_keep_ratio = ratio
         return True, tokens
 
     return False, 0
@@ -425,6 +429,13 @@ class AgentContextBuilder:
                 metadata={"retrieval_audit_id": audit["id"], "phase": "2e", "offload_mode": self.offload_mode},
             )
             for item in selected:
+                item_metadata = None
+                if item.offload_keep_ratio is not None and item.original_content:
+                    item_metadata = {
+                        "offload_keep_ratio": item.offload_keep_ratio,
+                        "original_chars": len(item.original_content),
+                        "kept_chars": len(item.content),
+                    }
                 context_package_item_create(
                     package["id"],
                     item.item_type,
@@ -439,6 +450,7 @@ class AgentContextBuilder:
                     authority_score=item.authority_score,
                     trust_score=item.trust_score,
                     relevance_score=item.relevance_score,
+                    metadata=item_metadata,
                 )
         else:
             package = {

@@ -2438,12 +2438,12 @@ def _ensure_project_persona(project_id: str | None) -> None:
 
 
 def _memory_pipeline_on_message(session_id: str, *, role: str = "user") -> None:
-    """Fire L1 extraction pipeline after a persisted message (Phase B)."""
+    """Fire L1 extraction pipeline after a persisted message (Phase B, async)."""
     try:
-        from edagent_vivado.memory.pipeline import on_message as memory_on_message
+        from edagent_vivado.memory.async_pipeline import schedule_memory_pipeline
 
         sess = session_get(session_id)
-        memory_on_message(session_id, (sess or {}).get("project_id"), role=role)
+        schedule_memory_pipeline(session_id, (sess or {}).get("project_id"), role=role)
     except Exception:
         import logging
         logging.getLogger(__name__).exception("memory pipeline failed for session %s", session_id)

@@ -9,7 +9,7 @@ from typing import Any
 from edagent_vivado.evolution.candidates import candidate_get
 from edagent_vivado.evolution.overlays import overlay_get
 from edagent_vivado.evolution.trials import trial_get
-from edagent_vivado.repository.store import atom_create, atom_list
+from edagent_vivado.repository.store import atom_create, atom_find_by_overlay_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +55,7 @@ def _summarize_overlay_payload(surface: str, payload: dict[str, Any]) -> str:
 
 
 def _find_config_atom_by_overlay(project_id: str, overlay_id: str) -> dict | None:
-    for row in atom_list(project_id, atom_type="config", limit=200):
-        raw = row.get("metadata_json") or row.get("metadata") or "{}"
-        try:
-            meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
-        except json.JSONDecodeError:
-            meta = {}
-        if meta.get("overlay_id") == overlay_id:
-            return row
-    return None
+    return atom_find_by_overlay_id(project_id, overlay_id)
 
 
 def record_overlay_config_atom(

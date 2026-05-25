@@ -10,6 +10,7 @@ from typing import Any
 from edagent_vivado.repository.store import (
     atom_create,
     atom_find_duplicate,
+    atom_find_similar,
     atom_list,
     message_list,
     session_get,
@@ -26,6 +27,7 @@ class MemoryAtomDraft:
     confidence: float = 0.7
     source_message_id: str = ""
     source_run_id: str = ""
+    evidence_artifact_id: str = ""
     metadata: dict | None = None
 
 
@@ -76,6 +78,7 @@ def _extract_tool_atoms(tc: dict) -> list[MemoryAtomDraft]:
     name = str(tc.get("tool_name") or "")
     state = str(tc.get("state") or "")
     summary = str(tc.get("output_summary") or tc.get("input_summary") or "")
+    evidence_id = str(tc.get("output_artifact_id") or "")
     if not name:
         return []
 
@@ -92,7 +95,8 @@ def _extract_tool_atoms(tc: dict) -> list[MemoryAtomDraft]:
                     object=_compact(summary or "success", 160),
                     confidence=0.82,
                     source_run_id=str(tc.get("run_id") or ""),
-                    metadata={"tool_state": state},
+                    evidence_artifact_id=evidence_id,
+                    metadata={"tool_state": state, "toolcall_id": tc.get("id")},
                 )
             )
         elif state in ("error", "rejected", "stopped"):
@@ -105,7 +109,8 @@ def _extract_tool_atoms(tc: dict) -> list[MemoryAtomDraft]:
                     object=obj,
                     confidence=0.85,
                     source_run_id=str(tc.get("run_id") or ""),
-                    metadata={"tool_state": state},
+                    evidence_artifact_id=evidence_id,
+                    metadata={"tool_state": state, "toolcall_id": tc.get("id")},
                 )
             )
             if _ERROR_FILE_RE.search(summary):
@@ -222,6 +227,16 @@ def extract_atoms_from_session(
             dup = atom_find_duplicate(project_id, draft.subject, draft.predicate, draft.object)
             if dup:
                 continue
+            if draft.atom_type == "event":
+                similar = atom_find_similar(
+                    project_id,
+                    draft.atom_type,
+                    draft.subject,
+                    draft.predicate,
+                    draft.object,
+                )
+                if similar:
+                    continue
 
         row = atom_create(
             scope="project" if project_id else "global",
@@ -234,6 +249,7 @@ def extract_atoms_from_session(
             source_session_id=session_id,
             source_message_id=draft.source_message_id,
             source_run_id=draft.source_run_id,
+            evidence_artifact_id=draft.evidence_artifact_id,
             metadata=draft.metadata,
         )
         created.append(row)

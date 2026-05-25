@@ -7,6 +7,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from edagent_vivado.memory.project_state import (
+    load_project_memory_state,
+    merge_project_memory_state,
+)
+from edagent_vivado.memory.scenarios import list_scenarios_for_project, read_scenario_md
 from edagent_vivado.repository.store import (
     atom_count,
     atom_list,
@@ -14,10 +19,7 @@ from edagent_vivado.repository.store import (
     persona_latest,
     persona_next_version,
     project_get,
-    settings_get,
-    settings_set,
 )
-from edagent_vivado.memory.scenarios import list_scenarios_for_project, read_scenario_md
 
 
 def _runtime_root() -> Path:
@@ -34,26 +36,19 @@ def _persona_path(project_id: str) -> Path:
     return p
 
 
-def _project_state_key(project_id: str) -> str:
-    return f"memory_project:{project_id}"
-
-
 def _load_project_state(project_id: str) -> dict[str, Any]:
-    state = settings_get(_project_state_key(project_id), default=None)
-    return state if isinstance(state, dict) else {"last_persona_atom_count": 0, "persona_dirty": False}
+    return load_project_memory_state(project_id)
 
 
 def _save_project_state(project_id: str, state: dict[str, Any]) -> None:
-    settings_set(_project_state_key(project_id), state)
+    merge_project_memory_state(project_id, state)
 
 
 def mark_project_persona_dirty(project_id: str) -> None:
     """Mark persona stale (e.g. after evolution config atom) without immediate rebuild."""
     if not project_id:
         return
-    state = _load_project_state(project_id)
-    state["persona_dirty"] = True
-    _save_project_state(project_id, state)
+    merge_project_memory_state(project_id, {"persona_dirty": True})
 
 
 def rebuild_persona_if_dirty(project_id: str) -> dict | None:
@@ -64,9 +59,7 @@ def rebuild_persona_if_dirty(project_id: str) -> dict | None:
     if not state.get("persona_dirty"):
         return None
     row = build_project_persona(project_id, force=True)
-    state = _load_project_state(project_id)
-    state["persona_dirty"] = False
-    _save_project_state(project_id, state)
+    merge_project_memory_state(project_id, {"persona_dirty": False})
     return row
 
 
