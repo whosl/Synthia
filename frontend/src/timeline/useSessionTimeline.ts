@@ -34,7 +34,7 @@ export function useSessionTimeline(sessionId: string) {
   })
   const eventsQ = useQuery({
     queryKey: ['events', sessionId],
-    queryFn: () => listEvents(sessionId, 0, 10000, true),
+    queryFn: () => listEvents(sessionId, 0, 5000, true),
     enabled: Boolean(sessionId),
   })
   const activeQ = useQuery({

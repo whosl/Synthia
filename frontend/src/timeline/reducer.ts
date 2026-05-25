@@ -3,8 +3,11 @@ import { toEventEnvelope } from '../lib/events/envelope'
 import { CHAT_ENTRY_KINDS } from '../lib/events/catalog'
 import {
   cloneStateForEvent,
+  insertEntriesBatch,
   insertEntry,
   removeKeys,
+  setTimelineRebuildBatch,
+  sortTimelineEntries,
   type ApplyEventOptions,
 } from './context'
 import { resolveTimelineEventHandler } from './handlers'
@@ -73,12 +76,55 @@ export function removeOptimisticUserEntries(state: SessionTimelineState): Sessio
   return removeKeys(state, (k) => k.startsWith('optimistic-user:'))
 }
 
-function taskHasCompleteAssistant(state: SessionTimelineState, taskId: string): boolean {
-  return state.entries.some((e) => {
-    if (e.kind !== 'assistant_text' || e.taskId !== taskId) return false
-    const p = e.payload as AssistantTextPayload
-    return !p.partial
-  })
+function assistantTextFromEvents(state: SessionTimelineState, taskId: string): string {
+  return state.entries
+    .filter((e) => e.kind === 'assistant_text' && e.taskId === taskId)
+    .map((e) => (e.payload as AssistantTextPayload).text)
+    .join('')
+}
+
+function shouldBackfillAssistantFromDb(state: SessionTimelineState, m: Message): boolean {
+  if (!m.task_id || !m.content?.trim()) return false
+  const fromEvents = assistantTextFromEvents(state, m.task_id)
+  if (!fromEvents.trim()) return true
+  // Event stream truncated mid-task — DB snapshot is longer
+  return m.content.length > fromEvents.length + 20
+}
+
+/** Seq slot after turn work, before next user (event seq space, not Unix time). */
+export function seqForAssistantBackfill(state: SessionTimelineState, taskId: string): number {
+  const userEntry = state.entries.find((e) => e.kind === 'user' && e.taskId === taskId)
+  if (!userEntry) {
+    const maxInTask = state.entries
+      .filter((e) => e.taskId === taskId)
+      .reduce((max, e) => Math.max(max, e.seq), 0)
+    return maxInTask + 1
+  }
+  let nextUserSeq = Infinity
+  for (const e of state.entries) {
+    if (e.kind === 'user' && e.seq > userEntry.seq) {
+      nextUserSeq = Math.min(nextUserSeq, e.seq)
+    }
+  }
+  let maxSeq = userEntry.seq
+  for (const e of state.entries) {
+    if (e.taskId === taskId && e.seq > userEntry.seq && e.seq < nextUserSeq) {
+      maxSeq = Math.max(maxSeq, e.seq)
+    }
+  }
+  return maxSeq + 0.01
+}
+
+function removeAssistantEntriesForTask(
+  state: SessionTimelineState,
+  taskId: string,
+): SessionTimelineState {
+  const entries = state.entries.filter(
+    (e) => !(e.kind === 'assistant_text' && e.taskId === taskId),
+  )
+  const indexByKey: Record<string, number> = {}
+  entries.forEach((e, i) => { indexByKey[e.key] = i })
+  return { ...state, entries, indexByKey }
 }
 
 /** When event stream was truncated, backfill assistant text from messages table. */
@@ -86,16 +132,20 @@ export function mergeAssistantMessagesFromDb(
   state: SessionTimelineState,
   messages: Message[],
 ): SessionTimelineState {
+  const toInsert: TimelineEntry[] = []
   let next = state
   for (const m of messages) {
     if (m.role !== 'assistant' || !m.task_id || !m.content?.trim()) continue
-    if (taskHasCompleteAssistant(next, m.task_id)) continue
+    if (!shouldBackfillAssistantFromDb(next, m)) continue
     const key = `assistant:msg:${m.id}`
     if (next.indexByKey[key] !== undefined) continue
-    const entry: TimelineEntry = {
+    if (assistantTextFromEvents(next, m.task_id).trim()) {
+      next = removeAssistantEntriesForTask(next, m.task_id)
+    }
+    toInsert.push({
       key,
       id: key,
-      seq: m.created_at || next.lastSeq,
+      seq: seqForAssistantBackfill(next, m.task_id),
       kind: 'assistant_text',
       taskId: m.task_id,
       createdAt: m.created_at,
@@ -104,10 +154,9 @@ export function mergeAssistantMessagesFromDb(
         text: m.content,
         partial: false,
       } satisfies AssistantTextPayload,
-    }
-    next = insertEntry(next, entry)
+    })
   }
-  return next
+  return insertEntriesBatch(next, toInsert)
 }
 
 function sliceHasWork(entries: TimelineEntry[]): boolean {
@@ -115,9 +164,12 @@ function sliceHasWork(entries: TimelineEntry[]): boolean {
 }
 
 /** Legacy sessions: tool-only turns with no assistant completion event. */
-export function ensureEmptyTurnPlaceholders(state: SessionTimelineState): SessionTimelineState {
+export function ensureEmptyTurnPlaceholders(
+  state: SessionTimelineState,
+  activeTaskId?: string | null,
+): SessionTimelineState {
   const chat = getChatEntries(state)
-  let next = state
+  const toInsert: TimelineEntry[] = []
   for (let i = 0; i < chat.length; i++) {
     const user = chat[i]
     if (user.kind !== 'user') continue
@@ -134,13 +186,14 @@ export function ensureEmptyTurnPlaceholders(state: SessionTimelineState): Sessio
     })
     if (hasFinal) continue
     const taskId = slice.find((e) => e.taskId)?.taskId ?? user.taskId
+    if (taskId && activeTaskId && taskId === activeTaskId) continue
     const key = `assistant:empty:${taskId || user.id}`
-    if (next.indexByKey[key] !== undefined) continue
+    if (state.indexByKey[key] !== undefined) continue
     const lastSeq = slice.reduce((max, e) => Math.max(max, e.seq), user.seq)
-    const entry: TimelineEntry = {
+    toInsert.push({
       key,
       id: key,
-      seq: lastSeq + 1,
+      seq: lastSeq + 0.01,
       kind: 'assistant_text',
       taskId,
       createdAt: slice[slice.length - 1]?.createdAt ?? user.createdAt,
@@ -150,10 +203,9 @@ export function ensureEmptyTurnPlaceholders(state: SessionTimelineState): Sessio
         partial: false,
         emptyTurn: true,
       } satisfies AssistantTextPayload,
-    }
-    next = insertEntry(next, entry)
+    })
   }
-  return next
+  return insertEntriesBatch(state, toInsert)
 }
 
 export function mergePendingInteractions(
@@ -201,34 +253,41 @@ export function rebuildTimelineFromSources(
   activeTask?: Task | null,
 ): SessionTimelineState {
   const sorted = [...events].sort((a, b) => (a.seq || 0) - (b.seq || 0))
+  setTimelineRebuildBatch(true)
   let state = emptyTimelineState()
-  for (const evt of sorted) {
-    state = applyTimelineEvent(state, evt, { appendAssistantDelta: true, ignoreSeqGuard: true })
-  }
-  for (const m of messages) {
-    if (m.role !== 'user') continue
-    const mid = m.id
-    const key = `user:${mid}`
-    if (state.indexByKey[key] !== undefined) continue
-    const entry: TimelineEntry = {
-      key,
-      id: mid,
-      seq: m.created_at || 0,
-      kind: 'user',
-      taskId: m.task_id ?? null,
-      createdAt: m.created_at,
-      payload: { text: m.content, messageId: mid },
+  try {
+    for (const evt of sorted) {
+      state = applyTimelineEvent(state, evt, { appendAssistantDelta: true, ignoreSeqGuard: true })
     }
-    state = insertEntry(state, entry)
+    state = sortTimelineEntries(state)
+    const userEntries: TimelineEntry[] = []
+    for (const m of messages) {
+      if (m.role !== 'user') continue
+      const mid = m.id
+      const key = `user:${mid}`
+      if (state.indexByKey[key] !== undefined) continue
+      userEntries.push({
+        key,
+        id: mid,
+        seq: m.created_at || 0,
+        kind: 'user',
+        taskId: m.task_id ?? null,
+        createdAt: m.created_at,
+        payload: { text: m.content, messageId: mid },
+      })
+    }
+    state = insertEntriesBatch(state, userEntries)
+    state = mergeAssistantMessagesFromDb(state, messages)
+    if (activeTask) {
+      state.activeTaskId = activeTask.id
+      state.taskState = activeTask.state
+    }
+    state = ensureEmptyTurnPlaceholders(state, activeTask?.id)
+    state = mergePendingInteractions(state, pending)
+    return sortTimelineEntries(state)
+  } finally {
+    setTimelineRebuildBatch(false)
   }
-  state = mergeAssistantMessagesFromDb(state, messages)
-  state = ensureEmptyTurnPlaceholders(state)
-  state = mergePendingInteractions(state, pending)
-  if (activeTask) {
-    state.activeTaskId = activeTask.id
-    state.taskState = activeTask.state
-  }
-  return state
 }
 
 export function getChatEntries(state: SessionTimelineState): TimelineEntry[] {

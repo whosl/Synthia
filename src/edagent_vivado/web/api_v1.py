@@ -1050,7 +1050,10 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 event_create(session_id, "memory.updated", {"memory_id": mem["id"], "summary": summary.summary[:240]},
                              task_id=t["id"], run_id=run["id"])
             else:
-                # Tool-only turn — still emit completion so chat UI can close the turn
+                # Tool-only turn — close UI turn + keep messages/memory chain continuous
+                placeholder = "[tool-only turn — executed via tools, no prose reply]"
+                message_create(session_id, "assistant", placeholder, task_id=t["id"])
+                _memory_pipeline_on_message(session_id, role="assistant")
                 event_create(
                     session_id,
                     "message.assistant.completed",

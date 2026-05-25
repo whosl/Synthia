@@ -66,11 +66,43 @@ export function toolStartedAtMs(payload: Record<string, unknown>, event: Session
   return undefined
 }
 
+/** During full timeline rebuild, append without sorting until flushTimelineEntryOrder(). */
+let timelineRebuildBatch = false
+
+export function setTimelineRebuildBatch(enabled: boolean): void {
+  timelineRebuildBatch = enabled
+}
+
+export function sortTimelineEntries(state: SessionTimelineState): SessionTimelineState {
+  const entries = [...state.entries].sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+  const indexByKey: Record<string, number> = {}
+  entries.forEach((e, i) => { indexByKey[e.key] = i })
+  return { ...state, entries, indexByKey }
+}
+
 export function insertEntry(state: SessionTimelineState, entry: TimelineEntry): SessionTimelineState {
+  if (timelineRebuildBatch) {
+    const entries = [...state.entries, entry]
+    const indexByKey = { ...state.indexByKey, [entry.key]: entries.length - 1 }
+    return { ...state, entries, indexByKey }
+  }
   const entries = [...state.entries, entry].sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
   const indexByKey: Record<string, number> = {}
   entries.forEach((e, i) => { indexByKey[e.key] = i })
   return { ...state, entries, indexByKey }
+}
+
+/** Insert many entries then sort once (used for DB/user merge during rebuild). */
+export function insertEntriesBatch(
+  state: SessionTimelineState,
+  newEntries: TimelineEntry[],
+): SessionTimelineState {
+  if (!newEntries.length) return state
+  const merged = [...state.entries, ...newEntries]
+  const indexByKey: Record<string, number> = {}
+  merged.sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+  merged.forEach((e, i) => { indexByKey[e.key] = i })
+  return { ...state, entries: merged, indexByKey }
 }
 
 export function updateEntry(
