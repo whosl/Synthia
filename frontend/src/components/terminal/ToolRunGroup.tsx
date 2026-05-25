@@ -173,13 +173,13 @@ function ToolRunBatchSegment({
           <span>{summaryLine}</span>
         </button>
       )}
-      {showDetails && (
-        <div className="tool-run-details">
+      <div className={`tool-run-details collapsible-body${showDetails ? ' expanded' : ''}`}>
+        <div>
           {members.map((entry) =>
             shouldShowMember(entry) ? renderMember(entry) : null,
           )}
         </div>
-      )}
+      </div>
     </>
   )
 }

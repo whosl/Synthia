@@ -1,5 +1,6 @@
 import { Check, CheckCircle2, ChevronDown, ChevronRight, Minus, X, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { parseApprovalPayload } from '../../lib/approvalPayload'
 import { useTerminalStore } from '../../stores/terminalStore'
 import { Button } from '../common/Button'
@@ -34,6 +35,7 @@ export function ApprovalBlock({
   onApprove,
   onReject,
 }: ApprovalBlockProps) {
+  const { t } = useTranslation()
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(() => new Set(files.map((f) => f.path)))
   const collapsed = useTerminalStore((s) => s.collapsed[id] ?? true)
@@ -76,18 +78,18 @@ export function ApprovalBlock({
   const selectNone = () => setSelectedFiles(new Set())
 
   const approveLabel = selectedFiles.size === files.length
-    ? 'Approve'
-    : `Approve (${selectedFiles.size}/${files.length})`
+    ? t('approval.approve')
+    : t('approval.approveCount', { selected: selectedFiles.size, total: files.length })
 
   const statusLabel = isApproved
-    ? (isPartialResult ? '部分批准' : 'approved')
+    ? (isPartialResult ? t('approval.partialApproval') : t('approval.approved'))
     : isPending
-      ? 'pending'
-      : 'rejected'
+      ? t('approval.pending')
+      : t('approval.rejected')
 
   const statusBadge = isApproved
-    ? (isPartialResult ? '✓ 部分批准' : '✓ 已批准')
-    : '✗ 已拒绝'
+    ? (isPartialResult ? t('approval.partialCheck') : t('approval.approvedCheck'))
+    : t('approval.rejectedCross')
 
   const headerIcon = isApproved
     ? <CheckCircle2 size={14} className="approval-status-icon approved" />
@@ -110,10 +112,10 @@ export function ApprovalBlock({
 
       {files.length > 1 && isPending && (
         <div className="approval-select-bar">
-          <button type="button" className="link-btn" onClick={selectAll}>全选</button>
+          <button type="button" className="link-btn" onClick={selectAll}>{t('approval.selectAll')}</button>
           <span className="sep">·</span>
-          <button type="button" className="link-btn" onClick={selectNone}>全不选</button>
-          <span className="approval-select-count">{selectedFiles.size} / {files.length} 已选</span>
+          <button type="button" className="link-btn" onClick={selectNone}>{t('approval.selectNone')}</button>
+          <span className="approval-select-count">{t('approval.selected', { selected: selectedFiles.size, total: files.length })}</span>
         </div>
       )}
 
@@ -133,7 +135,7 @@ export function ApprovalBlock({
                       type="checkbox"
                       checked={selectedFiles.has(file.path)}
                       onChange={() => toggleSelect(file.path)}
-                      aria-label={`Select ${file.path}`}
+                      aria-label={t('approval.selectFile', { path: file.path })}
                     />
                   )}
                   {!isPending && fileApproved && <Check size={14} className="file-status-icon approved" />}
@@ -164,14 +166,14 @@ export function ApprovalBlock({
             <Check size={14} /> {approveLabel}
           </Button>
           <Button className="ghost" onClick={() => onReject?.(id)}>
-            <X size={14} /> Reject all
+            <X size={14} /> {t('approval.rejectAll')}
           </Button>
         </div>
       )}
 
       {status === 'rejected' && !isPending && (
         <div className="interaction-rejected-hint">
-          <span className="muted">已拒绝 — 可在对话中继续说明需求</span>
+          <span className="muted">{t('approval.rejectedHint')}</span>
         </div>
       )}
     </>
@@ -200,7 +202,7 @@ export function ApprovalBlock({
         <span className={`interaction-badge ${status}`}>{statusBadge}</span>
         <span className="tool-state">{statusLabel}</span>
       </div>
-      {!collapsed && <div className="trace-body approval-trace-body">{body}</div>}
+      <div className={`trace-body approval-trace-body collapsible-body${!collapsed ? ' expanded' : ''}`}>{body}</div>
     </div>
   )
 }

@@ -8,6 +8,7 @@ import {
   Settings,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   createProjectSession,
@@ -71,19 +72,20 @@ function SessionTreeRow({
   onRename: () => void
   onArchive: () => void
 }) {
+  const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
   const isDesktop = useIsDesktop()
   const longPress = useLongPress(() => setMenuOpen(true))
   const pressHandlers = isDesktop ? {} : longPress
   const running = isSessionRunning(session.status)
   const archived = Boolean(session.archived_at)
-  const initials = sessionInitials(session.name || 'Session')
+  const initials = sessionInitials(session.name || t('projectSessions.untitledSession'))
 
   const actions: MobileAction[] = [
-    { id: 'rename', label: 'Rename session', onSelect: onRename },
+    { id: 'rename', label: t('projectSessions.renameSession'), onSelect: onRename },
     {
       id: 'archive',
-      label: 'Archive session',
+      label: t('projectSessions.archiveSession'),
       destructive: true,
       onSelect: onArchive,
     },
@@ -108,13 +110,13 @@ function SessionTreeRow({
           {initials}
         </span>
         <span className={`project-tree-session-title${archived ? ' muted' : ''}`}>
-          {session.name || 'Untitled session'}
+          {session.name || t('projectSessions.untitledSession')}
         </span>
         <span className="project-tree-session-meta">
           {running ? (
             <span className="session-meta-running">
               <span className="session-running-dot" aria-hidden />
-              running
+              {t('status.running')}
             </span>
           ) : (
             <span className="muted">{formatRelative(session.updated_at)}</span>
@@ -123,7 +125,7 @@ function SessionTreeRow({
       </div>
       {menuOpen && (
         <MobileActionsMenu
-          title={session.name || 'Session'}
+          title={session.name || t('projectSessions.sessionNamePrompt')}
           actions={actions}
           onClose={() => setMenuOpen(false)}
         />
@@ -155,6 +157,7 @@ function ProjectTreeSection({
   onRestoreProject: () => void
   onCreateSession: () => void
 }) {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const isDesktop = useIsDesktop()
@@ -185,22 +188,22 @@ function ProjectTreeSection({
     || (loadSessions && !sessionsQ.isLoading && sessions.length > 0)
 
   const renameSession = useCallback((s: Session) => {
-    const next = window.prompt('Session name', s.name)
+    const next = window.prompt(t('projectSessions.sessionNamePrompt'), s.name)
     if (next && next.trim() && next.trim() !== s.name) {
       updateSession(s.id, { name: next.trim() }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['sessions', project.id] })
         queryClient.invalidateQueries({ queryKey: ['projects'] })
       })
     }
-  }, [project.id, queryClient])
+  }, [project.id, queryClient, t])
 
   const archiveSession = useCallback((s: Session) => {
-    if (!confirm('Archive this session?')) return
+    if (!confirm(t('projectSessions.archiveSessionConfirm'))) return
     deleteSession(s.id).then(() => {
       queryClient.invalidateQueries({ queryKey: ['sessions', project.id] })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     })
-  }, [project.id, queryClient])
+  }, [project.id, queryClient, t])
 
   const openSession = useCallback(
     (sessionId: string) => navigate(`/term?project=${project.id}&session=${sessionId}`),
@@ -210,10 +213,10 @@ function ProjectTreeSection({
   if (!projectVisible && searchQuery.trim()) return null
 
   const projectActions: MobileAction[] = archived
-    ? [{ id: 'restore', label: 'Restore project', onSelect: onRestoreProject }]
+    ? [{ id: 'restore', label: t('projects.restoreProject'), onSelect: onRestoreProject }]
     : [
-        { id: 'edit', label: 'Edit project', onSelect: onEdit },
-        { id: 'archive', label: 'Archive project', destructive: true, onSelect: onArchiveProject },
+        { id: 'edit', label: t('projects.editProjectAction'), onSelect: onEdit },
+        { id: 'archive', label: t('projects.archiveProjectAction'), destructive: true, onSelect: onArchiveProject },
       ]
 
   return (
@@ -226,7 +229,7 @@ function ProjectTreeSection({
           type="button"
           className="project-tree-chevron"
           aria-expanded={expanded}
-          aria-label={expanded ? 'Collapse' : 'Expand'}
+          aria-label={expanded ? t('projects.collapse') : t('projects.expand')}
           onClick={(e) => {
             e.stopPropagation()
             onToggle()
@@ -236,7 +239,7 @@ function ProjectTreeSection({
         </button>
         <button type="button" className="project-tree-project-main" onClick={onToggle}>
           <span className="project-tree-project-name">{project.name}</span>
-          {archived && <span className="project-archived-badge">Archived</span>}
+          {archived && <span className="project-archived-badge">{t('status.archived')}</span>}
         </button>
         <div className="project-tree-project-actions" onClick={(e) => e.stopPropagation()}>
           <span className="project-tree-count muted">({formatNumber(sessionCount)})</span>
@@ -244,8 +247,8 @@ function ProjectTreeSection({
             <Button
               className="ghost icon-btn project-tree-add"
               type="button"
-              aria-label="New session"
-              title="New session"
+              aria-label={t('projectSessions.createSession')}
+              title={t('projectSessions.createSession')}
               onClick={onCreateSession}
             >
               <Plus size={16} />
@@ -253,21 +256,21 @@ function ProjectTreeSection({
           )}
           {isDesktop && (
             <>
-              <Button className="ghost icon-btn" type="button" title="Edit project" onClick={onEdit}>
+              <Button className="ghost icon-btn" type="button" title={t('projects.editProjectAction')} onClick={onEdit}>
                 <Pencil size={14} />
               </Button>
               {!archived ? (
                 <Button
                   className="ghost icon-btn"
                   type="button"
-                  title="Archive project"
+                  title={t('projects.archiveProjectAction')}
                   onClick={onArchiveProject}
                 >
                   <Archive size={14} />
                 </Button>
               ) : (
-                <Button className="ghost icon-btn" type="button" title="Restore project" onClick={onRestoreProject}>
-                  Restore
+                <Button className="ghost icon-btn" type="button" title={t('projects.restoreProject')} onClick={onRestoreProject}>
+                  {t('projects.restoreProject')}
                 </Button>
               )}
             </>
@@ -278,10 +281,10 @@ function ProjectTreeSection({
       {expanded && (
         <div className="project-tree-children">
           {sessionsQ.isLoading && (
-            <div className="project-tree-loading muted">Loading sessions…</div>
+            <div className="project-tree-loading muted">{t('projects.loadingSessions')}</div>
           )}
           {!sessionsQ.isLoading && sessions.length === 0 && (
-            <div className="project-tree-empty muted">No sessions</div>
+            <div className="project-tree-empty muted">{t('projects.noSessions')}</div>
           )}
           {isDesktop ? (
             <ProjectSessionsTable
@@ -330,6 +333,7 @@ export function ProjectTreeList({
   onEditProject: (p: Project) => void
   onNewProject: () => void
 }) {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [expanded, setExpanded] = useState<Set<string>>(() => loadExpandedIds())
@@ -378,7 +382,7 @@ export function ProjectTreeList({
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       navigate(`/term?project=${projectId}&session=${session.id}`)
     },
-    onError: (err: Error) => alert(err.message || 'Failed to create session'),
+    onError: (err: Error) => alert(err.message || t('projectSessions.createSessionFailed')),
   })
 
   const archiveProject = useMutation({
@@ -395,22 +399,22 @@ export function ProjectTreeList({
     <div className="project-tree">
       <header className="project-tree-topbar">
         <p className="project-tree-stats muted">
-          {formatNumber(totalSessions)} 个会话 · {formatNumber(projects.length)} 个项目
+          {t('projects.statsTemplate', { sessions: formatNumber(totalSessions), projects: formatNumber(projects.length) })}
         </p>
         <div className="project-tree-topbar-actions">
           <Button
             className="ghost icon-btn"
             type="button"
-            aria-label="Folders"
-            title="Folders (coming soon)"
+            aria-label={t('projects.folders')}
+            title={t('projects.folders')}
             disabled
           >
             <Folder size={18} />
           </Button>
-          <Link to="/settings" className="btn ghost icon-btn" aria-label="Settings" title="Settings">
+          <Link to="/settings" className="btn ghost icon-btn" aria-label={t('projects.settings')} title={t('projects.settings')}>
             <Settings size={18} />
           </Link>
-          <Button className="ghost icon-btn" type="button" aria-label="New project" title="New project" onClick={onNewProject}>
+          <Button className="ghost icon-btn" type="button" aria-label={t('projects.newProject')} title={t('projects.newProject')} onClick={onNewProject}>
             <Plus size={18} />
           </Button>
         </div>
@@ -431,14 +435,14 @@ export function ProjectTreeList({
               onToggle={() => toggle(p.id)}
               onEdit={() => onEditProject(p)}
               onArchiveProject={() => {
-                if (confirm(`Archive project "${p.name}"? Sessions become read-only.`)) {
+                if (confirm(t('projects.archiveProject', { name: p.name }))) {
                   archiveProject.mutate(p.id)
                 }
               }}
               onRestoreProject={() => restoreProject.mutate(p.id)}
               onCreateSession={() => {
                 if (isProjectArchived(p)) {
-                  alert('Project is archived.')
+                  alert(t('projects.archivedNotice'))
                   return
                 }
                 createSession.mutate(p.id)
@@ -449,7 +453,7 @@ export function ProjectTreeList({
       </div>
 
       {projects.length === 0 && (
-        <EmptyState title="No projects yet" detail="Tap + to create a project." />
+        <EmptyState title={t('projects.noProjects')} detail={t('projects.noProjectsDetail')} />
       )}
     </div>
   )

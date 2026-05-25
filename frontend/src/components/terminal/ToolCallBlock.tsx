@@ -1,5 +1,6 @@
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { resolveToolElapsedMs } from '../../lib/toolElapsed'
 import { useTerminalStore } from '../../stores/terminalStore'
 
@@ -48,6 +49,7 @@ export function ToolCallBlock({
   /** Default fold state when user has not toggled this tool yet */
   defaultCollapsed?: boolean
 }) {
+  const { t } = useTranslation()
   const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? defaultCollapsed)
   const toggle = useTerminalStore((s) => s.toggleCollapsed)
   const elapsedMs = useToolElapsed(tool)
@@ -75,13 +77,13 @@ export function ToolCallBlock({
         )}
         <span className="spacer" /><span className="tool-state">{tool.state}</span>
       </div>
-      {!collapsed && (
-        <div className="trace-body">
-          {tool.args && <><b>Input</b>{'\n'}{tool.args}{'\n\n'}</>}
-          {errored && tool.error && <><b style={{ color: 'var(--error)' }}>Error</b>{'\n'}{tool.error}{'\n\n'}</>}
-          <><b>Output</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : 'No result summary yet.')}</>
+      <div className={`trace-body collapsible-body${!collapsed ? ' expanded' : ''}`}>
+        <div>
+          {tool.args && <><b>{t('toolBlock.input')}</b>{'\n'}{tool.args}{'\n\n'}</>}
+          {errored && tool.error && <><b style={{ color: 'var(--error)' }}>{t('toolBlock.error')}</b>{'\n'}{tool.error}{'\n\n'}</>}
+          <><b>{t('toolBlock.output')}</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : t('toolBlock.noResult'))}</>
         </div>
-      )}
+      </div>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpDown, RefreshCw, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
 import {
   createProject,
@@ -11,6 +12,7 @@ import {
 import { listVivadoTargets } from '../api/vivado'
 import type { Project } from '../api/types'
 import { MigrationConflictsBanner } from '../components/projects/MigrationConflictsBanner'
+import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { ProjectTreeList } from '../components/projects/ProjectTreeList'
 import { Button } from '../components/common/Button'
 import { Modal } from '../components/common/Modal'
@@ -85,6 +87,7 @@ function formToPayload(form: ProjectFormState): CreateProjectPayload {
 }
 
 export default function ProjectsPage() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const expandProjectId = searchParams.get('expand')
@@ -115,7 +118,7 @@ export default function ProjectsPage() {
       setForm(DEFAULT_FORM)
       setShowCreate(false)
     },
-    onError: (err: Error) => alert(err.message || 'Failed to create project'),
+    onError: (err: Error) => alert(err.message || t('projects.createFailed')),
   })
 
   const saveEdit = useMutation({
@@ -130,7 +133,7 @@ export default function ProjectsPage() {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       closeForm()
     },
-    onError: (err: Error) => alert(err.message || 'Failed to update project'),
+    onError: (err: Error) => alert(err.message || t('projects.updateFailed')),
   })
 
   const projects = useMemo(() => {
@@ -144,7 +147,7 @@ export default function ProjectsPage() {
 
   const submitProject = () => {
     if (!form.root_path.trim() || !form.manifest_path.trim()) {
-      alert('root_path and manifest_path are required')
+      alert(t('projects.validationRequired'))
       return
     }
     const payload = formToPayload(form)
@@ -172,68 +175,68 @@ export default function ProjectsPage() {
   const projectForm = (
     <div className="project-create-form">
       <label>
-        <span>Name</span>
-        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="uart_full" />
+        <span>{t('projects.name')}</span>
+        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t('projects.placeholderName')} />
       </label>
       <label>
-        <span>Root path *</span>
+        <span>{t('projects.rootPath')}</span>
         <input className="input mono" value={form.root_path} onChange={(e) => setForm({ ...form, root_path: e.target.value })} />
       </label>
       <label>
-        <span>Manifest (Synthia YAML) *</span>
+        <span>{t('projects.manifest')}</span>
         <input className="input mono" value={form.manifest_path} onChange={(e) => setForm({ ...form, manifest_path: e.target.value })} />
       </label>
       <label>
-        <span>Vivado .xpr</span>
+        <span>{t('projects.xprPath')}</span>
         <input className="input mono" value={form.xpr_path} onChange={(e) => setForm({ ...form, xpr_path: e.target.value })} />
       </label>
       <div className="project-form-row-2">
         <label>
-          <span>Part</span>
-          <input className="input mono" value={form.part} onChange={(e) => setForm({ ...form, part: e.target.value })} placeholder="xc7a35tcpg236-1" />
+          <span>{t('projects.part')}</span>
+          <input className="input mono" value={form.part} onChange={(e) => setForm({ ...form, part: e.target.value })} placeholder={t('projects.placeholderPart')} />
         </label>
         <label>
-          <span>Board part</span>
+          <span>{t('projects.boardPart')}</span>
           <input className="input mono" value={form.board_part} onChange={(e) => setForm({ ...form, board_part: e.target.value })} />
         </label>
       </div>
       <label>
-        <span>Top module</span>
-        <input className="input mono" value={form.top_module} onChange={(e) => setForm({ ...form, top_module: e.target.value })} placeholder="uart_top" />
+        <span>{t('projects.topModule')}</span>
+        <input className="input mono" value={form.top_module} onChange={(e) => setForm({ ...form, top_module: e.target.value })} placeholder={t('projects.placeholderTopModule')} />
       </label>
       <div className="project-form-row-2">
         <label>
-          <span>Target language</span>
-          <input className="input" value={form.target_language} onChange={(e) => setForm({ ...form, target_language: e.target.value })} placeholder="Verilog" />
+          <span>{t('projects.targetLanguage')}</span>
+          <input className="input" value={form.target_language} onChange={(e) => setForm({ ...form, target_language: e.target.value })} placeholder={t('projects.placeholderLanguage')} />
         </label>
         <label>
-          <span>Simulator</span>
-          <input className="input" value={form.simulator} onChange={(e) => setForm({ ...form, simulator: e.target.value })} placeholder="xsim" />
+          <span>{t('projects.simulator')}</span>
+          <input className="input" value={form.simulator} onChange={(e) => setForm({ ...form, simulator: e.target.value })} placeholder={t('projects.placeholderSimulator')} />
         </label>
       </div>
       <label>
-        <span>Source globs (comma-separated)</span>
+        <span>{t('projects.sourceGlobs')}</span>
         <input className="input mono" value={form.source_globs_text} onChange={(e) => setForm({ ...form, source_globs_text: e.target.value })} />
       </label>
       <label>
-        <span>Constraint globs</span>
+        <span>{t('projects.constraintGlobs')}</span>
         <input className="input mono" value={form.constraint_globs_text} onChange={(e) => setForm({ ...form, constraint_globs_text: e.target.value })} />
       </label>
       <label>
-        <span>Tcl globs</span>
+        <span>{t('projects.tclGlobs')}</span>
         <input className="input mono" value={form.tcl_globs_text} onChange={(e) => setForm({ ...form, tcl_globs_text: e.target.value })} />
       </label>
       <label>
-        <span>Default Vivado target</span>
+        <span>{t('projects.defaultVivadoTarget')}</span>
         <select
           className="select"
           value={form.default_vivado_target_id}
           onChange={(e) => setForm({ ...form, default_vivado_target_id: e.target.value })}
         >
-          <option value="">(default from config)</option>
-          {vivadoTargets.map((t) => {
-            const id = String(t.id ?? '')
-            const name = String(t.name ?? id)
+          <option value="">{t('projects.defaultFromConfig')}</option>
+          {vivadoTargets.map((vt) => {
+            const id = String(vt.id ?? '')
+            const name = String(vt.name ?? id)
             return (
               <option key={id} value={id}>
                 {name}
@@ -244,10 +247,10 @@ export default function ProjectsPage() {
       </label>
       <div className="project-create-actions">
         <Button className="ghost" type="button" onClick={closeForm}>
-          Cancel
+          {t('projects.cancel')}
         </Button>
         <Button className="primary" type="button" onClick={submitProject} disabled={create.isPending || saveEdit.isPending}>
-          {editing ? (saveEdit.isPending ? 'Saving…' : 'Save changes') : create.isPending ? 'Creating…' : 'Create project'}
+          {editing ? (saveEdit.isPending ? t('projects.saving') : t('projects.saveChanges')) : create.isPending ? t('projects.creating') : t('projects.createProject')}
         </Button>
       </div>
     </div>
@@ -257,63 +260,65 @@ export default function ProjectsPage() {
     <div className="page projects-page projects-tree-page">
       <MigrationConflictsBanner />
 
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Projects</h1>
-          <p className="page-subtitle">Engineering workspaces — projects and debug sessions</p>
+      <PageStickyTop>
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">{t('projects.title')}</h1>
+            <p className="page-subtitle">{t('projects.subtitle')}</p>
+          </div>
         </div>
-      </div>
 
-      <div className="toolbar sessions-toolbar project-tree-toolbar">
-        <div className="sessions-search-wrap" style={{ flex: 1 }}>
-          <Search size={15} className="sessions-search-icon" />
-          <input
-            className="input"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search projects and sessions…"
-          />
-        </div>
-        <div className="sort-compact-wrap" title="Sort projects">
-          <ArrowUpDown size={16} className="sort-compact-icon" aria-hidden />
-          <select
-            className="select sort-compact"
-            value={sort}
-            onChange={(e) => setSort(e.target.value as typeof sort)}
-            aria-label="Sort projects"
+        <div className="toolbar sessions-toolbar project-tree-toolbar">
+          <div className="sessions-search-wrap" style={{ flex: 1 }}>
+            <Search size={15} className="sessions-search-icon" />
+            <input
+              className="input"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('projects.searchPlaceholder')}
+            />
+          </div>
+          <div className="sort-compact-wrap" title={t('projects.sortLabel')}>
+            <ArrowUpDown size={16} className="sort-compact-icon" aria-hidden />
+            <select
+              className="select sort-compact"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as typeof sort)}
+              aria-label={t('projects.sortLabel')}
+            >
+              <option value="updated">{t('projects.sortLastActive')}</option>
+              <option value="name">{t('projects.sortName')}</option>
+              <option value="sessions">{t('projects.sortSessionCount')}</option>
+            </select>
+          </div>
+          <Button
+            className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
+            type="button"
+            aria-label={t('projects.refresh')}
+            title={t('projects.refresh')}
+            onClick={() => refetch()}
+            disabled={isFetching}
           >
-            <option value="updated">Last active</option>
-            <option value="name">Name</option>
-            <option value="sessions">Session count</option>
-          </select>
+            <RefreshCw size={16} aria-hidden />
+          </Button>
+          <label className="projects-show-archived">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            {t('projects.filterArchivedProjects')}
+          </label>
+          <label className="projects-show-archived">
+            <input
+              type="checkbox"
+              checked={showArchivedSessions}
+              onChange={(e) => setShowArchivedSessions(e.target.checked)}
+            />
+            {t('projects.filterArchivedSessions')}
+          </label>
         </div>
-        <Button
-          className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
-          type="button"
-          aria-label="Refresh"
-          title="Refresh"
-          onClick={() => refetch()}
-          disabled={isFetching}
-        >
-          <RefreshCw size={16} aria-hidden />
-        </Button>
-        <label className="projects-show-archived">
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          Archived projects
-        </label>
-        <label className="projects-show-archived">
-          <input
-            type="checkbox"
-            checked={showArchivedSessions}
-            onChange={(e) => setShowArchivedSessions(e.target.checked)}
-          />
-          Archived sessions
-        </label>
-      </div>
+      </PageStickyTop>
 
       <Modal
         open={formOpen}
-        title={editing ? `Edit project — ${editing.name}` : 'New project'}
+        title={editing ? t('projects.editProject', { name: editing.name }) : t('projects.newProject')}
         onClose={closeForm}
         className="modal-card-wide"
       >

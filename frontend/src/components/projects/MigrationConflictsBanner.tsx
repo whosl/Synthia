@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { AlertTriangle } from 'lucide-react'
 import { listMigrationConflicts, resolveMigration } from '../../api/projects'
 import { Button } from '../common/Button'
 import { Panel } from '../common/Panel'
 
 export function MigrationConflictsBanner() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const { data } = useQuery({
     queryKey: ['migration-conflicts'],
@@ -27,10 +29,10 @@ export function MigrationConflictsBanner() {
   if (!sessions.length) return null
 
   return (
-    <Panel title="Migration conflicts" className="migration-conflicts-panel">
+    <Panel title={t('migration.title')} className="migration-conflicts-panel">
       <p className="muted migration-conflicts-intro">
         <AlertTriangle size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-        These sessions match multiple projects. Pick the correct project for each.
+        {t('migration.intro')}
       </p>
       <ul className="migration-conflicts-list">
         {sessions.map((s) => (

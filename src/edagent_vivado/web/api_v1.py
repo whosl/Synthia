@@ -516,6 +516,8 @@ async def api_task_start(session_id: str, req: StartTaskReq):
 
     async def _run_agent():
         run = None
+        arm_token = None
+        arm_assignments: list[dict] = []
         try:
             run = run_create("task", f"task:{t['id']}", session_id=session_id, task_id=t["id"])
             event_create(session_id, "run.started", {"run_id": run["id"], "run_type": "task"},
@@ -534,7 +536,47 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 "retrieval_audit_id": ctx.retrieval_audit["id"] if ctx.retrieval_audit else None,
                 "token_counts": ctx.token_counts,
             }, task_id=t["id"], run_id=run["id"])
-            agent = create_agent()
+            # SE-PR5 — assign A/B trial arms for this task BEFORE the agent boots
+            # so create_agent / resolvers see the right overlay payloads.
+            try:
+                from edagent_vivado.evolution import (
+                    assign_arms_for_task,
+                    set_task_arms,
+                    task_arms_summary,
+                )
+
+                arms = assign_arms_for_task(
+                    project_id=sess.get("project_id") or None,
+                    task_id=t["id"],
+                )
+                if arms:
+                    arm_token = set_task_arms(arms)
+                    arm_assignments = task_arms_summary(arms)
+                    for entry in arm_assignments:
+                        event_create(
+                            session_id,
+                            "evolution.trial.assigned",
+                            entry,
+                            task_id=t["id"],
+                            run_id=run["id"] if run else "",
+                        )
+                    # Persist on the task so collect_task_metrics can read it back.
+                    try:
+                        from edagent_vivado.repository.store import task_update as _tu
+
+                        prev_meta_raw = (task_get(t["id"]) or {}).get("metadata_json") or "{}"
+                        try:
+                            prev_meta = json.loads(prev_meta_raw) or {}
+                        except json.JSONDecodeError:
+                            prev_meta = {}
+                        prev_meta["evolution_arms"] = arm_assignments
+                        _tu(t["id"], metadata_json=json.dumps(prev_meta))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            agent = create_agent(project_id=sess.get("project_id") or None)
             config = {"configurable": {"thread_id": f"session:{session_id}"}, "recursion_limit": 1000}
             from edagent_vivado.harness.run_context import set_agent_run_context
             set_agent_run_context(session_id, t["id"], run["id"])
@@ -1011,6 +1053,70 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             event_create(session_id, "run.completed", {"run_id": run["id"] if run else None},
                          task_id=t["id"], run_id=run["id"] if run else "")
             event_create(session_id, "task.done", {"task_id": t["id"]}, task_id=t["id"])
+
+            # SPEC §22.7 — write a task-scope metric snapshot, then refresh rolling
+            # aggregates. Failures must never propagate into the agent loop.
+            try:
+                from edagent_vivado.evolution import (
+                    aggregate_rolling,
+                    collect_task_metrics,
+                    run_generators,
+                )
+
+                project_id_for_metrics: str | None = None
+                if sess.get("project_id"):
+                    project_id_for_metrics = sess["project_id"]
+                collect_task_metrics(
+                    session_id=session_id,
+                    task_id=t["id"],
+                    run_id=run["id"] if run else "",
+                    event_sink=event_create,
+                )
+                if project_id_for_metrics:
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_10",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_50",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+                # SPEC §22.6 — Level-0 candidate generators (always pending, never auto-apply).
+                run_generators(
+                    project_id=project_id_for_metrics,
+                    session_id=session_id,
+                    task_id=t["id"],
+                    event_sink=event_create,
+                )
+
+                # SE-PR5 — give every trial this task contributed to a chance to decide.
+                if arm_assignments:
+                    from edagent_vivado.evolution import maybe_decide_trial
+
+                    seen_trials = {a.get("trial_id") for a in arm_assignments if a.get("trial_id")}
+                    for tid in seen_trials:
+                        try:
+                            maybe_decide_trial(tid, event_sink=event_create)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            finally:
+                # Always clear the per-task arm assignment so a follow-up
+                # task in the same process starts from a clean slate.
+                try:
+                    if arm_token is not None:
+                        from edagent_vivado.evolution import reset_task_arms
+
+                        reset_task_arms(arm_token)
+                except Exception:
+                    pass
         except Exception as e:
             task_update(t["id"], state="error", error=str(e), finished_at=int(time.time()))
             session_update(session_id, status="error")
@@ -1018,6 +1124,14 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             if run:
                 event_create(session_id, "run.error", {"run_id": run["id"], "error": str(e)}, task_id=t["id"], run_id=run["id"])
             event_create(session_id, "task.error", {"task_id": t["id"], "error": str(e)}, task_id=t["id"])
+            # SE-PR5 — drop arm assignment on the error path too.
+            try:
+                if arm_token is not None:
+                    from edagent_vivado.evolution import reset_task_arms
+
+                    reset_task_arms(arm_token)
+            except Exception:
+                pass
 
     asyncio.create_task(_run_agent())
     event_type = "task.started"  # noqa: F841
@@ -1242,6 +1356,647 @@ async def api_vivado_approval_set(body: dict):
     approved = bool(body.get("approved", not is_vivado_execution_approved()))
     set_vivado_execution_approval(approved)
     return {"approved": is_vivado_execution_approved()}
+
+# ── Feedback API (SPEC §22.6) ─────────────────────────────────
+
+class FeedbackReq(BaseModel):
+    session_id: str
+    task_id: str | None = None
+    message_id: str | None = None
+    user_thumb: int | None = None
+    comment: str | None = None
+    tags: list[str] | None = None
+    metadata: dict | None = None
+
+
+@router.post("/feedback")
+async def api_feedback_create(req: FeedbackReq):
+    if req.user_thumb is not None and req.user_thumb not in (-1, 0, 1):
+        raise HTTPException(400, "user_thumb must be -1, 0, or 1")
+    sess = session_get(req.session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    from edagent_vivado.evolution import feedback_create
+
+    try:
+        row = feedback_create(
+            session_id=req.session_id,
+            task_id=req.task_id,
+            message_id=req.message_id,
+            user_thumb=req.user_thumb,
+            comment=(req.comment or None),
+            tags=req.tags,
+            metadata=req.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    event_create(
+        req.session_id,
+        "evolution.feedback.created",
+        {
+            "feedback_id": row["id"],
+            "user_thumb": row.get("user_thumb"),
+            "task_id": req.task_id,
+            "message_id": req.message_id,
+        },
+        task_id=req.task_id or "",
+    )
+    return {"feedback": row}
+
+
+@router.get("/sessions/{session_id}/feedback")
+async def api_feedback_list(session_id: str, limit: int = 200):
+    from edagent_vivado.evolution import feedback_list_for_session
+
+    return {"feedback": feedback_list_for_session(session_id, limit=limit)}
+
+# ── Metrics API (SPEC §22.9) ──────────────────────────────────
+
+@router.get("/metrics/summary")
+async def api_metrics_summary(
+    project_id: str = "",
+    window: str = "rolling_10",
+):
+    from edagent_vivado.evolution import latest_snapshot
+
+    scope = "project" if project_id else "global"
+    snap = latest_snapshot(project_id=project_id or None, scope=scope, window=window)
+    if not snap:
+        return {"snapshot": None, "project_id": project_id or None, "scope": scope, "window": window}
+    return {"snapshot": snap, "project_id": project_id or None, "scope": scope, "window": window}
+
+
+@router.get("/metrics/series")
+async def api_metrics_series(
+    project_id: str = "",
+    scope: str = "task",
+    window: str = "single",
+    limit: int = Query(50, ge=1, le=500),
+):
+    from edagent_vivado.evolution import snapshot_series
+
+    series = snapshot_series(
+        project_id=project_id or None,
+        scope=scope,
+        window=window,
+        limit=limit,
+    )
+    return {
+        "series": series,
+        "project_id": project_id or None,
+        "scope": scope,
+        "window": window,
+        "count": len(series),
+    }
+
+# ── Evolution Candidates API (SPEC §22.9 — SE-PR3 read-only) ───
+
+def _candidate_dto(row: dict, *, include_apply_preview: bool = False) -> dict:
+    """Decode JSON fields so the frontend can use them directly."""
+    try:
+        signal = json.loads(row.get("signal_source_json") or "{}")
+    except json.JSONDecodeError:
+        signal = {}
+    try:
+        meta = json.loads(row.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    out = dict(row)
+    out["signal_source"] = signal
+    out["metadata"] = meta
+    if include_apply_preview:
+        try:
+            from edagent_vivado.evolution import preview_candidate_payload
+
+            out["apply_preview"] = preview_candidate_payload(row["id"])
+        except Exception:
+            out["apply_preview"] = None
+    return out
+
+
+@router.get("/evolution/candidates")
+async def api_evolution_candidates_list(
+    status: str = "pending",
+    surface: str = "",
+    project_id: str = "",
+    limit: int = Query(100, ge=1, le=500),
+):
+    from edagent_vivado.evolution import candidate_list
+
+    rows = candidate_list(
+        status=status or None,
+        surface=surface or None,
+        project_id=project_id or None,
+        limit=limit,
+    )
+    return {
+        "candidates": [_candidate_dto(r) for r in rows],
+        "filters": {
+            "status": status or None,
+            "surface": surface or None,
+            "project_id": project_id or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/candidates/{candidate_id}")
+async def api_evolution_candidate_get(candidate_id: str):
+    from edagent_vivado.evolution import candidate_get
+
+    row = candidate_get(candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return {"candidate": _candidate_dto(row, include_apply_preview=True)}
+
+
+@router.get("/evolution/candidates/{candidate_id}/preview")
+async def api_evolution_candidate_preview(candidate_id: str):
+    """Return the overlay payload that would be applied on approve (read-only)."""
+    from edagent_vivado.evolution import preview_candidate_payload
+
+    try:
+        preview = preview_candidate_payload(candidate_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"preview": preview}
+
+
+class CandidateApproveReq(BaseModel):
+    reviewed_by: str = "user"
+    payload: dict | None = None
+    force_active: bool = False
+    confirm_source_reviewed: bool = False
+
+
+@router.post("/evolution/candidates/{candidate_id}/approve")
+async def api_evolution_candidate_approve(candidate_id: str, body: CandidateApproveReq):
+    from edagent_vivado.evolution import approve_candidate, candidate_get
+
+    try:
+        updated = approve_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            payload_override=body.payload,
+            force_active=body.force_active,
+            confirm_source_reviewed=body.confirm_source_reviewed,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    cand = candidate_get(candidate_id)
+    return {
+        "candidate": _candidate_dto(updated or cand or {"id": candidate_id}),
+        "overlay_id": (updated or {}).get("applied_overlay_id"),
+    }
+
+
+class ToolValidateReq(BaseModel):
+    source: str
+    name: str | None = None
+
+
+@router.post("/evolution/tools/validate")
+async def api_evolution_tool_validate(body: ToolValidateReq):
+    """Pre-flight AST validation for evolved tool sources.
+
+    Returns ``ok=true`` plus ``tool_name`` / ``hash`` / ``source_bytes`` on
+    success. 400 on any sandbox rejection, with a structured ``reason`` so
+    the review UI can show a precise error before the user hits Approve.
+    """
+    from edagent_vivado.evolution import SandboxError, validate_evolved_tool_source
+
+    try:
+        result = validate_evolved_tool_source(body.source)
+    except SandboxError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"ok": False, "reason": exc.reason, "detail": exc.detail},
+        ) from exc
+    if body.name and result["tool_name"] != body.name:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "reason": "name_mismatch",
+                "detail": f"declared {body.name!r}, source defines {result['tool_name']!r}",
+            },
+        )
+    return result
+
+
+class CandidateRejectReq(BaseModel):
+    reviewed_by: str = "user"
+    suppress_days: int = 0
+    reason: str | None = None
+
+
+@router.post("/evolution/candidates/{candidate_id}/reject")
+async def api_evolution_candidate_reject(candidate_id: str, body: CandidateRejectReq):
+    from edagent_vivado.evolution import reject_candidate
+
+    if body.suppress_days < 0 or body.suppress_days > 365:
+        raise HTTPException(400, "suppress_days must be between 0 and 365")
+    try:
+        updated = reject_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            suppress_days=body.suppress_days,
+            reason=body.reason,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+class CandidateMergeReq(BaseModel):
+    reviewed_by: str = "user"
+
+
+@router.post("/evolution/candidates/{candidate_id}/merge")
+async def api_evolution_candidate_merge(candidate_id: str, body: CandidateMergeReq):
+    from edagent_vivado.evolution import merge_candidate
+
+    try:
+        updated = merge_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+class CandidateRollbackReq(BaseModel):
+    reviewed_by: str = "user"
+    reason: str | None = None
+
+
+@router.post("/evolution/candidates/{candidate_id}/rollback")
+async def api_evolution_candidate_rollback(candidate_id: str, body: CandidateRollbackReq):
+    from edagent_vivado.evolution import rollback_candidate
+
+    try:
+        updated = rollback_candidate(
+            candidate_id,
+            reviewed_by=body.reviewed_by or "user",
+            reason=body.reason,
+            event_sink=event_create,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"candidate": _candidate_dto(updated or {})}
+
+
+def _overlay_dto(row: dict) -> dict:
+    """Serialise an overlay row with decoded payload + metadata."""
+    out = dict(row)
+    if "payload" not in out:
+        try:
+            out["payload"] = json.loads(out.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            out["payload"] = {}
+    if "metadata" not in out:
+        try:
+            out["metadata"] = json.loads(out.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            out["metadata"] = {}
+    return out
+
+
+@router.get("/evolution/overlays")
+async def api_evolution_overlays_list(
+    project_id: str = "",
+    surface: str = "",
+    state: str = "",
+    scope: str = "",
+    limit: int = Query(200, ge=1, le=500),
+):
+    from edagent_vivado.evolution import overlay_list
+
+    rows = overlay_list(
+        project_id=project_id or None,
+        surface=surface or None,
+        state=state or None,
+        scope=scope or None,
+        limit=limit,
+    )
+    return {
+        "overlays": [_overlay_dto(r) for r in rows],
+        "filters": {
+            "project_id": project_id or None,
+            "surface": surface or None,
+            "state": state or None,
+            "scope": scope or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/overlays/{overlay_id}")
+async def api_evolution_overlay_get(overlay_id: str):
+    from edagent_vivado.evolution import overlay_get
+
+    row = overlay_get(overlay_id)
+    if not row:
+        raise HTTPException(404, "overlay not found")
+    return {"overlay": _overlay_dto(row)}
+
+
+@router.post("/evolution/overlays/{overlay_id}/retire")
+async def api_evolution_overlay_retire(overlay_id: str):
+    from edagent_vivado.evolution import retire_overlay
+
+    try:
+        out = retire_overlay(overlay_id, event_sink=event_create)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"overlay": _overlay_dto(out)}
+
+
+# ── Trial config (SPEC §22 SE-PR5) ────────────────────────────
+
+
+@router.get("/evolution/config")
+async def api_evolution_config(project_id: str = ""):
+    from edagent_vivado.evolution import (
+        DECISION_MARGIN,
+        MIN_SAMPLES_PER_ARM,
+        TRIAL_FORBIDDEN_SURFACES,
+        project_trial_config,
+    )
+
+    if not project_id:
+        return {
+            "project_id": None,
+            "trials": {},
+            "forbidden_surfaces": sorted(TRIAL_FORBIDDEN_SURFACES),
+            "min_samples_per_arm": MIN_SAMPLES_PER_ARM,
+            "decision_margin": DECISION_MARGIN,
+        }
+    if not project_get(project_id):
+        raise HTTPException(404, "project not found")
+    return {
+        "project_id": project_id,
+        "trials": project_trial_config(project_id),
+        "forbidden_surfaces": sorted(TRIAL_FORBIDDEN_SURFACES),
+        "min_samples_per_arm": MIN_SAMPLES_PER_ARM,
+        "decision_margin": DECISION_MARGIN,
+    }
+
+
+class TrialConfigSetReq(BaseModel):
+    project_id: str
+    surface: str
+    enabled: bool
+
+
+@router.post("/evolution/config")
+async def api_evolution_config_set(body: TrialConfigSetReq):
+    from edagent_vivado.evolution import set_trial_enabled
+
+    if not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        out = set_trial_enabled(body.project_id, body.surface, body.enabled)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "project_id": body.project_id,
+        "surface": body.surface,
+        "enabled": out,
+    }
+
+
+# ── Trials (SPEC §22 SE-PR5) ─────────────────────────────────
+
+
+def _trial_dto(row: dict) -> dict:
+    """Serialise a trial row with decoded payload + per-arm score buckets."""
+    out = dict(row)
+    for col_json, col_decoded in (
+        ("metric_baseline_json", "metric_baseline"),
+        ("metric_variant_json", "metric_variant"),
+        ("metadata_json", "metadata"),
+    ):
+        if col_decoded in out:
+            continue
+        raw = out.get(col_json)
+        if isinstance(raw, str) and raw:
+            try:
+                out[col_decoded] = json.loads(raw)
+            except json.JSONDecodeError:
+                out[col_decoded] = {}
+        else:
+            out[col_decoded] = {}
+    return out
+
+
+@router.get("/evolution/trials")
+async def api_evolution_trials_list(
+    project_id: str = "",
+    state: str = "",
+    surface: str = "",
+    limit: int = Query(200, ge=1, le=500),
+):
+    from edagent_vivado.evolution import trial_list
+
+    rows = trial_list(
+        project_id=project_id or None,
+        state=state or None,
+        surface=surface or None,
+        limit=limit,
+    )
+    return {
+        "trials": [_trial_dto(r) for r in rows],
+        "filters": {
+            "project_id": project_id or None,
+            "state": state or None,
+            "surface": surface or None,
+        },
+        "count": len(rows),
+    }
+
+
+@router.get("/evolution/trials/{trial_id}")
+async def api_evolution_trial_get(trial_id: str):
+    from edagent_vivado.evolution import trial_get
+
+    row = trial_get(trial_id)
+    if not row:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(row)}
+
+
+class TrialDecideReq(BaseModel):
+    decision: str
+    reviewed_by: str = "user"
+
+
+@router.post("/evolution/trials/{trial_id}/decide")
+async def api_evolution_trial_decide(trial_id: str, body: TrialDecideReq):
+    """Operator override that decides a trial regardless of sample count."""
+    from edagent_vivado.evolution import force_decision
+
+    try:
+        out = force_decision(
+            trial_id,
+            body.decision,
+            reviewed_by=body.reviewed_by or "user",
+            event_sink=event_create,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not out:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(out)}
+
+
+class TrialAbortReq(BaseModel):
+    reason: str = "manual_abort"
+
+
+@router.post("/evolution/trials/{trial_id}/abort")
+async def api_evolution_trial_abort(trial_id: str, body: TrialAbortReq):
+    from edagent_vivado.evolution import abort_trial
+
+    out = abort_trial(trial_id, reason=body.reason or "manual_abort", event_sink=event_create)
+    if not out:
+        raise HTTPException(404, "trial not found")
+    return {"trial": _trial_dto(out)}
+
+
+# ── Eval set placeholder (SPEC §22.6B SE-PR6) ────────────────
+
+
+@router.get("/evolution/eval/sets")
+async def api_evolution_eval_sets_list():
+    from edagent_vivado.evolution import list_eval_sets_dto
+
+    sets = list_eval_sets_dto()
+    return {"sets": sets, "count": len(sets), "runner_implemented": False}
+
+
+@router.get("/evolution/eval/sets/{name}")
+async def api_evolution_eval_set_get(name: str):
+    from edagent_vivado.evolution import EvalSetError, get_eval_set_dto
+
+    try:
+        return {"set": get_eval_set_dto(name), "runner_implemented": False}
+    except EvalSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/evolution/eval/runs")
+async def api_evolution_eval_runs_list(
+    eval_set: str = "",
+    state: str = "",
+    limit: int = Query(100, ge=1, le=500),
+):
+    from edagent_vivado.evolution import eval_run_list
+
+    rows = eval_run_list(
+        eval_set=eval_set or None,
+        state=state or None,
+        limit=limit,
+    )
+    return {"runs": rows, "count": len(rows), "runner_implemented": False}
+
+
+@router.get("/evolution/eval/runs/{run_id}")
+async def api_evolution_eval_run_get(run_id: str):
+    from edagent_vivado.evolution import eval_run_get
+
+    row = eval_run_get(run_id)
+    if not row:
+        raise HTTPException(404, "eval_run not found")
+    return {"run": row, "runner_implemented": False}
+
+
+class EvalRunReq(BaseModel):
+    eval_set: str
+    project_id: str | None = None
+    overlay_id: str | None = None
+    note: str = ""
+
+
+@router.post("/evolution/eval/run")
+async def api_evolution_eval_run(body: EvalRunReq):
+    """Queue a placeholder eval_run.
+
+    SE-PR6 ships schema + dispatch only; the runner that drives cases through
+    the agent loop is not yet implemented. The response is HTTP 200 (the
+    request itself succeeded — the row is in the table) and carries
+    ``state="placeholder"`` together with ``runner_implemented=false`` so
+    callers can distinguish "submitted but pending the future runner" from
+    "ran and finished".
+    """
+    from edagent_vivado.evolution import EvalSetError, enqueue_eval_run
+
+    if body.project_id and not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    try:
+        row = enqueue_eval_run(
+            body.eval_set,
+            project_id=body.project_id,
+            overlay_id=body.overlay_id,
+            note=body.note,
+            event_sink=event_create,
+        )
+    except EvalSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "run": row,
+        "runner_implemented": False,
+        "note": "SE-PR6 placeholder — runner lands in a later PR (SPEC §22.6B)",
+    }
+
+
+class GeneratorRunReq(BaseModel):
+    project_id: str | None = None
+    session_id: str = ""
+    task_id: str = ""
+    only: list[str] | None = None
+
+
+@router.post("/evolution/generators/run")
+async def api_evolution_generators_run(body: GeneratorRunReq):
+    """On-demand trigger for the SE-PR3 generators.
+
+    Mainly for debugging / catching up after a backfill; the live system
+    runs the same dispatcher automatically after every ``task.done``.
+    """
+    from edagent_vivado.evolution import run_generators
+
+    if body.project_id and not project_get(body.project_id):
+        raise HTTPException(404, "project not found")
+    sink = event_create if body.session_id else None
+    result = run_generators(
+        project_id=body.project_id,
+        session_id=body.session_id or "",
+        task_id=body.task_id or "",
+        event_sink=sink,
+        only=body.only,
+    )
+    return {
+        "project_id": body.project_id,
+        "created": result.get("created", []),
+        "errors": result.get("errors", {}),
+    }
 
 # ── KB API ───────────────────────────────────────────────────
 

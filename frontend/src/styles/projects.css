@@ -268,7 +268,8 @@
 /* —— Project tree home (mobile tree + desktop nested table) —— */
 
 .projects-tree-page {
-  max-width: 920px;
+  width: 100%;
+  max-width: 100%;
 }
 
 .project-tree-toolbar {

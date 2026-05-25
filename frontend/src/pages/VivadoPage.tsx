@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2, Download, Play, RefreshCw, Server } from 'lucide-react'
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   formatVivadoTime,
   getVivadoHealth,
@@ -9,10 +10,12 @@ import {
   runVivadoTcl,
 } from '../api/vivado'
 import { Button } from '../components/common/Button'
+import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 
 export default function VivadoPage() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const { data, refetch, isFetching } = useQuery({ queryKey: ['vivado-health'], queryFn: getVivadoHealth })
   const targetsQ = useQuery({ queryKey: ['vivado-targets'], queryFn: listVivadoTargets })
@@ -22,9 +25,9 @@ export default function VivadoPage() {
   const [tclInput, setTclInput] = useState('')
   const [autoApprove, setAutoApprove] = useState(true)
   const [consoleLines, setConsoleLines] = useState<string[]>([
-    'Vivado% version -short',
+    t('vivado.consoleInit1'),
     data?.version || '2022.1',
-    'Vivado% ready',
+    t('vivado.consoleInit3'),
   ])
 
   const handleRun = async () => {
@@ -35,12 +38,12 @@ export default function VivadoPage() {
     try {
       const res = await runVivadoTcl(cmd, autoApprove)
       if (res.requires_approval) {
-        setConsoleLines(prev => [...prev, 'Policy requires approval — disable dangerous Tcl or enable auto-approve in Settings'])
+        setConsoleLines(prev => [...prev, t('vivado.approvalRequired')])
         return
       }
       if (res.stdout) setConsoleLines(prev => [...prev, ...(res.stdout || '').split('\n').filter(Boolean).slice(-30)])
       if (res.stderr) setConsoleLines(prev => [...prev, ...(res.stderr || '').split('\n').filter(Boolean).slice(-10)])
-      setConsoleLines(prev => [...prev, res.ok ? `# completed (${res.elapsed_sec ?? 0}s)` : `# failed: ${res.error || res.exit_code}`])
+      setConsoleLines(prev => [...prev, res.ok ? t('vivado.completed', { n: res.elapsed_sec ?? 0 }) : t('vivado.failed', { error: res.error || res.exit_code })])
       await queryClient.invalidateQueries({ queryKey: ['vivado-commands'] })
     } catch (e) {
       setConsoleLines(prev => [...prev, `# error: ${e instanceof Error ? e.message : String(e)}`])
@@ -57,38 +60,40 @@ export default function VivadoPage() {
   }
 
   return <div className="page">
-    <div className="page-header">
-      <div>
-        <h1 className="page-title">Vivado Runtime</h1>
-        <p className="page-subtitle">Remote target health, Tcl console, and command history (Phase 3A)</p>
+    <PageStickyTop>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">{t('vivado.title')}</h1>
+          <p className="page-subtitle">{t('vivado.subtitle')}</p>
+        </div>
+        <Button className="ghost" onClick={() => { refetch(); commandsQ.refetch() }}><RefreshCw size={14} /> {t('vivado.refresh')}</Button>
       </div>
-      <Button className="ghost" onClick={() => { refetch(); commandsQ.refetch() }}><RefreshCw size={14} /> Refresh</Button>
-    </div>
+    </PageStickyTop>
     <div className="dashboard-grid">
       <div style={{ display: 'grid', gap: 16 }}>
-        <Panel title="Target Health" actions={<StatusBadge status={data?.reachable ? 'connected' : 'error'} />}>
-          <div className="health-row"><span>Host</span><span>{data?.host || String(target?.host || 'not configured')}</span><Server size={15} color="var(--muted)" /></div>
-          <div className="health-row"><span>SSH</span><span>{data?.reachable ? 'Connected' : data?.error || 'Disconnected'}</span><StatusBadge status={data?.reachable ? 'connected' : 'error'} /></div>
-          <div className="health-row"><span>Vivado Path</span><span className="mono" style={{ fontSize: 12 }}>{data?.vivado_path || 'vivado'}</span><CheckCircle2 size={15} color="var(--success)" /></div>
-          <div className="health-row"><span>Version</span><span>{data?.version || 'Unknown'}</span><span className="muted">{isFetching ? 'checking...' : ''}</span></div>
+        <Panel title={t('vivado.targetHealth')} actions={<StatusBadge status={data?.reachable ? 'connected' : 'error'} />}>
+          <div className="health-row"><span>{t('vivado.host')}</span><span>{data?.host || String(target?.host || t('vivado.notConfigured'))}</span><Server size={15} color="var(--muted)" /></div>
+          <div className="health-row"><span>{t('vivado.ssh')}</span><span>{data?.reachable ? t('vivado.connected') : data?.error || t('vivado.disconnected')}</span><StatusBadge status={data?.reachable ? 'connected' : 'error'} /></div>
+          <div className="health-row"><span>{t('vivado.vivadoPath')}</span><span className="mono" style={{ fontSize: 12 }}>{data?.vivado_path || 'vivado'}</span><CheckCircle2 size={15} color="var(--success)" /></div>
+          <div className="health-row"><span>{t('vivado.version')}</span><span>{data?.version || t('vivado.unknown')}</span><span className="muted">{isFetching ? t('vivado.checking') : ''}</span></div>
         </Panel>
-        <Panel title="Tcl Console">
+        <Panel title={t('vivado.tclConsole')}>
           <div className="command-console">{consoleLines.join('\n')}</div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12 }} className="muted">
             <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} />
-            Auto-approve policy-checked Tcl (matches CLI --yes)
+            {t('vivado.autoApproveTcl')}
           </label>
-          <textarea className="textarea" placeholder="Enter Tcl command..." style={{ marginTop: 8 }} value={tclInput} onChange={e => setTclInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRun() } }} />
+          <textarea className="textarea" placeholder={t('vivado.tclPlaceholder')} style={{ marginTop: 8 }} value={tclInput} onChange={e => setTclInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRun() } }} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <Button className="primary" onClick={handleRun} disabled={!tclInput.trim()}><Play size={14} /> Run</Button>
-            <Button className="ghost" onClick={handleSaveScript}><Download size={14} /> Save Script</Button>
+            <Button className="primary" onClick={handleRun} disabled={!tclInput.trim()}><Play size={14} /> {t('vivado.run')}</Button>
+            <Button className="ghost" onClick={handleSaveScript}><Download size={14} /> {t('vivado.saveScript')}</Button>
           </div>
         </Panel>
       </div>
       <div style={{ display: 'grid', gap: 16 }}>
-        <Panel title="Command History" actions={<span className="muted" style={{ fontSize: 12 }}>{commandsQ.data?.commands?.length ?? 0} records</span>}>
+        <Panel title={t('vivado.commandHistory')} actions={<span className="muted" style={{ fontSize: 12 }}>{t('vivado.records', { n: commandsQ.data?.commands?.length ?? 0 })}</span>}>
           <table className="table">
-            <thead><tr><th>Time</th><th>Type</th><th>Command</th><th>Status</th></tr></thead>
+            <thead><tr><th>{t('vivado.tableTime')}</th><th>{t('vivado.tableType')}</th><th>{t('vivado.tableCommand')}</th><th>{t('vivado.tableStatus')}</th></tr></thead>
             <tbody>
               {(commandsQ.data?.commands?.length
                 ? commandsQ.data.commands.slice(0, 12).map((c) => (
@@ -101,17 +106,17 @@ export default function VivadoPage() {
                     <td><StatusBadge status={String(c.state || c.status || 'unknown')} /></td>
                   </tr>
                 ))
-                : <tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 24 }}>No command history yet — run Tcl or use Agent tools</td></tr>
+                : <tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 24 }}>{t('vivado.noHistory')}</td></tr>
               )}
             </tbody>
           </table>
         </Panel>
-        <Panel title="Runtime">
+        <Panel title={t('vivado.runtime')}>
           <div className="metric-grid">
-            <div className="metric-card"><div className="metric-label">Target</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.target || 'default-remote'}</div></div>
-            <div className="metric-card"><div className="metric-label">Vivado</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.version || '—'}</div></div>
-            <div className="metric-card"><div className="metric-label">SSH</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.reachable ? 'Up' : 'Down'}</div></div>
-            <div className="metric-card"><div className="metric-label">CLI</div><div className="metric-value mono" style={{ fontSize: 12 }}>edagent vivado health</div></div>
+            <div className="metric-card"><div className="metric-label">{t('vivado.target')}</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.target || t('vivado.targetDefault')}</div></div>
+            <div className="metric-card"><div className="metric-label">{t('nav.vivado')}</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.version || '—'}</div></div>
+            <div className="metric-card"><div className="metric-label">{t('vivado.ssh')}</div><div className="metric-value" style={{ fontSize: 18 }}>{data?.reachable ? t('vivado.up') : t('vivado.down')}</div></div>
+            <div className="metric-card"><div className="metric-label">{t('vivado.cli')}</div><div className="metric-value mono" style={{ fontSize: 12 }}>{t('vivado.cliValue')}</div></div>
           </div>
         </Panel>
       </div>

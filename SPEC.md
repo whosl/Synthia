@@ -1361,10 +1361,18 @@ task.stopped
 task.done
 task.error
 
+run.started
+run.completed
+run.error
+
 message.user.created
 message.assistant.delta
 message.assistant.completed
 message.assistant.stopped
+message.assistant.snapshot
+
+assistant.stream.opened
+assistant.stream.completed
 
 reasoning.delta
 reasoning.summary
@@ -1373,6 +1381,18 @@ tool.started
 tool.delta
 tool.completed
 tool.error
+
+interaction.requested
+interaction.approved
+interaction.rejected
+interaction.responded
+
+agent.started
+agent.completed
+agent.message
+agent.handoff
+agent.continuation
+channel.message.created
 
 llm.started
 llm.usage
@@ -1401,18 +1421,77 @@ vivado.file.uploaded
 vivado.file.downloaded
 vivado.path.mapped
 
+vivado.stop_requested
+vivado.interrupt_sent
+vivado.terminate_sent
+vivado.kill_sent
+vivado.stopped
+vivado.killed
+vivado.stop_error
+
 problem.detected
 kb.candidate.created
 kb.candidate.updated
 
-agent.started
-agent.completed
-agent.handoff
-agent.message
-
-channel.message.created
+context.package.created
+memory.updated
 artifact.created
 ```
+
+事件载荷约定：
+
+- `message.assistant.delta` 必须携带 `stream_id`，与同一 `assistant.stream.opened` 关联，便于在 tool call 之间分段渲染。
+- `message.assistant.snapshot` 是每个 stream 段完成时写入的纯文本快照，确保断线后能从事件流端到端重建 UI（即使 `messages` 表里尚未落 `assistant` 行）。
+- `agent.continuation` 由 harness 在 HITL approval 之后启动下一轮 LLM 时发出，载荷必须包含 `reason` 与裁剪后的 `approval_output`。
+- `kb.candidate.updated` 用于审批/合并后通知前端刷新。
+- 所有 `vivado.stop_*` 事件必须由 Vivado Runtime Adapter 按发生顺序发出，并写入 `vivado_commands.killed/stopped` 字段。
+
+### 6.6 协议版本协商
+
+后端在 `/api/v1/events/protocol` 暴露：
+
+```json
+{
+  "protocol_version": 2,
+  "wire_event_types": ["session.created", "..."]
+}
+```
+
+前端在初始化时必须读取并据此校验事件 reducer 注册的事件集；遇到未知事件类型必须降级到 generic timeline，不得崩溃。每次新增/重命名事件类型，必须同时：
+
+1. 更新 `src/edagent_vivado/events/catalog.py`。
+2. 提升 `PROTOCOL_VERSION`。
+3. 同步 `frontend/src/lib/events/catalog.ts`。
+
+### 6.7 Interaction Protocol
+
+HITL 交互是 chat/tool stream 的独立子通道。事件类型：
+
+```text
+interaction.requested
+interaction.approved
+interaction.rejected
+interaction.responded
+```
+
+`interaction.requested.payload` 必须包含：
+
+- `id`（interaction id，hex12 即可）
+- `interaction_id`（同 id，向前兼容）
+- `interaction_type`：`approval` 或 `input_request`
+- `session_id`, `task_id`
+- `title`, `message`, `reason`
+- `status`：`pending|approved|rejected|responded`
+- `created_at`
+- `files?`：`[{path, content, description, action: create|modify|delete}]`
+- `fields?`：`[{id, label, field_type: text|select|search_select, options?, placeholder, recommendations?, required}]`
+
+约束：
+
+- 同一 task 同一时刻最多保留一个 pending 的 approval interaction；多个 file 创建/修改请求必须由 harness 自动 batch 到同一 approval。
+- agent 主动发起的 HITL 必须通过工具：`request_approval(title, message, files?, fields?)` 和 `request_user_input(title, message, fields)`。
+- interaction 状态必须由 events 表重放可恢复；服务重启或前端刷新后，pending interaction 都能再次拉取（`GET /api/v1/sessions/{sid}/interactions` 必须能 rehydrate）。
+- 用户拒绝后，工具返回值必须包含 `edagent_outcome=user_rejected`（见 §8.5）。
 
 ---
 
@@ -1567,7 +1646,13 @@ Request:
 }
 ```
 
-Task execution uses the Session's `project_id` and `project_snapshot_json`; request-level `manifest_path` is deprecated and should only be accepted temporarily for migration/backward compatibility.
+Task execution uses the Session's `project_id` and `project_snapshot_json`; request-level `manifest_path` is **deprecated as of v1**. New clients must not send it. The server should:
+
+- Silently ignore `manifest_path` when `project_snapshot_json` is non-empty.
+- Log a `migration.manifest_path_used` event when an old client still sends it, so we can plan removal.
+- Reject the field outright once the migration window closes (target: next minor release after the Phase 1F frontend refactor lands).
+
+Vivado tools (`run_vivado_*_tool`) must not accept `manifest_path` as an LLM-controlled argument. The harness layer resolves manifest/top/part from `project_snapshot_json` before invoking the adapter; the tool signature only carries Vivado-specific parameters (e.g. `directive`, `target_id`).
 
 Response:
 
@@ -1603,20 +1688,47 @@ GET /api/sessions/{session_id}/stream
 
 ### 7.6 Approval API
 
-Patch approval remains a first-class setting:
+Patch approval and Vivado-execution auto-approval are first-class settings:
 
 ```http
+GET  /api/settings/approvals
 GET  /api/settings/patch-approval
 POST /api/settings/patch-approval
+GET  /api/settings/vivado-approval
+POST /api/settings/vivado-approval
 ```
 
 Response:
 
 ```json
+{ "approved": true }
+```
+
+Both flags must be **persisted** (SQLite `settings` table) so they survive process restart and are shared across uvicorn workers; in-memory module globals are not acceptable.
+
+#### 7.6.A Approval-request schema (LLM contract)
+
+Every Vivado / file-mutating tool must include a JSON-encoded `approval_request` argument so the UI can render an approval card. The body is a **JSON string** (no markdown fences). Schema:
+
+```json
 {
-  "approved": true
+  "reason": "Why this operation is needed; what was already checked",
+  "action": "One-line summary of what will happen",
+  "manifest_path": "examples/.../eda.yaml",
+  "tcl_command": "only for run_vivado_tcl_tool",
+  "script": "only for run_vivado_script_tool",
+  "target_id": "optional Vivado target id",
+  "files": [
+    { "path": "...", "action": "create|modify|delete", "description": "..." }
+  ]
 }
 ```
+
+Rules:
+
+- Empty fields must be omitted, not stringified as empty.
+- The LLM must not put free-form prose in `details` / `message` / `说明` — executable content goes in `tcl_command`, `script`, `manifest_path`, or `files`.
+- The frontend renders the dict as flat key/value rows in a fixed display order; unknown keys go to a generic section.
 
 ### 7.7 Monitor API
 
@@ -1925,6 +2037,35 @@ search_error_kb(error_signature: str, context: dict | None = None) -> str
 ```
 
 工具返回必须包含来源、相关度、权威度、可信度、artifact/source id。Agent 回答时应优先基于高可信来源。
+
+### 8.5 Tool Outcome Envelope
+
+Every tool that may surface in the chat timeline must return a JSON document with the following stable fields, so the agent (and the UI) can mechanically distinguish user rejection from execution failure from success:
+
+```json
+{
+  "edagent_outcome": "user_rejected | execution_failed | execution_succeeded | approved | partially_approved | timeout | queued",
+  "summary": "Human-readable one-line summary",
+  "scope": "vivado_synth | vivado_impl | vivado_tcl | vivado_script | vivado_flow | file_changes | input_request",
+  "ran": true,
+  "success": true,
+  "error": "optional structured error",
+  "...": "extra scope-specific fields"
+}
+```
+
+Required semantics:
+
+| `edagent_outcome` | `ran` | `success` | Agent must |
+|---|---|---|---|
+| `user_rejected` | false | false | Treat as "step skipped". Never report this as a Vivado/synth/impl failure. Ask the user what to do next. |
+| `execution_failed` | true | false | Diagnose from logs/reports — this is a real tool failure. |
+| `execution_succeeded` | true | true | Use the result normally. |
+| `approved` / `partially_approved` | true | true | Continue; applied paths are on disk. |
+| `timeout` | true | false | Re-check whether the tool should be retried with longer timeout or alternative path. |
+| `queued` | false | — | File change has been batched into a pending approval; user has not seen it yet. Do not surface as a final answer. |
+
+`scope` values are open-set but must be drawn from the constants in `harness/approval_outcomes.py`. The system prompt must teach the agent to read `edagent_outcome` strictly; any natural-language interpretation of the tool body is forbidden when an `edagent_outcome` field is present.
 
 ### 8.4 Tool 包装器
 
@@ -2533,6 +2674,7 @@ class EmbeddingProvider:
 - 支持本地 embedding 模型。
 - 支持与当前 LLM provider 同源的 embedding。
 - usage/cost 进入 `llm_usage` 或 embedding usage 记录。
+- 必须存在一个**确定性 offline fallback**（例如 hash-bow embedding），用于无 API key 的开发/CI/单元测试环境；fallback 的 `provider` 字段必须显式标记为 `"hash"` 之类的非真实模型名，以便检索审计能识别"当前结果可信度低"。Fallback 只用于开发，不允许作为生产默认；后端必须在启动时记录当前 embedding provider，并在 monitor overview 暴露。
 
 ### 10A.5 Ingestion Pipeline
 
@@ -3400,6 +3542,12 @@ src/edagent_vivado/web/static/
 - 构建模式 FastAPI 托管 React 静态资源。
 - Python package 可包含已构建静态资源。
 
+构建产物治理：
+
+- `src/edagent_vivado/web/static/assets/index-*.js` / `index-*.css` 是 Vite 输出的带 hash 文件，**只允许一份当前版本进入仓库**；每次 `npm run build` 必须清空 `assets/` 后再写入，避免历史 hash 文件累积。
+- `frontend/dist/`、`frontend/.vite/`、`frontend/bun.lock`、`*.egg-info/`、`__pycache__/`、`*.py[cod]`、`build/`、`dist/` 必须在 `.gitignore` 中。
+- `examples/**/[0-9]{8}_*_agent_(synth|impl)/`、`examples/**/_*.py`、`examples/**/_*.tcl` 这类 run-time scratch 产物必须 ignore；历史已 tracked 的可以在专门的 cleanup PR 中 `git rm --cached`。
+
 ---
 
 ## 14. 旧 Dashboard/API 迁移
@@ -3826,6 +3974,424 @@ LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
 
 多 Agent 也使用 SSE 进行前端实时展示。Agent 间通信通过文件 channel 和持久化事件表达。
 
+### 19.5 单 worker 部署约束
+
+当前 SSE queue、approval gate (`vivado_run_gate`)、HITL interaction store、file-batch、`patch_auto_approve` 在线缓存等运行时状态都驻留在单进程内存。Spec 接受这一现实，但要求：
+
+- 后端默认以**单 uvicorn worker** 启动。多 worker 部署明确不支持。
+- 所有运行时状态都必须**可由 events 表 + settings 表完整重建**：
+  - Pending interaction 重启后由 `rehydrate_session_interactions(session_id)` 从 `interaction.requested` / `interaction.responded` 重放还原。
+  - 审批开关由 `settings` 表持久化。
+  - Vivado gate 状态可丢失：服务重启等价于"所有 pending Vivado 请求被拒"，前端必须能识别并提示用户重新申请。
+- 集群部署（多 worker / 多进程）属于未来工作，需要把上述状态迁到外部 broker（Redis / SQLite advisory lock / NATS）后才可启用。当前实现不得依赖跨进程一致性。
+
+---
+
+## 22. 自进化（Self-Evolution）
+
+### 22.1 目标
+
+让 EdAgent-Vivado 在长期使用中从两类来源积累"经验"，并以受控、可观测、可回滚的方式把经验注入到下一次 Agent 执行：
+
+- 显式信号：用户反馈、Run 结果（QoR/timing/log）、问题累积、审批通过率、回归 eval set。
+- 隐式信号：reasoning summary、tool 摘要、memory snapshot 中的高置信片段。
+
+自进化是**附加层**，从不强制覆盖；任何 surface 都必须可在不变更 SPEC §8 主流程的前提下被禁用或回滚。
+
+### 22.2 进化面（Surface）
+
+| Surface | 影响 | 默认级别 | A/B 是否允许 | 沙箱要求 |
+|---|---|---|---|---|
+| `kb` | Error/Semantic KB 条目 | Level 0 / 1 | 否（用 KB candidate 既有审批流） | 无 |
+| `prompt` | Per-project system prompt overlay | Level 0 | 可选 Level 1 | 无 |
+| `tool` | 启用/禁用工具、新增进化工具 | **Level 0 only** | 否 | AST whitelist + sandbox import |
+| `flow_template` | Per-project Tcl 流程模板 | Level 0 / 1 | 可选 Level 1 | 单元测试通过后才能 promote |
+| `routing` | Supervisor 多 agent routing 权重/规则 | Level 0 / 1 | 可选 Level 1 | 无 |
+
+> Level 0 = 仅生成 candidate，必须人工审批；Level 1 = 自动应用为 shadow overlay 进 A/B 实验，胜出后进入"待 merge" 状态等待人工确认；Level 2/3 spec 暂不支持。
+
+### 22.3 Overlay 解析与优先级
+
+任何 surface 的有效配置由 **resolver** 统一返回，调用顺序如下：
+
+```text
+project-scope active overlay  →  global-scope active overlay  →  baseline (codebase 内嵌)
+```
+
+每个 surface 的 resolver 必须满足：
+
+- 无 overlay 时返回 baseline，且不抛异常。
+- 必须可以由配置开关临时禁用，例如 `EDAGENT_EVOLUTION_DISABLE=prompt,tool`。
+- 每次解析必须写一条 `evolution.overlay.resolved` 事件（payload: surface/project_id/overlay_id 或 null），供 monitor 追溯。
+
+### 22.4 数据模型
+
+```sql
+CREATE TABLE evolution_candidates (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,                -- session | project | global
+  project_id TEXT,
+  session_id TEXT,
+  surface TEXT NOT NULL,              -- kb | prompt | tool | flow_template | routing
+  candidate_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT,
+  signal_source_json TEXT,            -- 触发本 candidate 的信号快照
+  diff_artifact_id TEXT,              -- 改动正文（overlay payload diff）
+  baseline_artifact_id TEXT,          -- 应用前的 overlay snapshot
+  confidence REAL,
+  status TEXT NOT NULL,               -- pending|approved|rejected|merged|rolled_back|trialing
+  created_by TEXT NOT NULL,           -- harness|evolver|user|run|recurrence
+  created_at INTEGER NOT NULL,
+  reviewed_by TEXT,
+  reviewed_at INTEGER,
+  applied_overlay_id TEXT,
+  metadata_json TEXT
+);
+
+CREATE TABLE overlays (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,                -- project | global
+  project_id TEXT,
+  surface TEXT NOT NULL,
+  name TEXT,
+  state TEXT NOT NULL,                -- active | shadow | retired
+  payload_json TEXT NOT NULL,
+  source_candidate_id TEXT,
+  parent_overlay_id TEXT,
+  created_at INTEGER NOT NULL,
+  retired_at INTEGER,
+  metadata_json TEXT
+);
+
+CREATE TABLE evolution_trials (
+  id TEXT PRIMARY KEY,
+  candidate_id TEXT NOT NULL,
+  project_id TEXT,
+  surface TEXT NOT NULL,
+  baseline_overlay_id TEXT,
+  variant_overlay_id TEXT,
+  state TEXT NOT NULL,                -- running | completed | reverted
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  n_baseline INTEGER NOT NULL DEFAULT 0,
+  n_variant INTEGER NOT NULL DEFAULT 0,
+  metric_baseline_json TEXT,
+  metric_variant_json TEXT,
+  decision TEXT,                      -- variant_wins|baseline_wins|tie|insufficient_data
+  decided_at INTEGER,
+  metadata_json TEXT
+);
+
+CREATE TABLE feedback (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  message_id TEXT,
+  user_thumb INTEGER,                 -- +1 | 0 | -1
+  comment TEXT,
+  tags_json TEXT,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+
+CREATE TABLE metric_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  session_id TEXT,
+  task_id TEXT,
+  run_id TEXT,
+  overlay_id TEXT,
+  trial_id TEXT,
+  arm TEXT,                           -- baseline|variant|none
+  scope TEXT NOT NULL,                -- task|session|project|global
+  window TEXT NOT NULL,               -- single|rolling_10|rolling_50|all
+  metrics_json TEXT NOT NULL,
+  composite_score REAL,
+  created_at INTEGER NOT NULL,
+  metadata_json TEXT
+);
+
+CREATE TABLE eval_runs (
+  id TEXT PRIMARY KEY,
+  eval_set TEXT NOT NULL,
+  overlay_id TEXT,
+  state TEXT NOT NULL,                -- placeholder|queued|running|completed|error
+  started_at INTEGER,
+  finished_at INTEGER,
+  total_cases INTEGER,
+  passed INTEGER,
+  failed INTEGER,
+  metric_summary_json TEXT,
+  metadata_json TEXT
+);
+```
+
+### 22.5 进化范围与晋升路径
+
+```text
+session 行为
+  → session-scope candidate（pending；仅 session 内可影响 retrieval/prompt 临时层）
+  → 用户在 review UI 中 approve / session 结束指标改善触发自动晋升
+  → project-scope overlay（active，作用于该 Project 所有新 session）
+  → 多 Project 反复 approve 同一 normalized candidate
+  → global candidate（pending；必须人工审批）
+  → global overlay（与 built-in baseline 同级，但优先级低于 project overlay）
+```
+
+Session-scope candidate 不直接进 overlays 表；它由 ContextBuilder 在本次 task 临时注入。Project / global overlay 才会写入 overlays 表并被 resolver 长期使用。
+
+### 22.6 信号源
+
+| 信号 | 数据源 | 触发条件（SE-PR3 实现常量） | 产生 surface |
+|---|---|---|---|
+| `recurrence` | `problems.normalized_signature`（最近 30 天） | 同一 normalized signature 在 ≥ 3 个 distinct session 中出现 | `kb` |
+| `repeated_failure` | latest project-scope `metric_snapshots(window=rolling_10)` | `first_run_success < 0.4` 且 `sample_size ≥ 5` | `prompt` |
+| `negative_feedback` | `feedback`（project 范围，最近 10 条非空 thumb） | 负面 thumb ≥ 3 | `prompt` |
+| `approval_drop` | latest project-scope `metric_snapshots(window=rolling_10)` | `approval_pass_rate < 0.5` 且 `sample_size ≥ 5` | `prompt` |
+| `routing_drift` | 最近 20 个 task 的 `messages.role='user'` + `tool_calls.tool_name` | 同一 specialist 的关键词（timing/constraint/synthesis）在 ≥ 3 个 task 出现但对应工具一次都没被调用 | `routing` |
+| `flow_template_reuse` | 最近 40 个 task 的成功 `run_vivado_script_tool` 调用 | 同一**归一化**（去注释 + 去空白）的 Tcl 脚本出现 ≥ 3 次 | `flow_template` |
+| `eval_set` | `eval_runs` + `tests/eval_set/*.yaml` | 占位；SE-PR6 起 schema + CLI (`edagent eval`) + API (`POST /api/v1/evolution/eval/run`) 可用，runner 仍在后续 PR 中 | n/a |
+
+Dedup 约定（generators 必须遵守）：每个 candidate 的 `signal_source_json.signal_key` 是 `<signal>:<normalized_key>` 形式；同 surface + 同 project + 同 `signal_key` 的 pending candidate 唯一。当上一轮 candidate 已 `rejected / merged / rolled_back` 时，下一次信号触发允许生成新 candidate。
+
+### 22.6A A/B Trial 引擎（SE-PR5）
+
+每个 surface 可选 opt-in 到 A/B 模式（per-project flag，存于 `settings`：`evolution.trial.<surface>.<project_id>`）。`tool` surface 永远拒绝（SPEC §22.2）。
+
+启用后，`approve_candidate` 不再直接写 active overlay：
+
+1. 创建 `state=shadow` 的 overlay，记录 candidate 已合成的 payload。
+2. 写一条 `evolution_trials(state='running')`：`baseline_overlay_id` 指向当前 active overlay（可为空），`variant_overlay_id` 指向 shadow overlay。
+3. candidate.status = `trialing`。
+4. 发出 `evolution.trial.started` 事件；先前 active overlay **不退役**，继续服务 baseline 分支的任务。
+
+调用方仍可传 `force_active=True` 绕过 trial 直接 apply（紧急回滚或人工裁定）。
+
+**Arm 分配**：`_run_agent` 在调用 agent 之前为该 project 下所有 running trial 调用 `assign_arms_for_task(project_id, task_id)`，按 `md5(task_id || trial_id) % 2` 确定 baseline / variant。结果以 `{surface: (arm, overlay_id, trial_id)}` 形式放入 contextvar `evolution_task_arms`，同时落库到 `tasks.metadata_json.evolution_arms`。
+
+**Resolver 优先级**：`active_overlay(surface, project_id)` 优先读取 contextvar。如果该 surface 在当前 task 中有 arm 分配，则直接返回 `overlay_id` 对应的行（variant 分支 → shadow overlay；baseline 分支 → 老 active overlay）。无 arm 时回退到 §22.5 的原始优先级。每个事件发出 `evolution.trial.assigned`。
+
+**Metric 收集**：SE-PR2 的 `collect_task_metrics` 读取 `tasks.metadata_json.evolution_arms`，除了写 task-scope 主 snapshot 外，还为每个 arm 写一条额外 snapshot 并调用 `trials.record_snapshot(trial_id, arm, composite_score)`。Trial 行内的 `n_baseline / n_variant / metric_baseline_json / metric_variant_json` 滚动更新。
+
+**判定**：每个 `task.done` 后，`_run_agent` 对该 task 涉及的 trial 调用 `maybe_decide_trial`：
+
+- `n_baseline ≥ MIN_SAMPLES_PER_ARM` **且** `n_variant ≥ MIN_SAMPLES_PER_ARM`（默认 10）→ 计算 `delta = mean(variant) - mean(baseline)`：
+  - `delta ≥ DECISION_MARGIN`（默认 0.05）→ `variant_wins`：retire baseline overlay，把 variant overlay 由 `shadow` 升级为 `active`，candidate.status=approved。
+  - `delta ≤ -DECISION_MARGIN` → `baseline_wins`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`baseline_wins`）。
+  - 其他 → `tie`：retire variant overlay，candidate.status=rejected（metadata.ab_decision=`tie`）。
+- 启动 14 天后未决 → 自动 `abort_trial`，candidate 回到 pending。
+
+**操作覆盖**：`POST /api/v1/evolution/trials/{id}/decide { decision }` 允许 operator 在样本不足时强制决策；`POST /api/v1/evolution/trials/{id}/abort` 手动放弃 trial，variant 退役、candidate 回 pending。
+
+**事件**：
+
+```text
+evolution.trial.started        # approve_candidate 进入 trial 路径时
+evolution.trial.assigned       # 每个 task 启动时，每个 arm 一条
+evolution.trial.completed      # decide 落定（自动或 force）
+evolution.trial.reverted       # abort_trial / max-age 触发
+```
+
+**约束**：
+
+- `tool` surface 永远不能进 A/B（`set_trial_enabled` 与 `start_trial` 双重拒绝）。
+- A/B 决策仍是"L1 自动应用"——variant_wins 自动把 shadow 升级为 active，无需人工二次确认。SPEC §22.11 的"10% / 3 窗口自动 rollback"独立于 A/B 决策依然生效，A/B 之后的劣化触发常规 rollback。
+
+### 22.6B Eval set 占位（SE-PR6）
+
+静态回归集是后续 A/B / drift detection 的"地面真值"，但 runner 还没写。SE-PR6 落地以下骨架，所有面都标注 `runner_implemented=false`，把"等运行器到位"和"已经能录入提案"解耦：
+
+**YAML 约定**（位于 `tests/eval_set/<name>.yaml`，文件名 stem 必须等于 `name` 字段；强制 `[a-z0-9_-]` 且 `cases` 非空、`cases[].id` 唯一、`cases[].question` 非空）：
+
+```yaml
+name: smoke
+description: 短描述（可选）
+cases:
+  - id: parse-synth-log
+    question: |
+      给 agent 的自然语言问题…
+    project_id: 可选；指定后 runner 使用该 project 的 overlay
+    expected:
+      contains: ["WNS", "timing"]      # 必须全部出现
+      not_contains: ["TODO"]
+      tool_calls_any: ["parse_timing_tool"]
+      tool_calls_all: []
+      max_task_tokens: 8000
+      min_first_run_success: null
+    metadata: {}                         # 自由字段（tag、owner、关联 candidate）
+```
+
+`expected` 中的字段为 forward-compatible 约定；SE-PR6 的 loader 只校验结构，runner 在落地时再消费打分语义。
+
+**存储**：
+
+`eval_runs` 表已经在 SE-PR1 schema 里，本 PR 写入 `state='placeholder'`、`metadata_json.spec_section='22.6B'`，并保留 `total_cases` / `case_ids` / `note` / `path` 等字段。Runner 实装后将复用同一表行迁移状态：
+
+```text
+placeholder ─► queued ─► running ─► completed | error
+```
+
+**API**：
+
+```
+GET    /api/v1/evolution/eval/sets           # discovery
+GET    /api/v1/evolution/eval/sets/{name}    # cases detail
+GET    /api/v1/evolution/eval/runs           # list eval_runs (filter by eval_set / state)
+GET    /api/v1/evolution/eval/runs/{id}
+POST   /api/v1/evolution/eval/run            # 写入 placeholder 行，返回 runner_implemented=false
+```
+
+**CLI**：
+
+```
+edagent eval                       # 列出 eval set 和最近 runs
+edagent eval smoke                 # 提交 smoke 为 placeholder
+edagent eval smoke --show-cases    # 展开 smoke 的 cases
+edagent eval --status placeholder  # 按 state 过滤 runs
+```
+
+**事件**：
+
+```
+evolution.eval.queued       # SE-PR6 起在每次 placeholder 写入时发出
+evolution.eval.started      # 占位事件名，等 runner
+evolution.eval.completed    # 占位事件名，等 runner
+evolution.eval.error        # 占位事件名，等 runner
+```
+
+`runner_implemented=false` 标记由 API 与 CLI 同时回传，明确告诉 reviewer "提案已记录但还不会真正执行"。当 runner 到位时唯一变化是该 flag 翻 true + state 进入 `queued / running / completed`，调用方不需改 schema。
+
+### 22.7 度量与综合 score
+
+每次 `task.done` 必须生成一条 `metric_snapshots` 记录（scope=`task`, window=`single`），紧接着对所在 project 触发 `rolling_10` 与 `rolling_50` 聚合写入。聚合器读取 task-scope 单点快照的最近 N 条，逐字段取均值（数值）/ 成功率（布尔）/ 求和（计数），并以 project-scope（或 global-scope，当 session 未绑定 project 时）写回。`all` 窗口可以按需在 monitor 查询时按需聚合，不要求每次 task.done 都写入。
+
+字段：
+
+```json
+{
+  "vivado_success_rate": 0.0,
+  "first_run_success": false,
+  "wns_ps": 120,
+  "tns_ps": 0,
+  "lut_util_pct": 18.4,
+  "ff_util_pct": 9.1,
+  "drc_clean": true,
+  "task_tokens_total": 12450,
+  "task_elapsed_sec": 42.1,
+  "approval_pass_rate": 0.91,
+  "user_thumb_score": 1,
+  "composite_score": 0.78
+}
+```
+
+`composite_score` 计算：
+
+```text
+0.40 · norm(WNS)
++ 0.25 · norm(first_run_success)
++ 0.15 · norm(approval_pass_rate)
++ 0.10 · norm(1 / task_tokens_total)
++ 0.10 · norm(user_thumb_score)
+```
+
+权重在 `evolution_config` 中可调（per-project metadata）。缺失值贡献中性 0.5，部分遥测不会导致 score 崩塌。
+
+### 22.8 候选生命周期
+
+```text
+proposed ─approve──▶ approved ──apply──▶ overlay.active
+   │
+   ├──reject──▶ rejected
+   │
+   ├──trial (Level 1)──▶ trialing ──decision──▶ approved / rejected
+   │
+   └─auto_rollback─▶ rolled_back
+```
+
+强制要求：
+
+- 任何 surface 的 candidate 在被 apply 前必须保留先前 baseline 的恢复路径。SE-PR4 起的实现使用 `overlays.parent_overlay_id`：在 apply 新 overlay 前先 retire 当前 active overlay，并把它的 id 写入新 overlay 的 `parent_overlay_id`；rollback 时 retire 当前 overlay 并把 `parent_overlay_id` 指向的行重新置为 `active`。`baseline_artifact_id` 字段仍保留给未来需要"快照非 overlay 形态 baseline"的场景（如重写 system prompt 时的整文件快照）。
+- rollback 必须发出 `evolution.candidate.rolled_back` 与 `evolution.overlay.retired` 事件，并把当前 `overlays.state` 改为 `retired`。
+- `tool` surface 的 candidate 必须额外通过 AST whitelist 检查（禁止 `exec` / `eval` / `subprocess` / `os.system` / 网络访问）并存为只读 artifact。
+- **Reject suppression**：reject API 接受可选的 `suppress_days`，被设置后 generator dedup 会同时把"已 reject 且 `metadata.suppressed_until > now()`"的候选视为占位，阻止同 `signal_key` 在窗口内重复生成。`suppress_days=0`（默认）保持现有"reject 不阻挡"语义。
+- **Tool 沙箱（SE-PR8）**：surface=`tool` 的 overlay payload 形如 `{disabled: [...], additional_tools: [{name, source, description?}]}`，每条 `source` 必须先通过 AST 白名单（允许的 import 集 = `re/json/math/hashlib/typing/dataclasses/pathlib/langchain_core.tools`；禁止 `exec / eval / open / __import__ / subprocess / os.* / 文件 IO / async / yield / 双下划线属性 / class 定义`），再通过 sandbox loader 在精简的 `__builtins__`（含一个 whitelist 化的 `__import__`）下 exec，最终拿到 LangChain `@tool` 函数注册到 agent 工具集合。`approve_candidate(surface=tool)` 必须传 `confirm_source_reviewed=True`（API 返回 403 否则），并对 `additional_tools[*].source` 在持久化前**再次**校验一遍，确保即便绕过 UI 预检也无法把不安全 payload 落库。Loader 按 sha256 缓存编译结果，resolver 端任何加载失败都被吞掉 + 警告日志，单条坏 tool 永远不会让 agent 启动失败。
+
+### 22.9 API
+
+```http
+GET    /api/v1/evolution/candidates
+GET    /api/v1/evolution/candidates/{id}
+POST   /api/v1/evolution/candidates/{id}/approve
+POST   /api/v1/evolution/candidates/{id}/reject
+POST   /api/v1/evolution/candidates/{id}/merge
+POST   /api/v1/evolution/candidates/{id}/rollback
+
+GET    /api/v1/evolution/overlays?project_id=...&surface=...
+POST   /api/v1/evolution/overlays/{id}/retire
+
+GET    /api/v1/evolution/trials?project_id=...
+POST   /api/v1/evolution/trials/{id}/decide
+
+POST   /api/v1/feedback
+GET    /api/v1/sessions/{id}/feedback
+
+GET    /api/v1/metrics/summary?project_id=...&window=rolling_10
+GET    /api/v1/metrics/series?project_id=...&surface=...
+
+POST   /api/v1/evolution/eval/run      (SE-PR6 起占位返回 501)
+GET    /api/v1/evolution/eval/runs
+```
+
+### 22.10 事件
+
+```text
+evolution.candidate.created
+evolution.candidate.updated
+evolution.candidate.approved
+evolution.candidate.rejected
+evolution.candidate.merged
+evolution.candidate.rolled_back
+
+evolution.overlay.applied
+evolution.overlay.retired
+evolution.overlay.resolved        # 每次 resolver 命中 overlay 时发一条（可被 EDAGENT_EVOLUTION_LOG_RESOLVE=0 关闭）
+
+evolution.trial.started
+evolution.trial.assigned          # task 被分入 baseline / variant
+evolution.trial.completed
+evolution.trial.reverted
+
+evolution.metric.snapshot         # 每条 metric_snapshots
+evolution.signal.fired            # 信号源命中阈值
+```
+
+### 22.11 安全护栏
+
+- 任何 surface 在生产环境下默认 Level 0；Level 1 必须在 `/api/v1/settings/approvals`（或 evolution 设置面板）显式 opt-in，per surface 独立。
+- `tool` surface 永远不允许 Level 1；候选必须由人审，并在二次确认对话中再次声明"我已阅读源码"。
+- 任何 overlay 应用后 24 小时内必须有 metric_snapshot 写入；否则视为 "应用未生效"，自动 retire 并报警。
+- 复合 score 在应用 overlay 后的 rolling_10 窗口内相对 baseline 下降 >= 10% 且持续 3 个窗口，触发自动 rollback。
+
+### 22.12 SE-PR 实施分期
+
+| PR | 范围 |
+|---|---|
+| **SE-PR1** | 表结构 + resolver indirection（no-op）+ 本章 §22 |
+| SE-PR2 | feedback API + metric_snapshots post-task hook + rolling aggregator |
+| SE-PR3 | 4 个 candidate 生成器（recurrence / repeated_failure / negative_feedback / approval_drop）+ `/evolution/candidates` 只读 API + `/evolution/generators/run` 手动触发 |
+| SE-PR4 | approve/reject/merge/rollback/retire 后端 API + overlay 生命周期 + reject suppression + default payload synthesis（prompt/kb/flow_template/routing/tool）|
+| SE-PR4b | React `/evolution` review UI |
+| SE-PR5 | A/B trial engine（opt-in per surface）+ `/evolution/config` + `/evolution/trials/*` + trial UI 面板 |
+| SE-PR6 | Eval set 占位：`tests/eval_set/*.yaml` 约定 + 加载/校验 + `/evolution/eval/{sets,runs,run}` + `edagent eval` CLI + UI 启动器（runner 桩，本 PR 不执行）|
+| SE-PR7 | `routing_drift` 与 `flow_template_reuse` 两个真实 candidate 生成器；approve 时 default payload 直接读 `signal_source.suggested_payload` 把候选载体一次性应用为 overlay |
+| SE-PR8 | Tool surface 沙箱：AST 白名单 + 精简 `__builtins__` exec + sha256 缓存；`approve(surface=tool)` 强制 `confirm_source_reviewed` 二次确认；`POST /api/v1/evolution/tools/validate` 给前端预检；UI 在 detail modal 渲染源码与"我已阅读源码"复选框 |
+| SE-PR6 | eval set placeholder（schema + CLI 桩）|
+| SE-PR7 | routing overlay + supervisor consult（含规则与权重）|
+| SE-PR8 | tool surface（AST whitelist + sandbox loader）|
+
+每个 SE-PR 都必须保证：当对应 overlay 不存在时，系统行为与本 SPEC 主体（§1–§19）一致。
+
 ---
 
 ## 20. 术语表
@@ -3854,3 +4420,8 @@ LLM 可以总结，但不能作为唯一事实来源。事实必须来自：
 - **PathMapper**：本地路径与远程路径互相转换的映射层。
 - **TclPolicy**：Vivado Tcl 命令安全策略与审批层。
 - **Long-lived Tcl Session**：持续运行的 `vivado -mode tcl` 进程，可连续执行命令。
+- **Evolution Surface**：自进化可改动的一类系统配置，包括 `kb / prompt / tool / flow_template / routing`。
+- **Overlay**：单一 surface 在 project 或 global 范围内的有效覆盖层，应用于 baseline 之上。
+- **Evolution Candidate**：尚未应用的 overlay 提案，必须经过 approve / merge / trial 才能生效。
+- **Evolution Trial**：一组 baseline / variant overlay 的 A/B 实验，基于 `metric_snapshots` 评判胜负。
+- **Composite Score**：综合 timing / first-run / approval / token / user 反馈的 0..1 分数，用于 A/B 与回滚判断。

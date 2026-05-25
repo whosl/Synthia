@@ -1,5 +1,6 @@
 import { Check, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '../common/Button'
 
 export interface InputFieldDef {
@@ -23,6 +24,7 @@ export interface InputRequestBlockProps {
 }
 
 function SearchSelect({ field, value, onChange }: { field: InputFieldDef; value: string; onChange: (v: string) => void }) {
+  const { t } = useTranslation()
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
 
@@ -39,7 +41,7 @@ function SearchSelect({ field, value, onChange }: { field: InputFieldDef; value:
       <input
         type="text"
         value={open ? search : value || ''}
-        placeholder={field.placeholder || 'Search...'}
+        placeholder={field.placeholder || t('inputRequest.search')}
         onChange={(e) => { setSearch(e.target.value); setOpen(true) }}
         onFocus={() => setOpen(true)}
       />
@@ -47,19 +49,20 @@ function SearchSelect({ field, value, onChange }: { field: InputFieldDef; value:
     </div>
     {open && <div className="search-select-dropdown">
       {field.recommendations && !search && <div className="search-select-section">
-        <span className="section-label">推荐</span>
+        <span className="section-label">{t('inputRequest.recommendations')}</span>
         {field.recommendations.map(r => <div key={r} className="search-select-option recommended" onClick={() => { onChange(r); setOpen(false); setSearch('') }}>{r}</div>)}
       </div>}
       {filtered.length > 0 && <div className="search-select-section">
-        {search && <span className="section-label">搜索结果 ({filtered.length})</span>}
+        {search && <span className="section-label">{t('inputRequest.searchResults', { n: filtered.length })}</span>}
         {filtered.map(o => <div key={o.value} className={`search-select-option ${o.value === value ? 'selected' : ''}`} onClick={() => { onChange(o.value); setOpen(false); setSearch('') }}>{o.label}</div>)}
       </div>}
-      {filtered.length === 0 && search && <div className="search-select-empty">无匹配结果</div>}
+      {filtered.length === 0 && search && <div className="search-select-empty">{t('inputRequest.noResults')}</div>}
     </div>}
   </div>
 }
 
 export function InputRequestBlock({ id, title, message, fields, status, response, onSubmit }: InputRequestBlockProps) {
+  const { t } = useTranslation()
   const [values, setValues] = useState<Record<string, string>>({})
   const isPending = status === 'pending'
 
@@ -77,13 +80,13 @@ export function InputRequestBlock({ id, title, message, fields, status, response
     return <div className="interaction-block input-block status-responded">
       <div className="interaction-header">
         <span className="interaction-title">{title}</span>
-        <span className="interaction-badge responded">✓ 已提交</span>
+        <span className="interaction-badge responded">{t('inputRequest.submitted')}</span>
       </div>
       <div className="interaction-response-summary">
         {fields.map(f => <div key={f.id} className="response-item">
           <span className="response-label">{f.label}:</span>
           <span className="response-value">{response[f.id] || '—'}</span>
-          <span className="response-tag">用户选择</span>
+          <span className="response-tag">{t('inputRequest.userSelection')}</span>
         </div>)}
       </div>
     </div>
@@ -112,7 +115,7 @@ export function InputRequestBlock({ id, title, message, fields, status, response
           value={values[field.id] || ''}
           onChange={(e) => setValue(field.id, e.target.value)}
         >
-          <option value="">{field.placeholder || '请选择...'}</option>
+          <option value="">{field.placeholder || t('inputRequest.pleaseSelect')}</option>
           {field.options?.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>}
         {field.field_type === 'search_select' && <SearchSelect
@@ -121,7 +124,7 @@ export function InputRequestBlock({ id, title, message, fields, status, response
           onChange={(v) => setValue(field.id, v)}
         />}
         {field.recommendations && field.field_type === 'text' && <div className="field-recommendations">
-          <span className="rec-label">推荐:</span>
+          <span className="rec-label">{t('inputRequest.recommendationsHeading')}</span>
           {field.recommendations.map(r => <button key={r} className="rec-chip" onClick={() => setValue(field.id, r)}>{r}</button>)}
         </div>}
       </div>)}
@@ -129,7 +132,7 @@ export function InputRequestBlock({ id, title, message, fields, status, response
 
     <div className="interaction-actions">
       <Button className="primary" onClick={handleSubmit} disabled={!canSubmit}>
-        <Check size={14} /> 提交
+        <Check size={14} /> {t('inputRequest.submit')}
       </Button>
     </div>
   </div>

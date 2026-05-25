@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { groupChatEntries } from '../../timeline/chatGrouping'
 import { getChatEntries } from '../../timeline/reducer'
 import type { SessionTimelineState } from '../../timeline/types'
@@ -15,6 +16,7 @@ interface TimelineChatListProps {
 }
 
 export function TimelineChatList({ timeline, taskActive = false, onInteractionRespond }: TimelineChatListProps) {
+  const { t } = useTranslation()
   const entries = getChatEntries(timeline)
   const displayItems = groupChatEntries(entries)
   const itemKeys = useMemo(() => displayItems.map((item) => item.key), [displayItems])
@@ -22,7 +24,7 @@ export function TimelineChatList({ timeline, taskActive = false, onInteractionRe
   useSeedChatEnterKeys(itemKeys)
 
   if (!displayItems.length) {
-    return <EmptyState title="No messages yet" detail="Ask about synthesis, timing, constraints, or Vivado reports." />
+    return <EmptyState title={t('terminal.noMessages')} detail={t('terminal.noMessagesDetail')} />
   }
 
   return (

@@ -1,13 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
 import { Download, RefreshCw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router-dom'
 import { getRun, getRunContext, listRunArtifacts, listRunEvents, listRunProblems } from '../api/monitor'
 import { Button } from '../components/common/Button'
+import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { formatDuration, formatNumber, formatTime } from '../lib/time'
 
 export default function RunDetailPage() {
+  const { t } = useTranslation()
   const { runId = '' } = useParams()
   const { data, refetch } = useQuery({ queryKey: ['run', runId], queryFn: () => getRun(runId), enabled: Boolean(runId) })
   const eventsQ = useQuery({ queryKey: ['run-events', runId], queryFn: () => listRunEvents(runId), enabled: Boolean(runId) })
@@ -19,7 +22,7 @@ export default function RunDetailPage() {
   const usage = data?.usage ?? []
   const totalIn = usage.reduce((a, u) => a + (u.input_tokens || 0), 0)
   const totalOut = usage.reduce((a, u) => a + (u.output_tokens || 0), 0)
-  const longest = Math.max(1, ...toolcalls.map((t) => t.elapsed_ms || 250))
+  const longest = Math.max(1, ...toolcalls.map((c) => c.elapsed_ms || 250))
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify({ run, toolcalls, usage, events: eventsQ.data?.events, problems: problemsQ.data?.problems, context: contextQ.data, artifacts: artifactsQ.data?.artifacts }, null, 2)], { type: 'application/json' })
@@ -29,55 +32,57 @@ export default function RunDetailPage() {
   }
 
   return <div className="page">
-    <div className="page-header">
-      <div>
-        <h1 className="page-title">Run Detail</h1>
-        <p className="page-subtitle mono">{runId}</p>
+    <PageStickyTop>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">{t('runDetail.title')}</h1>
+          <p className="page-subtitle mono">{runId}</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> {t('runDetail.refresh')}</Button>
+          <Button className="ghost" onClick={handleExport}><Download size={14} /> {t('runDetail.export')}</Button>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> Refresh</Button>
-        <Button className="ghost" onClick={handleExport}><Download size={14} /> Export</Button>
-      </div>
-    </div>
+    </PageStickyTop>
     <div className="run-detail-grid">
       <div style={{ display: 'grid', gap: 16 }}>
-        <Panel title="Overview">
-          <div className="kv"><span>Session</span><span className="mono">{run?.session_id || '—'}</span></div>
-          <div className="kv"><span>Run ID</span><span className="mono">{run?.id || runId}</span></div>
-          <div className="kv"><span>Status</span><span><StatusBadge status={run?.state} /></span></div>
-          <div className="kv"><span>Started</span><span>{formatTime(run?.started_at)}</span></div>
-          <div className="kv"><span>Duration</span><span>{formatDuration(run?.elapsed_ms)}</span></div>
-          <div className="kv"><span>Type</span><span className="mono">{run?.run_type || '—'}</span></div>
+        <Panel title={t('runDetail.overview')}>
+          <div className="kv"><span>{t('runDetail.session')}</span><span className="mono">{run?.session_id || '—'}</span></div>
+          <div className="kv"><span>{t('runDetail.runId')}</span><span className="mono">{run?.id || runId}</span></div>
+          <div className="kv"><span>{t('runDetail.status')}</span><span><StatusBadge status={run?.state} /></span></div>
+          <div className="kv"><span>{t('runDetail.started')}</span><span>{formatTime(run?.started_at)}</span></div>
+          <div className="kv"><span>{t('runDetail.duration')}</span><span>{formatDuration(run?.elapsed_ms)}</span></div>
+          <div className="kv"><span>{t('runDetail.type')}</span><span className="mono">{run?.run_type || '—'}</span></div>
         </Panel>
         <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
-          <div className="metric-card"><div className="metric-label">Tool Calls</div><div className="metric-value">{toolcalls.length}</div></div>
-          <div className="metric-card"><div className="metric-label">Tokens</div><div className="metric-value">{formatNumber(totalIn + totalOut)}</div></div>
-          <div className="metric-card"><div className="metric-label">Input</div><div className="metric-value">{formatNumber(totalIn)}</div></div>
-          <div className="metric-card"><div className="metric-label">Output</div><div className="metric-value">{formatNumber(totalOut)}</div></div>
+          <div className="metric-card"><div className="metric-label">{t('runDetail.toolCalls')}</div><div className="metric-value">{toolcalls.length}</div></div>
+          <div className="metric-card"><div className="metric-label">{t('runDetail.tokens')}</div><div className="metric-value">{formatNumber(totalIn + totalOut)}</div></div>
+          <div className="metric-card"><div className="metric-label">{t('runDetail.input')}</div><div className="metric-value">{formatNumber(totalIn)}</div></div>
+          <div className="metric-card"><div className="metric-label">{t('runDetail.output')}</div><div className="metric-value">{formatNumber(totalOut)}</div></div>
         </div>
       </div>
       <div style={{ display: 'grid', gap: 16 }}>
-        <Panel title="Tool Call Timeline">
-          <div className="timeline-bars">{toolcalls.length ? toolcalls.map((t) => <div className="timeline-bar" key={t.id}>
-            <span className="mono">{t.tool_name}</span>
-            <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(8, ((t.elapsed_ms || 250) / longest) * 100)}%` }}>{formatDuration(t.elapsed_ms)}</div></div>
-            <StatusBadge status={t.state} />
-          </div>) : <div className="muted" style={{ padding: 12 }}>No tool calls</div>}</div>
+        <Panel title={t('runDetail.toolCallTimeline')}>
+          <div className="timeline-bars">{toolcalls.length ? toolcalls.map((c) => <div className="timeline-bar" key={c.id}>
+            <span className="mono">{c.tool_name}</span>
+            <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(8, ((c.elapsed_ms || 250) / longest) * 100)}%` }}>{formatDuration(c.elapsed_ms)}</div></div>
+            <StatusBadge status={c.state} />
+          </div>) : <div className="muted" style={{ padding: 12 }}>{t('runDetail.noToolCalls')}</div>}</div>
         </Panel>
         <div className="dashboard-grid">
-          <Panel title="Events">{(eventsQ.data?.events ?? []).slice(0, 8).map((e) => <div className="event-row" key={e.id}><span className="mono muted">#{e.seq}</span><span>{e.event_type}</span><span className="muted">{formatTime(e.created_at)}</span></div>)}</Panel>
-          <Panel title="Problems">{(problemsQ.data?.problems ?? []).length ? problemsQ.data!.problems.map((p) => <div className="problem-row" key={p.id}><span className={`status ${p.severity || 'warning'}`}>{p.severity || 'INFO'}</span><span>{p.message}</span><span className="muted">{p.source}</span></div>) : <div className="problem-row"><span className="status idle">OK</span><span className="muted">No problems recorded</span><span /></div>}</Panel>
+          <Panel title={t('runDetail.events')}>{(eventsQ.data?.events ?? []).slice(0, 8).map((e) => <div className="event-row" key={e.id}><span className="mono muted">#{e.seq}</span><span>{e.event_type}</span><span className="muted">{formatTime(e.created_at)}</span></div>)}</Panel>
+          <Panel title={t('runDetail.problems')}>{(problemsQ.data?.problems ?? []).length ? problemsQ.data!.problems.map((p) => <div className="problem-row" key={p.id}><span className={`status ${p.severity || 'warning'}`}>{p.severity || 'INFO'}</span><span>{p.message}</span><span className="muted">{p.source}</span></div>) : <div className="problem-row"><span className="status idle">{t('runDetail.ok')}</span><span className="muted">{t('runDetail.noProblems')}</span><span /></div>}</Panel>
         </div>
         <div className="dashboard-grid">
-          <Panel title="Context Audit">
+          <Panel title={t('runDetail.contextAudit')}>
             {(contextQ.data?.contexts ?? []).slice(0, 1).map((ctx) => <div key={ctx.package.id}>
-              <div className="kv"><span>Package</span><span className="mono">{ctx.package.id}</span></div>
-              <div className="kv"><span>Tokens</span><span>{ctx.package.total_tokens || 0}</span></div>
+              <div className="kv"><span>{t('runDetail.package')}</span><span className="mono">{ctx.package.id}</span></div>
+              <div className="kv"><span>{t('runDetail.tokens')}</span><span>{ctx.package.total_tokens || 0}</span></div>
               {ctx.items.slice(0, 6).map((item) => <div className="event-row" key={item.id}><span>{item.item_type}</span><span>{item.title}</span><span className="muted">{item.token_count}</span></div>)}
             </div>)}
           </Panel>
-          <Panel title="Artifacts">
-            {(artifactsQ.data?.artifacts ?? []).length ? artifactsQ.data!.artifacts.map((a) => <div className="event-row" key={a.id}><span>{a.artifact_type}</span><span className="mono">{a.path}</span><span className="muted">{formatTime(a.created_at)}</span></div>) : <div className="muted" style={{ padding: 8, fontSize: 12 }}>No artifacts recorded.</div>}
+          <Panel title={t('runDetail.artifacts')}>
+            {(artifactsQ.data?.artifacts ?? []).length ? artifactsQ.data!.artifacts.map((a) => <div className="event-row" key={a.id}><span>{a.artifact_type}</span><span className="mono">{a.path}</span><span className="muted">{formatTime(a.created_at)}</span></div>) : <div className="muted" style={{ padding: 8, fontSize: 12 }}>{t('runDetail.noArtifacts')}</div>}
           </Panel>
         </div>
       </div>

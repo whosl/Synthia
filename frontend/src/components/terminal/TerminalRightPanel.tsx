@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Bug, CircuitBoard, ExternalLink, FileText, FolderOpen, Pencil, RefreshCw, Shield, Trash2, Wrench, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { getApprovals, setPatchApproval, setVivadoApproval } from '../../api/settings'
 import { deleteSession, updateSession } from '../../api/sessions'
@@ -12,12 +13,22 @@ import type { InteractionEntryPayload, SessionTimelineState } from '../../timeli
 import { StatusBadge } from '../common/StatusBadge'
 import { ContextDebugPanel } from './ContextDebugPanel'
 
-const TABS: { id: RightPanelTab; label: string; icon: typeof FileText }[] = [
-  { id: 'run', label: 'Run', icon: Activity },
-  { id: 'artifacts', label: 'Artifacts', icon: FolderOpen },
-  { id: 'vivado', label: 'Vivado', icon: CircuitBoard },
-  { id: 'debug', label: 'Debug', icon: Bug },
+const TABS: { id: RightPanelTab; icon: typeof FileText }[] = [
+  { id: 'run', icon: Activity },
+  { id: 'artifacts', icon: FolderOpen },
+  { id: 'vivado', icon: CircuitBoard },
+  { id: 'debug', icon: Bug },
 ]
+
+function tabLabel(id: RightPanelTab, t: (key: string) => string): string {
+  const map: Record<RightPanelTab, string> = {
+    run: t('rightPanel.runTab'),
+    artifacts: t('rightPanel.artifactsTab'),
+    vivado: t('rightPanel.vivadoTab'),
+    debug: t('rightPanel.debugTab'),
+  }
+  return map[id]
+}
 
 export function TerminalRightPanel({
   open,
@@ -44,6 +55,7 @@ export function TerminalRightPanel({
   onTabChange: (tab: RightPanelTab) => void
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [approvalError, setApprovalError] = useState<string | null>(null)
   const approvalQ = useQuery({ queryKey: ['approvals'], queryFn: getApprovals })
@@ -66,7 +78,7 @@ export function TerminalRightPanel({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
     onError: (err: Error) => {
       setPatchLocal(null)
-      setApprovalError(err.message || 'Failed to update file patch approval')
+      setApprovalError(err.message || t('rightPanel.updateFileApprovalFailed'))
     },
   })
   const vivadoApprove = useMutation({
@@ -78,35 +90,37 @@ export function TerminalRightPanel({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['approvals'] }),
     onError: (err: Error) => {
       setVivadoLocal(null)
-      setApprovalError(err.message || 'Failed to update Vivado approval')
+      setApprovalError(err.message || t('rightPanel.updateVivadoApprovalFailed'))
     },
   })
 
   return (
     <aside
       className={`terminal-right-panel${open ? ' is-open' : ''}`}
-      aria-label="Session inspector"
+      aria-label={t('rightPanel.close')}
       aria-hidden={!open}
       inert={!open || undefined}
     >
       <div className="right-panel-topbar">
         <div className="right-panel-tabs" role="tablist">
-          {TABS.map((t) => (
+          {TABS.map((tb) => {
+            const label = tabLabel(tb.id, t)
+            return (
             <button
-              key={t.id}
+              key={tb.id}
               type="button"
               role="tab"
-              aria-selected={tab === t.id}
-              className={`right-panel-tab ${tab === t.id ? 'active' : ''}`}
-              onClick={() => onTabChange(t.id)}
-              title={t.label}
+              aria-selected={tab === tb.id}
+              className={`right-panel-tab ${tab === tb.id ? 'active' : ''}`}
+              onClick={() => onTabChange(tb.id)}
+              title={label}
             >
-              <t.icon size={14} />
-              <span className="right-panel-tab-label">{t.label}</span>
+              <tb.icon size={14} />
+              <span className="right-panel-tab-label">{label}</span>
             </button>
-          ))}
+          )})}
         </div>
-        <button type="button" className="right-panel-close" onClick={onClose} aria-label="Close session inspector">
+        <button type="button" className="right-panel-close" onClick={onClose} aria-label={t('rightPanel.close')}>
           <X size={15} />
         </button>
       </div>
@@ -176,6 +190,7 @@ function RunTab({
   onPatchApprovalChange: (approved: boolean) => void
   onVivadoApprovalChange: (approved: boolean) => void
 }) {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const recentTools = timeline.tools.slice(-5).reverse()
@@ -186,7 +201,7 @@ function RunTab({
       queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
       if (projectId) queryClient.invalidateQueries({ queryKey: ['sessions', projectId] })
     },
-    onError: (err: Error) => alert(err.message || 'Rename failed'),
+    onError: (err: Error) => alert(err.message || t('rightPanel.renameFailed')),
   })
   const del = useMutation({
     mutationFn: () => deleteSession(sessionId),
@@ -194,55 +209,55 @@ function RunTab({
       if (projectId) queryClient.invalidateQueries({ queryKey: ['sessions', projectId] })
       navigate(projectId ? `/projects/${projectId}` : '/')
     },
-    onError: (err: Error) => alert(err.message || 'Delete failed'),
+    onError: (err: Error) => alert(err.message || t('rightPanel.deleteFailed')),
   })
 
   const promptRename = () => {
-    const next = window.prompt('Session name', session?.name || '')
+    const next = window.prompt(t('rightPanel.sessionName'), session?.name || '')
     if (next && next.trim() && next.trim() !== session?.name) {
       rename.mutate(next.trim())
     }
   }
 
   const promptDelete = () => {
-    if (confirm('Archive this session?')) del.mutate()
+    if (confirm(t('rightPanel.archiveConfirm'))) del.mutate()
   }
 
   return (
     <>
       <section className="drawer-section">
-        <div className="side-title">Session info</div>
-        <div className="kv"><span>Status</span><span><StatusBadge status={activeTask?.state || session?.status} /></span></div>
-        <div className="kv"><span>Session</span><span className="mono">{session?.name || sessionId}</span></div>
-        <div className="kv"><span>Updated</span><span>{formatRelative(session?.updated_at)}</span></div>
-        <div className="kv"><span>Messages</span><span>{formatNumber(session?.message_count)}</span></div>
-        <div className="kv"><span>Tools</span><span>{formatNumber(timeline.tools.length || session?.tool_call_count)}</span></div>
-        <div className="kv"><span>Problems</span><span style={{ color: problemCount ? 'var(--error)' : undefined }}>{formatNumber(problemCount || session?.problem_count)}</span></div>
+        <div className="side-title">{t('rightPanel.sessionInfo')}</div>
+        <div className="kv"><span>{t('rightPanel.status')}</span><span><StatusBadge status={activeTask?.state || session?.status} /></span></div>
+        <div className="kv"><span>{t('rightPanel.session')}</span><span className="mono">{session?.name || sessionId}</span></div>
+        <div className="kv"><span>{t('rightPanel.updated')}</span><span>{formatRelative(session?.updated_at)}</span></div>
+        <div className="kv"><span>{t('rightPanel.messages')}</span><span>{formatNumber(session?.message_count)}</span></div>
+        <div className="kv"><span>{t('rightPanel.tools')}</span><span>{formatNumber(timeline.tools.length || session?.tool_call_count)}</span></div>
+        <div className="kv"><span>{t('rightPanel.problems')}</span><span style={{ color: problemCount ? 'var(--error)' : undefined }}>{formatNumber(problemCount || session?.problem_count)}</span></div>
         <div className="session-info-actions">
           <button type="button" className="btn ghost" onClick={promptRename} disabled={rename.isPending}>
-            <Pencil size={14} /> Rename
+            <Pencil size={14} /> {t('rightPanel.rename')}
           </button>
           <button type="button" className="btn ghost danger-ghost" onClick={promptDelete} disabled={del.isPending}>
-            <Trash2 size={14} /> Delete
+            <Trash2 size={14} /> {t('rightPanel.delete')}
           </button>
         </div>
       </section>
 
       <section className="drawer-section">
-        <div className="side-title"><Shield size={13} /> Approvals</div>
+        <div className="side-title"><Shield size={13} /> {t('rightPanel.approvals')}</div>
         {approvalError && (
           <p className="approval-error" role="alert">{approvalError}</p>
         )}
         <ApprovalSwitch
-          label="File patches"
-          description="Create and modify files without per-file confirmation."
+          label={t('rightPanel.filePatches')}
+          description={t('rightPanel.filePatchesDesc')}
           checked={Boolean(patchApproved)}
           disabled={patchUpdating}
           onChange={onPatchApprovalChange}
         />
         <ApprovalSwitch
-          label="Vivado execution"
-          description="Run synthesis, implementation, and Tcl commands without extra confirmation."
+          label={t('rightPanel.vivadoExecution')}
+          description={t('rightPanel.vivadoExecutionDesc')}
           checked={Boolean(vivadoApproved)}
           disabled={vivadoUpdating}
           onChange={onVivadoApprovalChange}
@@ -250,20 +265,20 @@ function RunTab({
       </section>
 
       <section className="drawer-section">
-        <div className="side-title"><Activity size={13} /> Stream</div>
-        <div className="kv"><span>Status</span><span>{streamStatus}</span></div>
-        <div className="kv"><span>Last seq</span><span className="mono">{timeline.lastSeq}</span></div>
+        <div className="side-title"><Activity size={13} /> {t('rightPanel.stream')}</div>
+        <div className="kv"><span>{t('rightPanel.status')}</span><span>{streamStatus}</span></div>
+        <div className="kv"><span>{t('rightPanel.lastSeq')}</span><span className="mono">{timeline.lastSeq}</span></div>
       </section>
 
       <section className="drawer-section">
-        <div className="side-title"><Wrench size={13} /> Recent tools</div>
+        <div className="side-title"><Wrench size={13} /> {t('rightPanel.recentTools')}</div>
         <div className="drawer-list">
-          {recentTools.length === 0 && <span className="muted">No tool calls yet</span>}
-          {recentTools.map((t) => (
-            <span key={t.toolcallId}>
-              <StatusDot state={t.state} />
-              <span className="mono drawer-list-label">{t.name}</span>
-              <span className="drawer-list-state">{t.state}</span>
+          {recentTools.length === 0 && <span className="muted">{t('rightPanel.noToolCalls')}</span>}
+          {recentTools.map((tc) => (
+            <span key={tc.toolcallId}>
+              <StatusDot state={tc.state} />
+              <span className="mono drawer-list-label">{tc.name}</span>
+              <span className="drawer-list-state">{tc.state}</span>
             </span>
           ))}
         </div>
@@ -285,6 +300,7 @@ function ApprovalSwitch({
   disabled: boolean
   onChange: (checked: boolean) => void
 }) {
+  const { t } = useTranslation()
   return (
     <label className={`approval-switch ${checked ? 'enabled' : ''}`}>
       <input
@@ -299,19 +315,20 @@ function ApprovalSwitch({
         <span>{label}</span>
         <small>{description}</small>
       </span>
-      <span className="approval-switch-state">{checked ? 'Auto' : 'Manual'}</span>
+      <span className="approval-switch-state">{checked ? t('rightPanel.auto') : t('rightPanel.manual')}</span>
     </label>
   )
 }
 
 function ArtifactsTab({ timeline }: { timeline: SessionTimelineState }) {
+  const { t } = useTranslation()
   const artifacts = useMemo(() => collectArtifacts(timeline), [timeline])
 
   return (
     <section className="drawer-section artifacts-section">
-      <div className="side-title"><FolderOpen size={13} /> Artifacts</div>
+      <div className="side-title"><FolderOpen size={13} /> {t('rightPanel.artifacts')}</div>
       <div className="artifact-list">
-        {artifacts.length === 0 && <div className="muted drawer-hint">No file artifacts recorded in this session yet.</div>}
+        {artifacts.length === 0 && <div className="muted drawer-hint">{t('rightPanel.noArtifacts')}</div>}
         {artifacts.map((artifact) => (
           <div className="artifact-row" key={`${artifact.action}:${artifact.path}`}>
             <span className="file-action-badge">{artifact.action}</span>
@@ -341,31 +358,32 @@ function DebugTab({
   timeline: SessionTimelineState
   problemCount: number
 }) {
+  const { t } = useTranslation()
   return (
     <>
       <section className="drawer-section">
-        <div className="side-title">Session</div>
-        <div className="kv"><span>ID</span><span className="mono">{sessionId}</span></div>
-        <div className="kv"><span>Stream</span><span>{streamStatus}</span></div>
-        <div className="kv"><span>Last seq</span><span className="mono">{timeline.lastSeq}</span></div>
+        <div className="side-title">{t('rightPanel.session')}</div>
+        <div className="kv"><span>{t('rightPanel.sessionId')}</span><span className="mono">{sessionId}</span></div>
+        <div className="kv"><span>{t('rightPanel.stream')}</span><span>{streamStatus}</span></div>
+        <div className="kv"><span>{t('rightPanel.lastSeq')}</span><span className="mono">{timeline.lastSeq}</span></div>
       </section>
       <section className="drawer-section">
-        <div className="side-title"><FileText size={13} /> Context</div>
+        <div className="side-title"><FileText size={13} /> {t('rightPanel.context')}</div>
         <ContextDebugPanel sessionId={sessionId} taskId={activeTaskId} />
       </section>
       <section className="drawer-section">
-        <div className="side-title"><Bug size={13} /> Events</div>
+        <div className="side-title"><Bug size={13} /> {t('rightPanel.events')}</div>
         <div className="drawer-list">
-          <span>{timeline.auditLog.length} events</span>
-          <span>{problemCount} problems</span>
+          <span>{t('rightPanel.eventsCount', { n: timeline.auditLog.length })}</span>
+          <span>{t('rightPanel.problemsCount', { n: problemCount })}</span>
         </div>
       </section>
       <section className="drawer-section">
-        <div className="side-title"><Wrench size={13} /> Tools</div>
+        <div className="side-title"><Wrench size={13} /> {t('rightPanel.tools')}</div>
         <div className="drawer-list">
-          {timeline.tools.length === 0 && <span className="muted">No tool calls yet</span>}
-          {timeline.tools.slice(-16).reverse().map((t) => (
-            <span key={t.toolcallId}>{t.name} - {t.state}</span>
+          {timeline.tools.length === 0 && <span className="muted">{t('rightPanel.noToolCalls')}</span>}
+          {timeline.tools.slice(-16).reverse().map((tc) => (
+            <span key={tc.toolcallId}>{tc.name} - {tc.state}</span>
           ))}
         </div>
       </section>
@@ -374,11 +392,12 @@ function DebugTab({
 }
 
 function RemoteTerminalTab() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const healthQ = useQuery({ queryKey: ['vivado-health'], queryFn: getVivadoHealth, refetchInterval: 15000 })
   const [tclInput, setTclInput] = useState('')
   const [autoApprove, setAutoApprove] = useState(true)
-  const [lines, setLines] = useState<string[]>(['# Vivado Tcl over SSH', '# Type Tcl commands below'])
+  const [lines, setLines] = useState<string[]>([t('rightPanel.tclConsoleInit1'), t('rightPanel.tclConsoleInit2')])
 
   const handleRun = async () => {
     const cmd = tclInput.trim()
@@ -388,7 +407,7 @@ function RemoteTerminalTab() {
     try {
       const res = await runVivadoTcl(cmd, autoApprove)
       if (res.requires_approval) {
-        setLines((prev) => [...prev, '# Policy requires approval - enable auto-approve or approve in chat'])
+        setLines((prev) => [...prev, t('rightPanel.tclApprovalMsg')])
         return
       }
       if (res.stdout) setLines((prev) => [...prev, ...(res.stdout || '').split('\n').filter(Boolean).slice(-40)])
@@ -404,17 +423,17 @@ function RemoteTerminalTab() {
   return (
     <div className="remote-terminal-tab">
       <section className="drawer-section">
-        <div className="side-title"><CircuitBoard size={13} /> Vivado</div>
-        <div className="kv compact"><span>Host</span><span className="mono">{h?.host || '—'}</span></div>
-        <div className="kv compact"><span>SSH</span><span><StatusBadge status={h?.reachable ? 'connected' : 'error'} /></span></div>
-        <div className="kv compact"><span>Version</span><span>{h?.version || '—'}</span></div>
-        <div className="kv compact"><span>Path</span><span className="mono">{h?.vivado_path || 'vivado'}</span></div>
+        <div className="side-title"><CircuitBoard size={13} /> {t('rightPanel.vivadoTab')}</div>
+        <div className="kv compact"><span>{t('rightPanel.vivadoHost')}</span><span className="mono">{h?.host || '—'}</span></div>
+        <div className="kv compact"><span>{t('rightPanel.vivadoSSH')}</span><span><StatusBadge status={h?.reachable ? 'connected' : 'error'} /></span></div>
+        <div className="kv compact"><span>{t('rightPanel.vivadoVersion')}</span><span>{h?.version || '—'}</span></div>
+        <div className="kv compact"><span>{t('rightPanel.vivadoPath')}</span><span className="mono">{h?.vivado_path || 'vivado'}</span></div>
         {h?.error && <div className="muted drawer-hint">{h.error}</div>}
         <div className="drawer-actions">
           <button type="button" className="btn ghost" onClick={() => void healthQ.refetch()} disabled={healthQ.isFetching}>
-            <RefreshCw size={13} /> Refresh
+            <RefreshCw size={13} /> {t('rightPanel.refresh')}
           </button>
-          <Link to="/vivado" className="btn ghost"><ExternalLink size={13} /> Open page</Link>
+          <Link to="/vivado" className="btn ghost"><ExternalLink size={13} /> {t('rightPanel.openPage')}</Link>
         </div>
       </section>
       <div className="remote-console" role="log">{lines.join('\n')}</div>
@@ -424,14 +443,14 @@ function RemoteTerminalTab() {
           value={tclInput}
           onChange={(e) => setTclInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleRun() } }}
-          placeholder="Tcl on remote Vivado..."
+          placeholder={t('rightPanel.tclPlaceholder')}
           spellCheck={false}
         />
-        <button type="button" className="btn primary" onClick={() => void handleRun()}>Run</button>
+        <button type="button" className="btn primary" onClick={() => void handleRun()}>{t('rightPanel.tclRun')}</button>
       </div>
       <label className="remote-console-opt muted">
         <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-        Auto-approve policy-checked Tcl
+        {t('rightPanel.tclAutoApprove')}
       </label>
     </div>
   )
