@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { parseApprovalPayload } from '../../lib/approvalPayload'
 import { useTerminalStore } from '../../stores/terminalStore'
 import { Button } from '../common/Button'
+import { CollapsibleSection } from '../common/CollapsibleSection'
 
 export interface ApprovalFile {
   path: string
@@ -192,17 +193,31 @@ export function ApprovalBlock({
 
   return (
     <div
-      className={`trace-block approval-trace-block status-${status}${isApproved ? ' completed' : ' rejected'}${isPartialResult ? ' status-partial' : ''}`}
+      className={`trace-block approval-trace-block status-${status}${isApproved ? ' completed' : ' rejected'}${isPartialResult ? ' status-partial' : ''}${collapsed ? '' : ' is-expanded'}`}
     >
-      <div className="trace-header" onClick={() => toggleCollapsed(id)} role="button" tabIndex={0}>
-        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+      <div
+        className="trace-header"
+        onClick={() => toggleCollapsed(id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            toggleCollapsed(id)
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={!collapsed}
+      >
+        <ChevronRight size={14} className="trace-chevron" />
         {headerIcon}
         <span>{title}</span>
         <span className="spacer" />
         <span className={`interaction-badge ${status}`}>{statusBadge}</span>
         <span className="tool-state">{statusLabel}</span>
       </div>
-      <div className={`trace-body approval-trace-body collapsible-body${!collapsed ? ' expanded' : ''}`}>{body}</div>
+      <CollapsibleSection open={!collapsed} className="trace-body-wrap">
+        <div className="trace-body approval-trace-body">{body}</div>
+      </CollapsibleSection>
     </div>
   )
 }

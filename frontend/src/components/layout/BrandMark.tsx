@@ -1,5 +1,7 @@
 /** Synthia logo mark (transparent PNG, no container fill). */
 
+import synthiaLogo from '../../assets/synthia-logo.png'
+
 export function BrandMark({ size = 36, fill = false }: { size?: number; fill?: boolean }) {
   return (
     <span
@@ -7,7 +9,7 @@ export function BrandMark({ size = 36, fill = false }: { size?: number; fill?: b
       style={fill ? undefined : { width: size, height: size }}
       aria-hidden
     >
-      <img src="/synthia-logo.png" alt="" className="brand-mark-img" draggable={false} />
+      <img src={synthiaLogo} alt="" className="brand-mark-img" draggable={false} />
     </span>
   )
 }

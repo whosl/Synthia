@@ -7,6 +7,7 @@ import {
 import { groupToolBatchEntries, type ChatDisplayItem } from '../../timeline/chatGrouping'
 import type { TimelineEntry } from '../../timeline/types'
 import { useTerminalStore } from '../../stores/terminalStore'
+import { CollapsibleSection } from '../common/CollapsibleSection'
 import { TimelineEntryView } from './TimelineEntryView'
 import { ToolRunGroup } from './ToolRunGroup'
 
@@ -64,11 +65,11 @@ export function AgentWorkGroup({
         <ChevronRight size={14} className="tool-run-summary-chevron" />
         <span>{summaryLine}</span>
       </button>
-      <div className={`tool-run-details agent-work-details collapsible-body${expanded ? ' expanded' : ''}`}>
-        <div>
+      <CollapsibleSection open={expanded} className="tool-run-details-wrap">
+        <div className="tool-run-details agent-work-details">
           {innerItems.map((item) => renderInnerItem(item, onInteractionRespond))}
         </div>
-      </div>
+      </CollapsibleSection>
     </div>
   )
 }

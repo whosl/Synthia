@@ -17,6 +17,7 @@ import {
 import { renderTimelineEntry } from '../../timeline/renderers/builtin'
 import type { InteractionEntryPayload, TimelineEntry } from '../../timeline/types'
 import { useTerminalStore } from '../../stores/terminalStore'
+import { CollapsibleSection } from '../common/CollapsibleSection'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ToolFailureCard } from './ToolFailureCard'
 
@@ -173,13 +174,13 @@ function ToolRunBatchSegment({
           <span>{summaryLine}</span>
         </button>
       )}
-      <div className={`tool-run-details collapsible-body${showDetails ? ' expanded' : ''}`}>
-        <div>
+      <CollapsibleSection open={showDetails} className="tool-run-details-wrap">
+        <div className="tool-run-details">
           {members.map((entry) =>
             shouldShowMember(entry) ? renderMember(entry) : null,
           )}
         </div>
-      </div>
+      </CollapsibleSection>
     </>
   )
 }

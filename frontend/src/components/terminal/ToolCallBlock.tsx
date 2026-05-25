@@ -1,8 +1,9 @@
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { resolveToolElapsedMs } from '../../lib/toolElapsed'
 import { useTerminalStore } from '../../stores/terminalStore'
+import { CollapsibleSection } from '../common/CollapsibleSection'
 
 export interface ToolCallViewModel {
   id: string
@@ -64,10 +65,22 @@ export function ToolCallBlock({
     : <CircleDotDashed size={14} className="tool-status-icon is-running" />
   return (
     <div
-      className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}`}
+      className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}${collapsed ? '' : ' is-expanded'}`}
     >
-      <div className="trace-header" onClick={() => toggle(tool.id, defaultCollapsed)}>
-        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+      <div
+        className="trace-header"
+        role="button"
+        tabIndex={0}
+        aria-expanded={!collapsed}
+        onClick={() => toggle(tool.id, defaultCollapsed)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            toggle(tool.id, defaultCollapsed)
+          }
+        }}
+      >
+        <ChevronRight size={14} className="trace-chevron" />
         {icon}
         <span>{tool.name}</span>
         {elapsedMs != null && (
@@ -77,13 +90,13 @@ export function ToolCallBlock({
         )}
         <span className="spacer" /><span className="tool-state">{tool.state}</span>
       </div>
-      <div className={`trace-body collapsible-body${!collapsed ? ' expanded' : ''}`}>
-        <div>
+      <CollapsibleSection open={!collapsed} className="trace-body-wrap">
+        <div className="trace-body">
           {tool.args && <><b>{t('toolBlock.input')}</b>{'\n'}{tool.args}{'\n\n'}</>}
           {errored && tool.error && <><b style={{ color: 'var(--error)' }}>{t('toolBlock.error')}</b>{'\n'}{tool.error}{'\n\n'}</>}
           <><b>{t('toolBlock.output')}</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : t('toolBlock.noResult'))}</>
         </div>
-      </div>
+      </CollapsibleSection>
     </div>
   )
 }
