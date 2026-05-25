@@ -496,21 +496,22 @@ export default function EvolutionPage() {
     <div className="page evolution-page">
       <PageStickyTop>
         <div className="page-header">
-          <div>
-            <h1 className="page-title">{t('evolution.title')}</h1>
+          <div className="page-header-main">
+            <div className="page-title-row">
+              <h1 className="page-title">{t('evolution.title')}</h1>
+              <Button
+                className={`ghost page-header-action${runGeneratorsMut.isPending ? ' is-spinning' : ''}`}
+                onClick={() => runGeneratorsMut.mutate()}
+                disabled={runGeneratorsMut.isPending}
+                aria-busy={runGeneratorsMut.isPending}
+                title={t('evolution.runGeneratorsTooltip')}
+              >
+                <Play size={14} aria-hidden /> {t('evolution.runGenerators')}
+              </Button>
+            </div>
             <p className="page-subtitle">
               {t('evolution.subtitle')}
             </p>
-          </div>
-          <div className="evolution-toolbar">
-            <Button
-              className="ghost"
-              onClick={() => runGeneratorsMut.mutate()}
-              disabled={runGeneratorsMut.isPending}
-              title={t('evolution.runGeneratorsTooltip')}
-            >
-              <Play size={14} /> {t('evolution.runGenerators')}
-            </Button>
           </div>
         </div>
 
@@ -533,10 +534,7 @@ export default function EvolutionPage() {
         </div>
 
         {activeTab === 'candidates' && (
-        <Panel
-          title={t('evolution.filters')}
-          className="evolution-filters-panel"
-        >
+        <Panel className="evolution-filters-panel">
           <div className="evolution-filters">
             <label className="evolution-filter">
               <span className="muted">{t('evolution.status')}</span>

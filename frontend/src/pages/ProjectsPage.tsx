@@ -262,57 +262,58 @@ export default function ProjectsPage() {
 
       <PageStickyTop>
         <div className="page-header">
-          <div>
-            <h1 className="page-title">{t('projects.title')}</h1>
+          <div className="page-header-main">
+            <div className="page-title-row projects-title-row">
+              <h1 className="page-title">{t('projects.title')}</h1>
+              <div className="toolbar sessions-toolbar project-tree-toolbar projects-title-toolbar">
+                <div className="sessions-search-wrap">
+                  <Search size={15} className="sessions-search-icon" />
+                  <input
+                    className="input"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder={t('projects.searchPlaceholder')}
+                  />
+                </div>
+                <div className="sort-compact-wrap" title={t('projects.sortLabel')}>
+                  <ArrowUpDown size={16} className="sort-compact-icon" aria-hidden />
+                  <select
+                    className="select sort-compact"
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value as typeof sort)}
+                    aria-label={t('projects.sortLabel')}
+                  >
+                    <option value="updated">{t('projects.sortLastActive')}</option>
+                    <option value="name">{t('projects.sortName')}</option>
+                    <option value="sessions">{t('projects.sortSessionCount')}</option>
+                  </select>
+                </div>
+                <Button
+                  className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
+                  type="button"
+                  aria-label={t('projects.refresh')}
+                  title={t('projects.refresh')}
+                  onClick={() => refetch()}
+                  disabled={isFetching}
+                >
+                  <RefreshCw size={16} aria-hidden />
+                </Button>
+                <label className="projects-show-archived">
+                  <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+                  {t('projects.filterArchivedProjects')}
+                </label>
+                <label className="projects-show-archived">
+                  <input
+                    type="checkbox"
+                    checked={showArchivedSessions}
+                    onChange={(e) => setShowArchivedSessions(e.target.checked)}
+                  />
+                  {t('projects.filterArchivedSessions')}
+                </label>
+              </div>
+            </div>
             <p className="page-subtitle">{t('projects.subtitle')}</p>
           </div>
-        </div>
-
-        <div className="toolbar sessions-toolbar project-tree-toolbar">
-          <div className="sessions-search-wrap" style={{ flex: 1 }}>
-            <Search size={15} className="sessions-search-icon" />
-            <input
-              className="input"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('projects.searchPlaceholder')}
-            />
-          </div>
-          <div className="sort-compact-wrap" title={t('projects.sortLabel')}>
-            <ArrowUpDown size={16} className="sort-compact-icon" aria-hidden />
-            <select
-              className="select sort-compact"
-              value={sort}
-              onChange={(e) => setSort(e.target.value as typeof sort)}
-              aria-label={t('projects.sortLabel')}
-            >
-              <option value="updated">{t('projects.sortLastActive')}</option>
-              <option value="name">{t('projects.sortName')}</option>
-              <option value="sessions">{t('projects.sortSessionCount')}</option>
-            </select>
-          </div>
-          <Button
-            className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
-            type="button"
-            aria-label={t('projects.refresh')}
-            title={t('projects.refresh')}
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw size={16} aria-hidden />
-          </Button>
-          <label className="projects-show-archived">
-            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-            {t('projects.filterArchivedProjects')}
-          </label>
-          <label className="projects-show-archived">
-            <input
-              type="checkbox"
-              checked={showArchivedSessions}
-              onChange={(e) => setShowArchivedSessions(e.target.checked)}
-            />
-            {t('projects.filterArchivedSessions')}
-          </label>
         </div>
       </PageStickyTop>
 

@@ -1,4 +1,4 @@
-﻿import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   ChevronLeft,
@@ -9,7 +9,6 @@ import {
   Settings,
   Sparkles,
 } from 'lucide-react'
-import { BrandMark } from './BrandMark'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
@@ -22,16 +21,17 @@ const nav = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
+  const location = useLocation()
+  const isTerminalRoute = location.pathname === '/term'
   const navCollapsed = useShellStore((s) => s.navCollapsed)
   const toggleNavCollapsed = useShellStore((s) => s.toggleNavCollapsed)
 
   return (
-    <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}`}>
+    <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}${isTerminalRoute ? ' shell-terminal' : ''}`}>
       <aside className="nav-rail" aria-label={t('nav.projects')}>
         <div className="nav-top">
           <div className="nav-header">
             <div className="brand">
-              <BrandMark fill={navCollapsed} />
               <span className="brand-label">{t('app.brand')}</span>
             </div>
           </div>

@@ -1,19 +1,5 @@
 /* /evolution page — SE-PR4b */
 
-.evolution-page .page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.evolution-toolbar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
 .evolution-tabs {
   display: flex;
   gap: 6px;
@@ -95,22 +81,29 @@
 
 .evolution-filters-panel { margin-bottom: 16px; }
 
+.evolution-filters-panel .panel-body {
+  padding: 10px 14px;
+}
+
 .evolution-filters {
   display: flex;
-  align-items: flex-end;
-  gap: 14px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
 }
 
 .evolution-filter {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 160px;
+  min-width: 0;
+  flex: 1 1 0;
+  max-width: 220px;
   font-size: 12px;
 }
 
 .evolution-filter select {
+  width: 100%;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -121,9 +114,27 @@
 }
 
 .evolution-filter-count {
+  flex: 0 0 auto;
   font-size: 12px;
   margin-left: auto;
-  align-self: center;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .evolution-filters {
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+
+  .evolution-filter {
+    flex: 1 1 calc(50% - 6px);
+    max-width: none;
+  }
+
+  .evolution-filter-count {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
 }
 
 .evolution-grid {

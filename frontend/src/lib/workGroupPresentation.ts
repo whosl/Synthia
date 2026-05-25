@@ -50,19 +50,20 @@ export function buildWorkGroupSummary(
 }
 
 export function formatWorkedDuration(totalSec: number): string {
-  const sec = Math.max(0, Math.round(totalSec))
+  const sec = Math.max(1, Math.round(totalSec))
   if (sec < 60) return `${sec} s`
   const m = Math.floor(sec / 60)
   const s = sec % 60
   return s > 0 ? `${m} min ${s} s` : `${m} min`
 }
 
+export function formatRunSummaryLine(elapsedSec: number, toolCount: number): string {
+  const seconds = Math.max(1, Math.round(elapsedSec))
+  return i18n.t('runSummary.default', { seconds, count: toolCount })
+}
+
 export function formatWorkGroupSummaryLine(summary: WorkGroupSummary): string {
-  const duration = formatWorkedDuration(summary.elapsedSec)
-  if (summary.toolCount === 1) {
-    return i18n.t('agentWork.workedForOne', { duration })
-  }
-  return i18n.t('agentWork.workedFor', { duration, count: summary.toolCount })
+  return formatRunSummaryLine(summary.elapsedSec, summary.toolCount)
 }
 
 export function isAssistantFinalComplete(entry: TimelineEntry | null | undefined): boolean {

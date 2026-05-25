@@ -316,7 +316,7 @@ class VivadoRuntimeAdapter:
                 manifest,
                 workspace_root,
                 ex,
-                remote_work_dir=self._target.remote_work_root,
+                remote_work_dir=remote_root,
                 task_id=task_id or None,
             )
             ex.mkdir_remote(f"{remote_root}/scripts {remote_root}/reports {remote_root}/checkpoints", task_id=task_id or None)

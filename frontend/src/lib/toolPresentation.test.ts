@@ -44,6 +44,16 @@ describe('toolPresentation', () => {
     expect(card?.action).toMatch(/RTL/i)
   })
 
+  it('shows at least 1 second in group summary', () => {
+    const tools = [
+      toolEntryToViewModel({ toolcallId: 'a', name: 'grep_tool', state: 'completed', result: '{}' }),
+    ]
+    const summary = buildToolGroupSummary(tools, null)
+    expect(summary.elapsedSec).toBe(0)
+    const line = formatToolGroupSummaryLine(summary)
+    expect(line).toBe('Run time 1s · called 1 tools')
+  })
+
   it('formats group summary line', () => {
     const tools = [
       toolEntryToViewModel({ toolcallId: 'a', name: 'grep_tool', state: 'completed', result: '{}' }),
@@ -58,8 +68,7 @@ describe('toolPresentation', () => {
     const primary = pickPrimaryFailure(tools)
     const summary = buildToolGroupSummary(tools, primary)
     const line = formatToolGroupSummaryLine(summary)
-    expect(line).toContain('2 tools completed in')
-    expect(line).toMatch(/in \d+ s$/)
+    expect(line).toMatch(/^Run time \d+s · called 3 tools$/)
     expect(line).not.toContain('tool error')
     expect(summary.tail).toContain('read_verilog')
   })

@@ -24,17 +24,19 @@ export default function MonitorPage() {
     </PageStickyTop>
     <MonitorOverviewPanel />
     <Panel title={t('monitor.recentRuns')}>
-      <table className="table">
-        <thead><tr><th>{t('monitor.tableRun')}</th><th>{t('monitor.tableType')}</th><th>{t('monitor.tableStatus')}</th><th>{t('monitor.tableStarted')}</th><th>{t('monitor.tableElapsed')}</th><th>{t('monitor.tableSession')}</th></tr></thead>
-        <tbody>{runs.map((r) => <tr key={r.id}>
-          <td><Link to={`/monitor/runs/${r.id}`} style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}>{r.name}</Link><div className="muted mono" style={{ fontSize: 11 }}>{r.id}</div></td>
-          <td className="mono">{r.run_type}</td>
-          <td><StatusBadge status={r.state} /></td>
-          <td className="muted">{formatTime(r.started_at)}</td>
-          <td className="mono">{formatDuration(r.elapsed_ms)}</td>
-          <td className="mono muted" style={{ fontSize: 11 }}>{r.session_id}</td>
-        </tr>)}</tbody>
-      </table>
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>{t('monitor.tableRun')}</th><th>{t('monitor.tableType')}</th><th>{t('monitor.tableStatus')}</th><th className="table-col-time">{t('monitor.tableStarted')}</th><th>{t('monitor.tableElapsed')}</th><th>{t('monitor.tableSession')}</th></tr></thead>
+          <tbody>{runs.map((r) => <tr key={r.id}>
+            <td><Link to={`/monitor/runs/${r.id}`} style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}>{r.name}</Link><div className="muted mono" style={{ fontSize: 11 }}>{r.id}</div></td>
+            <td className="mono">{r.run_type}</td>
+            <td><StatusBadge status={r.state} /></td>
+            <td className="muted table-col-time">{formatTime(r.started_at)}</td>
+            <td className="mono">{formatDuration(r.elapsed_ms)}</td>
+            <td className="mono muted" style={{ fontSize: 11 }}>{r.session_id}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
       {!isLoading && !runs.length && <EmptyState title={t('monitor.noRuns')} detail={t('monitor.noRunsDetail')} />}
     </Panel>
   </div>

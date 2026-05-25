@@ -25,6 +25,11 @@ function toolEntry(id: string, state: 'completed' | 'running' = 'completed'): Ti
 }
 
 describe('workGroupPresentation', () => {
+  it('shows at least 1 second for sub-second durations', () => {
+    expect(formatWorkedDuration(0)).toBe('1 s')
+    expect(formatWorkedDuration(0.4)).toBe('1 s')
+  })
+
   it('formats worked duration with minutes and seconds', () => {
     expect(formatWorkedDuration(45)).toBe('45 s')
     expect(formatWorkedDuration(75)).toBe('1 min 15 s')
@@ -33,7 +38,7 @@ describe('workGroupPresentation', () => {
 
   it('formats summary line', () => {
     const line = formatWorkGroupSummaryLine({ elapsedSec: 90, toolCount: 3 })
-    expect(line).toBe('worked for 1 min 30 s · 3 tools called')
+    expect(line).toBe('Run time 90s · called 3 tools')
   })
 
   it('counts tools in work members', () => {

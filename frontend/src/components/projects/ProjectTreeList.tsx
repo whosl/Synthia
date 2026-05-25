@@ -24,6 +24,7 @@ import { isProjectArchived } from '../../lib/projectStatus'
 import { isSessionRunning, sessionInitials } from '../../lib/sessionVisual'
 import { formatNumber, formatRelative } from '../../lib/time'
 import { Button } from '../common/Button'
+import { CollapsibleSection } from '../common/CollapsibleSection'
 import { EmptyState } from '../common/EmptyState'
 import { MobileActionsMenu, type MobileAction } from './MobileActionsMenu'
 import { ProjectSessionsTable } from './ProjectSessionsTable'
@@ -278,7 +279,7 @@ function ProjectTreeSection({
         </div>
       </div>
 
-      {expanded && (
+      <CollapsibleSection open={expanded} className="project-tree-children-wrap">
         <div className="project-tree-children">
           {sessionsQ.isLoading && (
             <div className="project-tree-loading muted">{t('projects.loadingSessions')}</div>
@@ -305,7 +306,7 @@ function ProjectTreeSection({
             ))
           )}
         </div>
-      )}
+      </CollapsibleSection>
 
       {menuOpen && (
         <MobileActionsMenu

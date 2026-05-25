@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, ChevronDown, ChevronRight, Minus, X, XCircle } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Minus, ShieldCheck, X, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { parseApprovalPayload } from '../../lib/approvalPayload'
@@ -93,7 +93,7 @@ export function ApprovalBlock({
     : t('approval.rejectedCross')
 
   const headerIcon = isApproved
-    ? <CheckCircle2 size={14} className="approval-status-icon approved" />
+    ? <ShieldCheck size={14} className="approval-status-icon approved" />
     : isPending
       ? null
       : <XCircle size={14} className="approval-status-icon rejected" />

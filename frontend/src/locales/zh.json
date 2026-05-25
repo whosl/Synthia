@@ -269,18 +269,17 @@
     "tclApprovalMsg": "# 策略要求审批 — 启用自动批准或在对话中审批"
   },
 
-  "agentWork": {
-    "workedFor": "工作了 {{duration}} · {{count}} 次工具调用",
-    "workedForOne": "工作了 {{duration}} · 1 次工具调用"
+  "runSummary": {
+    "default": "运行时间{{seconds}}s·调用{{count}}个工具"
   },
+
+  "agentWork": {},
 
   "toolBlock": {
     "input": "输入",
     "error": "错误",
     "output": "输出",
-    "noResult": "暂无结果摘要。",
-    "toolsCompleted": "{{completed}} 个工具在 {{seconds}} 秒内完成",
-    "toolsCompletedRunning": "{{completed}} 个工具在 {{seconds}} 秒内完成 · {{running}} 运行中"
+    "noResult": "暂无结果摘要。"
   },
 
   "toolFailure": {

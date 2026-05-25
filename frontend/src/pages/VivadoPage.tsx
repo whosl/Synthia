@@ -50,6 +50,8 @@ export default function VivadoPage() {
     }
   }
 
+  const refreshing = isFetching || commandsQ.isFetching
+
   const handleSaveScript = () => {
     const content = consoleLines.join('\n')
     const blob = new Blob([content], { type: 'text/plain' })
@@ -62,11 +64,20 @@ export default function VivadoPage() {
   return <div className="page">
     <PageStickyTop>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">{t('vivado.title')}</h1>
+        <div className="page-header-main">
+          <div className="page-title-row">
+            <h1 className="page-title">{t('vivado.title')}</h1>
+            <Button
+              className={`ghost page-header-action${refreshing ? ' is-spinning' : ''}`}
+              onClick={() => { refetch(); commandsQ.refetch() }}
+              disabled={refreshing}
+              aria-busy={refreshing}
+            >
+              <RefreshCw size={14} aria-hidden /> {t('vivado.refresh')}
+            </Button>
+          </div>
           <p className="page-subtitle">{t('vivado.subtitle')}</p>
         </div>
-        <Button className="ghost" onClick={() => { refetch(); commandsQ.refetch() }}><RefreshCw size={14} /> {t('vivado.refresh')}</Button>
       </div>
     </PageStickyTop>
     <div className="dashboard-grid">
@@ -92,24 +103,29 @@ export default function VivadoPage() {
       </div>
       <div style={{ display: 'grid', gap: 16 }}>
         <Panel title={t('vivado.commandHistory')} actions={<span className="muted" style={{ fontSize: 12 }}>{t('vivado.records', { n: commandsQ.data?.commands?.length ?? 0 })}</span>}>
-          <table className="table">
-            <thead><tr><th>{t('vivado.tableTime')}</th><th>{t('vivado.tableType')}</th><th>{t('vivado.tableCommand')}</th><th>{t('vivado.tableStatus')}</th></tr></thead>
-            <tbody>
-              {(commandsQ.data?.commands?.length
-                ? commandsQ.data.commands.slice(0, 12).map((c) => (
-                  <tr key={c.id}>
-                    <td className="mono muted" style={{ fontSize: 11 }}>{formatVivadoTime(c.started_at)}</td>
-                    <td className="muted">{c.command_type || '—'}</td>
-                    <td className="mono" style={{ fontSize: 11, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(c.command_text || c.command || '')}>
-                      {String(c.command_text || c.command || c.id).slice(0, 80)}
-                    </td>
-                    <td><StatusBadge status={String(c.state || c.status || 'unknown')} /></td>
-                  </tr>
-                ))
-                : <tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 24 }}>{t('vivado.noHistory')}</td></tr>
-              )}
-            </tbody>
-          </table>
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th className="table-col-time">{t('vivado.tableTime')}</th><th>{t('vivado.tableType')}</th><th className="table-col-command">{t('vivado.tableCommand')}</th><th>{t('vivado.tableStatus')}</th></tr></thead>
+              <tbody>
+                {(commandsQ.data?.commands?.length
+                  ? commandsQ.data.commands.slice(0, 12).map((c) => {
+                    const commandText = String(c.command_text || c.command || c.id)
+                    return (
+                      <tr key={c.id}>
+                        <td className="mono muted table-col-time" style={{ fontSize: 11 }}>{formatVivadoTime(c.started_at)}</td>
+                        <td className="muted">{c.command_type || '—'}</td>
+                        <td className="mono table-col-command" style={{ fontSize: 11 }} title={commandText}>
+                          {commandText}
+                        </td>
+                        <td><StatusBadge status={String(c.state || c.status || 'unknown')} /></td>
+                      </tr>
+                    )
+                  })
+                  : <tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 24 }}>{t('vivado.noHistory')}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </Panel>
         <Panel title={t('vivado.runtime')}>
           <div className="metric-grid">

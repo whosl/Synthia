@@ -248,18 +248,17 @@
     "tclApprovalMsg": "# Policy requires approval — enable auto-approve or approve in chat"
   },
 
-  "agentWork": {
-    "workedFor": "worked for {{duration}} · {{count}} tools called",
-    "workedForOne": "worked for {{duration}} · 1 tool called"
+  "runSummary": {
+    "default": "Run time {{seconds}}s · called {{count}} tools"
   },
+
+  "agentWork": {},
 
   "toolBlock": {
     "input": "Input",
     "error": "Error",
     "output": "Output",
-    "noResult": "No result summary yet.",
-    "toolsCompleted": "{{completed}} tools completed in {{seconds}}s",
-    "toolsCompletedRunning": "{{completed}} tools completed in {{seconds}}s · {{running}} running"
+    "noResult": "No result summary yet."
   },
 
   "toolFailure": {

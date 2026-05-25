@@ -102,7 +102,8 @@ export default function TerminalPage() {
       <div className="terminal-shell">
         <div className={`terminal-layout ${rightPanelOpen ? 'right-open' : 'right-closed'}`}>
           <section className="chat-panel">
-            <header className="chat-panel-header">
+            <div className="chat-panel-header-anchor">
+              <header className="chat-panel-header">
               <Link to={backHref} className="btn ghost terminal-back-link" aria-label={t('terminal.backToProject')}>
                 <ArrowLeft size={15} />
                 <span className="terminal-back-label">{t('terminal.back')}</span>
@@ -154,7 +155,8 @@ export default function TerminalPage() {
                   </Button>
                 )}
               </div>
-            </header>
+              </header>
+            </div>
             <div
               className={`chat-panel-scroll${view === 'chat' ? ' message-list' : ' timeline-view'}`}
               ref={scrollRef}

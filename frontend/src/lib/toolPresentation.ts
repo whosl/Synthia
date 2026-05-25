@@ -1,5 +1,6 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
 import i18n from './i18n'
+import { formatRunSummaryLine } from './workGroupPresentation'
 import { resolveToolElapsedMs } from './toolElapsed'
 
 export type ToolOutcome =
@@ -251,8 +252,8 @@ export function computeToolGroupElapsedSec(tools: ToolCallViewModel[]): number {
 }
 
 export function formatToolGroupSummaryLine(s: ToolGroupSummary): string {
-  if (s.running > 0) return i18n.t('toolBlock.toolsCompletedRunning', { completed: s.completed, seconds: s.elapsedSec, running: s.running })
-  return i18n.t('toolBlock.toolsCompleted', { completed: s.completed, seconds: s.elapsedSec })
+  const count = s.completed + s.errors + s.running + s.rejected
+  return formatRunSummaryLine(s.elapsedSec, count)
 }
 
 export function toolEntryToViewModel(

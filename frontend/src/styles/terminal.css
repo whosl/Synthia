@@ -1,4 +1,4 @@
-﻿/* ========== TERMINAL PAGE — Dark Mode for Chat ========== */
+/* ========== TERMINAL PAGE — Dark Mode for Chat ========== */
 .terminal-page { padding: 0 !important; overflow: hidden; }
 
 .terminal-shell {
@@ -6,7 +6,7 @@
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  padding: 10px 12px 0;
+  padding: 10px 0 0;
   box-sizing: border-box;
 }
 
@@ -409,17 +409,30 @@
   text-overflow: ellipsis;
 }
 
-/* Chat Panel — center */
+/* Chat Panel — center; messages scroll on --term-bg, header/composer float */
 .chat-panel {
   grid-column: 1;
   grid-row: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
   background: var(--term-bg);
   overflow: hidden;
   position: relative;
+  --chat-panel-inset-x: 26px;
+}
+
+.chat-panel-header-anchor {
+  position: absolute;
+  left: var(--chat-panel-inset-x);
+  right: var(--chat-panel-inset-x);
+  top: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.chat-panel-header-anchor .chat-panel-header {
+  pointer-events: auto;
 }
 
 .chat-panel-scroll {
@@ -434,8 +447,32 @@
 
 .chat-panel-scroll.message-list,
 .chat-panel-scroll.timeline-view {
-  padding: 12px 14px 108px;
+  padding: 60px var(--chat-panel-inset-x) 108px;
   scrollbar-gutter: stable;
+}
+
+/* Fade messages under floating header */
+.chat-panel::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 64px;
+  pointer-events: none;
+  z-index: 11;
+  background: linear-gradient(
+    180deg,
+    var(--term-bg) 0%,
+    color-mix(in srgb, var(--term-bg) 88%, transparent) 55%,
+    transparent 100%
+  );
+}
+
+@supports not (background: color-mix(in srgb, white 50%, transparent)) {
+  .chat-panel::before {
+    background: linear-gradient(180deg, var(--term-bg) 0%, transparent 100%);
+  }
 }
 
 /* Fade messages into background above floating composer */
@@ -464,22 +501,23 @@
   }
 }
 
-/* Unified floating header — same chrome as .composer input */
+/* Floating header — same chrome as composer input */
 .chat-panel-header {
   flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  z-index: 20;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 8px;
-  margin: 0 8px;
+  margin: 0;
   padding: 0 8px 0 10px;
   height: 48px;
   min-height: 48px;
   box-sizing: border-box;
   overflow: hidden;
+  background: var(--term-surface);
+  border: 1px solid var(--term-border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
 }
 
 .chat-panel-header-title-block {
@@ -981,8 +1019,8 @@
 /* Composer — floating input + action (no outer chrome) */
 .composer-anchor {
   position: absolute;
-  left: 8px;
-  right: 8px;
+  left: var(--chat-panel-inset-x);
+  right: var(--chat-panel-inset-x);
   bottom: 24px;
   z-index: 10;
 }
@@ -1018,14 +1056,6 @@
   pointer-events: none;
 }
 
-.composer input,
-.chat-panel-header {
-  background: var(--term-surface);
-  border: 1px solid var(--term-border-soft);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
-}
-
 .composer input {
   flex: 1;
   min-width: 0;
@@ -1033,6 +1063,10 @@
   height: 44px;
   padding: 0 14px;
   color: var(--term-text);
+  background: var(--term-surface);
+  border: 1px solid var(--term-border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
 }
 
 .composer-input-wrap.has-status input {
@@ -1048,9 +1082,9 @@
 
 .composer .composer-action {
   flex-shrink: 0;
-  width: 44px;
-  min-width: 44px;
-  height: 44px;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -1306,11 +1340,14 @@
 
 @media (max-width: 520px) {
   .terminal-shell {
-    padding: 8px 10px 0;
+    padding: 8px 0 0;
+  }
+
+  .chat-panel {
+    --chat-panel-inset-x: 16px;
   }
 
   .chat-panel-header {
-    margin: 0 6px;
     padding: 0 6px 0 8px;
     gap: 6px;
     height: 48px;
@@ -1339,16 +1376,16 @@
 
   .chat-panel-scroll.message-list,
   .chat-panel-scroll.timeline-view {
-    padding: 10px 12px 100px;
+    padding: 56px var(--chat-panel-inset-x) 100px;
   }
 
   .chat-panel::after {
+    left: var(--chat-panel-inset-x);
+    right: var(--chat-panel-inset-x);
     height: 116px;
   }
 
   .composer-anchor {
-    left: 6px;
-    right: 6px;
     bottom: 18px;
   }
 

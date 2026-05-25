@@ -3,6 +3,17 @@
   gap: 10px;
 }
 
+.language-picker {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+}
+
+.language-picker .theme-option {
+  flex: 1;
+  grid-template-columns: auto 1fr;
+}
+
 .theme-option {
   display: grid;
   grid-template-columns: auto 1fr auto;

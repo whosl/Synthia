@@ -78,7 +78,7 @@ export default function SettingsPage() {
           <p className="muted" style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 12 }}>
             {t('settings.languageDesc')}
           </p>
-          <div className="theme-picker" role="radiogroup" aria-label={t('settings.language')}>
+          <div className="language-picker" role="radiogroup" aria-label={t('settings.language')}>
             {(['en', 'zh'] as const).map((lng) => (
               <label
                 key={lng}
@@ -93,11 +93,6 @@ export default function SettingsPage() {
                 />
                 <span className="theme-option-copy">
                   <strong>{t(`settings.lang${lng === 'en' ? 'En' : 'Zh'}`)}</strong>
-                </span>
-                <span className="theme-swatches" aria-hidden>
-                  <span className="theme-swatch" style={{ background: 'var(--accent)', display: 'grid', placeItems: 'center', color: 'white', fontSize: 11, fontWeight: 700 }}>
-                    {lng.toUpperCase()}
-                  </span>
                 </span>
               </label>
             ))}
