@@ -1,4 +1,4 @@
-﻿import { request, streamUrl } from './client'
+﻿import { getApiToken, request, streamUrl } from './client'
 import type { SessionEvent } from './types'
 import { PROTOCOL_VERSION } from '../lib/events/catalog'
 
@@ -37,5 +37,10 @@ export async function fetchEventProtocol(): Promise<{ protocol_version: number; 
 }
 
 export function getSessionStreamUrl(sessionId: string, afterSeq = 0) {
-  return streamUrl(`/sessions/${sessionId}/stream?after_seq=${afterSeq}`)
+  const base = `/sessions/${sessionId}/stream?after_seq=${afterSeq}`
+  const token = getApiToken()
+  if (!token) {
+    return streamUrl(base)
+  }
+  return streamUrl(`${base}&token=${encodeURIComponent(token)}`)
 }

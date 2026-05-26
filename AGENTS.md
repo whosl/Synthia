@@ -24,7 +24,7 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 4. **Agent features require LLM API key:** The `edagent ask` and `edagent ask-multi` commands require `ANTHROPIC_API_KEY` to be set (copy `.env.example` to `.env` and fill in your key).
 
-5. **Pre-existing test failures (3):** `test_e2e_cases.py::test_case6_remote_runner_check` (missing class export), `test_integration.py::test_vivado_runner_mock_synth_with_parse` and `test_vivado_runner_mock_synth_failure_parse` (tests expect keys not present in runner return dict). These are code issues, not env issues.
+5. **Phase 0 (done):** Backend T1–T8 + frontend D1–D7. `pytest -k "not agent_smoke"` → 426+ passed. API auth uses `~/.synthia/token` (skipped under pytest). Frontend: warm/claude-dark themes, topbar, StatusPill, ToolCallBlock, Composer, ⌘K palette.
 
 ### Active development branch
 

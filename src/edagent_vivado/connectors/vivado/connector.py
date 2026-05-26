@@ -147,10 +147,10 @@ class VivadoConnector(BaseConnector):
             if cap == "run_simulation":
                 return ToolRunResult(
                     request_id=req.request_id,
-                    success=True,
-                    exit_code=0,
-                    edagent_outcome="execution_succeeded",
-                    error="",
+                    success=False,
+                    exit_code=2,
+                    edagent_outcome="execution_failed",
+                    error="run_simulation capability not implemented yet (planned v1.0)",
                 )
             if cap in (
                 "report_timing_summary",

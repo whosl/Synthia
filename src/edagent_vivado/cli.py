@@ -22,7 +22,7 @@ from edagent_vivado.parsers.timing_parser import load_timing
 from edagent_vivado.parsers.utilization_parser import load_utilization
 from edagent_vivado.parsers.vivado_log_parser import load_and_parse
 
-app = typer.Typer(help="EdAgent-Vivado: RTL Debug Agent for Xilinx Vivado")
+app = typer.Typer(help="Synthia — FPGA/EDA Agent Workbench (Vivado RTL debugging)")
 console = Console()
 logger = logging.getLogger("edagent_vivado")
 
@@ -481,12 +481,24 @@ def web(
     port: int = typer.Option(8484, "--port", help="Listen port"),
 ) -> None:
     """Start the terminal-style web dashboard."""
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        tok = _os.environ.get("SYNTHIA_API_TOKEN", "").strip()
+        if not tok or len(tok) < 16:
+            console.print(
+                "[red]ERROR:[/] binding to non-localhost requires SYNTHIA_API_TOKEN (>=16 chars).\n"
+                "       Example: export SYNTHIA_API_TOKEN=$(openssl rand -hex 32)"
+            )
+            raise typer.Exit(2)
     try:
         import uvicorn
         from edagent_vivado.web.app import create_app
+        from edagent_vivado.web.auth import ensure_token
 
         app_obj = create_app()
-        console.print(f"[green]EdAgent-Vivado Terminal[/]")
+        if host in ("127.0.0.1", "localhost", "::1"):
+            tok = ensure_token()
+            console.print(f"[dim]API token:[/] ~/.synthia/token (len={len(tok)})")
+        console.print(f"[green]Synthia Workbench[/]")
         console.print(f"  Terminal UI: http://{host}:{port}/term")
         console.print(f"  API Health:  http://{host}:{port}/api/health")
         uvicorn.run(app_obj, host=host, port=port, log_level="info")

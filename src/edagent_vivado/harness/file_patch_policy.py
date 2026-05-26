@@ -10,6 +10,7 @@ from typing import Any
 from edagent_vivado.tools.patch_tools import apply_text_patch, parse_modify_payload
 
 __all__ = [
+    "PatchPathError",
     "is_file_patch_tool",
     "is_file_tool_queued_for_approval",
     "is_interaction_tool",
@@ -21,6 +22,20 @@ _TOOL_MESSAGE_REPR_RE = re.compile(
     r"^content=(.+?)(?:\s+name=|\s*$)",
     re.DOTALL,
 )
+
+
+class PatchPathError(ValueError):
+    """Raised when a patch path escapes the project root."""
+
+
+def _ensure_under_root(path: Path, root: Path) -> Path:
+    abs_root = root.resolve()
+    abs_path = (root / path).resolve() if not path.is_absolute() else path.resolve()
+    try:
+        abs_path.relative_to(abs_root)
+    except ValueError as exc:
+        raise PatchPathError(f"path {abs_path} is outside project root {abs_root}") from exc
+    return abs_path
 
 
 def normalize_tool_output(raw: Any) -> str:
@@ -71,9 +86,13 @@ def is_file_tool_queued_for_approval(tool_name: str, output: str | Any) -> bool:
     return False
 
 
-def apply_approved_file_item(fi) -> tuple[bool, str]:
-    """Apply one approved FileItem. Returns (ok, detail)."""
-    fp = Path(fi.path)
+def apply_approved_file_item(fi, *, project_root: str | Path = ".") -> tuple[bool, str]:
+    """Apply one approved FileItem within project_root sandbox."""
+    try:
+        fp = _ensure_under_root(Path(fi.path), Path(project_root))
+    except PatchPathError as exc:
+        return False, f"refused: {exc}"
+
     if fi.action == "create":
         if fp.exists():
             return False, f"refused: file already exists: {fi.path}"
@@ -96,6 +115,4 @@ def apply_approved_file_item(fi) -> tuple[bool, str]:
             fp.unlink()
         return True, "deleted"
 
-    fp.parent.mkdir(parents=True, exist_ok=True)
-    fp.write_text(fi.content)
-    return True, "written"
+    return False, f"refused: unknown action: {fi.action!r}"

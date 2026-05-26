@@ -28,6 +28,20 @@ const nav = [
   { key: 'nav.settings', path: '/settings', icon: Settings },
 ]
 
+function routeLabel(pathname: string, t: (k: string) => string): string {
+  if (pathname === '/' || pathname.startsWith('/projects')) return t('nav.projects')
+  if (pathname.startsWith('/term')) return 'Terminal'
+  if (pathname.startsWith('/sessions')) return t('nav.sessions')
+  if (pathname.startsWith('/runs')) return t('nav.runs')
+  if (pathname.startsWith('/reports')) return t('nav.reports')
+  if (pathname.startsWith('/approvals')) return t('nav.approvals')
+  if (pathname.startsWith('/monitor')) return t('nav.monitor')
+  if (pathname.startsWith('/connectors')) return t('nav.connectors')
+  if (pathname.startsWith('/settings')) return t('nav.settings')
+  if (pathname.startsWith('/knowledge') || pathname.startsWith('/evolution')) return t('nav.evolution')
+  return pathname
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
   const location = useLocation()
@@ -36,7 +50,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const toggleNavCollapsed = useShellStore((s) => s.toggleNavCollapsed)
 
   return (
-    <div className={`app-shell ${navCollapsed ? 'nav-collapsed' : ''}${isTerminalRoute ? ' shell-terminal' : ''}`}>
+    <div
+      className={[
+        'app-shell',
+        navCollapsed ? 'nav-collapsed' : '',
+        isTerminalRoute ? 'shell-terminal' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <header className="app-topbar">
+        <div className="topbar-brand">Synthia</div>
+        <div className="topbar-context">{routeLabel(location.pathname, t)}</div>
+        <div className="topbar-status">
+          <span className="muted" style={{ fontSize: 11 }}>
+            ⌘K
+          </span>
+        </div>
+      </header>
+
       <aside className="nav-rail" aria-label={t('nav.projects')}>
         <div className="nav-top">
           <div className="nav-header">
@@ -81,6 +113,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="nav-version">{t('app.version')}</div>
         </div>
       </aside>
+
       <main className="app-main">{children}</main>
     </div>
   )

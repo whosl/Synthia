@@ -15,7 +15,7 @@ def test_partial_approval_applies_subset(tmp_path):
         FileItem(path=str(a), content="module a;", action="create"),
         FileItem(path=str(b), content="module b;", action="create"),
     ]
-    applied, skipped = apply_approved_files(files, [str(a)])
+    applied, skipped = apply_approved_files(files, [str(a)], project_root=tmp_path)
     assert applied == [str(a)]
     assert skipped == [str(b)]
     assert a.read_text() == "module a;"
@@ -37,7 +37,7 @@ def test_approve_all_indices_applies_duplicate_paths(tmp_path: Path):
             action="modify",
         ),
     ]
-    applied, skipped = apply_approved_files(files, approved_indices=[0, 1])
+    applied, skipped = apply_approved_files(files, approved_indices=[0, 1], project_root=tmp_path)
     assert applied == [str(f), str(f)]
     assert skipped == []
     assert "wire a, b, c;" in f.read_text()

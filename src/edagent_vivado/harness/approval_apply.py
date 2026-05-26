@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from edagent_vivado.harness.approval_outcomes import (
     OUTCOME_APPROVED,
@@ -22,9 +23,34 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "apply_approved_files",
     "format_approval_tool_output",
+    "resolve_project_root",
     "should_continue_after_approval",
     "continuation_prompt",
 ]
+
+
+def resolve_project_root(
+    *,
+    session_id: str | None = None,
+    project_id: str | None = None,
+) -> Path:
+    """Best-effort project root for patch sandbox (defaults to cwd)."""
+    from edagent_vivado.repository.db import get_db
+    from edagent_vivado.repository.project_scope import project_id_for_session
+    from edagent_vivado.repository.store import project_get, session_get
+
+    pid = project_id
+    if not pid and session_id:
+        sess = session_get(session_id)
+        if sess:
+            pid = sess.get("project_id")
+        if not pid:
+            pid = project_id_for_session(get_db(), session_id)
+    if pid:
+        proj = project_get(pid)
+        if proj and proj.get("root_path"):
+            return Path(proj["root_path"])
+    return Path(".")
 
 
 def _resolve_approved_indices(
@@ -43,6 +69,7 @@ def apply_approved_files(
     approved_paths: list[str] | None = None,
     *,
     approved_indices: list[int] | None = None,
+    project_root: str | Path = ".",
 ) -> tuple[list[str], list[str]]:
     """Write approved file changes to disk. Returns (applied_paths, skipped_paths) per change row."""
     selected = _resolve_approved_indices(files, approved_paths, approved_indices)
@@ -52,7 +79,7 @@ def apply_approved_files(
         if i not in selected:
             skipped.append(fi.path)
             continue
-        ok, detail = apply_approved_file_item(fi)
+        ok, detail = apply_approved_file_item(fi, project_root=project_root)
         if ok:
             applied.append(fi.path)
         else:

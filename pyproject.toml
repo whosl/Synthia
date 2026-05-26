@@ -41,6 +41,8 @@ all = [
 
 [project.scripts]
 edagent = "edagent_vivado.cli:app"
+synthia = "edagent_vivado.cli:app"
+synthia-web = "edagent_vivado.web.dashboard:start_server"
 edagent-web = "edagent_vivado.web.dashboard:start_server"
 
 [tool.setuptools.packages.find]

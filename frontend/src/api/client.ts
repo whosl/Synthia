@@ -2,6 +2,20 @@
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api/v1'
 
+const TOKEN_KEY = 'synthia.api.token'
+
+export function getApiToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setApiToken(token: string): void {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token)
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
+}
+
 export class ApiError extends Error {
   status: number
   body: ApiErrorShape | string | null
@@ -16,10 +30,12 @@ export class ApiError extends Error {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getApiToken()
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       ...(init?.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   })

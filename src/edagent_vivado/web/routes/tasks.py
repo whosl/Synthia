@@ -1,0 +1,892 @@
+"""API routes: tasks."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os as _os
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
+from edagent_vivado.events.envelope import enrich_wire_event
+from edagent_vivado.harness.execution_approval import (
+    is_vivado_execution_approved,
+    set_vivado_execution_approval,
+)
+from edagent_vivado.harness.file_patch_policy import (
+    is_file_patch_tool,
+    is_file_tool_queued_for_approval,
+    is_interaction_tool,
+    normalize_tool_output,
+)
+from edagent_vivado.projects.snapshot import snapshot_manifest_path
+from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
+from edagent_vivado.repository.store import (
+    approval_get,
+    approval_list,
+    approval_update,
+    artifact_list,
+    capability_list,
+    connector_get,
+    connector_list,
+    context_package_get,
+    context_package_items,
+    context_packages_for_run,
+    context_packages_for_session,
+    event_list,
+    event_list_for_run,
+    knowledge_source_list,
+    kb_candidate_approve,
+    kb_candidate_get,
+    kb_candidate_list,
+    kb_candidate_merge,
+    kb_candidate_reject,
+    memory_latest,
+    memory_list,
+    message_create,
+    message_list,
+    monitor_overview,
+    monitor_retention_cleanup,
+    parsed_report_get,
+    parsed_report_list,
+    parsed_report_trends,
+    patch_proposal_get,
+    patch_proposal_list,
+    patch_proposal_update,
+    problem_list,
+    project_create,
+    project_delete,
+    project_get,
+    project_is_archived,
+    project_list,
+    project_update,
+    retrieval_audit_get,
+    retrieval_audit_items,
+    retrieval_audits_for_run,
+    retrieval_audits_for_session,
+    run_create,
+    run_get,
+    run_list,
+    run_step_list,
+    run_update,
+    session_create,
+    session_delete,
+    session_get,
+    session_list,
+    session_update,
+    task_active_for_session,
+    task_create,
+    task_get,
+    task_update,
+    toolcall_list,
+    usage_create,
+    usage_list,
+    usage_totals_for_session,
+    vivado_command_list,
+)
+from edagent_vivado.tools.patch_tools import is_patch_approved, set_patch_approval
+from edagent_vivado.web.schemas.tasks import StartTaskReq
+from edagent_vivado.web.api_shared import (
+    _archive_task_canvas,
+    _blocked_tool_runs,
+    _early_blocked_tool_runs,
+    _early_completed_toolcall_ids,
+    _ensure_project_persona,
+    _flush_pending_file_batch,
+    _langgraph_tool_run_key,
+    _memory_pipeline_on_message,
+    _publish,
+    _stream_queues,
+    _vivado_reject_run_keys,
+    event_create,
+)
+
+router = APIRouter(tags=["tasks"])
+
+@router.post("/sessions/{session_id}/tasks")
+async def api_task_start(session_id: str, req: StartTaskReq):
+    sess = session_get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if sess.get("archived_at"):
+        raise HTTPException(403, "session is archived")
+    if sess.get("project_id"):
+        project = project_get(sess["project_id"])
+        if project_is_archived(project):
+            raise HTTPException(403, "project is archived")
+    active = task_active_for_session(session_id)
+    if active:
+        return JSONResponse({
+            "error": "session_task_running", "session_id": session_id,
+            "task_id": active["id"], "state": active["state"],
+        }, status_code=409)
+    # Save user message
+    msg = message_create(session_id, "user", req.question)
+    _memory_pipeline_on_message(session_id, role="user")
+    event_create(session_id, "message.user.created", {"message_id": msg["id"], "text": req.question})
+    # Create task
+    t = task_create(session_id, msg["id"])
+    if req.metadata:
+        try:
+            task_update(t["id"], metadata_json=json.dumps(req.metadata, ensure_ascii=False))
+        except Exception:
+            pass
+    task_update(t["id"], state="running", updated_at=int(time.time()))
+    session_update(session_id, status="running")
+    event_create(session_id, "task.created", {"task_id": t["id"]}, task_id=t["id"])
+    event_create(session_id, "task.started", {"task_id": t["id"]}, task_id=t["id"])
+
+    # Start agent in background
+    from edagent_vivado.agent.graph import create_agent
+    from langchain_core.messages import HumanMessage
+
+    async def _run_agent():
+        run = None
+        arm_token = None
+        arm_assignments: list[dict] = []
+        try:
+            parent_run = ""
+            if req.metadata:
+                parent_run = str(req.metadata.get("parent_run_id") or "")
+            run = run_create(
+                "task",
+                f"task:{t['id']}",
+                session_id=session_id,
+                task_id=t["id"],
+                parent_run_id=parent_run,
+            )
+            try:
+                from edagent_vivado.harness.run_workspace import ensure_run_workspace
+
+                ensure_run_workspace(run["id"])
+            except Exception:
+                pass
+            event_create(session_id, "run.started", {"run_id": run["id"], "run_type": "task"},
+                         task_id=t["id"], run_id=run["id"])
+            from edagent_vivado.agent.planner import plan_task, plan_to_json
+
+            manifest_path = req.manifest_path or snapshot_manifest_path(sess)
+            plan_steps = plan_task(
+                req.question,
+                project_id=sess.get("project_id") or "",
+                session_id=session_id,
+                manifest_path=manifest_path,
+            )
+            if plan_steps:
+                try:
+                    prev_meta_raw = (task_get(t["id"]) or {}).get("metadata_json") or "{}"
+                    try:
+                        prev_meta = json.loads(prev_meta_raw) or {}
+                    except json.JSONDecodeError:
+                        prev_meta = {}
+                    prev_meta["plan"] = json.loads(plan_to_json(plan_steps))
+                    task_update(t["id"], metadata_json=json.dumps(prev_meta))
+                except Exception:
+                    pass
+                event_create(
+                    session_id,
+                    "task.plan.generated",
+                    {"task_id": t["id"], "plan": json.loads(plan_to_json(plan_steps))},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+            from edagent_vivado.agent.context import build_agent_context
+            ctx = build_agent_context(
+                session_id=session_id,
+                task_id=t["id"],
+                run_id=run["id"],
+                question=req.question,
+                manifest_path=manifest_path,
+            )
+            event_create(session_id, "context.package.created", {
+                "context_package_id": ctx.context_package["id"],
+                "retrieval_audit_id": ctx.retrieval_audit["id"] if ctx.retrieval_audit else None,
+                "token_counts": ctx.token_counts,
+            }, task_id=t["id"], run_id=run["id"])
+            # SE-PR5 — assign A/B trial arms for this task BEFORE the agent boots
+            # so create_agent / resolvers see the right overlay payloads.
+            try:
+                from edagent_vivado.evolution import (
+                    assign_arms_for_task,
+                    set_task_arms,
+                    task_arms_summary,
+                )
+
+                arms = assign_arms_for_task(
+                    project_id=sess.get("project_id") or None,
+                    task_id=t["id"],
+                )
+                if arms:
+                    arm_token = set_task_arms(arms)
+                    arm_assignments = task_arms_summary(arms)
+                    for entry in arm_assignments:
+                        event_create(
+                            session_id,
+                            "evolution.trial.assigned",
+                            entry,
+                            task_id=t["id"],
+                            run_id=run["id"] if run else "",
+                        )
+                    # Persist on the task so collect_task_metrics can read it back.
+                    try:
+                        from edagent_vivado.repository.store import task_update as _tu
+
+                        prev_meta_raw = (task_get(t["id"]) or {}).get("metadata_json") or "{}"
+                        try:
+                            prev_meta = json.loads(prev_meta_raw) or {}
+                        except json.JSONDecodeError:
+                            prev_meta = {}
+                        prev_meta["evolution_arms"] = arm_assignments
+                        _tu(t["id"], metadata_json=json.dumps(prev_meta))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            agent = create_agent(project_id=sess.get("project_id") or None)
+            config = {"configurable": {"thread_id": f"session:{session_id}"}, "recursion_limit": 1000}
+            from edagent_vivado.harness.run_context import set_agent_run_context
+            set_agent_run_context(session_id, t["id"], run["id"])
+            from edagent_vivado.harness.observed_tool import ObservedToolRunner
+
+            tool_runner = ObservedToolRunner(session_id, t["id"], run["id"], event_create)
+            from edagent_vivado.harness.assistant_stream import AssistantStreamManager
+
+            stream_mgr = AssistantStreamManager(t["id"])
+            full_response = ""
+            continuation_msg: HumanMessage | None = None
+            approval_round = 0
+            max_approval_rounds = 6
+
+            def _emit_stream_completed(stream_id: str, *, stopped: bool = False) -> None:
+                snap = stream_mgr.text_for(stream_id)
+                event_create(
+                    session_id,
+                    "assistant.stream.completed",
+                    {"stream_id": stream_id, "stopped": stopped},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+                if snap:
+                    event_create(
+                        session_id,
+                        "message.assistant.snapshot",
+                        {"stream_id": stream_id, "text": snap},
+                        task_id=t["id"],
+                        run_id=run["id"],
+                    )
+
+            while approval_round < max_approval_rounds:
+                if approval_round > 0:
+                    closed_stream, _ = stream_mgr.rotate_after_tool()
+                    _emit_stream_completed(closed_stream)
+                event_create(
+                    session_id,
+                    "assistant.stream.opened",
+                    {
+                        "stream_id": stream_mgr.current_stream_id,
+                        "segment_index": stream_mgr.segment_index,
+                    },
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+                inline_approval_results: list[str] = []
+                agent_input = (
+                    HumanMessage(content=ctx.prompt)
+                    if approval_round == 0
+                    else continuation_msg  # type: ignore[assignment]
+                )
+                async for evt in agent.astream_events(
+                    {"messages": [agent_input]}, config=config, version="v2",
+                ):
+                    latest_task = task_get(t["id"])
+                    if latest_task and latest_task.get("stop_requested"):
+                        if full_response:
+                            _emit_stream_completed(stream_mgr.current_stream_id, stopped=True)
+                            message_create(session_id, "assistant", full_response, task_id=t["id"], stopped=True, partial=True)
+                        task_update(t["id"], state="stopped", finished_at=int(time.time()))
+                        session_update(session_id, status="idle")
+                        if run: run_update(run["id"], state="stopped", finished_at=int(time.time()),
+                                          elapsed_ms=int((time.time() - run["started_at"]) * 1000))
+                        event_create(session_id, "message.assistant.stopped", {"text": full_response[-200:]},
+                                     task_id=t["id"], run_id=run["id"])
+                        event_create(session_id, "task.stopped", {"task_id": t["id"]}, task_id=t["id"], run_id=run["id"])
+                        return
+                    kind = evt["event"]
+                    if kind == "on_tool_start":
+                        closed_stream, _new_stream = stream_mgr.rotate_after_tool()
+                        _emit_stream_completed(closed_stream)
+                        event_create(
+                            session_id,
+                            "assistant.stream.opened",
+                            {
+                                "stream_id": stream_mgr.current_stream_id,
+                                "segment_index": stream_mgr.segment_index,
+                            },
+                            task_id=t["id"],
+                            run_id=run["id"],
+                        )
+                        tool_name_start = evt.get("name", "")
+                        tool_input = evt.get("data", {}).get("input", {})
+                        run_key = _langgraph_tool_run_key(evt)
+                        # Flush batched file ops before any non-file tool
+                        if not is_patch_approved():
+                            if not is_file_patch_tool(tool_name_start):
+                                pre_flush = await _flush_pending_file_batch(session_id, t["id"], run, t)
+                                if pre_flush:
+                                    inline_approval_results.append(pre_flush)
+                        from edagent_vivado.harness.vivado_agent_registry import (
+                            is_vivado_execution_tool,
+                            vivado_tool_spec,
+                        )
+                        from edagent_vivado.harness.vivado_hitl import request_vivado_tool_approval
+
+                        vivado_blocked_early = False
+                        if is_vivado_execution_tool(tool_name_start) and not is_vivado_execution_approved():
+                            approved = await request_vivado_tool_approval(
+                                tool_name_start,
+                                tool_input,
+                                session_id=session_id,
+                                task_id=t["id"],
+                                run_id=run["id"],
+                                event_create=event_create,
+                            )
+                            if not approved:
+                                spec = vivado_tool_spec(tool_name_start)
+                                from edagent_vivado.harness.approval_outcomes import (
+                                    SCOPE_VIVADO_SYNTH,
+                                    format_user_rejection,
+                                )
+
+                                blocked_scope = spec.scope if spec else SCOPE_VIVADO_SYNTH
+                                lg_key = run_key or f"vivado-reject:{t['id']}:{tool_name_start}"
+                                from edagent_vivado.harness.run_context import set_tool_thread_context
+
+                                set_tool_thread_context(session_id, t["id"], run["id"])
+                                tcid = tool_runner.on_tool_rejected(
+                                    lg_key,
+                                    tool_name_start,
+                                    tool_input,
+                                    blocked_scope=blocked_scope,
+                                )
+                                _early_completed_toolcall_ids.add(tcid)
+                                _blocked_tool_runs[lg_key] = blocked_scope
+                                if run_key:
+                                    _blocked_tool_runs[run_key] = blocked_scope
+                                    tool_runner.tool_ids[run_key] = tcid
+                                _vivado_reject_run_keys.add(lg_key)
+                                if run_key:
+                                    _vivado_reject_run_keys.add(run_key)
+                                vivado_blocked_early = True
+                                inline_approval_results.append(
+                                    format_user_rejection(blocked_scope, tool_name=tool_name_start)
+                                )
+                        if not vivado_blocked_early:
+                            from edagent_vivado.harness.run_context import set_tool_thread_context
+
+                            set_tool_thread_context(session_id, t["id"], run["id"])
+                            tool_runner.on_tool_start(
+                                run_key or str(evt.get("run_id", "")),
+                                tool_name_start,
+                                tool_input,
+                            )
+                    elif kind == "on_tool_end":
+                        output = normalize_tool_output(evt.get("data", {}).get("output", ""))[:2500]
+                        run_key = _langgraph_tool_run_key(evt)
+                        tool_name = evt.get("name", "")
+                        from edagent_vivado.harness.run_context import clear_tool_thread_context
+                        from edagent_vivado.harness.vivado_agent_registry import is_vivado_execution_tool
+
+                        tcid_early = tool_runner.tool_ids.get(run_key, "")
+                        is_vivado_reject = (
+                            run_key in _vivado_reject_run_keys
+                            or tcid_early in _early_completed_toolcall_ids
+                        )
+                        if is_vivado_reject:
+                            _vivado_reject_run_keys.discard(run_key)
+                            if tcid_early:
+                                _early_completed_toolcall_ids.discard(tcid_early)
+                            _blocked_tool_runs.pop(run_key, None)
+                            clear_tool_thread_context()
+                            continue
+                        blocked_scope = _blocked_tool_runs.pop(run_key, None)
+                        was_blocked = blocked_scope is not None
+                        tcid = tool_runner.tool_ids.get(run_key, "")
+                        if was_blocked and is_vivado_execution_tool(tool_name):
+                            from edagent_vivado.harness.approval_outcomes import format_user_rejection
+
+                            output = format_user_rejection(
+                                blocked_scope or "",
+                                tool_name=tool_name,
+                            )
+                        queue_file_patch = (
+                            not was_blocked
+                            and is_file_patch_tool(tool_name)
+                            and is_file_tool_queued_for_approval(tool_name, output)
+                            and not is_patch_approved()
+                        )
+                        handle_interaction_tool = (
+                            not was_blocked
+                            and is_interaction_tool(tool_name)
+                            and not is_patch_approved()
+                        )
+                        # Intercept interaction tools — create interaction and wait for user
+                        if queue_file_patch or handle_interaction_tool:
+                            from edagent_vivado.harness.interaction import (
+                                create_interaction, wait_for_response, InteractionType, FileItem, InputField,
+                                append_file_to_batch, take_file_batch,
+                            )
+                            tool_input = evt.get("data", {}).get("input", {})
+                            if queue_file_patch and tool_name in ("create_file_tool", "propose_patch_tool"):
+                                if tool_name == "create_file_tool":
+                                    fi = FileItem(
+                                        path=tool_input.get("file_path", ""),
+                                        content=tool_input.get("content", ""),
+                                        description=tool_input.get("description", ""),
+                                        action="create",
+                                    )
+                                    title = "Create File"
+                                    message = tool_input.get("description", f"Create {tool_input.get('file_path', '')}")
+                                else:
+                                    fi = FileItem(
+                                        path=tool_input.get("file_path", ""),
+                                        content=(
+                                            f"--- OLD ---\n{tool_input.get('old_text', '')}\n"
+                                            f"--- NEW ---\n{tool_input.get('new_text', '')}"
+                                        ),
+                                        description=tool_input.get("description", ""),
+                                        action="modify",
+                                    )
+                                    title = "Modify File"
+                                    message = tool_input.get("description", f"Modify {tool_input.get('file_path', '')}")
+                                n = append_file_to_batch(session_id, t["id"], fi, title=title, message=message)
+                                output = f"QUEUED_FOR_APPROVAL ({n} file(s) in batch)"
+                            elif tool_name == "request_approval":
+                                batched, batch_title, batch_msg = take_file_batch(session_id, t["id"])
+                                extra = [
+                                    FileItem(
+                                        path=f.get("path", ""),
+                                        content=f.get("content", ""),
+                                        description=f.get("description", ""),
+                                        action=f.get("action", "create"),
+                                    )
+                                    for f in (tool_input.get("files") or [])
+                                ]
+                                files = batched + extra
+                                from edagent_vivado.harness.approval_payload import (
+                                    build_file_approval_payload,
+                                    payload_to_reason_json,
+                                )
+                                approval_title = tool_input.get("title", batch_title or "File Approval Required")
+                                approval_msg = tool_input.get("message", batch_msg)
+                                file_payload = build_file_approval_payload(
+                                    approval_title,
+                                    approval_msg,
+                                    [{"path": f.path, "description": f.description, "action": f.action} for f in files],
+                                )
+                                interaction = create_interaction(
+                                    InteractionType.APPROVAL, session_id, t["id"],
+                                    title=approval_title,
+                                    message="",
+                                    reason=payload_to_reason_json(file_payload),
+                                    files=files,
+                                )
+                                try:
+                                    from edagent_vivado.harness.approval_bridge import mirror_interaction_to_approval
+
+                                    mirror_interaction_to_approval(
+                                        interaction, run_id=run["id"],
+                                    )
+                                except Exception:
+                                    pass
+                                event_create(session_id, "interaction.requested", interaction.to_dict(),
+                                             task_id=t["id"], run_id=run["id"])
+                                responded = await wait_for_response(interaction.id, task_id=t["id"])
+                                if responded is None:
+                                    from edagent_vivado.repository.store import task_get as _task_get
+
+                                    if _task_get(t["id"]) and _task_get(t["id"]).get("stop_requested"):
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            SCOPE_FILE_CHANGES,
+                                            format_user_rejection,
+                                        )
+                                        output = format_user_rejection(
+                                            SCOPE_FILE_CHANGES, detail="Task stopped by user."
+                                        )
+                                    else:
+                                        output = "TIMEOUT: No user response"
+                                elif responded:
+                                    if responded.interaction_type == InteractionType.APPROVAL:
+                                        if responded.status.value == "approved":
+                                            from edagent_vivado.harness.approval_apply import (
+                                                apply_approved_files,
+                                                format_approval_tool_output,
+                                                resolve_project_root,
+                                            )
+                                            _root = resolve_project_root(session_id=session_id)
+                                            resp = responded.response if isinstance(responded.response, dict) else {}
+                                            approved_indices = resp.get("approved_indices")
+                                            if approved_indices is not None:
+                                                applied, skipped = apply_approved_files(
+                                                    files,
+                                                    approved_indices=[int(i) for i in approved_indices],
+                                                    project_root=_root,
+                                                )
+                                            else:
+                                                approved_paths = resp.get("approved_files") or [fi.path for fi in files]
+                                                applied, skipped = apply_approved_files(
+                                                    files, approved_paths, project_root=_root,
+                                                )
+                                            output = format_approval_tool_output(
+                                                applied, skipped, total_changes=len(files),
+                                            )
+                                        else:
+                                            from edagent_vivado.harness.approval_outcomes import (
+                                                SCOPE_FILE_CHANGES,
+                                                format_user_rejection,
+                                            )
+                                            output = format_user_rejection(SCOPE_FILE_CHANGES)
+                                    else:
+                                        from edagent_vivado.harness.interaction import InteractionStatus
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            OUTCOME_APPROVED,
+                                            SCOPE_INPUT_REQUEST,
+                                            format_tool_outcome,
+                                            format_user_rejection,
+                                        )
+                                        if responded.status == InteractionStatus.REJECTED:
+                                            output = format_user_rejection(SCOPE_INPUT_REQUEST)
+                                        else:
+                                            resp = responded.response if isinstance(responded.response, dict) else {}
+                                            output = format_tool_outcome(
+                                                OUTCOME_APPROVED,
+                                                "User submitted the requested information.",
+                                                scope=SCOPE_INPUT_REQUEST,
+                                                ran=False,
+                                                success=True,
+                                                extra=resp,
+                                            )
+                            elif handle_interaction_tool and tool_name == "request_user_input":
+                                await _flush_pending_file_batch(session_id, t["id"], run, t)
+                                fields = [InputField(id=f.get("id",""), label=f.get("label",""),
+                                                    field_type=f.get("field_type","text"),
+                                                    options=f.get("options"), placeholder=f.get("placeholder",""),
+                                                    recommendations=f.get("recommendations"), required=f.get("required",True))
+                                          for f in (tool_input.get("fields") or [])]
+                                interaction = create_interaction(
+                                    InteractionType.INPUT_REQUEST, session_id, t["id"],
+                                    title=tool_input.get("title", "Information Required"),
+                                    message=tool_input.get("message", ""),
+                                    fields=fields,
+                                )
+                                event_create(session_id, "interaction.requested", interaction.to_dict(),
+                                             task_id=t["id"], run_id=run["id"])
+                                responded = await wait_for_response(interaction.id, task_id=t["id"])
+                                if responded is None:
+                                    from edagent_vivado.repository.store import task_get as _task_get
+
+                                    if _task_get(t["id"]) and _task_get(t["id"]).get("stop_requested"):
+                                        from edagent_vivado.harness.approval_outcomes import (
+                                            SCOPE_INPUT_REQUEST,
+                                            format_user_rejection,
+                                        )
+                                        output = format_user_rejection(
+                                            SCOPE_INPUT_REQUEST, detail="Task stopped by user."
+                                        )
+                                    else:
+                                        output = "TIMEOUT: No user response"
+                                elif responded:
+                                    output = json.dumps(responded.response, ensure_ascii=False)
+                        if tcid:
+                            tool_runner.on_tool_end(
+                                run_key,
+                                tool_name,
+                                output,
+                                blocked=was_blocked,
+                                blocked_scope=blocked_scope,
+                            )
+                        if (
+                            tool_name in ("request_approval", "request_user_input", "create_file_tool", "propose_patch_tool")
+                            and output
+                            and not is_patch_approved()
+                        ):
+                            from edagent_vivado.harness.approval_apply import should_continue_after_approval
+                            if should_continue_after_approval(output) or output.startswith("{"):
+                                inline_approval_results.append(output)
+                        clear_tool_thread_context()
+                    elif kind in ("on_chat_model_end", "on_llm_end"):
+                        usage_meta = {}
+                        data = evt.get("data") or {}
+                        output = data.get("output")
+                        if output is not None:
+                            usage_meta = getattr(output, "usage_metadata", None) or {}
+                            if not usage_meta and hasattr(output, "response_metadata"):
+                                usage_meta = (output.response_metadata or {}).get("usage") or {}
+                        if not usage_meta:
+                            usage_meta = data.get("usage_metadata") or data.get("usage") or {}
+                        inp = int(usage_meta.get("input_tokens") or usage_meta.get("prompt_tokens") or 0)
+                        out_tok = int(usage_meta.get("output_tokens") or usage_meta.get("completion_tokens") or 0)
+                        if (inp or out_tok) and run:
+                            model_name = _os.environ.get("EDAGENT_MODEL", "unknown")
+                            usage_create(
+                                run_id=run["id"],
+                                model=model_name,
+                                session_id=session_id,
+                                task_id=t["id"],
+                                provider="anthropic_compatible",
+                                model_role="primary",
+                                input_tokens=inp,
+                                output_tokens=out_tok,
+                                total_tokens=inp + out_tok,
+                                usage_source="provider" if inp else "estimated",
+                            )
+                            event_create(
+                                session_id,
+                                "llm.usage",
+                                {"input_tokens": inp, "output_tokens": out_tok, "model": model_name},
+                                task_id=t["id"],
+                                run_id=run["id"],
+                            )
+                    elif kind == "on_chat_model_stream":
+                        chunk = evt["data"].get("chunk", {})
+                        reasoning = ""
+                        if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
+                            reasoning = chunk.additional_kwargs.get("reasoning_content") or ""
+                        if reasoning:
+                            event_create(session_id, "reasoning.delta", {"text": reasoning},
+                                         task_id=t["id"], run_id=run["id"])
+                            continue
+                        if hasattr(chunk, "content") and chunk.content:
+                            c = chunk.content
+                            text = ""
+                            if isinstance(c, str): text = c
+                            elif isinstance(c, list):
+                                text = "".join(b.get("text","") for b in c if isinstance(b, dict) and b.get("type")=="text")
+                            if text:
+                                full_response += text
+                                stream_mgr.append_delta(text)
+                                event_create(
+                                    session_id,
+                                    "message.assistant.delta",
+                                    {"text": text, "stream_id": stream_mgr.current_stream_id},
+                                    task_id=t["id"],
+                                    run_id=run["id"],
+                                )
+
+                # End of one agent round — flush any queued file approvals
+                flush_output = None
+                if not is_patch_approved():
+                    flush_output = await _flush_pending_file_batch(session_id, t["id"], run, t)
+
+                from edagent_vivado.harness.approval_apply import (
+                    should_continue_after_approval,
+                    continuation_prompt,
+                )
+                follow_up = flush_output or (inline_approval_results[-1] if inline_approval_results else "")
+                from edagent_vivado.harness.approval_outcomes import parse_tool_outcome, OUTCOME_USER_REJECTED
+
+                follow_parsed = parse_tool_outcome(follow_up) if follow_up else {}
+                is_user_reject = follow_parsed.get("edagent_outcome") == OUTCOME_USER_REJECTED
+                if (
+                    follow_up
+                    and should_continue_after_approval(follow_up)
+                    and approval_round < max_approval_rounds - 1
+                    and not (is_user_reject and full_response.strip())
+                ):
+                    continuation_msg = HumanMessage(content=continuation_prompt(follow_up))
+                    approval_round += 1
+                    event_create(
+                        session_id,
+                        "agent.continuation",
+                        {"reason": "approval_completed", "approval_output": follow_up[:500]},
+                        task_id=t["id"],
+                        run_id=run["id"],
+                    )
+                    continue
+                break
+
+            latest_task = task_get(t["id"])
+            if latest_task and latest_task.get("stop_requested"):
+                return
+
+            # Save assistant message (denormalized snapshot for search/export — chat timeline uses events)
+            _emit_stream_completed(stream_mgr.current_stream_id)
+            if full_response:
+                message_create(session_id, "assistant", full_response, task_id=t["id"])
+                _memory_pipeline_on_message(session_id, role="assistant")
+                event_create(
+                    session_id,
+                    "message.assistant.completed",
+                    {"stream_id": stream_mgr.current_stream_id},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+                from edagent_vivado.agent.summary import get_summary_model
+                previous = memory_latest(session_id)
+                recent = message_list(session_id, limit=20)
+                summary = await get_summary_model().summarize_session(
+                    previous.get("summary", "") if previous else "",
+                    recent,
+                    [tc.get("output_summary") or tc.get("input_summary") or tc.get("tool_name") for tc in toolcall_list(run_id=run["id"])],
+                )
+                from edagent_vivado.repository.store import memory_create
+                latest_event_seq = event_list(session_id, after_seq=0, limit=1_000_000)[-1]["seq"]
+                mem = memory_create(session_id, summary.summary, task_id=t["id"], summary_model=summary.model,
+                                    source_message_until=recent[-1]["id"] if recent else "",
+                                    source_event_until_seq=latest_event_seq)
+                event_create(session_id, "memory.updated", {"memory_id": mem["id"], "summary": summary.summary[:240]},
+                             task_id=t["id"], run_id=run["id"])
+            else:
+                # Tool-only turn — close UI turn + keep messages/memory chain continuous
+                placeholder = "[tool-only turn — executed via tools, no prose reply]"
+                message_create(session_id, "assistant", placeholder, task_id=t["id"])
+                _memory_pipeline_on_message(session_id, role="assistant")
+                event_create(
+                    session_id,
+                    "message.assistant.completed",
+                    {"stream_id": stream_mgr.current_stream_id, "empty": True},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+            # Complete
+            task_update(t["id"], state="done", finished_at=int(time.time()))
+            _archive_task_canvas(t["id"])
+            session_update(session_id, status="idle")
+            if run: run_update(run["id"], state="done", finished_at=int(time.time()),
+                              elapsed_ms=int((time.time() - run["started_at"]) * 1000))
+            event_create(session_id, "run.completed", {"run_id": run["id"] if run else None},
+                         task_id=t["id"], run_id=run["id"] if run else "")
+            event_create(session_id, "task.done", {"task_id": t["id"]}, task_id=t["id"])
+
+            # SPEC §22.7 — write a task-scope metric snapshot, then refresh rolling
+            # aggregates. Failures must never propagate into the agent loop.
+            try:
+                from edagent_vivado.evolution import (
+                    aggregate_rolling,
+                    collect_task_metrics,
+                    run_generators,
+                )
+
+                project_id_for_metrics: str | None = None
+                if sess.get("project_id"):
+                    project_id_for_metrics = sess["project_id"]
+                collect_task_metrics(
+                    session_id=session_id,
+                    task_id=t["id"],
+                    run_id=run["id"] if run else "",
+                    event_sink=event_create,
+                )
+                if project_id_for_metrics:
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_10",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+                    aggregate_rolling(
+                        project_id_for_metrics,
+                        "rolling_50",
+                        event_sink=event_create,
+                        session_id=session_id,
+                        task_id=t["id"],
+                    )
+                # SPEC §22.6 — Level-0 candidate generators (always pending, never auto-apply).
+                run_generators(
+                    project_id=project_id_for_metrics,
+                    session_id=session_id,
+                    task_id=t["id"],
+                    event_sink=event_create,
+                )
+
+                # SE-PR5 — give every trial this task contributed to a chance to decide.
+                if arm_assignments:
+                    from edagent_vivado.evolution import maybe_decide_trial
+
+                    seen_trials = {a.get("trial_id") for a in arm_assignments if a.get("trial_id")}
+                    for tid in seen_trials:
+                        try:
+                            maybe_decide_trial(tid, event_sink=event_create)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            finally:
+                # Always clear the per-task arm assignment so a follow-up
+                # task in the same process starts from a clean slate.
+                try:
+                    if arm_token is not None:
+                        from edagent_vivado.evolution import reset_task_arms
+
+                        reset_task_arms(arm_token)
+                except Exception:
+                    pass
+        except Exception as e:
+            task_update(t["id"], state="error", error=str(e), finished_at=int(time.time()))
+            _archive_task_canvas(t["id"])
+            session_update(session_id, status="error")
+            if run: run_update(run["id"], state="error", error=str(e), finished_at=int(time.time()))
+            if run:
+                event_create(session_id, "run.error", {"run_id": run["id"], "error": str(e)}, task_id=t["id"], run_id=run["id"])
+            event_create(session_id, "task.error", {"task_id": t["id"], "error": str(e)}, task_id=t["id"])
+            # SE-PR5 — drop arm assignment on the error path too.
+            try:
+                if arm_token is not None:
+                    from edagent_vivado.evolution import reset_task_arms
+
+                    reset_task_arms(arm_token)
+            except Exception:
+                pass
+
+    asyncio.create_task(_run_agent())
+    event_type = "task.started"  # noqa: F841
+
+    return {"task_id": t["id"], "session_id": session_id, "state": "running",
+            "stream_url": f"/api/v1/sessions/{session_id}/stream"}
+
+@router.get("/tasks/{task_id}")
+async def api_task_get(task_id: str):
+    t = task_get(task_id)
+    if not t: raise HTTPException(404)
+    return {"task": t}
+
+@router.get("/sessions/{session_id}/active-task")
+async def api_active_task(session_id: str):
+    t = task_active_for_session(session_id)
+    return {"task": t}
+
+@router.post("/tasks/{task_id}/stop")
+@router.post("/sessions/{session_id}/stop")
+async def api_task_stop(task_id: str = "", session_id: str = ""):
+    if session_id and not task_id:
+        t = task_active_for_session(session_id)
+        if not t: raise HTTPException(404, "no active task")
+        task_id = t["id"]
+    task_update(task_id, stop_requested=1, state="stopping")
+    sid = session_id or task_get(task_id)["session_id"]
+    from edagent_vivado.harness.task_cancel import cancel_task_execution
+    from edagent_vivado.harness.task_stop_helpers import finalize_task_stop
+
+    cancel_stats = cancel_task_execution(task_id)
+    from edagent_vivado.harness.interaction import release_interaction_waiters_for_task
+
+    release_interaction_waiters_for_task(task_id)
+    event_create(
+        sid,
+        "task.stopping",
+        {"task_id": task_id, **cancel_stats},
+        task_id=task_id,
+    )
+    final = finalize_task_stop(task_id, sid, event_create)
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "state": final.get("state", "stopped"),
+        "cancel": cancel_stats,
+        **final,
+    }

@@ -73,7 +73,8 @@ class VivadoRunner:
         tcl = generate_synth_tcl(self._manifest, self._workspace.root)
         p = self._workspace.script_path("synth.tcl"); p.write_text(tcl)
         if self._remote_cfg: return self._remote_run("synth", p)
-        if self._mock: return self._mock_synth(p)
+        if self._mock:
+            return self._enrich_mock_result(self._mock_synth(p))
         cr = CommandRunner(workspace_root=self._workspace.root, vivado_path=self._vivado_path).run(
             f"vivado -mode batch -source {p} -log {self._workspace.root / 'vivado_synth.log'}", timeout=7200, log_label="vivado_synth")
         return {"step": "synth", "success": cr.return_code == 0, "return_code": cr.return_code, "log": cr.stdout_path, "elapsed_sec": cr.elapsed_sec, "timed_out": cr.timed_out, "mock": False}
@@ -82,7 +83,8 @@ class VivadoRunner:
         tcl = generate_impl_tcl(self._manifest, self._workspace.root)
         p = self._workspace.script_path("impl.tcl"); p.write_text(tcl)
         if self._remote_cfg: return self._remote_run("impl", p)
-        if self._mock: return self._mock_impl(p)
+        if self._mock:
+            return self._enrich_mock_result(self._mock_impl(p))
         cr = CommandRunner(workspace_root=self._workspace.root, vivado_path=self._vivado_path).run(
             f"vivado -mode batch -source {p} -log {self._workspace.root / 'vivado_impl.log'}", timeout=7200, log_label="vivado_impl")
         return {"step": "impl", "success": cr.return_code == 0, "return_code": cr.return_code, "log": cr.stdout_path, "elapsed_sec": cr.elapsed_sec, "timed_out": cr.timed_out, "mock": False}
@@ -90,7 +92,8 @@ class VivadoRunner:
     def run_synth_with_strategy(self, directive: str, retiming: bool = False) -> dict[str, Any]:
         tcl = generate_synth_tcl(self._manifest, self._workspace.root, directive=directive, retiming=retiming)
         p = self._workspace.script_path(f"synth_{directive}.tcl"); p.write_text(tcl)
-        if self._mock: return self._mock_synth(p, directive=directive)
+        if self._mock:
+            return self._enrich_mock_result(self._mock_synth(p, directive=directive))
         cr = CommandRunner(workspace_root=self._workspace.root, vivado_path=self._vivado_path).run(
             f"vivado -mode batch -source {p} -log {self._workspace.root / 'vivado_synth.log'}", timeout=7200, log_label=f"vivado_synth_{directive}")
         return {"step": "synth", "success": cr.return_code == 0, "return_code": cr.return_code, "strategy": directive, "log": cr.stdout_path, "elapsed_sec": cr.elapsed_sec, "timed_out": cr.timed_out, "mock": False}
@@ -106,6 +109,45 @@ class VivadoRunner:
             cr = r.run(cmd, timeout=3600 if label == "xsim" else 600, log_label=label)
             if cr.return_code != 0: return {"step": "sim", "success": False, "error": f"{label} failed", "log": cr.stdout_path}
         return {"step": "sim", "success": True, "log": cr.stdout_path, "elapsed_sec": cr.elapsed_sec}
+
+    def _enrich_mock_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Attach parsed timing/utilization/log_summary for mock runs (integration tests + UI)."""
+        from edagent_vivado.parsers.timing_parser import load_timing
+        from edagent_vivado.parsers.utilization_parser import load_utilization
+        from edagent_vivado.parsers.vivado_log_parser import load_and_parse
+
+        step = result.get("step", "synth")
+        reports = self._workspace.root / "reports"
+        timing_path = reports / f"post_{step}_timing_summary.rpt"
+        util_path = reports / f"post_{step}_utilization.rpt"
+        if timing_path.is_file():
+            ts = load_timing(timing_path)
+            if ts is not None:
+                result["timing"] = {
+                    "wns": ts.wns,
+                    "tns": ts.tns,
+                    "whs": ts.whs,
+                    "ths": ts.ths,
+                }
+        if util_path.is_file():
+            us = load_utilization(util_path)
+            if us is not None:
+                result["utilization"] = {
+                    "lut": us.lut,
+                    "ff": us.ff,
+                    "bram": us.bram,
+                    "dsp": us.dsp,
+                }
+        log_path = result.get("log")
+        if log_path and Path(log_path).is_file():
+            summary = load_and_parse(Path(log_path))
+            result["log_summary"] = {
+                "error_count": summary.error_count,
+                "critical_warning_count": summary.critical_warning_count,
+                "warning_count": summary.warning_count,
+                "top_error_signatures": list(summary.top_error_signatures),
+            }
+        return result
 
     def _remote_run(self, step: str, tcl_path: Path) -> dict[str, Any]:
         """Delegate remote synth/impl to VivadoRuntimeAdapter (unified SSH/SCP path)."""
@@ -127,7 +169,8 @@ class VivadoRunner:
         s = MOCK_FAILURE_SCENARIOS.get(self._mock_fail or "")
         rp = self._workspace.root / "reports"; ck = self._workspace.root / "checkpoints"
         rp.mkdir(parents=True, exist_ok=True); ck.mkdir(parents=True, exist_ok=True)
-        if s and s["step"] == "synth": return self._mock_do(s, ck, rp, "synth")
+        if s and s["step"] == "synth":
+            return self._enrich_mock_result(self._mock_do(s, ck, rp, "synth"))
         mod = {"Default": (0.123, 1234, 567), "RuntimeOptimized": (0.156, 1190, 550), "AreaOptimized": (0.098, 1010, 480), "AlternateRoutability": (0.210, 1280, 590)}.get(directive, (0.123, 1234, 567))
         w, l, f = mod
         (ck / "post_synth.dcp").write_text("MOCK")
@@ -142,7 +185,8 @@ class VivadoRunner:
         s = MOCK_FAILURE_SCENARIOS.get(self._mock_fail or "")
         rp = self._workspace.root / "reports"; ck = self._workspace.root / "checkpoints"
         rp.mkdir(parents=True, exist_ok=True); ck.mkdir(parents=True, exist_ok=True)
-        if s and s["step"] == "impl": return self._mock_do(s, ck, rp, "impl")
+        if s and s["step"] == "impl":
+            return self._enrich_mock_result(self._mock_do(s, ck, rp, "impl"))
         (ck / "post_place.dcp").write_text("MOCK"); (ck / "post_route.dcp").write_text("MOCK")
         (rp / "post_impl_timing_summary.rpt").write_text("WNS=0.089\nTNS=0.000\nWHS=0.032\nTHS=0.000\n")
         (rp / "post_impl_utilization.rpt").write_text("LUT: 1300\nFF: 600\nBRAM: 2\nDSP: 0\n")

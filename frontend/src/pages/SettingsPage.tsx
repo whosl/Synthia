@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { getApiToken, setApiToken } from '../api/client'
 import { getApprovals, setPatchApproval, setVivadoApproval } from '../api/settings'
 import { Panel } from '../components/common/Panel'
 import { PageStickyTop } from '../components/layout/PageStickyTop'
@@ -14,6 +15,7 @@ export default function SettingsPage() {
   const qc = useQueryClient()
   const [theme, setTheme] = useState<ThemeId>(() => getStoredTheme())
   const [locale, setLocaleState] = useState<'en' | 'zh'>(getLocale)
+  const [apiToken, setApiTokenState] = useState(() => getApiToken())
 
   useEffect(() => {
     applyTheme(theme)
@@ -131,6 +133,22 @@ export default function SettingsPage() {
             />
             <span>{t('settings.autoApproveVivado')}</span>
           </label>
+        </Panel>
+
+        <Panel title="API token">
+          <p className="muted" style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 12 }}>
+            Paste the token from <code>~/.synthia/token</code> (printed when you run <code>synthia web</code>).
+            Required when the backend enforces bearer auth.
+          </p>
+          <input
+            type="password"
+            className="input"
+            value={apiToken}
+            onChange={(e) => setApiTokenState(e.target.value)}
+            onBlur={() => setApiToken(apiToken.trim())}
+            placeholder="Bearer token"
+            style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 13 }}
+          />
         </Panel>
 
         <Panel title={t('settings.runtimeConfig')}>

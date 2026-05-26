@@ -15,7 +15,11 @@ _RESUME_SCHEDULED: set[str] = set()
 
 def build_follow_up_from_approval_event(session_id: str, task_id: str) -> str | None:
     """Reconstruct post-approval tool output from the latest interaction.approved event."""
-    from edagent_vivado.harness.approval_apply import apply_approved_files, format_approval_tool_output
+    from edagent_vivado.harness.approval_apply import (
+        apply_approved_files,
+        format_approval_tool_output,
+        resolve_project_root,
+    )
     from edagent_vivado.harness.approval_outcomes import SCOPE_FILE_CHANGES, format_user_rejection
     from edagent_vivado.harness.interaction import FileItem
     from edagent_vivado.repository.store import event_list
@@ -55,15 +59,17 @@ def build_follow_up_from_approval_event(session_id: str, task_id: str) -> str | 
     if not files:
         return format_user_rejection(SCOPE_FILE_CHANGES, detail="Approval had no file payloads.")
 
+    root = resolve_project_root(session_id=session_id)
     approved_indices = resp.get("approved_indices")
     if approved_indices is not None:
         applied, skipped = apply_approved_files(
             files,
             approved_indices=[int(i) for i in approved_indices],
+            project_root=root,
         )
     else:
         approved_paths = resp.get("approved_files") or [fi.path for fi in files]
-        applied, skipped = apply_approved_files(files, approved_paths)
+        applied, skipped = apply_approved_files(files, approved_paths, project_root=root)
     return format_approval_tool_output(applied, skipped, total_changes=len(files))
 
 

@@ -2,17 +2,49 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from edagent_vivado.web.auth import auth_enabled, ensure_token, is_public_path, require_token
+
+_log = logging.getLogger(__name__)
+
+
+class _TokenMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if not auth_enabled() or is_public_path(request.url.path):
+            return await call_next(request)
+        try:
+            require_token(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        return await call_next(request)
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Synthia", version="0.3.0")
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    _origins = os.environ.get(
+        "SYNTHIA_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8484,http://127.0.0.1:8484",
+    ).split(",")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in _origins if o.strip()],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
+    app.add_middleware(_TokenMiddleware)
+    if auth_enabled():
+        tok = ensure_token()
+        _log.info("Synthia API token ready (len=%d). See ~/.synthia/token", len(tok))
 
     @app.on_event("startup")
     async def _recover_orphaned_agent_tasks() -> None:
@@ -61,9 +93,14 @@ def create_app() -> FastAPI:
         async def spa_fallback(full_path: str = ""):
             if full_path.startswith("api/"):
                 raise HTTPException(404)
-            fp = static_dir / full_path
-            if full_path and fp.is_file():
-                return FR(str(fp))
+            if full_path:
+                try:
+                    fp = (static_dir / full_path).resolve()
+                    fp.relative_to(static_dir.resolve())
+                except ValueError:
+                    raise HTTPException(404, detail="not found") from None
+                if fp.is_file():
+                    return FR(str(fp))
             return HTMLResponse((static_dir / "index.html").read_text(encoding="utf-8"))
 
     # Legacy API only — no HTML routes (React SPA handles those)

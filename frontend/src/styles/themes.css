@@ -3,39 +3,39 @@
 /* Warm (default) — Claude-inspired light */
 :root,
 [data-theme='warm'] {
-  --bg: #FAF9F7;
-  --bg-subtle: #F5F3EF;
+  --bg: #FAF7F2;
+  --bg-subtle: #F2EDE3;
   --surface: #FFFFFF;
   --surface-raised: #FFFFFF;
-  --surface-inset: #F8F6F3;
+  --surface-inset: #F7F3EB;
 
-  --border: #E8E4DE;
-  --border-hover: #D4CFC7;
-  --border-strong: #C8C2BA;
+  --border: #E5DDD0;
+  --border-hover: #D4C9B5;
+  --border-strong: #C8BCA5;
 
-  --text: #1A1A1A;
-  --text-secondary: #5C5650;
-  --muted: #8C857E;
+  --text: #1F1B17;
+  --text-secondary: #5C544A;
+  --muted: #8B847A;
   --subtle: #ADA69F;
 
-  --accent: #D97706;
-  --accent-hover: #B45309;
+  --accent: #CC785C;
+  --accent-hover: #B5634A;
   --accent-on: #FFFFFF;
-  --accent-subtle: rgba(217, 119, 6, 0.08);
-  --accent-border: rgba(217, 119, 6, 0.25);
+  --accent-subtle: rgba(204, 120, 92, 0.10);
+  --accent-border: rgba(204, 120, 92, 0.30);
 
-  --success: #16A34A;
-  --success-subtle: rgba(22, 163, 74, 0.08);
-  --success-border: rgba(22, 163, 74, 0.2);
-  --warning: #D97706;
-  --warning-subtle: rgba(217, 119, 6, 0.08);
-  --warning-border: rgba(217, 119, 6, 0.2);
-  --error: #DC2626;
-  --error-subtle: rgba(220, 38, 38, 0.06);
-  --error-border: rgba(220, 38, 38, 0.2);
-  --info: #2563EB;
-  --info-subtle: rgba(37, 99, 235, 0.06);
-  --info-border: rgba(37, 99, 235, 0.2);
+  --success: #7C8F5E;
+  --success-subtle: rgba(124, 143, 94, 0.10);
+  --success-border: rgba(124, 143, 94, 0.30);
+  --warning: #C99547;
+  --warning-subtle: rgba(201, 149, 71, 0.10);
+  --warning-border: rgba(201, 149, 71, 0.30);
+  --error: #B85450;
+  --error-subtle: rgba(184, 84, 80, 0.10);
+  --error-border: rgba(184, 84, 80, 0.30);
+  --info: #7A8FA8;
+  --info-subtle: rgba(122, 143, 168, 0.10);
+  --info-border: rgba(122, 143, 168, 0.30);
 
   /* Session chat — light cream (aligned with app shell) */
   --term-bg: #FAF9F7;
@@ -47,7 +47,55 @@
   --term-text-strong: #1A1A1A;
   --term-muted: #8C857E;
   --term-subtle: #ADA69F;
-  --term-accent: #D97706;
+  --term-accent: #CC785C;
+}
+
+/* Claude dark — warm charcoal + caramel accent */
+[data-theme='claude-dark'] {
+  --bg: #1A1815;
+  --bg-subtle: #211E1A;
+  --surface: #2A2622;
+  --surface-raised: #322D28;
+  --surface-inset: #1F1C18;
+
+  --border: #3A3530;
+  --border-hover: #4A443D;
+  --border-strong: #5A5249;
+
+  --text: #EDE8DF;
+  --text-secondary: #B8B0A3;
+  --muted: #8B847A;
+  --subtle: #6B6359;
+
+  --accent: #D97757;
+  --accent-hover: #E8896B;
+  --accent-on: #1A1815;
+  --accent-subtle: rgba(217, 119, 87, 0.15);
+  --accent-border: rgba(217, 119, 87, 0.40);
+
+  --success: #8FA572;
+  --success-subtle: rgba(143, 165, 114, 0.15);
+  --success-border: rgba(143, 165, 114, 0.35);
+  --warning: #D4A458;
+  --warning-subtle: rgba(212, 164, 88, 0.15);
+  --warning-border: rgba(212, 164, 88, 0.35);
+  --error: #C9695F;
+  --error-subtle: rgba(201, 105, 95, 0.15);
+  --error-border: rgba(201, 105, 95, 0.35);
+  --info: #8FA3BC;
+  --info-subtle: rgba(143, 163, 188, 0.15);
+  --info-border: rgba(143, 163, 188, 0.35);
+
+  --term-bg: #1A1815;
+  --term-surface: #2A2622;
+  --term-surface-2: #322D28;
+  --term-border: #3A3530;
+  --term-border-soft: #2F2B26;
+  --term-text: #EDE8DF;
+  --term-text-strong: #FAF7F2;
+  --term-muted: #8B847A;
+  --term-subtle: #6B6359;
+  --term-accent: #D97757;
 }
 
 /* Warm terminal — override dark-only component tints */

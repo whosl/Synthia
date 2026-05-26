@@ -36,9 +36,30 @@ def test_allowlist_rejects_empty():
     assert not runner.check_allowed("")
 
 
-def test_allowlist_accepts_python():
+def test_allowlist_rejects_python_dash_c():
     runner = CommandRunner()
-    assert runner.check_allowed("python -c 'print(1)'")
+    assert not runner.check_allowed("python -c 'print(1)'")
+
+
+def test_command_runner_rejects_python_dash_c():
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = CommandRunner(workspace_root=tmp)
+        result = runner.run('python -c "import os"')
+        assert result.return_code == -1
+        assert result.error
+
+
+def test_command_runner_rejects_shell_chaining_via_str():
+    runner = CommandRunner()
+    result = runner.run("echo ok; rm -rf /tmp/x")
+    assert result.return_code == -1
+
+
+def test_command_runner_accepts_list_argv():
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = CommandRunner(workspace_root=tmp)
+        result = runner.run(["echo", "hello"])
+        assert result.return_code == 0
 
 
 def test_allowlist_accepts_verilator():

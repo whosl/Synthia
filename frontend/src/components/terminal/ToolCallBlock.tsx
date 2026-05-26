@@ -1,9 +1,8 @@
-import { AlertCircle, CheckCircle2, ChevronRight, CircleDotDashed, Octagon, XCircle } from 'lucide-react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { resolveToolElapsedMs } from '../../lib/toolElapsed'
-import { useTerminalStore } from '../../stores/terminalStore'
-import { CollapsibleSection } from '../common/CollapsibleSection'
+import { StatusPill, type StatusKind } from '../common/StatusPill'
 
 export interface ToolCallViewModel {
   id: string
@@ -26,6 +25,23 @@ function formatElapsed(ms: number) {
   return `${min}m ${sec}s`
 }
 
+function toolStateToStatus(state: ToolCallViewModel['state']): StatusKind {
+  switch (state) {
+    case 'running':
+      return 'running'
+    case 'completed':
+      return 'succeeded'
+    case 'error':
+      return 'failed'
+    case 'rejected':
+      return 'needs_approval'
+    case 'stopped':
+      return 'cancelled'
+    default:
+      return 'unknown'
+  }
+}
+
 function useToolElapsed(tool: ToolCallViewModel) {
   const [tick, setTick] = useState(() => Date.now())
   const running = tool.state === 'running'
@@ -42,61 +58,94 @@ function useToolElapsed(tool: ToolCallViewModel) {
   }, [tool, running, tick])
 }
 
+function parseArgPreview(args?: string): Array<[string, string]> {
+  if (!args?.trim()) return []
+  try {
+    const obj = JSON.parse(args) as Record<string, unknown>
+    return Object.entries(obj)
+      .slice(0, 3)
+      .map(([k, v]) => [k, String(v)])
+  } catch {
+    return []
+  }
+}
+
 export function ToolCallBlock({
   tool,
   defaultCollapsed = true,
 }: {
   tool: ToolCallViewModel
-  /** Default fold state when user has not toggled this tool yet */
   defaultCollapsed?: boolean
 }) {
   const { t } = useTranslation()
-  const collapsed = useTerminalStore((s) => s.collapsed[tool.id] ?? defaultCollapsed)
-  const toggle = useTerminalStore((s) => s.toggleCollapsed)
+  const status = toolStateToStatus(tool.state)
   const elapsedMs = useToolElapsed(tool)
-  const done = tool.state === 'completed'
-  const rejected = tool.state === 'rejected'
-  const errored = tool.state === 'error'
-  const stopped = tool.state === 'stopped'
-  const icon = done ? <CheckCircle2 size={14} className="tool-status-icon is-done" />
-    : rejected ? <XCircle size={14} className="tool-status-icon is-rejected" />
-    : stopped ? <Octagon size={14} className="tool-status-icon is-stopped" />
-    : errored ? <AlertCircle size={14} className="tool-status-icon is-errored" />
-    : <CircleDotDashed size={14} className="tool-status-icon is-running" />
+  const autoExpand = tool.state === 'error' || tool.state === 'rejected'
+  const [expanded, setExpanded] = useState(() => autoExpand || !defaultCollapsed)
+  const argPairs = parseArgPreview(tool.args)
+
+  const outputText = tool.result || (tool.state === 'error' || tool.state === 'rejected' || tool.state === 'stopped'
+    ? ''
+    : t('toolBlock.noResult'))
+
   return (
     <div
-      className={`trace-block tool-block ${done ? 'completed' : ''} ${rejected ? 'rejected' : ''} ${errored ? 'errored' : ''} ${stopped ? 'stopped' : ''}${collapsed ? '' : ' is-expanded'}`}
+      className={`tool-call-block trace-block tool-block status-${status} ${tool.state}${expanded ? ' is-expanded' : ''}`}
     >
-      <div
-        className="trace-header"
+      <header
+        className="tcb-head trace-header"
         role="button"
         tabIndex={0}
-        aria-expanded={!collapsed}
-        onClick={() => toggle(tool.id, defaultCollapsed)}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
-            toggle(tool.id, defaultCollapsed)
+            setExpanded((v) => !v)
           }
         }}
       >
-        <ChevronRight size={14} className="trace-chevron" />
-        {icon}
-        <span>{tool.name}</span>
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="tcb-tool">tool · {tool.name}</span>
+        {argPairs.map(([k, v]) => (
+          <span key={k} className="tcb-arg" title={v}>
+            {k}={v.slice(0, 40)}
+          </span>
+        ))}
+        <span className="tcb-spacer spacer" />
         {elapsedMs != null && (
-          <span className={`tool-elapsed${tool.state === 'running' ? ' tool-elapsed-live' : ''}`}>
+          <span className={`tcb-elapsed tool-elapsed${tool.state === 'running' ? ' tool-elapsed-live' : ''}`}>
             {formatElapsed(elapsedMs)}
           </span>
         )}
-        <span className="spacer" /><span className="tool-state">{tool.state}</span>
-      </div>
-      <CollapsibleSection open={!collapsed} className="trace-body-wrap">
-        <div className="trace-body">
-          {tool.args && <><b>{t('toolBlock.input')}</b>{'\n'}{tool.args}{'\n\n'}</>}
-          {errored && tool.error && <><b style={{ color: 'var(--error)' }}>{t('toolBlock.error')}</b>{'\n'}{tool.error}{'\n\n'}</>}
-          <><b>{t('toolBlock.output')}</b>{'\n'}{tool.result || (errored || rejected || stopped ? '' : t('toolBlock.noResult'))}</>
+        <StatusPill status={status} label={tool.state} />
+      </header>
+      {expanded && (
+        <div className="tcb-body trace-body">
+          {tool.args && (
+            <>
+              <b>{t('toolBlock.input')}</b>
+              {'\n'}
+              {tool.args}
+              {'\n\n'}
+            </>
+          )}
+          {tool.state === 'error' && tool.error && (
+            <div className="tcb-error">
+              <b>{t('toolBlock.error')}</b>
+              {'\n'}
+              {tool.error}
+            </div>
+          )}
+          {(outputText || tool.state === 'completed') && (
+            <>
+              <b>{t('toolBlock.output')}</b>
+              {'\n'}
+              <pre className="tcb-output">{outputText}</pre>
+            </>
+          )}
         </div>
-      </CollapsibleSection>
+      )}
     </div>
   )
 }

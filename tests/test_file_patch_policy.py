@@ -48,7 +48,7 @@ def test_modify_applies_old_to_new_not_whole_file(tmp_path: Path):
     f.write_text("module top;\n  wire a;\nendmodule\n")
     content = "--- OLD ---\n  wire a;\n--- NEW ---\n  wire a, b;\n"
     files = [FileItem(path=str(f), content=content, action="modify")]
-    applied, skipped = apply_approved_files(files, [str(f)])
+    applied, skipped = apply_approved_files(files, [str(f)], project_root=tmp_path)
     assert applied == [str(f)]
     assert skipped == []
     text = f.read_text()
@@ -56,11 +56,43 @@ def test_modify_applies_old_to_new_not_whole_file(tmp_path: Path):
     assert "module top;" in text
 
 
+def test_apply_refuses_outside_root(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from edagent_vivado.harness.file_patch_policy import apply_approved_file_item
+
+    fi = SimpleNamespace(path="../../etc/passwd", action="create", content="x")
+    ok, msg = apply_approved_file_item(fi, project_root=tmp_path)
+    assert not ok
+    assert "outside" in msg
+
+
+def test_apply_refuses_absolute_outside(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from edagent_vivado.harness.file_patch_policy import apply_approved_file_item
+
+    fi = SimpleNamespace(path="/etc/passwd", action="create", content="x")
+    ok, msg = apply_approved_file_item(fi, project_root=tmp_path)
+    assert not ok
+
+
+def test_apply_refuses_unknown_action(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from edagent_vivado.harness.file_patch_policy import apply_approved_file_item
+
+    fi = SimpleNamespace(path="ok.txt", action="overwrite", content="x")
+    ok, msg = apply_approved_file_item(fi, project_root=tmp_path)
+    assert not ok
+    assert "unknown action" in msg
+
+
 def test_create_refuses_existing_file(tmp_path: Path):
     f = tmp_path / "exists.v"
     f.write_text("legacy")
     files = [FileItem(path=str(f), content="new", action="create")]
-    applied, skipped = apply_approved_files(files, [str(f)])
+    applied, skipped = apply_approved_files(files, [str(f)], project_root=tmp_path)
     assert applied == []
     assert skipped == [str(f)]
     assert f.read_text() == "legacy"

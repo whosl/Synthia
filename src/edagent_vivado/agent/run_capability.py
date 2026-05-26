@@ -73,7 +73,10 @@ def run_connector_capability(
             "edagent_outcome": result.edagent_outcome,
             "connector_id": connector_id,
             "capability_id": capability_id,
-            "artifacts": [{"path": a.path, "kind": a.kind} for a in result.artifacts],
+            "artifacts": [
+                {"path": a.path, "kind": getattr(a, "artifact_type", "")}
+                for a in result.artifacts
+            ],
         }
         return tag_execution_result(payload, scope)
     except Exception as exc:

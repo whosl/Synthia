@@ -1,0 +1,175 @@
+"""API routes: knowledge."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os as _os
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
+from edagent_vivado.events.envelope import enrich_wire_event
+from edagent_vivado.harness.execution_approval import (
+    is_vivado_execution_approved,
+    set_vivado_execution_approval,
+)
+from edagent_vivado.harness.file_patch_policy import (
+    is_file_patch_tool,
+    is_file_tool_queued_for_approval,
+    is_interaction_tool,
+    normalize_tool_output,
+)
+from edagent_vivado.projects.snapshot import snapshot_manifest_path
+from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
+from edagent_vivado.repository.store import (
+    approval_get,
+    approval_list,
+    approval_update,
+    artifact_list,
+    capability_list,
+    connector_get,
+    connector_list,
+    context_package_get,
+    context_package_items,
+    context_packages_for_run,
+    context_packages_for_session,
+    event_list,
+    event_list_for_run,
+    knowledge_source_list,
+    kb_candidate_approve,
+    kb_candidate_get,
+    kb_candidate_list,
+    kb_candidate_merge,
+    kb_candidate_reject,
+    memory_latest,
+    memory_list,
+    message_create,
+    message_list,
+    monitor_overview,
+    monitor_retention_cleanup,
+    parsed_report_get,
+    parsed_report_list,
+    parsed_report_trends,
+    patch_proposal_get,
+    patch_proposal_list,
+    patch_proposal_update,
+    problem_list,
+    project_create,
+    project_delete,
+    project_get,
+    project_is_archived,
+    project_list,
+    project_update,
+    retrieval_audit_get,
+    retrieval_audit_items,
+    retrieval_audits_for_run,
+    retrieval_audits_for_session,
+    run_create,
+    run_get,
+    run_list,
+    run_step_list,
+    run_update,
+    session_create,
+    session_delete,
+    session_get,
+    session_list,
+    session_update,
+    task_active_for_session,
+    task_create,
+    task_get,
+    task_update,
+    toolcall_list,
+    usage_create,
+    usage_list,
+    usage_totals_for_session,
+    vivado_command_list,
+)
+from edagent_vivado.tools.patch_tools import is_patch_approved, set_patch_approval
+from edagent_vivado.web.api_shared import (
+    _archive_task_canvas,
+    _blocked_tool_runs,
+    _early_blocked_tool_runs,
+    _early_completed_toolcall_ids,
+    _ensure_project_persona,
+    _flush_pending_file_batch,
+    _langgraph_tool_run_key,
+    _memory_pipeline_on_message,
+    _publish,
+    _stream_queues,
+    _vivado_reject_run_keys,
+    event_create,
+)
+
+router = APIRouter(tags=["knowledge"])
+
+@router.post("/knowledge/reindex")
+async def api_knowledge_reindex(request: Request):
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    project_id = str(body.get("project_id") or "")
+    from edagent_vivado.knowledge.semantic_kb import reindex_all, reindex_global, reindex_project_record
+
+    if project_id:
+        project = project_get(project_id)
+        if project:
+            return {"project": reindex_project_record(project), "global": reindex_global()}
+    return reindex_all(project_id=project_id or "uart_demo")
+
+@router.get("/knowledge/sources")
+async def api_knowledge_sources(scope: str = "", project_id: str = "", limit: int = 100):
+    return {"sources": knowledge_source_list(scope=scope, project_id=project_id, limit=limit)}
+
+@router.post("/knowledge/search")
+async def api_knowledge_search(request: Request):
+    body = await request.json()
+    query = str(body.get("query", ""))
+    top_k = int(body.get("top_k", 12))
+    scope = str(body.get("scope") or "both")
+    project_id = str(body.get("project_id") or "uart_demo")
+    session_id = str(body.get("session_id") or "")
+    from edagent_vivado.knowledge.semantic_kb import search_semantic_kb
+
+    text, hits = search_semantic_kb(
+        query, top_k=top_k, scope=scope, project_id=project_id, session_id=session_id,
+    )
+    return {"query": query, "results": hits, "formatted": text}
+
+@router.post("/knowledge/context-preview")
+async def api_knowledge_context_preview(request: Request):
+    body = await request.json()
+    question = str(body.get("question") or body.get("query") or "")
+    manifest_path = str(body.get("manifest_path") or "")
+    session_id = str(body.get("session_id") or "")
+    if session_id and not manifest_path:
+        sess = session_get(session_id)
+        if sess:
+            manifest_path = snapshot_manifest_path(sess)
+    from edagent_vivado.agent.context import AgentContextBuilder
+
+    ctx = AgentContextBuilder().build(
+        session_id=session_id or "preview",
+        task_id="preview",
+        run_id="preview",
+        question=question,
+        manifest_path=manifest_path,
+        persist=False,
+    )
+    return {
+        "prompt_preview": ctx.prompt[:8000],
+        "token_counts": ctx.token_counts,
+        "context_package_id": ctx.context_package.get("id"),
+        "retrieval_audit_id": ctx.retrieval_audit.get("id") if ctx.retrieval_audit else None,
+        "persisted": False,
+        "items": [
+            {"type": i.item_type, "title": i.title, "included": i.included, "tokens": i.token_count}
+            for i in ctx.items
+        ],
+    }

@@ -8,6 +8,9 @@ id_*
 # Python venv
 .venv/
 
+# Phase 1 API split reference copy
+*.backup
+
 # Python cache
 __pycache__/
 *.py[cod]
