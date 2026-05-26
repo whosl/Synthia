@@ -226,6 +226,14 @@ def start_run(
         output_summary=f"{len(step_states)} steps, state={overall_state}",
         error=error_msg or None,
     )
+
+    try:
+        from edagent_vivado.runs.summary import write_summary_md
+
+        write_summary_md(run_id)
+    except Exception:
+        logger.exception("write_summary_md failed for run %s", run_id)
+
     if session_id:
         evt = "run.succeeded" if overall_state in ("done", "succeeded", "succeeded_with_warnings") else "run.failed"
         event_create(

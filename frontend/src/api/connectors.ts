@@ -26,7 +26,27 @@ export interface ParsedReportRow {
   report_type: string
   stage: string
   data?: Record<string, unknown>
+  metrics?: Record<string, unknown>
   created_at?: number
+}
+
+export interface ProjectTrendSeries {
+  run_id: string
+  name: string
+  state?: string
+  run_type?: string
+  session_id?: string
+  started_at?: number
+  finished_at?: number
+  elapsed_ms?: number
+  metrics: Record<string, number | boolean | null>
+  metrics_full?: Record<string, unknown>
+}
+
+export interface ProjectTrendResponse {
+  project_id: string
+  metric_keys: string[]
+  series: ProjectTrendSeries[]
 }
 
 export function listConnectors() {
@@ -68,6 +88,12 @@ export interface ReportTrendPoint {
   metric: string
   value: number
   created_at?: number
+}
+
+export function getProjectTrend(projectId: string, limit = 10) {
+  return request<ProjectTrendResponse>(
+    `/projects/${encodeURIComponent(projectId)}/trend?limit=${limit}`,
+  )
 }
 
 export function listReportTrends(params: {

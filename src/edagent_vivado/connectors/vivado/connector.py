@@ -196,13 +196,21 @@ class VivadoConnector(BaseConnector):
         )
 
     def parse_artifacts(self, result: ToolRunResult) -> ParsedReportBundle:
+        from edagent_vivado.connectors.vivado.parsers.bitstream import detect_bitstream
         from edagent_vivado.connectors.vivado.parsers.drc import parse_drc_report
+        from edagent_vivado.connectors.vivado.parsers.impl_summary import build_impl_summary
         from edagent_vivado.connectors.vivado.parsers.log_summary import parse_log_summary
         from edagent_vivado.connectors.vivado.parsers.methodology import parse_methodology_report
         from edagent_vivado.parsers.timing_parser import parse_timing_summary
         from edagent_vivado.parsers.utilization_parser import parse_utilization
 
-        reports: list = []
+        reports: list[ParsedReport] = []
+        per_stage: dict[str, dict[str, dict]] = {}
+        workspace_dir = ""
+
+        def _record(stage: str, kind: str, data: dict) -> None:
+            per_stage.setdefault(stage, {})[kind] = data
+
         for art in result.artifacts:
             path = art.path
             if not path:
@@ -213,47 +221,96 @@ class VivadoConnector(BaseConnector):
                 continue
             stage = stage_from_path(path)
             aid = art.artifact_id
+            if not workspace_dir:
+                try:
+                    workspace_dir = str(Path(path).resolve().parent.parent)
+                except OSError:
+                    workspace_dir = ""
             if path.endswith("_timing_summary.rpt"):
                 t = parse_timing_summary(text)
                 if t:
+                    data = {
+                        "wns": t.wns,
+                        "tns": t.tns,
+                        "whs": t.whs,
+                        "ths": t.ths,
+                        "critical_paths": t.critical_paths,
+                        "violated_path_count": t.violated_path_count,
+                        "met_setup": t.met_setup,
+                        "met_hold": t.met_hold,
+                    }
                     reports.append(
                         ParsedReport(
                             type="timing_summary",
                             tool="vivado",
                             stage=stage,
-                            data={
-                                "wns": t.wns,
-                                "tns": t.tns,
-                                "whs": t.whs,
-                                "ths": t.ths,
-                            },
+                            data=data,
                             source_artifact_id=aid,
                         )
                     )
+                    _record(stage, "timing", data)
             elif path.endswith("_utilization.rpt"):
                 u = parse_utilization(text)
                 if u:
+                    data = {
+                        "lut": u.lut,
+                        "ff": u.ff,
+                        "bram": u.bram,
+                        "dsp": u.dsp,
+                        "uram": u.uram,
+                        "lut_pct": u.lut_pct,
+                        "ff_pct": u.ff_pct,
+                        "bram_pct": u.bram_pct,
+                        "dsp_pct": u.dsp_pct,
+                        "uram_pct": u.uram_pct,
+                        "sites": u.sites,
+                    }
                     reports.append(
                         ParsedReport(
                             type="utilization",
                             tool="vivado",
                             stage=stage,
-                            data={"lut": u.lut, "ff": u.ff, "bram": u.bram, "dsp": u.dsp},
+                            data=data,
                             source_artifact_id=aid,
                         )
                     )
+                    _record(stage, "util", data)
             elif path.endswith("_drc.rpt"):
                 r = parse_drc_report(text, stage=stage)
                 r.source_artifact_id = aid
                 reports.append(r)
+                _record(stage, "drc", r.data)
             elif path.endswith("_methodology.rpt"):
                 r = parse_methodology_report(text, stage=stage)
                 r.source_artifact_id = aid
                 reports.append(r)
+                _record(stage, "methodology", r.data)
             elif path.endswith(".log") or art.artifact_type == "vivado_log":
                 r = parse_log_summary(text, stage=stage)
                 r.source_artifact_id = aid
                 reports.append(r)
+                _record(stage, "log", r.data)
+
+        bitstream_data: dict | None = None
+        if workspace_dir:
+            bs = detect_bitstream(workspace_dir)
+            if bs.data.get("count") or bs.data.get("found"):
+                reports.append(bs)
+                bitstream_data = bs.data
+
+        impl_bucket = per_stage.get("impl") or per_stage.get("report")
+        if impl_bucket:
+            impl_report = build_impl_summary(
+                timing_data=impl_bucket.get("timing"),
+                util_data=impl_bucket.get("util"),
+                drc_data=impl_bucket.get("drc"),
+                methodology_data=impl_bucket.get("methodology"),
+                log_data=impl_bucket.get("log"),
+                bitstream_data=bitstream_data,
+                stage="impl",
+            )
+            reports.append(impl_report)
+
         return ParsedReportBundle(reports=reports)
 
     def classify_error(self, result: ToolRunResult) -> ToolErrorSummary | None:

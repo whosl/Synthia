@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -14,7 +14,17 @@ class TimingSummary:
     tns: Optional[float] = None  # Total Negative Slack
     whs: Optional[float] = None  # Worst Hold Slack
     ths: Optional[float] = None  # Total Hold Slack
+    critical_paths: list[dict[str, Any]] = field(default_factory=list)
+    violated_path_count: int = 0
     raw_lines: list[str] = field(default_factory=list)
+
+    @property
+    def met_setup(self) -> bool:
+        return self.wns is None or self.wns >= 0
+
+    @property
+    def met_hold(self) -> bool:
+        return self.whs is None or self.whs >= 0
 
 
 # Format 1: Mock / simplified "WNS=value" or "WNS: value"
@@ -31,6 +41,54 @@ PAT_TABLE_HEADER = re.compile(
 PAT_INTRA_CLOCK = re.compile(
     r"^\S+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)"
 )
+
+# Critical path block: `Slack (VIOLATED|MET) :  -0.342ns` followed by Source/Destination/...
+PATH_BLOCK_RE = re.compile(
+    r"Slack\s*\((?P<status>VIOLATED|MET)\)\s*:\s*(?P<slack>-?\d+\.\d+)ns"
+    r"(?P<body>(?:.|\n){0,1500}?)"
+    r"(?=Slack\s*\(|\Z)",
+    re.MULTILINE,
+)
+_FIELD_RES = {
+    "source": re.compile(r"^\s*Source:\s*(.+?)\s*$", re.MULTILINE),
+    "destination": re.compile(r"^\s*Destination:\s*(.+?)\s*$", re.MULTILINE),
+    "path_group": re.compile(r"^\s*Path Group:\s*(.+?)\s*$", re.MULTILINE),
+    "path_type": re.compile(r"^\s*Path Type:\s*(.+?)\s*$", re.MULTILINE),
+    "requirement_ns": re.compile(r"^\s*Requirement:\s*(-?\d+\.\d+)ns", re.MULTILINE),
+    "data_path_delay_ns": re.compile(r"^\s*Data Path Delay:\s*(-?\d+\.\d+)ns", re.MULTILINE),
+    "logic_levels": re.compile(r"^\s*Logic Levels:\s*(\d+)", re.MULTILINE),
+}
+
+
+def parse_critical_paths(text: str, *, top_n: int = 10) -> list[dict[str, Any]]:
+    """Extract structured per-path slack records, ordered worst-slack-first."""
+    paths: list[dict[str, Any]] = []
+    for match in PATH_BLOCK_RE.finditer(text):
+        body = match.group("body")
+        path: dict[str, Any] = {
+            "slack_ns": float(match.group("slack")),
+            "status": match.group("status").lower(),
+        }
+        for key, pat in _FIELD_RES.items():
+            fm = pat.search(body)
+            if not fm:
+                continue
+            raw = fm.group(1).strip()
+            if key in ("requirement_ns", "data_path_delay_ns"):
+                try:
+                    path[key] = float(raw)
+                except ValueError:
+                    path[key] = None
+            elif key == "logic_levels":
+                try:
+                    path[key] = int(raw)
+                except ValueError:
+                    path[key] = None
+            else:
+                path[key] = raw
+        paths.append(path)
+    paths.sort(key=lambda p: p.get("slack_ns", 0.0))
+    return paths[:top_n]
 
 
 def parse_timing_summary(text: str) -> Optional[TimingSummary]:
@@ -81,6 +139,10 @@ def parse_timing_summary(text: str) -> Optional[TimingSummary]:
                     # Only use the first matching table (Design Timing Summary)
                     break
 
+        summary.critical_paths = parse_critical_paths(text, top_n=10)
+        summary.violated_path_count = sum(
+            1 for p in summary.critical_paths if p.get("status") == "violated"
+        )
         return summary
     except Exception:
         return None

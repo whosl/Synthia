@@ -149,3 +149,67 @@ async def api_run_report_detail(run_id: str, report_id: str):
         raise HTTPException(404, "report not found")
     return {"run_id": run_id, "report": row}
 
+
+@router.get("/projects/{project_id}/trend")
+async def api_project_trend(project_id: str, limit: int = Query(10, ge=1, le=50)):
+    from edagent_vivado.runs.trend import project_trend
+
+    if not project_get(project_id):
+        raise HTTPException(404, "project not found")
+    return project_trend(project_id, limit=limit)
+
+
+@router.get("/runs/{run_id}/summary.md")
+async def api_run_summary_md(run_id: str):
+    from fastapi.responses import PlainTextResponse
+
+    from edagent_vivado.runs.summary import render_run_summary
+
+    if not run_get(run_id):
+        raise HTTPException(404, "run not found")
+    return PlainTextResponse(
+        render_run_summary(run_id),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@router.get("/runs/{run_id}/artifacts/zip")
+async def api_run_artifacts_zip(run_id: str):
+    import io
+    import zipfile
+
+    from fastapi.responses import StreamingResponse
+
+    if not run_get(run_id):
+        raise HTTPException(404, "run not found")
+    artifacts = artifact_list(run_id=run_id, limit=500)
+    if not artifacts:
+        raise HTTPException(404, "no artifacts for this run")
+
+    buf = io.BytesIO()
+    seen: dict[str, int] = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for art in artifacts:
+            raw_path = art.get("path")
+            if not raw_path:
+                continue
+            p = Path(str(raw_path))
+            if not p.is_file():
+                continue
+            arcname = p.name
+            count = seen.get(arcname, 0)
+            if count:
+                stem, ext = p.stem, p.suffix
+                arcname = f"{stem}_{count}{ext}"
+            seen[arcname] = count + 1
+            try:
+                zf.write(p, arcname=arcname)
+            except OSError:
+                continue
+    buf.seek(0)
+    headers = {
+        "Content-Disposition": f'attachment; filename="run_{run_id}_artifacts.zip"',
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
+

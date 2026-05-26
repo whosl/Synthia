@@ -64,6 +64,18 @@ export function stopRun(runId: string) {
   return request<{ run_id: string; state: string }>(`/runs/${runId}/stop`, { method: 'POST' })
 }
 
+export function runSummaryUrl(runId: string) {
+  return `/api/v1/runs/${encodeURIComponent(runId)}/summary.md`
+}
+
+export function runArtifactsZipUrl(runId: string) {
+  return `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/zip`
+}
+
+export function artifactDownloadUrl(artifactId: string) {
+  return `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`
+}
+
 export function rerunRun(runId: string, autoStart = true) {
   return request<{
     run_id: string

@@ -526,6 +526,7 @@ CREATE TABLE IF NOT EXISTS parsed_reports (
     stage TEXT NOT NULL,
     source_artifact_id TEXT,
     data_json TEXT NOT NULL,
+    metrics_json TEXT,
     created_at INTEGER NOT NULL,
     metadata_json TEXT
 );
@@ -644,6 +645,13 @@ def _migrate_orphan_sessions(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_parsed_reports_metrics(db: sqlite3.Connection) -> None:
+    cols = {row[1] for row in db.execute("PRAGMA table_info(parsed_reports)").fetchall()}
+    if "metrics_json" not in cols:
+        db.execute("ALTER TABLE parsed_reports ADD COLUMN metrics_json TEXT")
+    db.commit()
+
+
 def _migrate_projects(db: sqlite3.Connection) -> None:
     cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
     if "project_id" not in cols:
@@ -679,6 +687,7 @@ def init_db() -> None:
     db.executescript(SCHEMA)
     db.commit()
     _migrate_projects(db)
+    _migrate_parsed_reports_metrics(db)
 
 
 def close_db() -> None:

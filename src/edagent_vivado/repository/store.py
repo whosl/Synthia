@@ -1722,18 +1722,21 @@ def parsed_report_create(
     step_id: str = "",
     source_artifact_id: str = "",
     metadata: dict | None = None,
+    metrics: dict | None = None,
 ) -> dict:
     rid = _uid()
     now = _now()
     get_db().execute(
         """INSERT INTO parsed_reports(
           id,run_id,step_id,connector_id,report_type,stage,
-          source_artifact_id,data_json,created_at,metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+          source_artifact_id,data_json,metrics_json,created_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (
             rid, run_id, step_id or None, connector_id, report_type, stage,
             source_artifact_id or None,
-            json.dumps(data, ensure_ascii=False), now,
+            json.dumps(data, ensure_ascii=False),
+            json.dumps(metrics or {}, ensure_ascii=False, default=str),
+            now,
             json.dumps(metadata or {}, ensure_ascii=False),
         ),
     )
@@ -1751,6 +1754,13 @@ def parsed_report_get(report_id: str) -> dict | None:
             d["data"] = json.loads(d["data_json"])
         except json.JSONDecodeError:
             d["data"] = {}
+    if d.get("metrics_json"):
+        try:
+            d["metrics"] = json.loads(d["metrics_json"])
+        except json.JSONDecodeError:
+            d["metrics"] = {}
+    else:
+        d["metrics"] = {}
     return d
 
 
@@ -1827,6 +1837,13 @@ def parsed_report_list(run_id: str = "", step_id: str = "", report_type: str = "
                 d["data"] = json.loads(d["data_json"])
             except json.JSONDecodeError:
                 d["data"] = {}
+        if d.get("metrics_json"):
+            try:
+                d["metrics"] = json.loads(d["metrics_json"])
+            except json.JSONDecodeError:
+                d["metrics"] = {}
+        else:
+            d["metrics"] = {}
         out.append(d)
     return out
 

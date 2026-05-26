@@ -764,6 +764,27 @@
     "methodology": "方法论",
     "noFindings": "无方法论发现项。",
     "trendWns": "WNS 趋势（近期运行）",
-    "trendEmpty": "暂无时序报告 — 请先运行综合以生成趋势数据。"
+    "trendEmpty": "暂无时序报告 — 请先运行综合以生成趋势数据。",
+    "projectTrend": "工程趋势",
+    "noProject": "最新 Run 没有关联工程。",
+    "implSummary": "实现总览",
+    "bitstream": "Bitstream",
+    "bitstreamFound": "Bit",
+    "bitstreamCount": "文件数",
+    "bitstreamMissing": "工作区内未找到 bitstream 文件。",
+    "siteType": "资源类型",
+    "drcErrors": "错误",
+    "drcWarnings": "警告",
+    "slack": "Slack",
+    "source": "起点",
+    "destination": "终点",
+    "group": "分组",
+    "levels": "层数",
+    "setupMet": "Setup",
+    "holdMet": "Hold",
+    "violatedPaths": "违规",
+    "overall": "总体",
+    "issues": "问题",
+    "noIssues": "未检测到问题。"
   }
 }

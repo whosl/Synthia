@@ -14,6 +14,8 @@ from edagent_vivado.runs.state_machine import (
     can_transition,
     is_terminal,
 )
+from edagent_vivado.runs.summary import render_run_summary, write_summary_md
+from edagent_vivado.runs.trend import project_trend
 
 __all__ = [
     "FLOW_REGISTRY",
@@ -25,6 +27,9 @@ __all__ = [
     "create_run",
     "get_flow",
     "is_terminal",
+    "project_trend",
+    "render_run_summary",
     "resume_run",
     "start_run",
+    "write_summary_md",
 ]

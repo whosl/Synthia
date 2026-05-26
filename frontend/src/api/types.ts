@@ -99,6 +99,7 @@ export interface Run {
   id: ID
   session_id?: ID | null
   task_id?: ID | null
+  project_id?: ID | null
   parent_run_id?: ID | null
   agent_id?: ID | null
   run_type: string
@@ -168,6 +169,9 @@ export interface Artifact {
   run_id?: ID | null
   artifact_type: string
   path: string
+  mime_type?: string | null
+  size_bytes?: number | null
+  sha256?: string | null
   summary?: string | null
   created_at?: number
 }

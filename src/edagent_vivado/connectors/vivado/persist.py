@@ -13,6 +13,64 @@ from edagent_vivado.repository.store import parsed_report_create
 
 EventSink = Callable[..., Any] | None
 
+
+def _metrics_for_report(report_type: str, data: dict | None) -> dict[str, Any]:
+    """Compute a slim metrics dict for a parsed report (consumed by trend)."""
+    if not isinstance(data, dict):
+        return {}
+    if report_type == "timing_summary":
+        return {
+            "wns_ns": data.get("wns"),
+            "tns_ns": data.get("tns"),
+            "whs_ns": data.get("whs"),
+            "ths_ns": data.get("ths"),
+            "violated_path_count": int(data.get("violated_path_count") or 0),
+            "met_setup": bool(data.get("met_setup", True)),
+            "met_hold": bool(data.get("met_hold", True)),
+        }
+    if report_type == "utilization":
+        return {
+            "lut_pct": data.get("lut_pct"),
+            "ff_pct": data.get("ff_pct"),
+            "bram_pct": data.get("bram_pct"),
+            "dsp_pct": data.get("dsp_pct"),
+            "uram_pct": data.get("uram_pct"),
+            "lut_used": data.get("lut"),
+            "ff_used": data.get("ff"),
+        }
+    if report_type == "drc":
+        errors = data.get("errors") or []
+        warnings = data.get("warnings") or []
+        return {
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "clean": bool(data.get("clean")),
+            "by_category": dict(data.get("by_category") or {}),
+        }
+    if report_type == "methodology":
+        return {
+            "count": int(data.get("count") or 0),
+            "by_severity": dict(data.get("by_severity") or {}),
+        }
+    if report_type == "log_summary":
+        return {
+            "error_count": int(data.get("error_count") or 0),
+            "critical_warning_count": int(data.get("critical_warning_count") or 0),
+            "warning_count": int(data.get("warning_count") or 0),
+        }
+    if report_type == "impl_summary":
+        issues = data.get("issues") or []
+        return {
+            "ok": bool(data.get("ok")),
+            "issue_count": len(issues),
+        }
+    if report_type == "bitstream":
+        return {
+            "bit_found": bool(data.get("found")),
+            "bit_count": int(data.get("count") or 0),
+        }
+    return {}
+
 _MANIFEST_TOOLS = frozenset({
     "run_vivado_synth_tool",
     "run_vivado_impl_tool",
@@ -74,6 +132,7 @@ def persist_tool_run_result(
     bundle = conn.parse_artifacts(tool_result)
     saved: list[dict] = []
     for report in bundle.reports:
+        metrics = _metrics_for_report(report.type, report.data)
         row = parsed_report_create(
             run_id,
             connector_id,
@@ -82,6 +141,7 @@ def persist_tool_run_result(
             report.data,
             step_id=step_id,
             source_artifact_id=report.source_artifact_id,
+            metrics=metrics,
         )
         saved.append(row)
         if event_sink and session_id:

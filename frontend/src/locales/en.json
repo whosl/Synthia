@@ -743,6 +743,27 @@
     "methodology": "Methodology",
     "noFindings": "No methodology findings.",
     "trendWns": "WNS trend (recent runs)",
-    "trendEmpty": "No timing reports yet — run synthesis to populate trends."
+    "trendEmpty": "No timing reports yet — run synthesis to populate trends.",
+    "projectTrend": "Project trend",
+    "noProject": "No project association on latest run.",
+    "implSummary": "Impl Summary",
+    "bitstream": "Bitstream",
+    "bitstreamFound": "Bit",
+    "bitstreamCount": "Files",
+    "bitstreamMissing": "No bitstream files found in this run workspace.",
+    "siteType": "Site type",
+    "drcErrors": "Errors",
+    "drcWarnings": "Warnings",
+    "slack": "Slack",
+    "source": "Source",
+    "destination": "Destination",
+    "group": "Group",
+    "levels": "Lvl",
+    "setupMet": "Setup",
+    "holdMet": "Hold",
+    "violatedPaths": "Violated",
+    "overall": "Overall",
+    "issues": "Issues",
+    "noIssues": "No issues detected."
   }
 }

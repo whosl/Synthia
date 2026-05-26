@@ -8,6 +8,7 @@ import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { formatDuration, formatNumber, formatTime } from '../lib/time'
+import { ArtifactsPanel } from '../components/reports/ArtifactsPanel'
 import { StructuredReportsPanel } from '../components/reports/StructuredReportsPanel'
 import { StepTimeline } from '../components/monitor/StepTimeline'
 import { RunPatchesPanel } from '../components/monitor/RunPatchesPanel'
@@ -133,9 +134,11 @@ export default function RunDetailPage() {
               {ctx.items.slice(0, 6).map((item) => <div className="event-row" key={item.id}><span>{item.item_type}</span><span>{item.title}</span><span className="muted">{item.token_count}</span></div>)}
             </div>)}
           </Panel>
-          <Panel title={t('runDetail.artifacts')}>
-            {(artifactsQ.data?.artifacts ?? []).length ? artifactsQ.data!.artifacts.map((a) => <div className="event-row" key={a.id}><span>{a.artifact_type}</span><span className="mono">{a.path}</span><span className="muted">{formatTime(a.created_at)}</span></div>) : <div className="muted" style={{ padding: 8, fontSize: 12 }}>{t('runDetail.noArtifacts')}</div>}
-          </Panel>
+          <ArtifactsPanel
+            runId={runId}
+            artifacts={artifactsQ.data?.artifacts ?? []}
+            loading={artifactsQ.isLoading}
+          />
         </div>
       </div>
     </div>
