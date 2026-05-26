@@ -1,6 +1,7 @@
 ﻿import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import ProjectsPage from '../pages/ProjectsPage'
+import ProjectImportPage from '../pages/ProjectImportPage'
 import ProjectExpandRedirect from '../pages/ProjectExpandRedirect'
 import TerminalPage from '../pages/TerminalPage'
 import MonitorPage from '../pages/MonitorPage'
@@ -25,6 +26,7 @@ export function AppRouter() {
   return <AppShell>
     <Routes>
       <Route path="/" element={<ProjectsPage />} />
+      <Route path="/projects/import" element={<ProjectImportPage />} />
       <Route path="/projects/:projectId" element={<ProjectExpandRedirect />} />
 
       <Route path="/sessions" element={<SessionsPage />} />

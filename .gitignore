@@ -53,6 +53,7 @@ examples/**/remote_results/
 *.str
 *.wdb
 *.xpr
+!tests/fixtures/xpr/*.xpr
 *.cache/
 *.runs/
 *.sim/

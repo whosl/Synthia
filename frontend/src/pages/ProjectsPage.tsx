@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpDown, RefreshCw, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   createProject,
   listProjects,
@@ -288,6 +288,9 @@ export default function ProjectsPage() {
                     <option value="sessions">{t('projects.sortSessionCount')}</option>
                   </select>
                 </div>
+                <Link to="/projects/import" className="syn-link" style={{ alignSelf: 'center', fontSize: 13 }}>
+                  Import / Create
+                </Link>
                 <Button
                   className={`ghost icon-btn sessions-refresh${isFetching ? ' is-spinning' : ''}`}
                   type="button"

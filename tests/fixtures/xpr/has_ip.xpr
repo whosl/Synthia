@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Project Version="7" Minor="42" Path="has_ip.xpr">
+  <Configuration>
+    <Option Name="Part" Val="xc7a50tfgg484-2"/>
+    <Option Name="TopModule" Val="top"/>
+    <Option Name="TargetLanguage" Val="Verilog"/>
+  </Configuration>
+  <FileSets Version="1" Minor="31">
+    <FileSet Name="sources_1" Type="DesignSrcs">
+      <File Path="$PPRDIR/rtl/top.v"/>
+      <File Path="$PPRDIR/ip/fifo_gen.xci"/>
+    </FileSet>
+  </FileSets>
+</Project>

@@ -104,3 +104,62 @@ export function createProjectSession(projectId: string, payload: { name?: string
     { method: 'POST', ...jsonBody(payload) },
   )
 }
+
+export type ScanProjectResult = {
+  root: string
+  is_likely_fpga_project: boolean
+  xpr_files: string[]
+  rtl_files: string[]
+  sv_files: string[]
+  vhd_files: string[]
+  xdc_files: string[]
+  ip_files: string[]
+  bd_files: string[]
+  candidate_top_modules: string[]
+  detected_part: string
+}
+
+export function importXpr(xpr_path: string, auto_register = true) {
+  return request<{
+    ok: boolean
+    project_id?: string
+    manifest_path?: string
+    project?: Project
+    warnings?: string[]
+  }>('/projects/import-xpr', { method: 'POST', ...jsonBody({ xpr_path, auto_register }) })
+}
+
+export function scanProject(root_path: string) {
+  return request<ScanProjectResult>('/projects/scan', { method: 'POST', ...jsonBody({ root_path }) })
+}
+
+export function createProjectFromWizard(payload: {
+  name: string
+  location: string
+  part?: string
+  board_part?: string
+  top_module?: string
+  target_language?: string
+  rtl_sources?: string[]
+  xdc_sources?: string[]
+  tb_sources?: string[]
+  copy_sources?: boolean
+}) {
+  return request<{ ok: boolean; project_id: string; manifest_path: string; project: Project }>(
+    '/projects/from-wizard',
+    { method: 'POST', ...jsonBody(payload) },
+  )
+}
+
+export function getProjectHealth(projectId: string) {
+  return request<{ project_id: string; status: string; detail: string; last_check_at: number }>(
+    `/projects/${projectId}/health`,
+  )
+}
+
+export function syncProjectXpr(projectId: string) {
+  return request<{ ok: boolean; manifest_path?: string; warnings?: string[] }>(
+    `/projects/${projectId}/sync-xpr`,
+    { method: 'POST' },
+  )
+}

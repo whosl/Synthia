@@ -88,7 +88,16 @@ from edagent_vivado.repository.store import (
     vivado_command_list,
 )
 from edagent_vivado.tools.patch_tools import is_patch_approved, set_patch_approval
-from edagent_vivado.web.schemas.projects import CreateProjectReq, CreateSessionReq, UpdateProjectReq
+from edagent_vivado.web.schemas.projects import (
+    CreateProjectReq,
+    CreateSessionReq,
+    ImportXprReq,
+    ProjectHealthResponse,
+    ScanProjectReq,
+    ScanResponse,
+    UpdateProjectReq,
+    WizardCreateReq,
+)
 from edagent_vivado.web.api_shared import (
     _archive_task_canvas,
     _blocked_tool_runs,
@@ -271,4 +280,140 @@ async def api_project_sessions_create(project_id: str, req: CreateSessionReq):
     _ensure_project_persona(project_id)
     event_create(s["id"], "session.created", {"name": s["name"], "project_id": project_id})
     return {"session": s}
+
+
+def _parse_capability_output(raw: str) -> dict:
+    import json
+
+    from edagent_vivado.harness.approval_outcomes import parse_tool_outcome
+
+    parsed = parse_tool_outcome(raw)
+    if isinstance(parsed, dict) and parsed.get("edagent_outcome"):
+        return parsed
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"success": False, "error": raw}
+
+
+@router.post("/projects/import-xpr")
+async def api_project_import_xpr(req: ImportXprReq):
+    from edagent_vivado.projects.xpr_importer import import_xpr_project, project_create_fields_from_import
+
+    try:
+        imported = import_xpr_project(req.xpr_path)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if not req.auto_register:
+        return {
+            "ok": True,
+            "manifest_path": imported.manifest_path,
+            "warnings": imported.doc.warnings,
+        }
+
+    proj = project_create(project_create_fields_from_import(imported))
+    return {
+        "ok": True,
+        "project_id": proj["id"],
+        "manifest_path": imported.manifest_path,
+        "project": proj,
+        "warnings": imported.doc.warnings,
+    }
+
+
+@router.post("/projects/scan", response_model=ScanResponse)
+async def api_project_scan(req: ScanProjectReq):
+    import json
+
+    from edagent_vivado.agent.run_capability import run_connector_capability
+    from edagent_vivado.connectors import ensure_connectors
+
+    ensure_connectors()
+    out = run_connector_capability("vivado", "scan_project", inputs={"root_path": req.root_path})
+    data = _parse_capability_output(out)
+    scan_data: dict = {}
+    if data.get("error"):
+        try:
+            scan_data = json.loads(data["error"])
+        except json.JSONDecodeError:
+            scan_data = {}
+    return ScanResponse(
+        root=req.root_path,
+        is_likely_fpga_project=bool(
+            scan_data.get("is_likely_fpga_project")
+            if "is_likely_fpga_project" in scan_data
+            else scan_data.get("rtl_files") or scan_data.get("sv_files") or scan_data.get("xpr_files")
+        ),
+        xpr_files=scan_data.get("xpr_files") or [],
+        rtl_files=scan_data.get("rtl_files") or [],
+        sv_files=scan_data.get("sv_files") or [],
+        vhd_files=scan_data.get("vhd_files") or [],
+        xdc_files=scan_data.get("xdc_files") or [],
+        ip_files=scan_data.get("ip_files") or [],
+        bd_files=scan_data.get("bd_files") or [],
+        candidate_top_modules=scan_data.get("candidate_top_modules") or [],
+        detected_part=scan_data.get("detected_part") or "",
+    )
+
+
+@router.post("/projects/from-wizard")
+async def api_project_from_wizard(req: WizardCreateReq):
+    from pathlib import Path
+
+    from edagent_vivado.agent.run_capability import run_connector_capability
+    from edagent_vivado.connectors import ensure_connectors
+
+    ensure_connectors()
+    out = run_connector_capability(
+        "vivado",
+        "create_vivado_project",
+        inputs=req.model_dump(),
+    )
+    data = _parse_capability_output(out)
+    if not data.get("success"):
+        raise HTTPException(400, data.get("error") or "create failed")
+
+    artifacts = data.get("artifacts") or []
+    manifest_path = artifacts[0]["path"] if artifacts else ""
+    project_root = str(Path(req.location) / req.name).replace("\\", "/")
+    proj = project_create(
+        {
+            "name": req.name,
+            "root_path": project_root,
+            "manifest_path": manifest_path,
+            "part": req.part or None,
+            "board_part": req.board_part or None,
+            "top_module": req.top_module or None,
+            "target_language": req.target_language,
+        }
+    )
+    return {"ok": True, "project_id": proj["id"], "manifest_path": manifest_path, "project": proj}
+
+
+@router.get("/projects/{project_id}/health", response_model=ProjectHealthResponse)
+async def api_project_health(project_id: str):
+    from edagent_vivado.projects.manifest_sync import check_sync
+
+    proj = project_get(project_id)
+    if not proj:
+        raise HTTPException(404, "project not found")
+    sr = check_sync(proj["root_path"])
+    return ProjectHealthResponse(
+        project_id=project_id,
+        status=sr.status,
+        detail=sr.detail,
+        last_check_at=int(time.time()),
+    )
+
+
+@router.post("/projects/{project_id}/sync-xpr")
+async def api_project_sync_xpr(project_id: str):
+    proj = project_get(project_id)
+    if not proj:
+        raise HTTPException(404, "project not found")
+    xpr_path = proj.get("xpr_path") or ""
+    if not xpr_path:
+        raise HTTPException(400, "project has no .xpr")
+    return await api_project_import_xpr(ImportXprReq(xpr_path=xpr_path, auto_register=False))
 

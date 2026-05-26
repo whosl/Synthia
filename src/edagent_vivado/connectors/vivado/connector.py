@@ -126,13 +126,13 @@ class VivadoConnector(BaseConnector):
                     edagent_outcome="execution_succeeded" if vr.ok else "execution_failed",
                 )
             if cap == "import_xpr":
-                return vivado_executor.stub_not_implemented(req, cap)
+                return vivado_executor.import_xpr(self, req)
             if cap == "scan_project":
-                return vivado_executor.stub_not_implemented(req, cap)
+                return vivado_executor.scan_project(self, req)
             if cap == "create_vivado_project":
-                return vivado_executor.stub_not_implemented(req, cap)
+                return vivado_executor.create_vivado_project(self, req)
             if cap == "sync_xpr_manifest":
-                return vivado_executor.stub_not_implemented(req, cap)
+                return vivado_executor.sync_xpr_manifest(self, req)
             if cap == "run_synthesis":
                 return vivado_executor.run_synthesis(self, req)
             if cap == "run_implementation":

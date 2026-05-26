@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Project Version="7" Minor="42" Path="missing_part.xpr">
+  <Configuration>
+    <Option Name="TopModule" Val="uart_top"/>
+    <Option Name="TargetLanguage" Val="Verilog"/>
+  </Configuration>
+  <FileSets Version="1" Minor="31">
+    <FileSet Name="sources_1" Type="DesignSrcs">
+      <File Path="$PPRDIR/rtl/uart_top.v"/>
+    </FileSet>
+  </FileSets>
+</Project>

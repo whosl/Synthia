@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Project Version="7" Minor="42" Path="valid_uart.xpr">
+  <Configuration>
+    <Option Name="Part" Val="xc7a50tfgg484-2"/>
+    <Option Name="TopModule" Val="uart_top"/>
+    <Option Name="TargetLanguage" Val="Verilog"/>
+    <Option Name="BoardPart" Val=""/>
+  </Configuration>
+  <FileSets Version="1" Minor="31">
+    <FileSet Name="sources_1" Type="DesignSrcs">
+      <File Path="$PPRDIR/rtl/uart_top.v"/>
+      <File Path="$PPRDIR/rtl/uart_tx.v"/>
+      <File Path="$PPRDIR/rtl/uart_rx.v"/>
+    </FileSet>
+    <FileSet Name="constrs_1" Type="Constrs">
+      <File Path="$PPRDIR/constraints/top.xdc"/>
+    </FileSet>
+    <FileSet Name="sim_1" Type="SimulationSrcs">
+      <File Path="$PPRDIR/tb/uart_tb.sv"/>
+    </FileSet>
+  </FileSets>
+</Project>
