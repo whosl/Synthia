@@ -124,6 +124,20 @@
   background: var(--accent-subtle);
 }
 
+[data-theme='warm'] .interaction-block.approval-block .btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--term-text-strong);
+}
+
+[data-theme='warm'] .approval-block .approval-file-header {
+  background: var(--term-surface-2);
+}
+
+[data-theme='warm'] .approval-block .file-content-preview {
+  background: var(--term-surface-2);
+  color: var(--term-text);
+}
+
 /* Obsidian — true black / zinc (Figma site reference) */
 [data-theme='obsidian'] {
   --bg: #000000;

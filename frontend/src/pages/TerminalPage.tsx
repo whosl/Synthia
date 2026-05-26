@@ -163,11 +163,6 @@ export default function TerminalPage() {
                 >
                   <SlidersHorizontal size={16} />
                 </Button>
-                {(running || stopping) && (
-                  <Button className="danger" onClick={() => stop.mutate()} disabled={stopping}>
-                    {t('terminal.stop')}
-                  </Button>
-                )}
               </div>
               </header>
             </div>

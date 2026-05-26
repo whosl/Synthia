@@ -1512,12 +1512,12 @@
 .interaction-block.status-rejected { border-color: var(--error); opacity: 0.85; }
 .interaction-block.status-responded { border-color: var(--success); opacity: 0.85; }
 
-/* Pending approval — accent for actionable UI */
+/* Pending approval — match terminal accent (warm orange by default) */
 .interaction-block.approval-block {
-  --approval-accent: var(--info);
-  --approval-border: var(--info-border);
-  --approval-border-strong: rgba(37, 99, 235, 0.25);
-  --approval-surface: var(--info-subtle);
+  --approval-accent: var(--term-accent);
+  --approval-border: var(--accent-border);
+  --approval-border-strong: var(--accent-border);
+  --approval-surface: var(--accent-subtle);
 }
 
 /* Degraded approval trace — monochrome (matches tool trace blocks) */
@@ -1540,12 +1540,12 @@
 .interaction-block.approval-block .btn.primary {
   background: var(--approval-accent);
   border-color: var(--approval-accent);
-  color: #fff;
+  color: var(--accent-on, #fff);
 }
 
 .interaction-block.approval-block .btn.primary:hover:not(:disabled) {
-  background: #1d4ed8;
-  border-color: #1d4ed8;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .interaction-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -1640,7 +1640,19 @@
   background: linear-gradient(to top, var(--term-bg) 70%, transparent);
 }
 
-.interaction-actions { display: flex; gap: 8px; margin-top: 12px; }
+.interaction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.interaction-actions .btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+}
 .interaction-rejected-hint { margin-top: 8px; font-size: var(--font-size-xs); }
 
 /* Approval files */
@@ -1683,8 +1695,8 @@
 .approval-select-count { margin-left: auto; color: var(--term-muted); }
 
 .approval-block .approval-file.selected {
-  border-color: var(--info-border);
-  background: var(--info-subtle);
+  border-color: var(--approval-border);
+  background: var(--approval-surface);
 }
 
 .approval-trace-block .approval-file.selected {
@@ -1707,7 +1719,7 @@
 }
 .file-status-icon.skipped { color: var(--term-muted); flex-shrink: 0; }
 
-.interaction-block.approval-block.status-partial { border-color: rgba(37, 99, 235, 0.35); }
+.interaction-block.approval-block.status-partial { border-color: var(--accent-border); }
 .approval-trace-block.status-partial { border-color: var(--term-border-soft); }
 .interaction-block.status-partial { border-color: rgba(245, 158, 11, 0.55); }
 
@@ -1752,7 +1764,7 @@
 
 .approval-block .file-action-badge {
   background: var(--approval-accent);
-  color: var(--term-text-strong);
+  color: var(--accent-on, #fff);
 }
 
 .approval-trace-block .file-action-badge {

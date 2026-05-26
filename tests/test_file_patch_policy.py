@@ -2,11 +2,24 @@
 
 from pathlib import Path
 
+from langchain_core.messages import ToolMessage
+
 from edagent_vivado.harness.approval_apply import apply_approved_files
 from edagent_vivado.harness.file_patch_policy import (
     is_file_tool_queued_for_approval,
+    normalize_tool_output,
 )
 from edagent_vivado.harness.interaction import FileItem
+
+
+def test_normalize_tool_output_from_tool_message():
+    msg = ToolMessage(
+        content="FILE PROPOSED (not yet created)\nPath: rtl/a.v",
+        tool_call_id="x",
+        name="create_file_tool",
+    )
+    assert normalize_tool_output(msg) == "FILE PROPOSED (not yet created)\nPath: rtl/a.v"
+    assert normalize_tool_output(str(msg)) == "FILE PROPOSED (not yet created)\nPath: rtl/a.v"
 
 
 def test_queue_only_on_proposed_output():
@@ -18,6 +31,16 @@ def test_queue_only_on_proposed_output():
     assert not is_file_tool_queued_for_approval(
         "propose_patch_tool", "ERROR: The specified old_text was not found"
     )
+
+
+def test_queue_on_tool_message_repr():
+    msg = ToolMessage(
+        content="FILE PROPOSED (not yet created — user approval required)\nPath: rtl/a.v",
+        tool_call_id="x",
+        name="create_file_tool",
+    )
+    assert is_file_tool_queued_for_approval("create_file_tool", msg)
+    assert is_file_tool_queued_for_approval("create_file_tool", str(msg))
 
 
 def test_modify_applies_old_to_new_not_whole_file(tmp_path: Path):

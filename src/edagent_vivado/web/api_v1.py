@@ -37,6 +37,7 @@ from edagent_vivado.harness.file_patch_policy import (
     is_file_patch_tool,
     is_file_tool_queued_for_approval,
     is_interaction_tool,
+    normalize_tool_output,
 )
 from edagent_vivado.events.envelope import enrich_wire_event
 from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
@@ -727,7 +728,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                 tool_input,
                             )
                     elif kind == "on_tool_end":
-                        output = str(evt.get("data", {}).get("output", ""))[:2500]
+                        output = normalize_tool_output(evt.get("data", {}).get("output", ""))[:2500]
                         run_key = _langgraph_tool_run_key(evt)
                         tool_name = evt.get("name", "")
                         from edagent_vivado.harness.run_context import clear_tool_thread_context
