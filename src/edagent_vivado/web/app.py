@@ -14,9 +14,30 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Synthia", version="0.3.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+    @app.on_event("startup")
+    async def _recover_orphaned_agent_tasks() -> None:
+        import asyncio
+        import logging
+
+        async def _delayed() -> None:
+            await asyncio.sleep(3)
+            try:
+                from edagent_vivado.harness.task_resume import recover_all_orphaned_tasks
+
+                recovered = await recover_all_orphaned_tasks()
+                if recovered:
+                    logging.getLogger(__name__).info("Recovered orphaned tasks: %s", recovered)
+            except Exception:
+                logging.getLogger(__name__).exception("orphan task recovery failed")
+
+        asyncio.create_task(_delayed())
+
     # Phase 1 v1 API
     from edagent_vivado.web.api_v1 import router as api_v1_router
+    from edagent_vivado.integrations.workbuddy import router as workbuddy_router
+
     app.include_router(api_v1_router)
+    app.include_router(workbuddy_router, prefix="/api/v1")
 
     # React SPA — must come before legacy HTML routes
     from fastapi.responses import FileResponse as FR, HTMLResponse

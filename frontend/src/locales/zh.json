@@ -10,6 +10,11 @@
   "nav": {
     "projects": "项目管理",
     "monitor": "监控",
+    "connectors": "连接器",
+    "sessions": "会话",
+    "runs": "运行",
+    "reports": "报告",
+    "approvals": "审批",
     "vivado": "Vivado",
     "knowledge": "知识库",
     "evolution": "进化",
@@ -339,7 +344,8 @@
     "approveCount": "批准 ({{selected}}/{{total}})",
     "rejectAll": "全部拒绝",
     "rejectedHint": "已拒绝 — 可在对话中继续说明需求",
-    "selectFile": "选择 {{path}}"
+    "selectFile": "选择 {{path}}",
+    "dockRegion": "待审批操作"
   },
 
   "inputRequest": {
@@ -371,6 +377,7 @@
   "monitor": {
     "title": "监控",
     "subtitle": "用量趋势、工具可靠性和运行追踪（阶段 4）",
+    "connectors": "工具连接器",
     "recentRuns": "最近运行",
     "tableRun": "运行",
     "tableType": "类型",
@@ -418,7 +425,8 @@
     "consoleInit1": "Vivado% version -short",
     "consoleInit2": "2022.1",
     "consoleInit3": "Vivado% ready",
-    "approvalRequired": "策略要求审批 — 禁用危险 Tcl 或在设置中启用自动批准",
+    "approvalRequired": "策略要求审批 — 请在审批页确认，或在设置中启用自动批准",
+    "approvalQueued": "已加入审批队列",
     "completed": "# 已完成 ({{n}}秒)",
     "failed": "# 失败：{{error}}",
     "commandHistory": "命令历史",
@@ -672,6 +680,90 @@
     "contextAudit": "上下文审计",
     "package": "包",
     "artifacts": "产物",
-    "noArtifacts": "无产物记录。"
+    "noArtifacts": "无产物记录。",
+    "rerun": "重新运行",
+    "rerunStarted": "已基于此 Run 启动新任务。",
+    "workspace": "运行工作区",
+    "workspaceRoot": "根目录",
+    "noWorkspace": "工作区尚未初始化。",
+    "toolRequests": "受控工具请求",
+    "noToolRequests": "本运行暂无连接器工具请求记录。",
+    "steps": "运行步骤",
+    "noSteps": "暂无连接器步骤记录。",
+    "patches": "补丁提案",
+    "noPatches": "此 Run 暂无补丁提案。"
+  },
+
+  "sessions": {
+    "subtitle": "跨项目的全部 Agent 会话。",
+    "list": "会话列表",
+    "empty": "暂无会话。"
+  },
+
+  "runs": {
+    "subtitle": "含工具调用与结构化报告的任务运行。",
+    "list": "运行列表"
+  },
+
+  "approvals": {
+    "subtitle": "补丁、Tcl 与高风险执行的统一审批队列。",
+    "queue": "待处理",
+    "detail": "详情",
+    "empty": "暂无待审批项。",
+    "selectOne": "选择一项以查看详情。",
+    "type": "类型",
+    "risk": "风险",
+    "approve": "批准",
+    "reject": "拒绝",
+    "applyPatch": "应用补丁"
+  },
+
+  "connectors": {
+    "title": "工具连接器",
+    "subtitle": "工业工具 SDK 注册表 — 能力、环境与风险策略。",
+    "refresh": "刷新",
+    "registry": "已注册连接器",
+    "empty": "尚未注册连接器。",
+    "environment": "运行环境",
+    "version": "工具版本",
+    "target": "目标类型",
+    "reachable": "可达",
+    "hint": "在以下页面配置目标并运行流程：",
+    "capabilities": "能力矩阵",
+    "capId": "能力",
+    "capStage": "阶段",
+    "capRisk": "风险",
+    "capApproval": "需审批",
+    "yes": "是",
+    "no": "否",
+    "healthCheck": "健康检查"
+  },
+
+  "knowledge": {
+    "candidates": "KB 候选",
+    "retrieval": "检索审计",
+    "comingSoon": "即将推出。",
+    "emptyCandidates": "暂无待审 KB 候选。",
+    "emptyRetrieval": "近期运行暂无检索审计记录。"
+  },
+
+  "reports": {
+    "explorerSubtitle": "浏览各 Run 的时序、利用率与 DRC 结构化报告。",
+    "recentRun": "最近 Run",
+    "detailTitle": "报告详情",
+    "backToRun": "返回 Run",
+    "notFound": "未找到报告。",
+    "viewDetail": "查看详情",
+    "structuredTitle": "结构化报告",
+    "loading": "正在加载解析报告…",
+    "empty": "此 Run 尚无结构化报告。运行 Vivado 综合/实现后会自动填充。",
+    "timing": "时序摘要",
+    "utilization": "资源利用率",
+    "drc": "DRC",
+    "drcClean": "无 DRC 违规。",
+    "methodology": "方法论",
+    "noFindings": "无方法论发现项。",
+    "trendWns": "WNS 趋势（近期运行）",
+    "trendEmpty": "暂无时序报告 — 请先运行综合以生成趋势数据。"
   }
 }

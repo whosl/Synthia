@@ -21,8 +21,10 @@ from edagent_vivado.repository.store import (
     context_package_item_create,
     memory_latest,
     message_list,
+    parsed_report_list,
     retrieval_audit_create,
     retrieval_audit_item_create,
+    run_step_list,
     session_get,
     toolcall_list,
 )
@@ -156,6 +158,59 @@ def _load_project_persona(project_id: str) -> str:
         return load_project_persona_text(project_id)
     except Exception:
         return ""
+
+
+def _summarize_reports(reports: list[dict], *, max_chars: int = 600) -> str:
+    lines: list[str] = []
+    for r in reports[:6]:
+        data = r.get("data") or {}
+        if r.get("report_type") == "timing_summary":
+            lines.append(
+                f"timing({r.get('stage')}): WNS={data.get('wns')} TNS={data.get('tns')}"
+            )
+        elif r.get("report_type") == "utilization":
+            lines.append(
+                f"util({r.get('stage')}): LUT={data.get('lut')} FF={data.get('ff')}"
+            )
+        elif r.get("report_type") == "drc":
+            err_n = len(data.get("errors") or [])
+            lines.append(f"drc({r.get('stage')}): {err_n} errors, clean={data.get('clean')}")
+        else:
+            lines.append(f"{r.get('report_type')}({r.get('stage')})")
+    text = "\n".join(lines)
+    return compact_text(text, max_chars)
+
+
+def _connector_environment_block() -> str:
+    try:
+        from edagent_vivado.connectors import ensure_connectors
+        from edagent_vivado.connectors.base.registry import get_connector
+
+        ensure_connectors()
+        conn = get_connector("vivado")
+        if not conn:
+            return ""
+        env = conn.detect_environment()
+        return (
+            f"{env.tool_name} {env.version or 'unknown'} via {env.target_type}"
+            f" (target={env.target_id or 'default'}, reachable={env.reachable})"
+        )
+    except Exception:
+        return ""
+
+
+def _tool_error_summary_block(run_id: str) -> str:
+    if not run_id:
+        return ""
+    steps = run_step_list(run_id)
+    failed = [s for s in steps if s.get("state") == "failed" and s.get("error")]
+    if not failed:
+        return ""
+    last = failed[-1]
+    return (
+        f"[error] {last.get('stage')}: {last.get('name')}\n"
+        f"message: {compact_text(str(last.get('error') or ''), 400)}"
+    )
 
 
 def _load_task_canvas(task_id: str) -> str:
@@ -338,6 +393,94 @@ class AgentContextBuilder:
         )
         if semantic_text:
             items.append(ContextItem("semantic_kb", "Retrieved Semantic Knowledge", semantic_text, priority=8, source_type="semantic_kb", authority_score=0.7, trust_score=0.65, relevance_score=0.6))
+
+        parsed = parsed_report_list(run_id=run_id) if run_id else []
+        if parsed:
+            summary = _summarize_reports(parsed)
+            items.append(
+                ContextItem(
+                    "parsed_report_context",
+                    "Latest Run Parsed Reports",
+                    summary,
+                    priority=4,
+                    source_type="parsed_report",
+                    trust_score=0.9,
+                )
+            )
+
+        env_block = _connector_environment_block()
+        if env_block:
+            items.append(
+                ContextItem(
+                    "connector_environment_context",
+                    "Tool Environment",
+                    env_block,
+                    priority=2,
+                    source_type="connector",
+                    trust_score=0.9,
+                )
+            )
+
+        if task_id:
+            try:
+                from edagent_vivado.repository.store import task_get
+                import json as _json
+
+                trow = task_get(task_id) or {}
+                meta = _json.loads(trow.get("metadata_json") or "{}")
+                plan = meta.get("plan") or []
+                if plan:
+                    plan_lines = [
+                        f"- {s.get('step')}: {s.get('connector')}.{s.get('capability')}"
+                        for s in plan[:8]
+                        if isinstance(s, dict)
+                    ]
+                    items.append(
+                        ContextItem(
+                            "capability_context",
+                            "Task Capability Plan",
+                            "Planned steps:\n" + "\n".join(plan_lines),
+                            priority=3,
+                            source_id=task_id,
+                            source_type="task_plan",
+                            trust_score=0.88,
+                        )
+                    )
+            except Exception:
+                pass
+
+        if run_id:
+            from edagent_vivado.repository.store import artifact_list
+
+            arts = artifact_list(run_id=run_id, limit=12)
+            if arts:
+                art_lines = [
+                    f"- {a.get('artifact_type') or 'file'}: {a.get('path', '')}"
+                    for a in arts[:10]
+                ]
+                items.append(
+                    ContextItem(
+                        "artifact_index_context",
+                        "Run Artifacts",
+                        "\n".join(art_lines),
+                        priority=5,
+                        source_type="artifact",
+                        trust_score=0.85,
+                    )
+                )
+
+        err_block = _tool_error_summary_block(run_id)
+        if err_block:
+            items.append(
+                ContextItem(
+                    "tool_error_summary_context",
+                    "Tool Error Summary",
+                    err_block,
+                    priority=1,
+                    source_type="run_step",
+                    trust_score=0.9,
+                )
+            )
 
         # Token budget selection: priority order; offload before hard exclusion (Phase E).
         selected: list[ContextItem] = []

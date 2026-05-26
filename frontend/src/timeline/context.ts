@@ -73,8 +73,17 @@ export function setTimelineRebuildBatch(enabled: boolean): void {
   timelineRebuildBatch = enabled
 }
 
+/** Strict event order: seq, then createdAt timestamp, then stable key. */
+export function compareTimelineEntries(a: TimelineEntry, b: TimelineEntry): number {
+  const seqDiff = (a.seq ?? 0) - (b.seq ?? 0)
+  if (seqDiff !== 0) return seqDiff
+  const timeDiff = (a.createdAt ?? 0) - (b.createdAt ?? 0)
+  if (timeDiff !== 0) return timeDiff
+  return a.key.localeCompare(b.key)
+}
+
 export function sortTimelineEntries(state: SessionTimelineState): SessionTimelineState {
-  const entries = [...state.entries].sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+  const entries = [...state.entries].sort(compareTimelineEntries)
   const indexByKey: Record<string, number> = {}
   entries.forEach((e, i) => { indexByKey[e.key] = i })
   return { ...state, entries, indexByKey }
@@ -86,7 +95,7 @@ export function insertEntry(state: SessionTimelineState, entry: TimelineEntry): 
     const indexByKey = { ...state.indexByKey, [entry.key]: entries.length - 1 }
     return { ...state, entries, indexByKey }
   }
-  const entries = [...state.entries, entry].sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+  const entries = [...state.entries, entry].sort(compareTimelineEntries)
   const indexByKey: Record<string, number> = {}
   entries.forEach((e, i) => { indexByKey[e.key] = i })
   return { ...state, entries, indexByKey }
@@ -100,7 +109,7 @@ export function insertEntriesBatch(
   if (!newEntries.length) return state
   const merged = [...state.entries, ...newEntries]
   const indexByKey: Record<string, number> = {}
-  merged.sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+  merged.sort(compareTimelineEntries)
   merged.forEach((e, i) => { indexByKey[e.key] = i })
   return { ...state, entries: merged, indexByKey }
 }

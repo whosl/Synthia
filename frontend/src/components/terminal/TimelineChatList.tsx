@@ -6,7 +6,6 @@ import type { SessionTimelineState } from '../../timeline/types'
 import { EmptyState } from '../common/EmptyState'
 import { ChatEnterItem, useSeedChatEnterKeys } from './ChatEnterAnimation'
 import { TimelineEntryView } from './TimelineEntryView'
-import { AgentWorkGroup } from './AgentWorkGroup'
 import { ToolRunGroup } from './ToolRunGroup'
 
 interface TimelineChatListProps {
@@ -18,7 +17,7 @@ interface TimelineChatListProps {
 export function TimelineChatList({ timeline, taskActive = false, onInteractionRespond }: TimelineChatListProps) {
   const { t } = useTranslation()
   const entries = getChatEntries(timeline)
-  const displayItems = groupChatEntries(entries)
+  const displayItems = useMemo(() => groupChatEntries(entries), [entries])
   const itemKeys = useMemo(() => displayItems.map((item) => item.key), [displayItems])
 
   useSeedChatEnterKeys(itemKeys)
@@ -31,13 +30,7 @@ export function TimelineChatList({ timeline, taskActive = false, onInteractionRe
     <div className="timeline-chat-list">
       {displayItems.map((item) => (
         <ChatEnterItem key={item.key} itemKey={item.key}>
-          {item.type === 'work_group' ? (
-            <AgentWorkGroup
-              groupKey={item.key}
-              members={item.members}
-              onInteractionRespond={onInteractionRespond}
-            />
-          ) : item.type === 'tool_group' ? (
+          {item.type === 'tool_group' ? (
             <ToolRunGroup
               groupKey={item.key}
               members={item.members}

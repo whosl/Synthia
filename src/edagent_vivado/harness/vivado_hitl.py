@@ -59,7 +59,20 @@ async def request_vivado_tool_approval(
         task_id=task_id,
         run_id=run_id,
     )
+    try:
+        from edagent_vivado.harness.approval_bridge import mirror_interaction_to_approval
+
+        mirror_interaction_to_approval(interaction, run_id=run_id, connector_id="vivado")
+    except Exception:
+        pass
     responded = await wait_for_response(interaction.id)
     approved = bool(responded and responded.status.value == "approved")
     resolve_vivado_gate(task_id, spec.operation, approved)
+    if responded:
+        try:
+            from edagent_vivado.harness.approval_bridge import sync_approval_on_interaction_resolved
+
+            sync_approval_on_interaction_resolved(responded)
+        except Exception:
+            pass
     return approved

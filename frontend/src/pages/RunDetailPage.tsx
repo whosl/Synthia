@@ -1,22 +1,32 @@
-import { useQuery } from '@tanstack/react-query'
-import { Download, RefreshCw } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Download, Play, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router-dom'
-import { getRun, getRunContext, listRunArtifacts, listRunEvents, listRunProblems } from '../api/monitor'
+import { getRun, getRunContext, getRunWorkspace, listRunArtifacts, listRunEvents, listRunProblems, listRunToolRequests, rerunRun } from '../api/monitor'
 import { Button } from '../components/common/Button'
 import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { formatDuration, formatNumber, formatTime } from '../lib/time'
+import { StructuredReportsPanel } from '../components/reports/StructuredReportsPanel'
+import { StepTimeline } from '../components/monitor/StepTimeline'
+import { RunPatchesPanel } from '../components/monitor/RunPatchesPanel'
 
 export default function RunDetailPage() {
   const { t } = useTranslation()
+  const qc = useQueryClient()
   const { runId = '' } = useParams()
   const { data, refetch } = useQuery({ queryKey: ['run', runId], queryFn: () => getRun(runId), enabled: Boolean(runId) })
   const eventsQ = useQuery({ queryKey: ['run-events', runId], queryFn: () => listRunEvents(runId), enabled: Boolean(runId) })
   const artifactsQ = useQuery({ queryKey: ['run-artifacts', runId], queryFn: () => listRunArtifacts(runId), enabled: Boolean(runId) })
   const problemsQ = useQuery({ queryKey: ['run-problems', runId], queryFn: () => listRunProblems(runId), enabled: Boolean(runId) })
   const contextQ = useQuery({ queryKey: ['run-context', runId], queryFn: () => getRunContext(runId), enabled: Boolean(runId) })
+  const toolReqQ = useQuery({ queryKey: ['run-tool-requests', runId], queryFn: () => listRunToolRequests(runId), enabled: Boolean(runId) })
+  const wsQ = useQuery({ queryKey: ['run-workspace', runId], queryFn: () => getRunWorkspace(runId), enabled: Boolean(runId) })
+  const rerunM = useMutation({
+    mutationFn: () => rerunRun(runId, true),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['run', runId] }),
+  })
   const run = data?.run
   const toolcalls = data?.toolcalls ?? []
   const usage = data?.usage ?? []
@@ -39,6 +49,9 @@ export default function RunDetailPage() {
           <p className="page-subtitle mono">{runId}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <Button className="ghost" onClick={() => rerunM.mutate()} disabled={rerunM.isPending}>
+            <Play size={14} /> {t('runDetail.rerun')}
+          </Button>
           <Button className="ghost" onClick={() => refetch()}><RefreshCw size={14} /> {t('runDetail.refresh')}</Button>
           <Button className="ghost" onClick={handleExport}><Download size={14} /> {t('runDetail.export')}</Button>
         </div>
@@ -73,6 +86,32 @@ export default function RunDetailPage() {
           <Panel title={t('runDetail.events')}>{(eventsQ.data?.events ?? []).slice(0, 8).map((e) => <div className="event-row" key={e.id}><span className="mono muted">#{e.seq}</span><span>{e.event_type}</span><span className="muted">{formatTime(e.created_at)}</span></div>)}</Panel>
           <Panel title={t('runDetail.problems')}>{(problemsQ.data?.problems ?? []).length ? problemsQ.data!.problems.map((p) => <div className="problem-row" key={p.id}><span className={`status ${p.severity || 'warning'}`}>{p.severity || 'INFO'}</span><span>{p.message}</span><span className="muted">{p.source}</span></div>) : <div className="problem-row"><span className="status idle">{t('runDetail.ok')}</span><span className="muted">{t('runDetail.noProblems')}</span><span /></div>}</Panel>
         </div>
+        <Panel title={t('runDetail.workspace')}>
+          {wsQ.data?.workspace_root ? (
+            <>
+              <div className="kv"><span>{t('runDetail.workspaceRoot')}</span><span className="mono" style={{ fontSize: 11 }}>{wsQ.data.workspace_root}</span></div>
+              {Object.entries(wsQ.data.subdirs ?? {}).slice(0, 6).map(([k, v]) => (
+                <div className="event-row" key={k}><span className="mono">{k}</span><span className="muted mono" style={{ fontSize: 10 }}>{v}</span></div>
+              ))}
+            </>
+          ) : (
+            <p className="muted">{t('runDetail.noWorkspace')}</p>
+          )}
+        </Panel>
+        <Panel title={t('runDetail.toolRequests')}>
+          {(toolReqQ.data?.requests ?? []).length
+            ? toolReqQ.data!.requests.map((req) => (
+              <div className="event-row" key={req.id}>
+                <span className="mono">{req.capability_id}</span>
+                <span className="muted">{req.connector_id}</span>
+                <StatusBadge status={req.status || 'pending'} />
+              </div>
+            ))
+            : <p className="muted">{t('runDetail.noToolRequests')}</p>}
+        </Panel>
+        <StepTimeline runId={runId} />
+        <StructuredReportsPanel runId={runId} />
+        <RunPatchesPanel runId={runId} />
         <div className="dashboard-grid">
           <Panel title={t('runDetail.contextAudit')}>
             {(contextQ.data?.contexts ?? []).slice(0, 1).map((ctx) => <div key={ctx.package.id}>

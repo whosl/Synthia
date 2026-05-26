@@ -39,6 +39,39 @@ export function getRunContext(runId: string) {
   }>(`/monitor/runs/${runId}/context`)
 }
 
+export interface ToolRunRequest {
+  id: string
+  run_id: string
+  step_id?: string
+  connector_id: string
+  capability_id: string
+  executable?: string
+  status?: string
+  created_at?: number
+}
+
+export function listRunToolRequests(runId: string) {
+  return request<{ run_id: string; requests: ToolRunRequest[] }>(`/runs/${runId}/tool-requests`)
+}
+
+export function getRunWorkspace(runId: string) {
+  return request<{ run_id: string; workspace_root: string; subdirs: Record<string, string> }>(
+    `/runs/${runId}/workspace`,
+  )
+}
+
+export function rerunRun(runId: string, autoStart = true) {
+  return request<{
+    run_id: string
+    session_id: string
+    status: string
+    suggested_question?: string
+    task?: Record<string, unknown>
+    active_task_id?: string
+    hint?: string
+  }>(`/runs/${runId}/rerun?auto_start=${autoStart ? 'true' : 'false'}`, { method: 'POST', body: '{}' })
+}
+
 export function listSessionRuns(sessionId: string, limit = 50) {
   return request<{ runs: Run[] }>(`/monitor/sessions/${sessionId}/runs?limit=${limit}`)
 }

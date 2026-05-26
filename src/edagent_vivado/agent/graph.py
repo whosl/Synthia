@@ -21,14 +21,9 @@ from edagent_vivado.tools.report_tools import (
     parse_utilization_tool,
     parse_vivado_log_tool,
 )
-from edagent_vivado.tools.vivado_tools import (
-    run_vivado_flow_tool,
-    run_vivado_impl_tool,
-    run_vivado_script_tool,
-    run_vivado_synth_tool,
-    run_vivado_tcl_tool,
-)
 from edagent_vivado.tools.knowledge_tools import search_knowledge_tool, reindex_knowledge_tool
+from edagent_vivado.agent.capability_tools import CAPABILITY_AGENT_TOOLS
+from edagent_vivado.agent.vivado_capability_shims import VIVADO_CAPABILITY_SHIM_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +34,24 @@ _TOOLS = [
     parse_timing_tool,
     parse_utilization_tool,
     match_error_cases_tool,
-    run_vivado_synth_tool,
-    run_vivado_impl_tool,
-    run_vivado_tcl_tool,
-    run_vivado_script_tool,
-    run_vivado_flow_tool,
+    *VIVADO_CAPABILITY_SHIM_TOOLS,
     search_knowledge_tool,
     reindex_knowledge_tool,
     propose_patch_tool,
     create_file_tool,
+    *CAPABILITY_AGENT_TOOLS,
 ]
+
+if _os.environ.get("EDAGENT_LEGACY_VIVADO_TOOLS", "").lower() in ("1", "true", "yes"):
+    from edagent_vivado.tools.vivado_tools import (
+        run_vivado_flow_tool as _legacy_flow,
+        run_vivado_impl_tool as _legacy_impl,
+        run_vivado_script_tool as _legacy_script,
+        run_vivado_synth_tool as _legacy_synth,
+        run_vivado_tcl_tool as _legacy_tcl,
+    )
+
+    _TOOLS.extend([_legacy_synth, _legacy_impl, _legacy_tcl, _legacy_script, _legacy_flow])
 
 _checkpointer = MemorySaver()
 

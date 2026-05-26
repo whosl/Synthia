@@ -127,6 +127,18 @@ def propose_patch_tool(file_path: str, old_text: str, new_text: str, description
         logger.info("Patch applied to %s: %s", file_path, description)
         return f"PATCH APPLIED to {file_path}\nDescription: {description}\n\nDiff:\n{diff}"
     else:
+        try:
+            from edagent_vivado.harness.patch_proposal import record_patch_proposal
+
+            record_patch_proposal(
+                file_path=str(file_path),
+                diff_text=diff,
+                description=description,
+                old_text=old_text,
+                new_text=new_text,
+            )
+        except Exception as exc:
+            logger.debug("patch proposal record skipped: %s", exc)
         return (
             f"PATCH PROPOSED (not yet applied — user approval required)\n"
             f"File: {file_path}\n"

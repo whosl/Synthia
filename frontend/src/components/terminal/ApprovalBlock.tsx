@@ -2,6 +2,7 @@ import { Check, ChevronDown, ChevronRight, Minus, ShieldCheck, X, XCircle } from
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { parseApprovalPayload } from '../../lib/approvalPayload'
+import { buildApprovalResponse } from '../../lib/approvalResponse'
 import { useTerminalStore } from '../../stores/terminalStore'
 import { Button } from '../common/Button'
 import { CollapsibleSection } from '../common/CollapsibleSection'
@@ -21,7 +22,7 @@ export interface ApprovalBlockProps {
   files: ApprovalFile[]
   status: 'pending' | 'approved' | 'rejected'
   response?: Record<string, unknown>
-  onApprove?: (id: string, approvedFiles: string[]) => void
+  onApprove?: (id: string, approvedIndices: number[]) => void
   onReject?: (id: string) => void
 }
 
@@ -37,19 +38,27 @@ export function ApprovalBlock({
   onReject,
 }: ApprovalBlockProps) {
   const { t } = useTranslation()
-  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
-  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(() => new Set(files.map((f) => f.path)))
+  const [expandedFiles, setExpandedFiles] = useState<Set<number>>(new Set())
+  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(
+    () => new Set(files.map((_, index) => index)),
+  )
   const collapsed = useTerminalStore((s) => s.collapsed[id] ?? true)
   const toggleCollapsed = useTerminalStore((s) => s.toggleCollapsed)
 
   const isPending = status === 'pending'
   const isApproved = status === 'approved'
-  const allPaths = files.map((f) => f.path)
+  const allIndices = files.map((_, index) => index)
 
   const detailRows = useMemo(
     () => parseApprovalPayload(reason, message, files),
     [reason, message, files],
   )
+
+  const approvedIndices = useMemo(() => {
+    const raw = response?.approved_indices
+    if (!Array.isArray(raw)) return null
+    return new Set(raw.map((v) => Number(v)))
+  }, [response])
 
   const approvedSet = useMemo(() => {
     const raw = response?.approved_files
@@ -57,30 +66,34 @@ export function ApprovalBlock({
     return new Set(raw.map(String))
   }, [response])
 
-  const isPartialResult = isApproved && approvedSet !== null && approvedSet.size < files.length
+  const isPartialResult = isApproved && (
+    approvedIndices !== null
+      ? approvedIndices.size < files.length
+      : approvedSet !== null && approvedSet.size < files.length
+  )
 
-  const toggleExpand = (path: string) => {
+  const toggleExpand = (index: number) => {
     setExpandedFiles((prev) => {
       const next = new Set(prev)
-      next.has(path) ? next.delete(path) : next.add(path)
+      next.has(index) ? next.delete(index) : next.add(index)
       return next
     })
   }
 
-  const toggleSelect = (path: string) => {
-    setSelectedFiles((prev) => {
+  const toggleSelect = (index: number) => {
+    setSelectedIndices((prev) => {
       const next = new Set(prev)
-      next.has(path) ? next.delete(path) : next.add(path)
+      next.has(index) ? next.delete(index) : next.add(index)
       return next
     })
   }
 
-  const selectAll = () => setSelectedFiles(new Set(allPaths))
-  const selectNone = () => setSelectedFiles(new Set())
+  const selectAll = () => setSelectedIndices(new Set(allIndices))
+  const selectNone = () => setSelectedIndices(new Set())
 
-  const approveLabel = selectedFiles.size === files.length
+  const approveLabel = selectedIndices.size === files.length
     ? t('approval.approve')
-    : t('approval.approveCount', { selected: selectedFiles.size, total: files.length })
+    : t('approval.approveCount', { selected: selectedIndices.size, total: files.length })
 
   const statusLabel = isApproved
     ? (isPartialResult ? t('approval.partialApproval') : t('approval.approved'))
@@ -116,26 +129,28 @@ export function ApprovalBlock({
           <button type="button" className="link-btn" onClick={selectAll}>{t('approval.selectAll')}</button>
           <span className="sep">·</span>
           <button type="button" className="link-btn" onClick={selectNone}>{t('approval.selectNone')}</button>
-          <span className="approval-select-count">{t('approval.selected', { selected: selectedFiles.size, total: files.length })}</span>
+          <span className="approval-select-count">{t('approval.selected', { selected: selectedIndices.size, total: files.length })}</span>
         </div>
       )}
 
       {files.length > 0 && (
         <div className="approval-files">
-          {files.map((file) => {
-            const fileApproved = approvedSet?.has(file.path)
-            const fileSkipped = approvedSet !== null && !fileApproved
+          {files.map((file, index) => {
+            const fileApproved = approvedIndices
+              ? approvedIndices.has(index)
+              : (approvedSet?.has(file.path) ?? false)
+            const fileSkipped = isApproved && !fileApproved && (approvedIndices !== null || approvedSet !== null)
             return (
               <div
-                key={file.path}
-                className={`approval-file${isPending && selectedFiles.has(file.path) ? ' selected' : ''}${fileApproved ? ' file-approved' : ''}${fileSkipped ? ' file-skipped' : ''}`}
+                key={`${file.path}:${index}`}
+                className={`approval-file${isPending && selectedIndices.has(index) ? ' selected' : ''}${fileApproved ? ' file-approved' : ''}${fileSkipped ? ' file-skipped' : ''}`}
               >
                 <div className="approval-file-header">
                   {isPending && (
                     <input
                       type="checkbox"
-                      checked={selectedFiles.has(file.path)}
-                      onChange={() => toggleSelect(file.path)}
+                      checked={selectedIndices.has(index)}
+                      onChange={() => toggleSelect(index)}
                       aria-label={t('approval.selectFile', { path: file.path })}
                     />
                   )}
@@ -144,11 +159,11 @@ export function ApprovalBlock({
                   <span className="file-action-badge">{file.action}</span>
                   <code className="file-path">{file.path}</code>
                   {file.description && <span className="file-desc">{file.description}</span>}
-                  <button type="button" className="btn-icon" onClick={() => toggleExpand(file.path)}>
-                    {expandedFiles.has(file.path) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <button type="button" className="btn-icon" onClick={() => toggleExpand(index)}>
+                    {expandedFiles.has(index) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </button>
                 </div>
-                {expandedFiles.has(file.path) && (
+                {expandedFiles.has(index) && (
                   <pre className="file-content-preview">{file.content}</pre>
                 )}
               </div>
@@ -161,8 +176,11 @@ export function ApprovalBlock({
         <div className="interaction-actions">
           <Button
             className="primary"
-            disabled={files.length > 0 && selectedFiles.size === 0}
-            onClick={() => onApprove?.(id, files.length > 0 ? [...selectedFiles] : allPaths)}
+            disabled={files.length > 0 && selectedIndices.size === 0}
+            onClick={() => {
+              const indices = files.length > 0 ? [...selectedIndices].sort((a, b) => a - b) : allIndices
+              onApprove?.(id, indices)
+            }}
           >
             <Check size={14} /> {approveLabel}
           </Button>

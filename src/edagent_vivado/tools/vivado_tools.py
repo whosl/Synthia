@@ -52,6 +52,87 @@ def _gate_or_reject(tool_name: str) -> str | None:
     return None
 
 
+def _legacy_synth(manifest_path: str, session_id: str, task_id: str, run_id: str) -> dict:
+    adapter = VivadoRuntimeAdapter()
+    return adapter.run_synthesis(
+        manifest_path,
+        session_id=session_id,
+        task_id=task_id,
+        run_id=run_id,
+    )
+
+
+def _legacy_impl(
+    manifest_path: str,
+    session_id: str,
+    task_id: str,
+    run_id: str,
+    *,
+    run_synth_first: bool = True,
+) -> dict:
+    adapter = VivadoRuntimeAdapter()
+    return adapter.run_implementation(
+        manifest_path,
+        session_id=session_id,
+        task_id=task_id,
+        run_id=run_id,
+        run_synth_first=run_synth_first,
+    )
+
+
+def _run_manifest_tool(tool_name: str, manifest_path: str, scope: str) -> str:
+    try:
+        rejected = _gate_or_reject(tool_name)
+        if rejected:
+            return rejected
+
+        session_id, task_id, run_id = _ctx_ids()
+        from edagent_vivado.connectors.vivado.bridge import run_manifest_via_connector
+
+        run_synth_first = None
+        if tool_name == "run_vivado_impl_tool":
+            run_synth_first = False
+        elif tool_name == "run_vivado_flow_tool":
+            run_synth_first = True
+
+        result = run_manifest_via_connector(
+            tool_name,
+            manifest_path,
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            run_synth_first=run_synth_first,
+        )
+        if result is None:
+            if tool_name == "run_vivado_synth_tool":
+                result = _legacy_synth(manifest_path, session_id, task_id, run_id)
+            else:
+                result = _legacy_impl(
+                    manifest_path,
+                    session_id,
+                    task_id,
+                    run_id,
+                    run_synth_first=run_synth_first if run_synth_first is not None else True,
+                )
+
+        ws_path = Path(result.get("workspace") or "")
+        if ws_path.is_dir():
+            name = {
+                "run_vivado_synth_tool": "synth_result.json",
+                "run_vivado_impl_tool": "impl_result.json",
+                "run_vivado_flow_tool": "flow_result.json",
+            }.get(tool_name, "result.json")
+            summary_path = ws_path / "artifacts" / name
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, default=str)
+            result["summary_path"] = str(summary_path)
+
+        return tag_execution_result(result, scope)
+    except Exception as e:
+        return format_execution_failed(scope, str(e))
+
+
 @tool
 def run_vivado_synth_tool(manifest_path: str, approval_request: str = "") -> str:
     """Run Vivado synthesis using the project manifest. Returns a JSON summary.
@@ -60,30 +141,7 @@ def run_vivado_synth_tool(manifest_path: str, approval_request: str = "") -> str
         manifest_path: Path to eda.yaml project manifest.
         approval_request: Required JSON string for the approval UI (see system prompt schema).
     """
-    try:
-        rejected = _gate_or_reject("run_vivado_synth_tool")
-        if rejected:
-            return rejected
-
-        session_id, task_id, run_id = _ctx_ids()
-        adapter = VivadoRuntimeAdapter()
-        result = adapter.run_synthesis(
-            manifest_path,
-            session_id=session_id,
-            task_id=task_id,
-            run_id=run_id,
-        )
-
-        ws_path = Path(result.get("workspace") or "")
-        summary_path = ws_path / "artifacts" / "synth_result.json"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, default=str)
-        result["summary_path"] = str(summary_path)
-
-        return tag_execution_result(result, SCOPE_VIVADO_SYNTH)
-    except Exception as e:
-        return format_execution_failed(SCOPE_VIVADO_SYNTH, str(e))
+    return _run_manifest_tool("run_vivado_synth_tool", manifest_path, SCOPE_VIVADO_SYNTH)
 
 
 @tool
@@ -94,30 +152,7 @@ def run_vivado_impl_tool(manifest_path: str, approval_request: str = "") -> str:
         manifest_path: Path to eda.yaml project manifest.
         approval_request: Required JSON string for the approval UI.
     """
-    try:
-        rejected = _gate_or_reject("run_vivado_impl_tool")
-        if rejected:
-            return rejected
-
-        session_id, task_id, run_id = _ctx_ids()
-        adapter = VivadoRuntimeAdapter()
-        result = adapter.run_implementation(
-            manifest_path,
-            session_id=session_id,
-            task_id=task_id,
-            run_id=run_id,
-        )
-
-        ws_path = Path(result.get("workspace") or "")
-        summary_path = ws_path / "artifacts" / "impl_result.json"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, default=str)
-        result["summary_path"] = str(summary_path)
-
-        return tag_execution_result(result, SCOPE_VIVADO_IMPL)
-    except Exception as e:
-        return format_execution_failed(SCOPE_VIVADO_IMPL, str(e))
+    return _run_manifest_tool("run_vivado_impl_tool", manifest_path, SCOPE_VIVADO_IMPL)
 
 
 @tool
@@ -135,6 +170,8 @@ def run_vivado_tcl_tool(command: str, target_id: str = "", approval_request: str
             return rejected
 
         session_id, task_id, run_id = _ctx_ids()
+        from edagent_vivado.connectors.vivado.bridge import run_tcl_via_adapter
+
         adapter = VivadoRuntimeAdapter()
         if target_id:
             from edagent_vivado.harness.vivado_adapter import get_target
@@ -149,9 +186,9 @@ def run_vivado_tcl_tool(command: str, target_id: str = "", approval_request: str
                 extra={"policy": policy.matched_rules},
             )
 
-        result = adapter.run_tcl(
+        result = run_tcl_via_adapter(
             command,
-            auto_approved=True,
+            target_id=target_id,
             session_id=session_id,
             task_id=task_id,
             run_id=run_id,
@@ -176,6 +213,8 @@ def run_vivado_script_tool(script: str, target_id: str = "", approval_request: s
             return rejected
 
         session_id, task_id, run_id = _ctx_ids()
+        from edagent_vivado.connectors.vivado.bridge import run_script_via_adapter
+
         adapter = VivadoRuntimeAdapter()
         if target_id:
             from edagent_vivado.harness.vivado_adapter import get_target
@@ -190,9 +229,9 @@ def run_vivado_script_tool(script: str, target_id: str = "", approval_request: s
                 extra={"policy": policy.matched_rules},
             )
 
-        result = adapter.run_script(
+        result = run_script_via_adapter(
             script,
-            auto_approved=True,
+            target_id=target_id,
             session_id=session_id,
             task_id=task_id,
             run_id=run_id,
@@ -210,28 +249,4 @@ def run_vivado_flow_tool(manifest_path: str, approval_request: str = "") -> str:
         manifest_path: Path to eda.yaml project manifest.
         approval_request: Required JSON string for the approval UI.
     """
-    try:
-        rejected = _gate_or_reject("run_vivado_flow_tool")
-        if rejected:
-            return rejected
-
-        session_id, task_id, run_id = _ctx_ids()
-        adapter = VivadoRuntimeAdapter()
-        result = adapter.run_implementation(
-            manifest_path,
-            session_id=session_id,
-            task_id=task_id,
-            run_id=run_id,
-            run_synth_first=True,
-        )
-
-        ws_path = Path(result.get("workspace") or "")
-        summary_path = ws_path / "artifacts" / "flow_result.json"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, default=str)
-        result["summary_path"] = str(summary_path)
-
-        return tag_execution_result(result, SCOPE_VIVADO_FLOW)
-    except Exception as e:
-        return format_execution_failed(SCOPE_VIVADO_FLOW, str(e))
+    return _run_manifest_tool("run_vivado_flow_tool", manifest_path, SCOPE_VIVADO_FLOW)

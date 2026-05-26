@@ -165,6 +165,25 @@ class ObservedToolRunner:
             run_id=self.run_id,
         )
 
+        if output and ui_state == "completed" and tool_name in (
+            "run_vivado_synth_tool",
+            "run_vivado_impl_tool",
+            "run_vivado_flow_tool",
+        ):
+            try:
+                from edagent_vivado.connectors.vivado.persist import persist_from_tool_output
+
+                persist_from_tool_output(
+                    self.session_id,
+                    self.task_id,
+                    self.run_id,
+                    tool_name,
+                    output,
+                    self.event_sink,
+                )
+            except Exception:
+                pass
+
         if output and ui_state in ("completed", "error", "rejected"):
             probs = collect_from_tool_output(tool_name, output)
             if probs:

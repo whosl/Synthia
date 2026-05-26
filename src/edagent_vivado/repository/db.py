@@ -467,6 +467,136 @@ CREATE TABLE IF NOT EXISTS memory_personas (
 
 CREATE INDEX IF NOT EXISTS idx_memory_scenarios_project ON memory_scenarios(project_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_personas_project_version ON memory_personas(scope, project_id, version);
+
+CREATE TABLE IF NOT EXISTS connectors (
+    id TEXT PRIMARY KEY,
+    connector_id TEXT NOT NULL UNIQUE,
+    tool_name TEXT NOT NULL,
+    version TEXT,
+    supported_versions_json TEXT,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    last_health_at INTEGER,
+    last_health_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS connector_capabilities (
+    id TEXT PRIMARY KEY,
+    connector_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    display_name TEXT,
+    stage TEXT,
+    risk_level TEXT NOT NULL DEFAULT 'low',
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    supports_stop INTEGER NOT NULL DEFAULT 1,
+    supports_mock INTEGER NOT NULL DEFAULT 1,
+    input_schema_json TEXT,
+    outputs_json TEXT,
+    UNIQUE(connector_id, capability_id)
+);
+
+CREATE TABLE IF NOT EXISTS run_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    session_id TEXT,
+    task_id TEXT,
+    connector_id TEXT,
+    capability_id TEXT,
+    stage TEXT NOT NULL,
+    name TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    started_at INTEGER,
+    finished_at INTEGER,
+    elapsed_ms INTEGER,
+    command_text TEXT,
+    request_artifact_id TEXT,
+    log_artifact_id TEXT,
+    error TEXT,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS parsed_reports (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT,
+    connector_id TEXT NOT NULL,
+    report_type TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    source_artifact_id TEXT,
+    data_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_steps_run ON run_steps(run_id);
+CREATE INDEX IF NOT EXISTS idx_parsed_reports_run ON parsed_reports(run_id);
+
+CREATE TABLE IF NOT EXISTS patch_proposals (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    step_id TEXT,
+    session_id TEXT,
+    task_id TEXT,
+    problem_id TEXT,
+    connector_id TEXT NOT NULL,
+    capability_id TEXT,
+    target_file TEXT NOT NULL,
+    patch_type TEXT NOT NULL,
+    risk_level TEXT NOT NULL DEFAULT 'low',
+    reason TEXT,
+    diff_text TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    approval_id TEXT,
+    applied_at INTEGER,
+    superseded_by TEXT,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    task_id TEXT,
+    run_id TEXT,
+    step_id TEXT,
+    connector_id TEXT,
+    capability_id TEXT,
+    approval_type TEXT NOT NULL,
+    risk_level TEXT NOT NULL DEFAULT 'low',
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    decided_at INTEGER,
+    decided_by TEXT,
+    interaction_id TEXT,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_patch_proposals_run ON patch_proposals(run_id);
+CREATE INDEX IF NOT EXISTS idx_patch_proposals_status ON patch_proposals(status);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+
+CREATE TABLE IF NOT EXISTS tool_run_requests (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT,
+    connector_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    command_id TEXT,
+    executable TEXT,
+    args_json TEXT,
+    cwd TEXT,
+    env_profile TEXT,
+    allowed_paths_json TEXT,
+    timeout_sec INTEGER DEFAULT 3600,
+    state TEXT NOT NULL DEFAULT 'prepared',
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_run_requests_run ON tool_run_requests(run_id);
 """
 
 

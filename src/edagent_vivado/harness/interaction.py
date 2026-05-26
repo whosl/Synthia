@@ -265,6 +265,96 @@ def rehydrate_session_interactions(session_id: str) -> list[Interaction]:
     return restored
 
 
+def _load_requested_interaction_payload(interaction_id: str) -> tuple[dict, str, str] | None:
+    """Return (payload, session_id, task_id) from interaction.requested event."""
+    from edagent_vivado.repository.db import get_db
+
+    row = get_db().execute(
+        """SELECT payload_json, session_id, task_id FROM events
+           WHERE event_type='interaction.requested'
+             AND (payload_json LIKE ? OR payload_json LIKE ?)
+           ORDER BY seq DESC LIMIT 1""",
+        (f'%"id": "{interaction_id}"%', f'%"interaction_id": "{interaction_id}"%'),
+    ).fetchone()
+    if not row:
+        return None
+    raw = row["payload_json"] or "{}"
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    session_id = str(row["session_id"] or payload.get("session_id") or "")
+    task_id = str(row["task_id"] or payload.get("task_id") or "")
+    return payload, session_id, task_id
+
+
+def sync_interaction_resolution_from_store(interaction_id: str) -> Interaction | None:
+    """Apply persisted approval/rejection to in-memory state (survives lost asyncio events)."""
+    from edagent_vivado.repository.db import get_db
+
+    row = get_db().execute(
+        """SELECT event_type, payload_json FROM events
+           WHERE event_type IN ('interaction.approved','interaction.rejected','interaction.responded')
+             AND (payload_json LIKE ? OR payload_json LIKE ?)
+           ORDER BY seq DESC LIMIT 1""",
+        (f'%"id": "{interaction_id}"%', f'%"interaction_id": "{interaction_id}"%'),
+    ).fetchone()
+    if not row:
+        return None
+
+    raw = row["payload_json"] or "{}"
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    body = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+    event_type = str(row["event_type"])
+    if event_type == "interaction.approved":
+        status = InteractionStatus.APPROVED if body.get("approved", True) else InteractionStatus.REJECTED
+    elif event_type == "interaction.rejected":
+        status = InteractionStatus.REJECTED
+    else:
+        status = InteractionStatus.RESPONDED
+
+    interaction = get_interaction(interaction_id)
+    if not interaction:
+        requested = _load_requested_interaction_payload(interaction_id)
+        if not requested:
+            return None
+        req_payload, session_id, task_id = requested
+        interaction = interaction_from_payload(req_payload, session_id, task_id)
+        _interactions[interaction_id] = interaction
+
+    if interaction.status != InteractionStatus.PENDING:
+        return interaction
+
+    interaction.response = body
+    interaction.responded_at = int(payload.get("responded_at") or time.time())
+    interaction.status = status
+    _interactions[interaction_id] = interaction
+    evt = _ensure_wait_event(interaction_id, interaction)
+    evt.set()
+    return interaction
+
+
+def release_interaction_waiters_for_task(task_id: str) -> int:
+    """Wake pending interaction waiters when a task is stopped (returns count released)."""
+    released = 0
+    for iid, interaction in list(_interactions.items()):
+        if interaction.task_id != task_id or interaction.status != InteractionStatus.PENDING:
+            continue
+        evt = _interaction_events.get(iid)
+        if evt and not evt.is_set():
+            evt.set()
+            released += 1
+    return released
+
+
 def lookup_session_for_interaction(interaction_id: str) -> str | None:
     from edagent_vivado.repository.store import get_db
 
@@ -336,7 +426,14 @@ async def wait_for_response(
     while True:
         if _task_stop_requested(task_id):
             return None
+        synced = sync_interaction_resolution_from_store(interaction_id)
+        if synced and synced.status != InteractionStatus.PENDING:
+            return synced
         if evt.is_set():
+            resolved = _interactions.get(interaction_id)
+            if resolved and resolved.status != InteractionStatus.PENDING:
+                return resolved
+            sync_interaction_resolution_from_store(interaction_id)
             return _interactions.get(interaction_id)
         wait_for = poll
         if deadline is not None:

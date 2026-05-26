@@ -7,6 +7,7 @@ import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { MonitorOverviewPanel } from '../components/monitor/MonitorOverviewPanel'
+import { ConnectorHealthPanel } from '../components/monitor/ConnectorHealthPanel'
 import { formatDuration, formatTime } from '../lib/time'
 
 export default function MonitorPage() {
@@ -23,12 +24,15 @@ export default function MonitorPage() {
       </div>
     </PageStickyTop>
     <MonitorOverviewPanel />
+    <div className="dashboard-grid" style={{ marginBottom: 16 }}>
+      <ConnectorHealthPanel />
+    </div>
     <Panel title={t('monitor.recentRuns')}>
       <div className="table-wrap">
         <table className="table">
           <thead><tr><th>{t('monitor.tableRun')}</th><th>{t('monitor.tableType')}</th><th>{t('monitor.tableStatus')}</th><th className="table-col-time">{t('monitor.tableStarted')}</th><th>{t('monitor.tableElapsed')}</th><th>{t('monitor.tableSession')}</th></tr></thead>
           <tbody>{runs.map((r) => <tr key={r.id}>
-            <td><Link to={`/monitor/runs/${r.id}`} style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}>{r.name}</Link><div className="muted mono" style={{ fontSize: 11 }}>{r.id}</div></td>
+            <td><Link to={`/runs/${r.id}`} style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}>{r.name}</Link><div className="muted mono" style={{ fontSize: 11 }}>{r.id}</div></td>
             <td className="mono">{r.run_type}</td>
             <td><StatusBadge status={r.state} /></td>
             <td className="muted table-col-time">{formatTime(r.started_at)}</td>

@@ -27,13 +27,29 @@ __all__ = [
 ]
 
 
-def apply_approved_files(files: list[FileItem], approved_paths: list[str]) -> tuple[list[str], list[str]]:
-    """Write approved files to disk. Returns (applied_paths, skipped_paths)."""
-    approved_set = set(approved_paths)
+def _resolve_approved_indices(
+    files: list[FileItem],
+    approved_paths: list[str] | None,
+    approved_indices: list[int] | None,
+) -> set[int]:
+    if approved_indices is not None:
+        return {int(i) for i in approved_indices if 0 <= int(i) < len(files)}
+    approved_set = set(approved_paths or [])
+    return {i for i, fi in enumerate(files) if fi.path in approved_set}
+
+
+def apply_approved_files(
+    files: list[FileItem],
+    approved_paths: list[str] | None = None,
+    *,
+    approved_indices: list[int] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Write approved file changes to disk. Returns (applied_paths, skipped_paths) per change row."""
+    selected = _resolve_approved_indices(files, approved_paths, approved_indices)
     applied: list[str] = []
     skipped: list[str] = []
-    for fi in files:
-        if fi.path not in approved_set:
+    for i, fi in enumerate(files):
+        if i not in selected:
             skipped.append(fi.path)
             continue
         ok, detail = apply_approved_file_item(fi)
@@ -45,9 +61,14 @@ def apply_approved_files(files: list[FileItem], approved_paths: list[str]) -> tu
     return applied, skipped
 
 
-def format_approval_tool_output(applied: list[str], skipped: list[str]) -> str:
+def format_approval_tool_output(
+    applied: list[str],
+    skipped: list[str],
+    *,
+    total_changes: int | None = None,
+) -> str:
     """Structured JSON returned to the agent after file approval."""
-    total = len(applied) + len(skipped)
+    total = total_changes if total_changes is not None else len(applied) + len(skipped)
     if not applied:
         return format_user_rejection(SCOPE_FILE_CHANGES, detail="User rejected all proposed file changes.")
     if not skipped:

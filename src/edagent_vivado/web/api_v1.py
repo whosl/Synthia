@@ -26,6 +26,10 @@ from edagent_vivado.repository.store import (
     monitor_overview, monitor_retention_cleanup,
     kb_candidate_list, kb_candidate_get, kb_candidate_approve, kb_candidate_reject, kb_candidate_merge,
     vivado_command_list, knowledge_source_list,
+    connector_list, connector_get, capability_list,
+    run_step_list, parsed_report_list, parsed_report_get, parsed_report_trends,
+    patch_proposal_list, patch_proposal_get, patch_proposal_update,
+    approval_list, approval_get, approval_update,
 )
 from edagent_vivado.repository.db import get_db
 from edagent_vivado.tools.patch_tools import set_patch_approval, is_patch_approved
@@ -134,9 +138,17 @@ async def _flush_pending_file_batch(
         from edagent_vivado.harness.approval_outcomes import SCOPE_FILE_CHANGES, format_user_rejection
         return format_user_rejection(SCOPE_FILE_CHANGES)
     from edagent_vivado.harness.approval_apply import apply_approved_files, format_approval_tool_output
-    approved_paths = responded.response.get("approved_files") or [fi.path for fi in files]
-    applied, skipped = apply_approved_files(files, approved_paths)
-    return format_approval_tool_output(applied, skipped)
+    resp = responded.response if isinstance(responded.response, dict) else {}
+    approved_indices = resp.get("approved_indices")
+    if approved_indices is not None:
+        applied, skipped = apply_approved_files(
+            files,
+            approved_indices=[int(i) for i in approved_indices],
+        )
+    else:
+        approved_paths = resp.get("approved_files") or [fi.path for fi in files]
+        applied, skipped = apply_approved_files(files, approved_paths)
+    return format_approval_tool_output(applied, skipped, total_changes=len(files))
 
 
 # ── Project API ──────────────────────────────────────────────
@@ -509,6 +521,11 @@ async def api_task_start(session_id: str, req: StartTaskReq):
     event_create(session_id, "message.user.created", {"message_id": msg["id"], "text": req.question})
     # Create task
     t = task_create(session_id, msg["id"])
+    if req.metadata:
+        try:
+            task_update(t["id"], metadata_json=json.dumps(req.metadata, ensure_ascii=False))
+        except Exception:
+            pass
     task_update(t["id"], state="running", updated_at=int(time.time()))
     session_update(session_id, status="running")
     event_create(session_id, "task.created", {"task_id": t["id"]}, task_id=t["id"])
@@ -523,11 +540,52 @@ async def api_task_start(session_id: str, req: StartTaskReq):
         arm_token = None
         arm_assignments: list[dict] = []
         try:
-            run = run_create("task", f"task:{t['id']}", session_id=session_id, task_id=t["id"])
+            parent_run = ""
+            if req.metadata:
+                parent_run = str(req.metadata.get("parent_run_id") or "")
+            run = run_create(
+                "task",
+                f"task:{t['id']}",
+                session_id=session_id,
+                task_id=t["id"],
+                parent_run_id=parent_run,
+            )
+            try:
+                from edagent_vivado.harness.run_workspace import ensure_run_workspace
+
+                ensure_run_workspace(run["id"])
+            except Exception:
+                pass
             event_create(session_id, "run.started", {"run_id": run["id"], "run_type": "task"},
                          task_id=t["id"], run_id=run["id"])
-            from edagent_vivado.agent.context import build_agent_context
+            from edagent_vivado.agent.planner import plan_task, plan_to_json
+
             manifest_path = req.manifest_path or snapshot_manifest_path(sess)
+            plan_steps = plan_task(
+                req.question,
+                project_id=sess.get("project_id") or "",
+                session_id=session_id,
+                manifest_path=manifest_path,
+            )
+            if plan_steps:
+                try:
+                    prev_meta_raw = (task_get(t["id"]) or {}).get("metadata_json") or "{}"
+                    try:
+                        prev_meta = json.loads(prev_meta_raw) or {}
+                    except json.JSONDecodeError:
+                        prev_meta = {}
+                    prev_meta["plan"] = json.loads(plan_to_json(plan_steps))
+                    task_update(t["id"], metadata_json=json.dumps(prev_meta))
+                except Exception:
+                    pass
+                event_create(
+                    session_id,
+                    "task.plan.generated",
+                    {"task_id": t["id"], "plan": json.loads(plan_to_json(plan_steps))},
+                    task_id=t["id"],
+                    run_id=run["id"],
+                )
+            from edagent_vivado.agent.context import build_agent_context
             ctx = build_agent_context(
                 session_id=session_id,
                 task_id=t["id"],
@@ -828,6 +886,14 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                     reason=payload_to_reason_json(file_payload),
                                     files=files,
                                 )
+                                try:
+                                    from edagent_vivado.harness.approval_bridge import mirror_interaction_to_approval
+
+                                    mirror_interaction_to_approval(
+                                        interaction, run_id=run["id"],
+                                    )
+                                except Exception:
+                                    pass
                                 event_create(session_id, "interaction.requested", interaction.to_dict(),
                                              task_id=t["id"], run_id=run["id"])
                                 responded = await wait_for_response(interaction.id, task_id=t["id"])
@@ -851,9 +917,19 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                                                 apply_approved_files,
                                                 format_approval_tool_output,
                                             )
-                                            approved_paths = responded.response.get("approved_files") or [fi.path for fi in files]
-                                            applied, skipped = apply_approved_files(files, approved_paths)
-                                            output = format_approval_tool_output(applied, skipped)
+                                            resp = responded.response if isinstance(responded.response, dict) else {}
+                                            approved_indices = resp.get("approved_indices")
+                                            if approved_indices is not None:
+                                                applied, skipped = apply_approved_files(
+                                                    files,
+                                                    approved_indices=[int(i) for i in approved_indices],
+                                                )
+                                            else:
+                                                approved_paths = resp.get("approved_files") or [fi.path for fi in files]
+                                                applied, skipped = apply_approved_files(files, approved_paths)
+                                            output = format_approval_tool_output(
+                                                applied, skipped, total_changes=len(files),
+                                            )
                                         else:
                                             from edagent_vivado.harness.approval_outcomes import (
                                                 SCOPE_FILE_CHANGES,
@@ -1182,6 +1258,9 @@ async def api_task_stop(task_id: str = "", session_id: str = ""):
     from edagent_vivado.harness.task_stop_helpers import finalize_task_stop
 
     cancel_stats = cancel_task_execution(task_id)
+    from edagent_vivado.harness.interaction import release_interaction_waiters_for_task
+
+    release_interaction_waiters_for_task(task_id)
     event_create(
         sid,
         "task.stopping",
@@ -1245,6 +1324,507 @@ async def api_stream(session_id: str, after_seq: int = 0):
 
     return StreamingResponse(_stream(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+# ── Connectors API (Phase 6A) ────────────────────────────────
+
+@router.get("/connectors")
+async def api_connectors_list():
+    from edagent_vivado.connectors import ensure_connectors
+    from edagent_vivado.connectors.base.registry import list_connectors as registry_list
+
+    ensure_connectors()
+    db_rows = {r["connector_id"]: r for r in connector_list()}
+    items = []
+    for conn in registry_list():
+        db_row = db_rows.get(conn.connector_id, {})
+        items.append({
+            "connector_id": conn.connector_id,
+            "tool_name": conn.tool_name,
+            "supported_versions": list(conn.supported_versions),
+            "status": db_row.get("status") or "registered",
+            "version": db_row.get("version"),
+            "capabilities_count": len(conn.list_capabilities()),
+        })
+    for row in db_rows.values():
+        if row["connector_id"] not in {i["connector_id"] for i in items}:
+            items.append({
+                "connector_id": row["connector_id"],
+                "tool_name": row["tool_name"],
+                "supported_versions": json.loads(row.get("supported_versions_json") or "[]"),
+                "status": row.get("status"),
+                "version": row.get("version"),
+                "capabilities_count": len(capability_list(row["connector_id"])),
+            })
+    return {"connectors": items}
+
+
+@router.get("/connectors/{connector_id}")
+async def api_connector_get(connector_id: str):
+    from edagent_vivado.connectors.base.registry import get_connector
+
+    row = connector_get(connector_id)
+    conn = get_connector(connector_id)
+    if not row and not conn:
+        raise HTTPException(404, "connector not found")
+    env = conn.detect_environment() if conn else None
+    return {
+        "connector": row or {"connector_id": connector_id},
+        "environment": {
+            "reachable": env.reachable,
+            "version": env.version,
+            "target_type": env.target_type,
+            "target_id": env.target_id,
+        } if env else None,
+    }
+
+
+@router.get("/connectors/{connector_id}/capabilities")
+async def api_connector_capabilities(connector_id: str):
+    from edagent_vivado.connectors.base.registry import get_connector
+
+    conn = get_connector(connector_id)
+    caps = []
+    if conn:
+        for c in conn.list_capabilities():
+            caps.append({
+                "capability_id": c.capability_id,
+                "display_name": c.display_name,
+                "stage": c.stage,
+                "risk_level": c.risk_level,
+                "requires_approval": c.requires_approval,
+                "outputs": c.outputs,
+            })
+    else:
+        for row in capability_list(connector_id):
+            caps.append({
+                "capability_id": row["capability_id"],
+                "display_name": row.get("display_name"),
+                "stage": row.get("stage"),
+                "risk_level": row.get("risk_level"),
+                "requires_approval": bool(row.get("requires_approval")),
+                "outputs": json.loads(row.get("outputs_json") or "[]"),
+            })
+    if not caps and not connector_get(connector_id):
+        raise HTTPException(404, "connector not found")
+    return {"connector_id": connector_id, "capabilities": caps}
+
+
+@router.get("/runs/{run_id}/steps")
+async def api_run_steps(run_id: str):
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    return {"run_id": run_id, "steps": run_step_list(run_id)}
+
+
+@router.get("/runs/{run_id}/workspace")
+async def api_run_workspace(run_id: str):
+    from edagent_vivado.harness.run_workspace import RUN_WORKSPACE_SUBDIRS, workspace_root_for_run
+
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    root = workspace_root_for_run(run_id)
+    if not root:
+        from edagent_vivado.harness.run_workspace import ensure_run_workspace
+
+        ws = ensure_run_workspace(run_id)
+        root = ws.root
+    subdirs = {name: str(root / name) for name in RUN_WORKSPACE_SUBDIRS}
+    return {"run_id": run_id, "workspace_root": str(root), "subdirs": subdirs}
+
+
+@router.get("/runs/{run_id}/tool-requests")
+async def api_run_tool_requests(run_id: str):
+    from edagent_vivado.repository.store import tool_run_request_list
+
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    return {"run_id": run_id, "requests": tool_run_request_list(run_id=run_id)}
+
+
+@router.get("/reports/trends")
+async def api_reports_trends(
+    report_type: str = "timing_summary",
+    session_id: str = "",
+    metric: str = "wns",
+    limit: int = 20,
+):
+    points = parsed_report_trends(
+        report_type,
+        session_id=session_id,
+        metric=metric,
+        limit=limit,
+    )
+    return {
+        "report_type": report_type,
+        "metric": metric,
+        "session_id": session_id or None,
+        "points": points,
+    }
+
+
+@router.get("/runs/{run_id}/reports")
+async def api_run_reports(run_id: str, report_type: str = ""):
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    rows = parsed_report_list(run_id=run_id, report_type=report_type or "")
+    return {"run_id": run_id, "reports": rows}
+
+
+@router.get("/runs/{run_id}/reports/{report_id}")
+async def api_run_report_detail(run_id: str, report_id: str):
+    from edagent_vivado.repository.store import parsed_report_get
+
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    row = parsed_report_get(report_id)
+    if not row or row.get("run_id") != run_id:
+        raise HTTPException(404, "report not found")
+    return {"run_id": run_id, "report": row}
+
+
+@router.post("/connectors/{connector_id}/health-check")
+async def api_connector_health_check(connector_id: str, session_id: str = ""):
+    from edagent_vivado.connectors import ensure_connectors
+    from edagent_vivado.connectors.base.registry import get_connector
+    from edagent_vivado.repository.store import connector_upsert
+
+    ensure_connectors()
+    conn = get_connector(connector_id)
+    if not conn:
+        raise HTTPException(404, "connector not found")
+    env = conn.detect_environment()
+    health = {
+        "reachable": env.reachable,
+        "version": env.version,
+        "target_type": env.target_type,
+        "target_id": env.target_id,
+    }
+    try:
+        connector_upsert(
+            connector_id,
+            conn.tool_name,
+            version=env.version,
+            status="ready" if env.reachable else "degraded",
+            last_health=health,
+        )
+    except Exception:
+        pass
+    if session_id:
+        event_create(
+            session_id,
+            "connector.health.checked",
+            {"connector_id": connector_id, **health},
+        )
+    return {
+        "connector_id": connector_id,
+        "reachable": env.reachable,
+        "version": env.version,
+        "target_type": env.target_type,
+        "environment": health,
+    }
+
+
+@router.get("/runs")
+async def api_runs_list(
+    project_id: str = "",
+    session_id: str = "",
+    connector_id: str = "",
+    status: str = "",
+    limit: int = 50,
+):
+    rows = run_list(session_id=session_id, limit=limit)
+    if status:
+        rows = [r for r in rows if r.get("state") == status]
+    return {"runs": rows, "count": len(rows)}
+
+
+@router.post("/runs/{run_id}/rerun")
+async def api_run_rerun(run_id: str, auto_start: bool = True):
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    session_id = r.get("session_id") or ""
+    task_id = r.get("task_id") or ""
+    question = ""
+    if task_id:
+        t = task_get(task_id)
+        if t and t.get("message_id"):
+            msgs = message_list(session_id, limit=50)
+            for m in reversed(msgs):
+                if m.get("id") == t.get("message_id"):
+                    question = m.get("content") or ""
+                    break
+    if not question:
+        for m in reversed(message_list(session_id, limit=30)):
+            if m.get("role") == "user" and (m.get("content") or "").strip():
+                question = m.get("content") or ""
+                break
+    if not session_id:
+        raise HTTPException(400, "run has no session_id")
+
+    active = task_active_for_session(session_id)
+    if active:
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "status": "blocked",
+            "active_task_id": active["id"],
+            "suggested_question": question,
+            "hint": "Stop the active task before rerunning.",
+        }
+
+    if not auto_start or not (question or "").strip():
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "status": "ready",
+            "suggested_question": question,
+            "hint": f"POST /api/v1/sessions/{session_id}/tasks with the same question",
+        }
+
+    started = await api_task_start(
+        session_id,
+        StartTaskReq(
+            question=question,
+            metadata={"parent_run_id": run_id, "rerun": True},
+        ),
+    )
+    if isinstance(started, JSONResponse) and started.status_code == 409:
+        body = started.body
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "status": "blocked",
+            "suggested_question": question,
+            "detail": body.decode() if isinstance(body, bytes) else str(body),
+        }
+    return {
+        "run_id": run_id,
+        "session_id": session_id,
+        "status": "started",
+        "parent_run_id": run_id,
+        "task": started if isinstance(started, dict) else {},
+        "suggested_question": question,
+    }
+
+
+@router.get("/tasks/{task_id}/plan")
+async def api_task_plan(task_id: str):
+    t = task_get(task_id)
+    if not t:
+        raise HTTPException(404, "task not found")
+    try:
+        meta = json.loads(t.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    return {"task_id": task_id, "plan": meta.get("plan") or []}
+
+
+@router.get("/approvals")
+async def api_approvals_list(
+    status: str = "pending",
+    project_id: str = "",
+    session_id: str = "",
+    connector_id: str = "",
+    approval_type: str = "",
+    include_interactions: bool = True,
+    limit: int = 100,
+):
+    if include_interactions and (status or "pending") == "pending":
+        from edagent_vivado.harness.approval_bridge import list_pending_approvals_unified
+
+        rows = list_pending_approvals_unified(session_id=session_id, limit=limit)
+        if connector_id:
+            rows = [r for r in rows if r.get("connector_id") == connector_id]
+        if approval_type:
+            rows = [r for r in rows if r.get("approval_type") == approval_type]
+    else:
+        rows = approval_list(
+            status=status or "",
+            session_id=session_id,
+            connector_id=connector_id,
+            approval_type=approval_type,
+            limit=limit,
+        )
+    return {"approvals": rows}
+
+
+@router.get("/approvals/{approval_id}")
+async def api_approval_get(approval_id: str):
+    from edagent_vivado.harness.approval_bridge import get_unified_approval_detail, resolve_unified_approval_id
+
+    kind, raw_id = resolve_unified_approval_id(approval_id)
+    if kind == "interaction":
+        row = get_unified_approval_detail(approval_id, raw_id)
+    else:
+        row = get_unified_approval_detail(approval_id)
+    if not row:
+        raise HTTPException(404, "approval not found")
+    patch_rows = [
+        p for p in patch_proposal_list(limit=200)
+        if p.get("approval_id") == approval_id
+    ]
+    return {"approval": row, "patches": patch_rows}
+
+
+class ApprovalDecisionReq(BaseModel):
+    decided_by: str = "user"
+    note: str = ""
+
+
+@router.post("/approvals/{approval_id}/approve")
+async def api_approval_approve(approval_id: str, body: ApprovalDecisionReq):
+    from edagent_vivado.harness.approval_bridge import resolve_unified_approval_id
+
+    kind, raw_id = resolve_unified_approval_id(approval_id)
+    if kind == "interaction":
+        from edagent_vivado.harness.interaction import (
+            lookup_session_for_interaction,
+            respond_interaction,
+            sync_interaction_resolution_from_store,
+        )
+
+        sid = lookup_session_for_interaction(raw_id) or ""
+        result = respond_interaction(raw_id, {"approved": True, "approved_indices": "all"}, session_id=sid or None)
+        if not result:
+            raise HTTPException(404, "interaction not found")
+        sync_interaction_resolution_from_store(raw_id)
+        try:
+            from edagent_vivado.harness.approval_bridge import sync_approval_on_interaction_resolved as _sync
+
+            _sync(result)
+        except Exception:
+            pass
+        return {"approval_id": approval_id, "status": "approved", "interaction_id": raw_id}
+
+    row = approval_get(approval_id)
+    if not row:
+        raise HTTPException(404, "approval not found")
+    now = int(time.time())
+    approval_update(
+        approval_id,
+        status="approved",
+        decided_at=now,
+        decided_by=body.decided_by,
+    )
+    for p in patch_proposal_list(limit=200):
+        if p.get("approval_id") == approval_id and p.get("status") == "pending":
+            patch_proposal_update(p["id"], status="approved")
+    if row.get("session_id"):
+        event_create(
+            row["session_id"],
+            "interaction.approved",
+            {"approval_id": approval_id, "note": body.note},
+            task_id=row.get("task_id"),
+            run_id=row.get("run_id"),
+        )
+    return {"approval_id": approval_id, "status": "approved"}
+
+
+@router.post("/approvals/{approval_id}/reject")
+async def api_approval_reject(approval_id: str, body: ApprovalDecisionReq):
+    from edagent_vivado.harness.approval_bridge import resolve_unified_approval_id
+
+    kind, raw_id = resolve_unified_approval_id(approval_id)
+    if kind == "interaction":
+        from edagent_vivado.harness.interaction import (
+            lookup_session_for_interaction,
+            respond_interaction,
+            sync_interaction_resolution_from_store,
+        )
+
+        sid = lookup_session_for_interaction(raw_id) or ""
+        result = respond_interaction(raw_id, {"rejected": True}, session_id=sid or None)
+        if not result:
+            raise HTTPException(404, "interaction not found")
+        sync_interaction_resolution_from_store(raw_id)
+        try:
+            from edagent_vivado.harness.approval_bridge import sync_approval_on_interaction_resolved as _sync
+
+            _sync(result)
+        except Exception:
+            pass
+        return {"approval_id": approval_id, "status": "rejected", "interaction_id": raw_id}
+
+    row = approval_get(approval_id)
+    if not row:
+        raise HTTPException(404, "approval not found")
+    now = int(time.time())
+    approval_update(
+        approval_id,
+        status="rejected",
+        decided_at=now,
+        decided_by=body.decided_by,
+    )
+    for p in patch_proposal_list(limit=200):
+        if p.get("approval_id") == approval_id:
+            patch_proposal_update(p["id"], status="rejected")
+            if row.get("session_id"):
+                event_create(
+                    row["session_id"],
+                    "patch.proposal.rejected",
+                    {"patch_id": p["id"], "approval_id": approval_id},
+                    task_id=row.get("task_id"),
+                    run_id=row.get("run_id"),
+                )
+    if row.get("session_id"):
+        event_create(
+            row["session_id"],
+            "interaction.rejected",
+            {"approval_id": approval_id, "note": body.note},
+            task_id=row.get("task_id"),
+            run_id=row.get("run_id"),
+        )
+    return {"approval_id": approval_id, "status": "rejected"}
+
+
+@router.get("/runs/{run_id}/patches")
+async def api_run_patches(run_id: str):
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    return {"run_id": run_id, "patches": patch_proposal_list(run_id=run_id)}
+
+
+@router.post("/patches/{patch_id}/apply")
+async def api_patch_apply(patch_id: str):
+    from edagent_vivado.tools.patch_tools import apply_text_patch
+
+    patch = patch_proposal_get(patch_id)
+    if not patch:
+        raise HTTPException(404, "patch not found")
+    payload = {}
+    approval = approval_get(patch.get("approval_id") or "")
+    if approval:
+        payload = approval.get("payload") or {}
+    file_path = patch.get("target_file") or payload.get("file_path") or ""
+    old_text = payload.get("old_text") or ""
+    new_text = payload.get("new_text") or ""
+    if not file_path:
+        raise HTTPException(400, "patch missing target file")
+    if not old_text or not new_text:
+        raise HTTPException(400, "patch missing old_text/new_text in approval payload")
+    ok, msg = apply_text_patch(file_path, old_text, new_text)
+    if not ok:
+        raise HTTPException(400, msg)
+    now = int(time.time())
+    patch_proposal_update(patch_id, status="applied", applied_at=now)
+    sid = patch.get("session_id") or ""
+    if sid:
+        event_create(
+            sid,
+            "patch.proposal.applied",
+            {"patch_id": patch_id, "target_file": file_path},
+            task_id=patch.get("task_id"),
+            run_id=patch.get("run_id"),
+        )
+    return {"patch_id": patch_id, "status": "applied", "message": msg}
+
 
 # ── Monitor API ──────────────────────────────────────────────
 
@@ -2146,7 +2726,7 @@ async def api_interaction_detail(interaction_id: str):
 
 @router.post("/interactions/{interaction_id}/respond")
 async def api_interaction_respond(interaction_id: str, request: Request):
-    from edagent_vivado.harness.interaction import get_interaction, respond_interaction
+    from edagent_vivado.harness.interaction import get_interaction, respond_interaction, sync_interaction_resolution_from_store
     body = await request.json()
     interaction = get_interaction(interaction_id)
     if not interaction:
@@ -2154,6 +2734,13 @@ async def api_interaction_respond(interaction_id: str, request: Request):
     result = respond_interaction(interaction_id, body, session_id=interaction.session_id)
     if not result:
         raise HTTPException(500, "Failed to process response")
+    sync_interaction_resolution_from_store(interaction_id)
+    try:
+        from edagent_vivado.harness.approval_bridge import sync_approval_on_interaction_resolved
+
+        sync_approval_on_interaction_resolved(result)
+    except Exception:
+        pass
     # Emit event
     event_type = "interaction.approved" if result.status.value == "approved" else (
         "interaction.rejected" if result.status.value == "rejected" else "interaction.responded"
@@ -2163,6 +2750,10 @@ async def api_interaction_respond(interaction_id: str, request: Request):
         "interaction_id": interaction_id,
         "response": body,
     }, task_id=interaction.task_id)
+    import asyncio
+    from edagent_vivado.harness.task_resume import maybe_schedule_orphan_recovery
+
+    asyncio.create_task(maybe_schedule_orphan_recovery(interaction.task_id))
     return {"ok": True, "interaction": result.to_dict()}
 
 # ── Vivado Health API ────────────────────────────────────────
@@ -2346,11 +2937,38 @@ async def api_vivado_run_tcl(request: Request):
     policy = adapter.check_policy(command, auto_approved=auto_approved)
     if not policy.allowed:
         return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
-    if policy.requires_approval:
-        return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
     sid = str(body.get("session_id") or "")
     tid = str(body.get("task_id") or "")
     rid = str(body.get("run_id") or "")
+    if policy.requires_approval and not auto_approved:
+        from edagent_vivado.harness.vivado_approval_queue import enqueue_tcl_approval
+
+        if not sid:
+            return JSONResponse(
+                {"ok": False, "error": "session_id required for Tcl approval queue"},
+                status_code=400,
+            )
+        queued = enqueue_tcl_approval(
+            command,
+            session_id=sid,
+            task_id=tid,
+            run_id=rid,
+            target_id=str(target_id or ""),
+            policy_reason=policy.reason,
+            event_sink=event_create,
+        )
+        return JSONResponse(
+            {
+                "ok": False,
+                "requires_approval": True,
+                "reason": policy.reason,
+                "matched_rules": policy.matched_rules,
+                "approval_id": queued.get("approval_id"),
+                "interaction_id": queued.get("interaction_id"),
+                "hint": "Approve via /approvals or Terminal, then re-run the command.",
+            },
+            status_code=202,
+        )
     result = adapter.run_tcl(
         command,
         auto_approved=True,
@@ -2390,11 +3008,32 @@ async def api_vivado_run_script(request: Request):
     policy = adapter.check_script_policy(script, auto_approved=auto_approved)
     if not policy.allowed:
         return JSONResponse({"ok": False, "error": f"Denied: {policy.reason}", "policy": {"allowed": False, "reason": policy.reason}}, status_code=403)
-    if policy.requires_approval:
-        return JSONResponse({"ok": False, "requires_approval": True, "reason": policy.reason, "matched_rules": policy.matched_rules}, status_code=403)
     sid = str(body.get("session_id") or "")
     tid = str(body.get("task_id") or "")
     rid = str(body.get("run_id") or "")
+    if policy.requires_approval and not auto_approved:
+        from edagent_vivado.harness.vivado_approval_queue import enqueue_vivado_approval
+
+        if not sid:
+            return JSONResponse({"ok": False, "error": "session_id required"}, status_code=400)
+        queued = enqueue_vivado_approval(
+            approval_type="tcl_execution",
+            payload={"reason": policy.reason, "action": "Run Vivado script", "script": script[:2000]},
+            session_id=sid,
+            task_id=tid,
+            run_id=rid,
+            title="Approve Vivado script",
+            event_sink=event_create,
+        )
+        return JSONResponse(
+            {
+                "ok": False,
+                "requires_approval": True,
+                "approval_id": queued.get("approval_id"),
+                "interaction_id": queued.get("interaction_id"),
+            },
+            status_code=202,
+        )
     result = adapter.run_script(
         script,
         auto_approved=True,

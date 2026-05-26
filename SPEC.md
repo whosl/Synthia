@@ -1,10 +1,96 @@
-# EdAgent-Vivado Next Architecture Specification
+# Synthia / EdAgent-Vivado Next Architecture Specification
 
 > 本文档是 EdAgent-Vivado 后续开发的黄金参考（source of truth）。所有 session 记忆、后台任务、React 前端、SSE 实时通信、多 Agent 协作、监控观测、错误知识库沉淀等功能，应以本文档定义的长期架构为准。
 
 配套维护文档：
 
 - `VIVADO_COMMANDS.md`：按 Vivado Runtime Adapter 分层维护需要支持的 Vivado 命令矩阵、TclPolicy 分级、模板、parser/monitor 要求与实现优先级。
+
+## 0. Synthia 工业软件 Agent 平台定位
+
+### 0.1 一句话定位
+
+Synthia 是面向芯片开发与工业软件流程的 **Agentic EDA Control Plane**：它复用现有 Agent Harness、Context Builder、SSE Timeline、审批、监控、知识库与审计底座，通过统一的 Industrial Tool Connector Layer 接入 Vivado 等 EDA/工业软件，实现受控执行、结构化解析、流程审计、人工审批和企业知识沉淀。
+
+第一阶段的产品形态是 **Synthia + Vivado Connector**；长期形态是 **Synthia Industrial Tool Agent Platform**。Vivado 是第一个 connector，而不是 Agent Core 的硬编码依赖。
+
+### 0.2 与现有 Synthia Harness 的关系
+
+本规范不要求推倒重写现有系统。Synthia 当前已经具备的能力应继续作为平台底座：
+
+- Project / Session / Task / Run / Event / Artifact 数据模型。
+- LangGraph Agent Harness、Context Builder、Memory、KB、Semantic Retrieval。
+- SSE 事件流、Timeline Chat、ToolCall 可视化和断线恢复。
+- Approval / HITL、Stop、Monitor、Problem Collector、Token/Cost Collector。
+- Vivado Runtime Adapter、remote/local/mock 执行、path mapping、file sync、artifact capture。
+
+新的 Industrial Tool Connector Layer 是在这些能力之上补齐工业软件抽象边界：
+
+```text
+Synthia Web Console / CLI / WorkBuddy / VS Code
+        ↓
+Synthia API
+        ↓
+Synthia Agent Harness
+        ↓
+Tool Capability Selector
+        ↓
+Industrial Tool Connector Layer
+        ↓
+Vivado / Verilator / Yosys / ISE / VCS / DC / PrimeTime / 自研工具
+        ↓
+Controlled Execution + Artifact Capture + Structured Reports + Audit
+```
+
+### 0.3 核心架构判断
+
+Synthia 的核心不是“LLM + Vivado 聊天机器人”，而是：
+
+```text
+LLM + Agent Harness + Industrial Tool Connector + Controlled Execution
+    + Structured Reports + Human Approval + Knowledge / Monitor / Audit
+```
+
+因此：
+
+1. **Agent Core 不直接依赖 Vivado**  
+   Agent Core 只能看到 connector capability，例如 `run_synthesis`、`run_implementation`、`parse_timing_summary`、`propose_patch`。Vivado Tcl、batch command、remote SSH、report 文件布局等细节由 connector 封装。
+
+2. **LLM 不裸生成工业软件脚本**  
+   LLM 只能选择 capability 和参数；Connector 使用受控模板、参数 schema、policy guard 渲染 Tcl/script。任何绕过模板的 Tcl/script 注入都必须经过显式策略与审批。
+
+3. **报告结构化优先于日志原文**  
+   原始 log/rpt 是 artifact；供 Agent 和 UI 消费的权威数据应是 ParsedReport、Problem、ToolErrorSummary、RunMetrics、KnowledgeCase。
+
+4. **聊天入口继续保留，但产品心智是控制台**  
+   Terminal/Timeline Chat 是自然语言操作入口和审计时间线，不是普通 chatbot。Project、Run、Report、Patch Approval、Monitor 页面构成 Synthia Control Plane。
+
+5. **Vivado Runtime Adapter 升级为 Vivado Connector 的执行内核**  
+   现有 Vivado Runner、remote SSH、mock、path mapper、file sync、Tcl policy 不废弃；它们被 Vivado Connector 包装为标准 capability。
+
+### 0.4 平台边界与扩展目标
+
+Synthia 的长期 connector 目标包括但不限于：
+
+- FPGA / EDA：Vivado、ISE、XSim、Verilator、Yosys、ABC。
+- ASIC EDA：VCS、Design Compiler、PrimeTime、Formality、SpyGlass。
+- 工业软件：MATLAB、ADS、Virtuoso、COMSOL、Ansys、自研加固/TMR 工具。
+
+所有新工具必须通过统一 Connector SDK 接入，禁止在 Agent Core 中新增某个工具的特殊执行分支。
+
+### 0.5 分层命名
+
+后续文档和代码命名应优先使用以下平台层次：
+
+- **Synthia Web Console**：React 控制台，包含 Project、Session、Run、Report、Approval、Monitor、Timeline Chat。
+- **Synthia API**：FastAPI 层，对 Web、CLI、WorkBuddy、VS Code、外部系统提供统一接口。
+- **Synthia Agent Harness**：Planner、Context Builder、LangGraph、Memory、Diagnosis、Patch Proposal、Approval Controller。
+- **Synthia Connector SDK**：ToolConnector、Capability、Manifest、PreparedRun、ToolRunResult、Artifact、Parser、Policy。
+- **Industrial Tool Connector**：Vivado Connector、VCS Connector、DC Connector 等具体实现。
+- **Controlled Execution**：命令白名单、路径隔离、超时、stop、资源限制、日志捕获、artifact capture、audit。
+- **Storage / Knowledge / Monitor**：Run、Step、ToolCall、Artifact、ParsedReport、Problem、KB、Usage、Trace。
+
+---
 
 ## 1. 目标与原则
 
@@ -2553,6 +2639,465 @@ Raw full logs stay as artifacts and are retrieved only when needed.
 
 ---
 
+## 9B. Synthia Connector SDK 与 Industrial Tool Connector Layer
+
+### 9B.1 目标
+
+Industrial Tool Connector Layer 是 Synthia 从 Vivado 单点 Agent 升级为工业软件 Agent 平台的核心边界。它负责把 Agent Harness 的抽象意图转化为具体工业软件的受控执行，并把工业软件输出转化为结构化、可审计、可复用的数据。
+
+Connector 必须承担：
+
+- 工具环境探测、版本识别、license/可达性检查。
+- 通用 manifest 与工具专用 manifest 扩展校验。
+- capability 声明、参数 schema、风险等级、审批要求。
+- Tcl/script/command 生成与策略校验。
+- 调用 Controlled Execution 执行命令。
+- stdout/stderr/log/rpt/checkpoint/bitstream/waveform 等 artifact 采集。
+- Timing、Utilization、DRC、Methodology、Power、Area、Simulation 等报告解析。
+- 错误分类、Problem 生成、KB candidate 生成信号。
+- 为 Context Builder 提供结构化 tool environment、parsed report、artifact index 与 error summary。
+
+### 9B.2 包结构
+
+Connector SDK 在 Synthia 代码库内具有稳定边界，后续可独立发布为工具连接包。推荐结构：
+
+```text
+src/edagent_vivado/connectors/
+  base/
+    connector.py
+    capability.py
+    manifest.py
+    request.py
+    execution.py
+    artifact.py
+    parser.py
+    policy.py
+    registry.py
+
+  vivado/
+    connector.py
+    manifest.py
+    capabilities.py
+    environment.py
+    runner_adapter.py
+    tcl_renderer.py
+    artifact_collector.py
+    parsers/
+      timing_summary.py
+      utilization.py
+      drc.py
+      methodology.py
+      vivado_log.py
+      xsim_log.py
+    templates/
+      synth.tcl.j2
+      impl.tcl.j2
+      bitstream.tcl.j2
+      report_only.tcl.j2
+    error_rules/
+      synth_errors.yaml
+      impl_errors.yaml
+      timing_rules.yaml
+      drc_rules.yaml
+
+  verilator/
+  yosys/
+  ise/
+  vcs/
+  design_compiler/
+  primetime/
+```
+
+代码可以保留 `edagent_vivado` 包名以兼容现有工程，但架构边界必须以 `connectors/base` 和具体 connector 子包为准。
+
+### 9B.3 ToolConnector 基础接口
+
+所有工业软件 connector 必须实现同一语义接口：
+
+```python
+class ToolConnector(Protocol):
+    connector_id: str
+    tool_name: str
+    supported_versions: list[str]
+
+    def detect_environment(self) -> ToolEnvironment: ...
+
+    def list_capabilities(self) -> list[ToolCapability]: ...
+
+    def validate_manifest(self, manifest: ToolManifest) -> ValidationResult: ...
+
+    def prepare_run(self, request: ToolRunRequest) -> PreparedRun: ...
+
+    def execute(self, prepared_run: PreparedRun) -> ToolRunResult: ...
+
+    def collect_artifacts(self, result: ToolRunResult) -> list[Artifact]: ...
+
+    def parse_artifacts(self, result: ToolRunResult) -> ParsedReportBundle: ...
+
+    def classify_error(self, result: ToolRunResult) -> ToolErrorSummary: ...
+```
+
+接口约束：
+
+- `prepare_run()` 只生成受控执行计划、脚本、参数与预期 artifact，不执行真实工具。
+- `execute()` 必须通过 Controlled Execution / ObservedToolRunner，不得直接裸调 `subprocess`。
+- `parse_artifacts()` 输出必须可落库、可版本化、可进入 Context Builder。
+- `classify_error()` 必须输出 machine-readable signature、severity、stage、likely_causes、suggested_actions。
+
+### 9B.4 ToolCapability 模型
+
+Capability 是 Agent Core 可选择的最小工具能力单元。
+
+```json
+{
+  "connector_id": "vivado",
+  "capability_id": "run_synthesis",
+  "display_name": "Vivado Synthesis",
+  "stage": "synth",
+  "input_schema": { "top": "string", "part": "string", "strategy": "string" },
+  "outputs": ["vivado_log", "timing_summary", "utilization", "drc", "post_synth_dcp"],
+  "risk_level": "low",
+  "requires_approval": false,
+  "supports_stop": true,
+  "supports_mock": true,
+  "produces_reports": true,
+  "produces_patch": false
+}
+```
+
+Capability 必须声明参数 schema、默认值、stage、run/step 映射、风险等级、审批要求、artifact 类型、parser 输出类型、stop/mock/remote 支持状态，以及是否允许 Agent 请求该 capability。
+
+### 9B.5 Tool Manifest 抽象
+
+Synthia Manifest 是跨工具通用工程描述，允许每个 connector 提供专用扩展字段。Agent prompt 不应持有分散的工程配置，Context Builder 应从 manifest、Project、Run 和 Connector Environment 生成权威上下文。
+
+通用字段：
+
+```yaml
+project:
+  name: uart_demo
+  root: /workspace/projects/uart_demo
+  type: fpga
+
+tool:
+  connector: vivado
+  version: "2022.1"
+  mode: batch
+
+source:
+  rtl:
+    - rtl/uart_rx.v
+    - rtl/uart_tx.v
+    - rtl/uart_top.v
+  constraints:
+    - constrs/arty.xdc
+
+design:
+  top: uart_top
+  part: xc7a35ticsg324-1L
+  board_part: null
+
+flow:
+  stages:
+    - synth
+    - impl
+    - report
+```
+
+Vivado 扩展字段：
+
+```yaml
+vivado:
+  strategy:
+    synth: Flow_PerfOptimized_high
+    impl: Performance_Explore
+  reports:
+    timing_summary: true
+    utilization: true
+    drc: true
+    methodology: true
+  bitstream:
+    enabled: false
+  execution:
+    target_id: remote_192_168_31_150
+    max_threads: 8
+```
+
+ASIC 工具可添加独立扩展，例如 `design_compiler.target_library`、`design_compiler.link_library`、`design_compiler.sdc`。
+
+### 9B.6 Vivado Connector 能力矩阵
+
+Vivado Connector 是第一个标准 connector，必须以现有 Vivado Runtime Adapter 为执行内核，并向 Agent Harness 暴露统一 capability。
+
+第一等级能力：
+
+- `detect_environment`
+- `validate_project`
+- `run_synthesis`
+- `run_implementation`
+- `run_simulation`
+- `report_timing_summary`
+- `report_utilization`
+- `report_drc`
+- `report_methodology`
+- `parse_vivado_log`
+- `classify_vivado_error`
+
+第二等级能力：
+
+- `elaborate_design`
+- `opt_design`
+- `place_design`
+- `route_design`
+- `write_bitstream`
+- `report_power`
+- `report_clock_interaction`
+- `report_cdc`
+- `open_checkpoint_report_only`
+- `compare_runs`
+
+第三等级能力：
+
+- `long_lived_tcl_session`
+- `interactive_query`
+- `incremental_compile`
+- `strategy_sweep`
+- `timing_fix_suggestion`
+- `xdc_patch_proposal`
+- `rtl_patch_proposal`
+
+Vivado 标准 stage：
+
+```text
+validate -> elaborate -> synth -> opt -> place -> route -> bitstream -> report -> diagnose -> patch_proposal -> rerun
+```
+
+每个 stage 必须创建 Step 记录，并关联 command、artifact、parsed report、problem、usage 与 event。
+
+### 9B.7 Tcl/script 模板与策略
+
+LLM 不能直接生成任意 Tcl。Vivado Connector 使用 Jinja2 或等价模板系统渲染受控 Tcl。
+
+模板允许参数：`top`、`part`、`board_part`、`rtl_files`、`xdc_files`、`tcl_files`、`work_dir`、`report_dir`、`checkpoint_dir`、`strategy`、`max_threads`、`reports`。
+
+模板禁止任意 `exec`、任意 `source` 未审批脚本、访问 project root / run workspace 之外路径、删除或覆盖非 run workspace 文件、网络命令、权限命令、系统破坏命令。
+
+TclPolicy 必须输出：
+
+```json
+{
+  "policy_result": "allowed | needs_approval | denied",
+  "risk_level": "low | medium | high | critical",
+  "reasons": ["uses approved synth template", "writes only run checkpoint dir"],
+  "blocked_tokens": []
+}
+```
+
+### 9B.8 Controlled Execution 合同
+
+所有 connector 执行都必须通过 Controlled Execution。执行请求使用结构化 argv，而不是 shell 字符串。
+
+```json
+{
+  "command_id": "cmd_001",
+  "run_id": "run_001",
+  "step_id": "step_synth",
+  "connector_id": "vivado",
+  "capability_id": "run_synthesis",
+  "executable": "vivado",
+  "args": ["-mode", "batch", "-source", "generated_tcl/synth.tcl"],
+  "cwd": "workspace/runs/run_001",
+  "timeout_sec": 3600,
+  "env_profile": "vivado_2022_1_remote",
+  "allowed_paths": ["workspace/projects/uart_demo", "workspace/runs/run_001"],
+  "capture_stdout": true,
+  "capture_stderr": true
+}
+```
+
+禁止 Agent 或 connector 绕过该合同直接执行 shell。对于 remote Vivado，SSH/SCP 也必须被建模为受控 executor 能力，并记录 host、key alias、remote workdir、path mapping、upload/download artifact。
+
+### 9B.9 Run Workspace 与 Artifact Layout
+
+每次 run 必须使用独立目录：
+
+```text
+workspace/
+  projects/
+    uart_demo/
+      eda.yaml
+      rtl/
+      constrs/
+
+  runs/
+    run_20260526_001/
+      input_snapshot/
+      generated_tcl/
+      logs/
+      reports/
+      checkpoints/
+      bitstreams/
+      artifacts/
+      patches/
+      parsed/
+      audit/
+```
+
+原工程目录只读输入；所有生成物进入 run workspace。Patch 必须先生成 proposal 和 diff，经审批后才写回工程资产。
+
+### 9B.10 ParsedReport 标准模型
+
+Connector parser 输出统一 ParsedReportBundle。ParsedReport 必须可被 Report UI、Context Builder、Monitor、History Compare、KB candidate 和 Evolution signal 复用。
+
+Timing Summary：
+
+```json
+{
+  "type": "timing_summary",
+  "tool": "vivado",
+  "stage": "synth",
+  "wns": -0.238,
+  "tns": -12.431,
+  "whs": 0.051,
+  "ths": 0.0,
+  "failing_endpoints": 17,
+  "worst_paths": [
+    {"slack": -0.238, "from": "u_core/reg_a", "to": "u_core/reg_b", "clock": "clk", "path_group": "clk"}
+  ]
+}
+```
+
+Utilization：
+
+```json
+{
+  "type": "utilization",
+  "tool": "vivado",
+  "stage": "synth",
+  "lut": 18231,
+  "ff": 24990,
+  "bram": 12,
+  "dsp": 8,
+  "io": 42,
+  "lut_percent": 31.4,
+  "ff_percent": 21.7
+}
+```
+
+DRC：
+
+```json
+{
+  "type": "drc",
+  "tool": "vivado",
+  "stage": "impl",
+  "errors": [
+    {"rule": "NSTD-1", "severity": "error", "message": "Unspecified I/O Standard", "objects": ["uart_tx", "uart_rx"], "suggested_action": "Add IOSTANDARD constraint in XDC"}
+  ],
+  "warnings": []
+}
+```
+
+### 9B.11 Agent Harness 集成
+
+Agent Planner 的输出必须从“直接工具调用”升级为 capability plan：
+
+```json
+{
+  "task_id": "task_001",
+  "plan": [
+    {"step": "validate_manifest", "connector": "vivado", "capability": "validate_project"},
+    {"step": "run_synthesis", "connector": "vivado", "capability": "run_synthesis"},
+    {"step": "parse_reports", "connector": "vivado", "capability": "parse_artifacts"},
+    {"step": "diagnose", "agent": "diagnosis_agent"}
+  ]
+}
+```
+
+Tool Capability Selector 负责根据 manifest、project target、tool availability、user task、policy、approval state 选择 connector/capability。Agent Core 不应知道 Vivado 命令行参数、Tcl 模板文件名、远程目录细节。
+
+### 9B.12 Context Builder 集成
+
+Context Builder 必须支持 connector-aware context blocks：
+
+- `connector_environment_context`
+- `capability_context`
+- `manifest_context`
+- `current_run_steps_context`
+- `parsed_report_context`
+- `artifact_index_context`
+- `tool_error_summary_context`
+- `policy_context`
+- `similar_problem_context`
+- `knowledge_context`
+
+优先级：当前用户任务与当前 run 状态、当前失败 stage/ToolErrorSummary/Problem、Manifest 与 connector environment、ParsedReport 摘要、最近 run 对比、相似 KB/Semantic KB 案例、按需检索的原始日志片段。
+
+### 9B.13 API 扩展
+
+Connector API 必须提供给 Web、CLI、WorkBuddy、VS Code 使用：
+
+```text
+GET  /api/v1/connectors
+GET  /api/v1/connectors/{connector_id}
+GET  /api/v1/connectors/{connector_id}/capabilities
+POST /api/v1/projects/{project_id}/tasks
+GET  /api/v1/tasks/{task_id}/plan
+GET  /api/v1/runs/{run_id}/steps
+GET  /api/v1/runs/{run_id}/artifacts
+GET  /api/v1/runs/{run_id}/reports
+GET  /api/v1/runs/{run_id}/problems
+POST /api/v1/runs/{run_id}/rerun
+POST /api/v1/approvals/{approval_id}/approve
+POST /api/v1/approvals/{approval_id}/reject
+```
+
+所有实时状态、日志片段、tool event、多 Agent event 继续通过 SSE 传输；不引入 WebSocket 作为主通道。
+
+### 9B.14 前端控制台要求
+
+Synthia Web Console 必须把聊天入口与控制台视图结合，而不是二选一。
+
+核心页面：Projects、Run / Timeline、Reports、Patch Approval、History Compare、Connectors、Monitor。
+
+Timeline Chat 继续作为自然语言入口：用户可以说“跑综合并分析失败原因”，系统生成 task、plan、run、steps，并把所有事件投射到 timeline。
+
+### 9B.15 WorkBuddy / Skill 接入
+
+WorkBuddy Skill 不直接访问 Vivado、不直接执行 SSH、不直接写工程文件。Skill 只做入口包装：识别用户意图、定位 Synthia Project / manifest、调用 Synthia API 创建 Task、订阅或轮询任务结果、汇总返回并提供打开 Synthia Run 页面的链接。
+
+推荐 skill 能力：`synthia-run-synth`、`synthia-run-impl`、`synthia-debug-timing`、`synthia-debug-drc`、`synthia-export-report`、`synthia-review-patch`。
+
+### 9B.16 多工具扩展流程
+
+新增工业软件 connector 的标准流程：manifest 扩展 schema、`ToolConnector`、capabilities、script/templates、artifact collector、report/log parsers、error classifier、policy/approval、Context Builder、Report UI/Monitor/KB candidate。
+
+Agent Core 不因新增工具而新增硬编码执行分支。
+
+### 9B.17 Connector 级风险与审批
+
+| 风险等级 | 示例 | 策略 |
+| --- | --- | --- |
+| Low | 读取 report、运行综合、解析日志 | 可按项目策略自动批准 |
+| Medium | 修改 XDC、修改 Tcl 参数、切换策略 | 需要审批或项目策略授权 |
+| High | 修改 RTL、覆盖工程文件、生成 bitstream | 必须审批 |
+| Critical | 非白名单命令、工程外路径、危险系统命令 | 禁止 |
+
+PatchProposal 必须关联 `run_id`、`step_id`、`problem_id`、`connector_id`、`capability_id`、`target_file`、`patch_type`、`risk_level`、`reason`、`diff`、`status`。
+
+### 9B.18 实施序列
+
+Connector 架构按以下长期目标分阶段落地：
+
+- **Phase 6A：Connector SDK 基础边界**：建立 `connectors/base`、registry、capability schema、ToolRunRequest/Result、Artifact/ParsedReport 类型。
+- **Phase 6B：Vivado Connector 包装现有 Runtime Adapter**：将现有 Vivado runner、remote/local/mock、file sync、path mapper、Tcl policy 包装为 `VivadoConnector` capabilities。
+- **Phase 6C：Structured Report Pipeline**：Timing、Utilization、DRC、Methodology parser 输出 ParsedReportBundle，落库并接入 Report UI、Context Builder、Monitor。
+- **Phase 6D：PatchProposal 与 Connector Policy 统一**：XDC/RTL/Tcl 修改统一通过 proposal、diff、approval、apply、rerun、compare。
+- **Phase 6E：Connector API 与 WorkBuddy Skill**：暴露 connector/capability/run/report/approval API，WorkBuddy 只调用 Synthia API。
+- **Phase 6F：第二个 Connector 样板**：以 Verilator/XSim/Yosys 之一作为第二 connector，验证 Agent Core 无 Vivado 硬依赖。
+
+---
+
 ## 10. 错误知识库设计
 
 ### 10.1 KB 分层
@@ -3497,6 +4042,432 @@ remark-gfm
 
 ---
 
+### 12.29 Synthia Control Plane Frontend IA
+
+Synthia 前端的长期定位不是普通聊天窗口，而是面向 EDA/工业软件执行的 Control Plane。Timeline Chat 是自然语言入口和审计时间线；Project、Run、Report、Approval、Connector、Knowledge、Monitor 页面共同构成企业级操作控制台。
+
+长期一级导航应包含：
+
+| 页面 | 定位 |
+| --- | --- |
+| Projects | 工程入口、manifest、器件、connector target、最近 run/session/problem |
+| Sessions | 自然语言会话与 Timeline Chat，承载 Agent 交互、tool events、approval cards |
+| Runs | 工业软件执行历史与当前 run 控制面 |
+| Reports | Timing / Utilization / DRC / Methodology / Power 结构化报告浏览 |
+| Approvals | Patch、Tcl/script、高风险操作、KB/Evolution 审批中心 |
+| Connectors | Vivado / Verilator / Yosys / VCS / DC 等 connector 能力与健康状态 |
+| Knowledge | Error KB、Semantic KB、KB candidates、retrieval audits、enterprise rules |
+| Monitor | token、toolcall、run、problem、cost、retention、connector health 观测 |
+| Settings | 模型、审批策略、Vivado target、connector policy、主题/语言 |
+
+现有页面迁移关系：
+
+```text
+ProjectsPage       -> Projects / Project Detail
+TerminalPage       -> Sessions / Timeline Chat
+MonitorPage        -> Monitor
+RunDetailPage      -> Runs / Run Detail
+VivadoPage         -> Connectors / Vivado Detail
+EvolutionPage      -> Knowledge / Evolution / KB Review
+KnowledgeBasePage  -> redirect or merge into Knowledge
+SettingsPage       -> Settings
+```
+
+前端原则：
+
+1. **Timeline Chat 是入口，不是全部。** 用户可以用自然语言创建 task，但 task/run/report/approval 必须有结构化页面。
+2. **Run 是工业软件执行核心对象。** 所有 connector execution、steps、artifacts、reports、problems、approvals 都围绕 run 展示。
+3. **Report 是结构化数据，不是 log viewer。** 原始 log/rpt 可作为 artifact 打开，但 UI 首屏展示 ParsedReport。
+4. **Approval 是企业安全边界。** 所有修改与高风险操作必须能在全局 Approval Queue 中追踪。
+5. **Connector 是用户可见抽象。** 工具版本、target、capability、policy、health、license/mock 状态必须可见。
+6. **Monitor 显示 harness 事实数据。** 不依赖 LLM 自觉上报。
+7. **Knowledge 是企业经验入口。** KB、Semantic KB、retrieval audit、candidate/evolution 均应在 Knowledge 信息架构下收敛。
+
+### 12.30 Projects 页面规划
+
+Projects 页面是 Synthia 的工作入口。企业用户应先选择或创建 Project，再进入 Sessions、Runs、Reports 或 Connector 操作。
+
+Project list/card/tree 必须展示：
+
+- project name、status、archived 状态。
+- root path、manifest path。
+- top module、part、board part。
+- default connector 与 default target。
+- last run status、last active time。
+- session count、run count、problem count、KB source count。
+- manifest validation 状态。
+
+Project Detail / Drawer 应包含：
+
+```text
+Project Detail
+├── Manifest Summary
+│   ├── connector
+│   ├── top / part / board_part
+│   ├── RTL/XDC/Tcl globs
+│   └── validation diagnostics
+├── Connector Target
+│   ├── Vivado/local/remote target
+│   ├── version / path / settings
+│   └── health check
+├── Recent Sessions
+├── Recent Runs
+├── Recent Problems
+├── Recent Reports
+└── Knowledge Sources
+```
+
+关键操作：
+
+- Create / Edit / Archive Project。
+- Validate Manifest。
+- New Session / New Task。
+- Run Synthesis / Run Implementation。
+- Open Runs / Reports / Knowledge。
+
+### 12.31 Sessions / Timeline Chat 页面规划
+
+Sessions 页面保留现有 Timeline Chat，但产品语义升级为 Operator Timeline。
+
+Timeline 必须支持以下 entry/card：
+
+- user message。
+- assistant reasoning / response。
+- task created / plan generated。
+- run started / run completed / run failed。
+- step started / step completed / step failed。
+- tool call / tool result / tool failure。
+- approval request / approval decision。
+- patch proposal。
+- parsed report summary。
+- problem detected。
+- KB candidate generated。
+- stop requested / stopped / partial response saved。
+
+推荐布局：
+
+```text
+Timeline Chat
+├── Left/Main: chronological timeline
+│   ├── user / assistant messages
+│   ├── reasoning blocks
+│   ├── tool call blocks
+│   ├── run step cards
+│   ├── report summary cards
+│   └── approval / patch cards
+└── Right Panel: active context
+    ├── current task
+    ├── active run
+    ├── step progress
+    ├── artifacts
+    ├── reports
+    ├── context package
+    └── pending approvals
+```
+
+Chat composer 必须能够：
+
+- 创建普通问答 task。
+- 创建 connector task，例如 run synth、run impl、debug timing、debug drc。
+- Stop 当前任务。
+- 对 pending approval 进行快捷操作。
+
+### 12.32 Runs 页面与 Run Detail 规划
+
+Runs 是 Synthia 工业执行的核心页面。Run list 必须支持跨 project/session/connector/stage/status 查询。
+
+Run list 字段：
+
+- run id。
+- project / session / task。
+- connector id / capability id。
+- status / current stage。
+- started_at / duration。
+- WNS / TNS / DRC error count / LUT / FF。
+- toolcall count / token count / cost。
+- problem count / approval count。
+
+Run Detail 推荐布局：
+
+```text
+Run Detail
+├── Header
+│   ├── run id / project / connector / status
+│   ├── capability / stage / duration
+│   ├── stop / rerun / compare / export buttons
+│   └── links to session, project, artifacts
+├── Step Timeline
+│   ├── validate
+│   ├── elaborate
+│   ├── synth
+│   ├── opt/place/route
+│   ├── report
+│   ├── diagnose
+│   └── patch_proposal
+├── Structured Reports
+│   ├── timing summary cards
+│   ├── utilization cards
+│   ├── DRC cards
+│   └── methodology cards
+├── Problems
+├── Artifacts
+├── Tool Calls
+├── Agent Diagnosis
+├── Approvals / Patch Proposals
+└── Audit / Context Package
+```
+
+Step Timeline 需要展示：
+
+- step status、started/ended、duration。
+- command / capability / risk level。
+- log artifact。
+- parsed report count。
+- problem count。
+- retry/rerun relation。
+
+### 12.33 Reports 页面规划
+
+Reports 页面展示 ParsedReport，不以原始 log 为中心。
+
+Reports 可按 Project、Run、Connector、Report Type 查询。核心 tabs：
+
+```text
+Reports
+├── Timing
+├── Utilization
+├── DRC
+├── Methodology
+├── Power
+├── Simulation
+└── Raw Artifacts
+```
+
+Timing 视图：
+
+- WNS、TNS、WHS、THS。
+- failing endpoints。
+- worst paths table。
+- clock/path group。
+- 与上一 run 的 delta。
+- 可跳转到 artifact 原文位置。
+
+Utilization 视图：
+
+- LUT、FF、BRAM、DSP、IO。
+- percentage。
+- 与上一 run 的 delta。
+- trend chart。
+
+DRC 视图：
+
+- rule、severity、message、objects。
+- suggested action。
+- linked KB cases。
+- create patch proposal / open approval。
+
+Methodology / Power / Simulation 视图后续按 connector parser 扩展，不得写死 Vivado-only UI。
+
+### 12.34 Approval Center 页面规划
+
+Approval Center 是企业安全边界的全局入口。Session 内 approval card 与全局 approval queue 必须共享同一数据源。
+
+审批类型：
+
+- RTL patch。
+- XDC patch。
+- Tcl/script 参数变更。
+- 高风险 connector execution。
+- 工程外路径访问请求。
+- KB candidate approve/merge。
+- Evolution overlay apply。
+
+Approval list 字段：
+
+- approval id、type、risk_level。
+- project / session / task / run / step。
+- connector / capability。
+- requester agent。
+- created_at / expires_at。
+- status。
+
+Approval detail：
+
+```text
+Approval Detail
+├── Summary / Reason
+├── Risk Explanation
+├── Linked Problem
+├── Linked Report Evidence
+├── Diff Viewer
+├── Proposed Command / Tcl Policy Result
+├── Artifact references
+├── Approve / Reject / Edit and Approve
+└── Audit trail
+```
+
+Diff viewer 应优先使用 Monaco diff viewer 或等价组件。所有审批决策必须落库并生成 event。
+
+### 12.35 Connectors 页面规划
+
+Connectors 页面是 Industrial Tool Connector Layer 的用户可见控制台。
+
+Connector list 展示：
+
+- connector id / name。
+- health status。
+- version / supported versions。
+- target count。
+- capability count。
+- license/reachable/mock 状态。
+- last health check。
+
+Connector Detail 推荐布局：
+
+```text
+Connector Detail
+├── Environment
+│   ├── local / remote
+│   ├── executable path
+│   ├── env script
+│   ├── version
+│   ├── license / reachable
+│   └── remote workdir / path mapping
+├── Capabilities
+│   ├── validate_project
+│   ├── run_synthesis
+│   ├── run_implementation
+│   ├── report_timing_summary
+│   └── ...
+├── Policies
+│   ├── risk level
+│   ├── approval requirement
+│   ├── allowed paths
+│   └── Tcl/script restrictions
+├── Recent Runs
+├── Recent Commands
+└── Health Check History
+```
+
+现有 `VivadoPage` 应演进为 `/connectors/vivado`，但旧 `/vivado` 可作为兼容 redirect。
+
+### 12.36 Knowledge 页面规划
+
+Knowledge 页面收敛 Error KB、Semantic KB、KB Candidates、Retrieval Audits 与 Evolution 知识沉淀。
+
+推荐 tabs：
+
+```text
+Knowledge
+├── Error KB
+├── Semantic KB
+├── Candidates
+├── Sources
+├── Retrieval Audits
+├── Project Rules
+└── Evolution
+```
+
+展示内容：
+
+- built-in cases。
+- user approved cases。
+- project/global knowledge。
+- semantic sources 与 embedding 状态。
+- authority_score / trust_score / relevance_score。
+- retrieval audit query、selected chunks、token budget。
+- KB candidate approve/reject/merge。
+- Evolution KB candidates。
+
+长期路由 `/kb` 和 `/evolution?tab=kb` 应收敛到 `/knowledge` 下；Evolution 可以保留为高级/管理页。
+
+### 12.37 Monitor 页面规划
+
+Monitor 页面继续作为 harness 强制观测的可视化入口。它展示事实数据，不展示 LLM 自述。
+
+必须覆盖：
+
+- run count、success/failure rate。
+- connector / capability 使用分布。
+- most failing stages。
+- top error signatures。
+- toolcall count、duration、failure rate。
+- token input/output、cost。
+- approval request/approve/reject rate。
+- stop rate / partial response count。
+- KB candidate generation / approval rate。
+- artifact storage / retention cleanup。
+- connector health history。
+
+### 12.38 路由迁移计划
+
+长期推荐路由：
+
+```text
+/                         -> Projects
+/projects/:projectId       -> Project Detail
+/projects/:projectId/tasks/new
+
+/sessions                  -> Session list
+/sessions/:sessionId       -> Timeline Chat
+/term                      -> legacy alias or redirect
+
+/runs                      -> Run list
+/runs/:runId               -> Run Detail
+/runs/:runId/reports       -> Report Detail
+/runs/:runId/artifacts     -> Artifact Browser
+
+/reports                   -> Report Explorer
+/reports/:reportId
+
+/approvals                 -> Approval Queue
+/approvals/:approvalId
+
+/connectors                -> Connector list
+/connectors/:connectorId   -> Connector Detail
+/connectors/vivado         -> Vivado Connector Detail
+
+/knowledge                 -> Knowledge Base
+/knowledge/candidates
+/knowledge/retrieval
+
+/monitor
+/settings
+```
+
+兼容旧路径：
+
+```text
+/term       -> keep alias until Sessions page is complete
+/vivado     -> redirect /connectors/vivado
+/kb         -> redirect /knowledge/candidates or /knowledge
+/evolution  -> keep as advanced evolution/admin page
+```
+
+### 12.39 前端实施阶段
+
+前端按以下阶段演进：
+
+- **Frontend IA Phase A：导航重组**  
+  新增 Runs、Reports、Approvals、Connectors、Knowledge 一级入口；保留 Projects、Monitor、Settings、Timeline Chat。
+
+- **Frontend IA Phase B：Run Detail 增强**  
+  将 RunDetailPage 扩展为核心页面：summary、step timeline、tool calls、artifacts、parsed reports、problems、approvals、agent diagnosis。
+
+- **Frontend IA Phase C：VivadoPage -> Connector Detail**  
+  将现有 Vivado Runtime 页面演进为 Connector / Vivado Detail，并为后续 connector 预留通用组件。
+
+- **Frontend IA Phase D：Knowledge Console 独立**  
+  收敛 KB、Semantic KB、Retrieval Audit、KB Candidates、Evolution KB 到 Knowledge 信息架构。
+
+- **Frontend IA Phase E：Approval Center**  
+  打通 session 内 approval card 与全局 approval queue，支持 diff viewer、risk evidence、audit trail。
+
+- **Frontend IA Phase F：Report Explorer 与 History Compare**  
+  支持跨 run 的 Timing/Utilization/DRC 对比和趋势展示。
+
+---
+
 ## 13. FastAPI 静态资源与开发模式
 
 ### 13.1 开发模式
@@ -3854,6 +4825,30 @@ Tool input/output 支持 whitelist/blacklist。
 - SSE 展示多 Agent 消息流。
 
 ---
+
+### Phase 6：Synthia Industrial Tool Connector Platform
+
+目标：将 Synthia 从 Vivado 专用 Agent 升级为可扩展的工业软件 Agent 平台，同时复用现有 Agent Harness、SSE Timeline、Approval、Monitor、Context Builder 和 Vivado Runtime Adapter。
+
+交付物：
+
+- Connector SDK：`ToolConnector`、`ToolCapability`、`ToolManifest`、`ToolRunRequest`、`PreparedRun`、`ToolRunResult`、`ParsedReportBundle`、`ToolErrorSummary`。
+- Connector Registry 与 `/api/v1/connectors`、`/capabilities` API。
+- Vivado Connector：包装现有 Vivado Runtime Adapter，提供标准 `validate_project`、`run_synthesis`、`run_implementation`、`run_simulation`、`parse_artifacts`、`classify_error` 能力。
+- Controlled Execution 合同：所有 connector 执行都通过 ObservedToolRunner / Controlled Execution，禁止裸 shell。
+- Structured Reports：Timing、Utilization、DRC、Methodology 结构化落库。
+- Report UI：Run Detail 中展示 parsed reports、artifact、problem、history compare。
+- PatchProposal：connector-aware diff、risk、approval、apply、rerun、before/after compare。
+- WorkBuddy 接入：Skill 只调用 Synthia API，不直接执行 Vivado。
+- 第二 connector 样板：Verilator/XSim/Yosys 任选其一，用来证明 Agent Core 不依赖 Vivado。
+
+验收标准：
+
+1. Agent Planner 输出 capability plan，而非 Vivado 命令。
+2. Vivado synth/impl/sim 均可通过 `VivadoConnector` 执行并生成 Step、Artifact、ParsedReport、Problem。
+3. 前端 Run 页面可以同时看到 timeline、steps、reports、artifacts、approval。
+4. Context Builder 可以注入 connector environment、manifest、parsed report、tool error summary、artifact index。
+5. 新增第二 connector 时不修改 Agent Core 的工具执行主流程。
 
 ## 18. 配置项
 

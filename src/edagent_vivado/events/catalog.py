@@ -15,6 +15,7 @@ LIFECYCLE_EVENTS = (
     "task.stopped",
     "task.done",
     "task.error",
+    "task.plan.generated",
     "run.started",
     "run.completed",
     "run.error",
@@ -100,6 +101,19 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
+# Industrial Tool Connector Layer (SPEC §9B, Phase 6A)
+CONNECTOR_EVENTS = (
+    "run.step.started",
+    "run.step.completed",
+    "run.step.failed",
+    "connector.health.checked",
+    "connector.capability.invoked",
+    "report.parsed.created",
+    "patch.proposal.created",
+    "patch.proposal.applied",
+    "patch.proposal.rejected",
+)
+
 # Evolution / metrics / feedback / candidates / overlays / trials (SPEC §22.10)
 EVOLUTION_EVENTS = (
     "evolution.metric.snapshot",
@@ -132,6 +146,7 @@ ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *INTERACTION_EVENTS,
     *AGENT_EVENTS,
     *MONITOR_EVENTS,
+    *CONNECTOR_EVENTS,
     *EVOLUTION_EVENTS,
 )
 

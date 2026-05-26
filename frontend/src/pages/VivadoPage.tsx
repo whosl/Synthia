@@ -38,7 +38,12 @@ export default function VivadoPage() {
     try {
       const res = await runVivadoTcl(cmd, autoApprove)
       if (res.requires_approval) {
-        setConsoleLines(prev => [...prev, t('vivado.approvalRequired')])
+        const aid = (res as { approval_id?: string }).approval_id
+        setConsoleLines(prev => [
+          ...prev,
+          t('vivado.approvalRequired'),
+          aid ? `${t('vivado.approvalQueued')}: ${aid.slice(0, 8)}… → /approvals` : '',
+        ].filter(Boolean))
         return
       }
       if (res.stdout) setConsoleLines(prev => [...prev, ...(res.stdout || '').split('\n').filter(Boolean).slice(-30)])

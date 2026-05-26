@@ -1,12 +1,10 @@
 import type { ToolCallViewModel } from '../components/terminal/ToolCallBlock'
 import { toolEntryToViewModel } from '../lib/toolPresentation'
-import { collectWorkTools, isAssistantFinalComplete } from '../lib/workGroupPresentation'
 import type { InteractionEntryPayload, TimelineEntry, ToolEntryPayload } from './types'
 
 export type ChatDisplayItem =
   | { type: 'entry'; key: string; entry: TimelineEntry }
   | { type: 'tool_group'; key: string; members: TimelineEntry[] }
-  | { type: 'work_group'; key: string; members: TimelineEntry[]; finalEntry: TimelineEntry | null }
 
 export function isApprovalInteractionEntry(entry: TimelineEntry): boolean {
   return (
@@ -19,11 +17,28 @@ export function isToolEntry(entry: TimelineEntry): boolean {
   return entry.kind === 'tool'
 }
 
-function isPendingApprovalEntry(entry: TimelineEntry): boolean {
+export function isPendingApprovalEntry(entry: TimelineEntry): boolean {
   return (
     isApprovalInteractionEntry(entry)
     && (entry.payload as InteractionEntryPayload).status === 'pending'
   )
+}
+
+/** Pending approvals render in the bottom dock, not inline in the chat list. */
+export function filterInlineChatEntries(entries: TimelineEntry[]): TimelineEntry[] {
+  return entries.filter((entry) => !isPendingApprovalEntry(entry))
+}
+
+/** Pending approvals sorted by event order (seq, then createdAt). */
+export function collectPendingApprovalEntries(entries: TimelineEntry[]): TimelineEntry[] {
+  return entries
+    .filter(isPendingApprovalEntry)
+    .sort((a, b) => {
+      const seqA = a.seq ?? 0
+      const seqB = b.seq ?? 0
+      if (seqA !== seqB) return seqA - seqB
+      return (a.createdAt ?? 0) - (b.createdAt ?? 0)
+    })
 }
 
 /** Pending approvals start a new run batch so later cards are not merged above completed tools. */
@@ -103,56 +118,10 @@ function sliceUntilNextUser(entries: TimelineEntry[], start: number) {
   return { slice: entries.slice(start, end), next: end }
 }
 
-function hasPendingInteraction(entries: TimelineEntry[]): boolean {
-  return entries.some(isPendingApprovalEntry)
-}
-
-/** Work group summary is shown only after tools finish and final assistant text is complete. */
-export function isWorkPhaseComplete(
-  workEntries: TimelineEntry[],
-  finalEntry: TimelineEntry | null,
-): boolean {
-  if (!workEntries.length || !finalEntry || !isAssistantFinalComplete(finalEntry)) {
-    return false
-  }
-  if (hasPendingInteraction(workEntries)) return false
-  return !collectWorkTools(workEntries).some((t) => t.state === 'running')
-}
-
-function groupTurnAfterUser(slice: TimelineEntry[], userKey: string): ChatDisplayItem[] {
-  if (!slice.length) return []
-
-  const assistants = slice.filter((e) => e.kind === 'assistant_text')
-  const finalEntry = assistants.length ? assistants[assistants.length - 1]! : null
-  const workEntries = finalEntry
-    ? slice.filter((e) => e.key !== finalEntry.key)
-    : [...slice]
-
-  const out: ChatDisplayItem[] = []
-
-  if (workEntries.length > 0) {
-    if (isWorkPhaseComplete(workEntries, finalEntry)) {
-      out.push({
-        type: 'work_group',
-        key: `work:${userKey}`,
-        members: workEntries,
-        finalEntry,
-      })
-    } else {
-      out.push(...groupToolBatchEntries(workEntries))
-    }
-  }
-
-  if (finalEntry) {
-    out.push({ type: 'entry', key: finalEntry.key, entry: finalEntry })
-  }
-
-  return out
-}
-
 /**
- * Chat layout: user → [work group: tools/reasoning/intermediate blocks] → final assistant text.
- * Within the work group, consecutive tool/approval rows still form tool_run groups.
+ * Chat layout preserves backend event order (seq / createdAt).
+ * Consecutive tool + completed approval rows may collapse into one tool_group.
+ * Pending approvals are excluded here and shown in PendingApprovalDock.
  */
 export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
   const out: ChatDisplayItem[] = []
@@ -162,7 +131,7 @@ export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
     const entry = entries[i]!
     if (entry.kind !== 'user') {
       const { slice, next } = sliceUntilNextUser(entries, i)
-      out.push(...groupToolBatchEntries(slice))
+      out.push(...groupToolBatchEntries(filterInlineChatEntries(slice)))
       i = next
       continue
     }
@@ -170,7 +139,7 @@ export function groupChatEntries(entries: TimelineEntry[]): ChatDisplayItem[] {
     out.push({ type: 'entry', key: entry.key, entry })
     i++
     const { slice, next } = sliceUntilNextUser(entries, i)
-    out.push(...groupTurnAfterUser(slice, entry.key))
+    out.push(...groupToolBatchEntries(filterInlineChatEntries(slice)))
     i = next
   }
 

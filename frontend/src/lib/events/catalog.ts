@@ -13,6 +13,7 @@ export const LIFECYCLE_EVENTS = [
   'task.stopped',
   'task.done',
   'task.error',
+  'task.plan.generated',
   'run.started',
   'run.completed',
   'run.error',
@@ -44,6 +45,18 @@ export const INTERACTION_EVENTS = [
   'interaction.responded',
 ] as const
 
+export const CONNECTOR_EVENTS = [
+  'run.step.started',
+  'run.step.completed',
+  'run.step.failed',
+  'connector.health.checked',
+  'connector.capability.invoked',
+  'report.parsed.created',
+  'patch.proposal.created',
+  'patch.proposal.applied',
+  'patch.proposal.rejected',
+] as const
+
 export const MONITOR_EVENTS = [
   'llm.started',
   'llm.usage',
@@ -73,6 +86,7 @@ export const ALL_WIRE_EVENT_TYPES: readonly string[] = [
   ...MESSAGE_EVENTS,
   ...TOOL_EVENTS,
   ...INTERACTION_EVENTS,
+  ...CONNECTOR_EVENTS,
   ...MONITOR_EVENTS,
 ]
 

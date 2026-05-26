@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { groupChatEntries, isWorkPhaseComplete, partitionRunGroupMembers } from './chatGrouping'
+import {
+  collectPendingApprovalEntries,
+  filterInlineChatEntries,
+  groupChatEntries,
+  partitionRunGroupMembers,
+} from './chatGrouping'
 import type { AssistantTextPayload } from './types'
 import type { TimelineEntry } from './types'
 
@@ -7,8 +12,16 @@ function entry(
   key: string,
   kind: TimelineEntry['kind'],
   payload: TimelineEntry['payload'],
+  seq = 1,
 ): TimelineEntry {
-  return { key, id: key, seq: 1, kind, taskId: null, createdAt: 1, payload }
+  return { key, id: key, seq, kind, taskId: null, createdAt: seq, payload }
+}
+
+function displayKeys(items: ReturnType<typeof groupChatEntries>): string[] {
+  return items.map((item) => {
+    if (item.type === 'entry') return item.entry.key
+    return item.key
+  })
 }
 
 describe('groupChatEntries', () => {
@@ -56,51 +69,32 @@ describe('groupChatEntries', () => {
     }
   })
 
-  it('wraps middle blocks in work group only after final assistant completes', () => {
-    const work = [
-      entry('reason:1', 'reasoning', { text: 'thinking', state: 'done' }),
-      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
-    ]
-    const final = entry('text:final', 'assistant_text', {
-      streamId: 's1',
-      text: 'All done',
-      partial: false,
-    } satisfies AssistantTextPayload)
-    expect(isWorkPhaseComplete(work, final)).toBe(true)
-
+  it('preserves event order without moving final assistant to the end', () => {
     const items = groupChatEntries([
-      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }),
-      ...work,
-      final,
+      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }, 1),
+      entry('text:mid', 'assistant_text', { streamId: 's1', text: 'Working…', partial: false }, 2),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }, 3),
+      entry('text:final', 'assistant_text', {
+        streamId: 's2',
+        text: 'All done',
+        partial: false,
+      } satisfies AssistantTextPayload, 4),
     ])
-    expect(items).toHaveLength(3)
-    expect(items[0]?.type).toBe('entry')
-    expect(items[1]?.type).toBe('work_group')
-    expect(items[2]?.type).toBe('entry')
-    if (items[1]?.type === 'work_group') {
-      expect(items[1].key).toBe('work:user:1')
-      expect(items[1].members).toHaveLength(2)
-    }
+    expect(displayKeys(items)).toEqual([
+      'user:1',
+      'text:mid',
+      'tool-group:tool:t1',
+      'text:final',
+    ])
   })
 
-  it('groups tool-only turn with empty assistant placeholder', () => {
+  it('keeps assistant text before tools when events arrive in that order', () => {
     const items = groupChatEntries([
-      entry('user:1', 'user', { text: 'run synth', messageId: 'm1' }),
-      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'run_vivado_synth_tool', state: 'completed' }),
-      entry('text:empty', 'assistant_text', {
-        streamId: 's-empty',
-        text: '',
-        partial: false,
-        emptyTurn: true,
-      } satisfies AssistantTextPayload),
+      entry('user:1', 'user', { text: 'go', messageId: 'm1' }, 1),
+      entry('text:first', 'assistant_text', { streamId: 's1', text: 'Let me check', partial: false }, 2),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }, 3),
     ])
-    expect(items).toHaveLength(3)
-    expect(items[0]?.type).toBe('entry')
-    expect(items[1]?.type).toBe('work_group')
-    expect(items[2]?.type).toBe('entry')
-    if (items[1]?.type === 'work_group') {
-      expect(items[1].key).toBe('work:user:1')
-    }
+    expect(displayKeys(items)).toEqual(['user:1', 'text:first', 'tool-group:tool:t1'])
   })
 
   it('shows flat tool batches while turn is still running', () => {
@@ -110,68 +104,40 @@ describe('groupChatEntries', () => {
     ])
     expect(items).toHaveLength(2)
     expect(items[1]?.type).toBe('tool_group')
-    expect(items.some((i) => i.type === 'work_group')).toBe(false)
   })
 
-  it('starts a new tool group after a pending approval', () => {
-    const items = groupChatEntries([
+  it('routes pending approvals to the dock instead of inline chat', () => {
+    const pending = entry('interaction:wait', 'interaction', {
+      interaction_type: 'approval',
+      title: 'Second',
+      message: '',
+      status: 'pending',
+    }, 30)
+    const all = [
       entry('interaction:done', 'interaction', {
         interaction_type: 'approval',
         title: 'First',
         message: '',
         status: 'approved',
-      }),
-      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
-      entry('interaction:wait', 'interaction', {
-        interaction_type: 'approval',
-        title: 'Second',
-        message: '',
-        status: 'pending',
-      }),
-    ])
-    expect(items).toHaveLength(2)
-    expect(items[0]?.type).toBe('tool_group')
-    expect(items[1]?.type).toBe('entry')
-    if (items[0]?.type === 'tool_group') {
-      expect(items[0].members).toHaveLength(2)
-    }
-    if (items[1]?.type === 'entry') {
-      expect(items[1].entry.kind).toBe('interaction')
-    }
-  })
-
-  it('does not show work group while an interaction is still pending', () => {
-    const work = [
-      entry('interaction:a', 'interaction', {
-        interaction_type: 'approval',
-        title: 'Approve patch',
-        message: '',
-        status: 'pending',
-      }),
-      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
+      }, 10),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }, 20),
+      pending,
     ]
-    const final = entry('text:final', 'assistant_text', {
-      streamId: 's1',
-      text: 'Done',
-      partial: false,
-    } satisfies AssistantTextPayload)
-    expect(isWorkPhaseComplete(work, final)).toBe(false)
+    expect(collectPendingApprovalEntries(all)).toEqual([pending])
+    expect(filterInlineChatEntries(all).map((e) => e.key)).toEqual(['interaction:done', 'tool:t1'])
 
-    const items = groupChatEntries([
-      entry('user:1', 'user', { text: 'hi', messageId: 'm1' }),
-      ...work,
-      final,
-    ])
-    expect(items.some((i) => i.type === 'work_group')).toBe(false)
+    const items = groupChatEntries(all)
+    expect(items.some((i) => i.type === 'entry' && i.entry.key === pending.key)).toBe(false)
+    expect(items).toHaveLength(1)
+    expect(items[0]?.type).toBe('tool_group')
   })
 
-  it('shows flat work items while final assistant is still streaming', () => {
+  it('shows assistant entries in timeline order while streaming', () => {
     const items = groupChatEntries([
-      entry('user:1', 'user', { text: 'go', messageId: 'm1' }),
-      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }),
-      entry('text:partial', 'assistant_text', { streamId: 's1', text: 'Typing…', partial: true }),
+      entry('user:1', 'user', { text: 'go', messageId: 'm1' }, 1),
+      entry('tool:t1', 'tool', { toolcallId: 't1', name: 'grep_tool', state: 'completed' }, 2),
+      entry('text:partial', 'assistant_text', { streamId: 's1', text: 'Typing…', partial: true }, 3),
     ])
-    expect(items.some((i) => i.type === 'work_group')).toBe(false)
-    expect(items.filter((i) => i.type === 'entry')).toHaveLength(2)
+    expect(displayKeys(items)).toEqual(['user:1', 'tool-group:tool:t1', 'text:partial'])
   })
 })

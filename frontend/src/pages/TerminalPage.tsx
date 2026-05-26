@@ -13,9 +13,12 @@ import { Composer } from '../components/terminal/Composer'
 import { TerminalRightPanel } from '../components/terminal/TerminalRightPanel'
 import { ChatEnterProvider } from '../components/terminal/ChatEnterAnimation'
 import { TimelineChatList } from '../components/terminal/TimelineChatList'
+import { PendingApprovalDock } from '../components/terminal/PendingApprovalDock'
 import { TimelineView } from '../components/terminal/TimelineView'
 import { MemoryGraphView } from '../components/terminal/MemoryGraphView'
 import { useSessionTimeline } from '../timeline/useSessionTimeline'
+import { collectPendingApprovalEntries } from '../timeline/chatGrouping'
+import { getChatEntries } from '../timeline/reducer'
 import { isProjectArchived } from '../lib/projectStatus'
 import { useStickToBottomScroll } from '../lib/useStickToBottomScroll'
 import { useStreamStore } from '../stores/streamStore'
@@ -82,6 +85,11 @@ export default function TerminalPage() {
     () => timeline.auditLog.filter((tl) => tl.type.includes('problem') || tl.state === 'error').length,
     [timeline.auditLog],
   )
+  const pendingApprovals = useMemo(
+    () => collectPendingApprovalEntries(getChatEntries(timeline)),
+    [timeline],
+  )
+  const hasApprovalDock = pendingApprovals.length > 0
   const session = sessionQ.data?.session
   const project = projectQ.data?.project
   const projectArchived = isProjectArchived(project)
@@ -169,7 +177,7 @@ export default function TerminalPage() {
             <div
               className={`chat-panel-scroll${
                 view === 'chat' ? ' message-list' : view === 'memory' ? ' memory-graph-view-scroll' : ' timeline-view'
-              }`}
+              }${view === 'chat' && hasApprovalDock ? ' has-approval-dock' : ''}`}
               ref={scrollRef}
               onScroll={onChatScroll}
             >
@@ -202,6 +210,12 @@ export default function TerminalPage() {
                   <X size={16} aria-hidden />
                 </button>
               </div>
+            )}
+            {view === 'chat' && hasApprovalDock && (
+              <PendingApprovalDock
+                entries={pendingApprovals}
+                onInteractionRespond={handleInteractionRespond}
+              />
             )}
             <Composer
               running={running}

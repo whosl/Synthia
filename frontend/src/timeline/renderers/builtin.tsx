@@ -7,6 +7,7 @@ import { InputRequestBlock } from '../../components/terminal/InputRequestBlock'
 import { ReasoningBlock } from '../../components/terminal/ReasoningBlock'
 import { ToolCallBlock } from '../../components/terminal/ToolCallBlock'
 import { formatTime } from '../../lib/time'
+import { buildApprovalResponse } from '../../lib/approvalResponse'
 import type {
   AssistantTextPayload,
   CustomEntryPayload,
@@ -95,7 +96,9 @@ function InteractionRenderer({ entry, onInteractionRespond }: TimelineRenderCont
         files={p.files || []}
         status={p.status as 'pending' | 'approved' | 'rejected'}
         response={p.response}
-        onApprove={(iid, files) => onInteractionRespond?.(iid, { approved: true, approved_files: files })}
+        onApprove={(iid, indices) =>
+          onInteractionRespond?.(iid, buildApprovalResponse(p.files || [], indices))
+        }
         onReject={(iid) => onInteractionRespond?.(iid, { approved: false })}
       />
     )
@@ -166,11 +169,10 @@ export function renderTimelineEntryShell(ctx: TimelineRenderContext) {
 
   const p = entry.payload as InteractionEntryPayload
   const isApprovalInteraction = entry.kind === 'interaction' && p.interaction_type === 'approval'
-  const stickyPending = isApprovalInteraction && p.status === 'pending'
 
   return (
     <div
-      className={`message-turn assistant timeline-entry kind-${entry.kind}${isApprovalInteraction ? ' kind-approval' : ''}${stickyPending ? ' sticky-pending-approval' : ''}`}
+      className={`message-turn assistant timeline-entry kind-${entry.kind}${isApprovalInteraction ? ' kind-approval' : ''}`}
     >
       {renderTimelineEntry(ctx)}
     </div>

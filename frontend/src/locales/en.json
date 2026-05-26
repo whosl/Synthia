@@ -10,6 +10,11 @@
   "nav": {
     "projects": "Projects",
     "monitor": "Monitor",
+    "connectors": "Connectors",
+    "sessions": "Sessions",
+    "runs": "Runs",
+    "reports": "Reports",
+    "approvals": "Approvals",
     "vivado": "Vivado",
     "knowledge": "Knowledge",
     "evolution": "Evolution",
@@ -318,7 +323,8 @@
     "approveCount": "Approve ({{selected}}/{{total}})",
     "rejectAll": "Reject all",
     "rejectedHint": "Rejected — you can continue to explain requirements in the conversation",
-    "selectFile": "Select {{path}}"
+    "selectFile": "Select {{path}}",
+    "dockRegion": "Pending approval"
   },
 
   "inputRequest": {
@@ -350,6 +356,7 @@
   "monitor": {
     "title": "Monitor",
     "subtitle": "Usage trends, tool reliability, and run traces (Phase 4)",
+    "connectors": "Tool connectors",
     "recentRuns": "Recent runs",
     "tableRun": "Run",
     "tableType": "Type",
@@ -397,7 +404,8 @@
     "consoleInit1": "Vivado% version -short",
     "consoleInit2": "2022.1",
     "consoleInit3": "Vivado% ready",
-    "approvalRequired": "Policy requires approval — disable dangerous Tcl or enable auto-approve in Settings",
+    "approvalRequired": "Policy requires approval — open Approvals to confirm, or enable auto-approve in Settings",
+    "approvalQueued": "Queued approval",
     "completed": "# completed ({{n}}s)",
     "failed": "# failed: {{error}}",
     "commandHistory": "Command History",
@@ -651,6 +659,90 @@
     "contextAudit": "Context Audit",
     "package": "Package",
     "artifacts": "Artifacts",
-    "noArtifacts": "No artifacts recorded."
+    "noArtifacts": "No artifacts recorded.",
+    "rerun": "Rerun task",
+    "rerunStarted": "New task started from this run.",
+    "workspace": "Run workspace",
+    "workspaceRoot": "Root",
+    "noWorkspace": "Workspace not initialized yet.",
+    "toolRequests": "Controlled tool requests",
+    "noToolRequests": "No connector tool requests recorded for this run.",
+    "steps": "Run Steps",
+    "noSteps": "No connector steps recorded.",
+    "patches": "Patch Proposals",
+    "noPatches": "No patch proposals for this run."
+  },
+
+  "sessions": {
+    "subtitle": "All agent sessions across projects.",
+    "list": "Sessions",
+    "empty": "No sessions yet."
+  },
+
+  "runs": {
+    "subtitle": "Task runs with tool calls and structured reports.",
+    "list": "Runs"
+  },
+
+  "approvals": {
+    "subtitle": "Unified approval queue for patches, Tcl, and high-risk execution.",
+    "queue": "Pending",
+    "detail": "Detail",
+    "empty": "No pending approvals.",
+    "selectOne": "Select an approval to review.",
+    "type": "Type",
+    "risk": "Risk",
+    "approve": "Approve",
+    "reject": "Reject",
+    "applyPatch": "Apply patch"
+  },
+
+  "connectors": {
+    "title": "Tool Connectors",
+    "subtitle": "Industrial tool SDK registry — capabilities, environment, and risk policy.",
+    "refresh": "Refresh",
+    "registry": "Registered connectors",
+    "empty": "No connectors registered yet.",
+    "environment": "Environment",
+    "version": "Tool version",
+    "target": "Target type",
+    "reachable": "Reachable",
+    "hint": "Configure targets and run flows from",
+    "capabilities": "Capabilities",
+    "capId": "Capability",
+    "capStage": "Stage",
+    "capRisk": "Risk",
+    "capApproval": "Approval",
+    "yes": "Yes",
+    "no": "No",
+    "healthCheck": "Health check"
+  },
+
+  "knowledge": {
+    "candidates": "KB Candidates",
+    "retrieval": "Retrieval audit",
+    "comingSoon": "Coming soon.",
+    "emptyCandidates": "No pending KB candidates.",
+    "emptyRetrieval": "No retrieval audits for recent runs."
+  },
+
+  "reports": {
+    "explorerSubtitle": "Browse parsed timing, utilization, and DRC reports across runs.",
+    "recentRun": "Latest run",
+    "detailTitle": "Report detail",
+    "backToRun": "Back to run",
+    "notFound": "Report not found.",
+    "viewDetail": "View detail",
+    "structuredTitle": "Structured Reports",
+    "loading": "Loading parsed reports…",
+    "empty": "No structured reports for this run yet. Run Vivado synth/impl to populate.",
+    "timing": "Timing Summary",
+    "utilization": "Utilization",
+    "drc": "DRC",
+    "drcClean": "No DRC violations.",
+    "methodology": "Methodology",
+    "noFindings": "No methodology findings.",
+    "trendWns": "WNS trend (recent runs)",
+    "trendEmpty": "No timing reports yet — run synthesis to populate trends."
   }
 }

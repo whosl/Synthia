@@ -384,6 +384,15 @@ def event_list_recent(session_id: str, limit: int = 5000) -> list[dict]:
     ).fetchall()
     return [dict(r) for r in reversed(rows)]
 
+
+def event_list_by_type(event_type: str, limit: int = 200) -> list[dict]:
+    """Recent events of a type, chronological (for cross-session queues)."""
+    rows = get_db().execute(
+        "SELECT * FROM events WHERE event_type=? ORDER BY seq DESC LIMIT ?",
+        (event_type, limit),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
 # ── Runs ─────────────────────────────────────────────────────
 
 def run_create(run_type: str, name: str, session_id: str = "", task_id: str = "",
@@ -1532,3 +1541,551 @@ def persona_next_version(project_id: str, *, scope: str = "project") -> int:
         (scope, project_id),
     ).fetchone()
     return int(row["v"] or 0) + 1 if row else 1
+
+
+# ── Connectors (Phase 6A) ────────────────────────────────────
+
+def connector_upsert(
+    connector_id: str,
+    tool_name: str,
+    *,
+    version: str = "",
+    supported_versions: list[str] | None = None,
+    status: str = "ready",
+    last_health: dict | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    db = get_db()
+    now = _now()
+    row = db.execute("SELECT id FROM connectors WHERE connector_id=?", (connector_id,)).fetchone()
+    health_json = json.dumps(last_health, ensure_ascii=False) if last_health else None
+    meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+    versions_json = json.dumps(supported_versions or [], ensure_ascii=False)
+    if row:
+        db.execute(
+            """UPDATE connectors SET tool_name=?, version=?, supported_versions_json=?,
+               status=?, last_health_at=?, last_health_json=?, updated_at=?, metadata_json=?
+               WHERE connector_id=?""",
+            (
+                tool_name, version or None, versions_json, status,
+                now if last_health else None, health_json, now, meta_json, connector_id,
+            ),
+        )
+        cid = row["id"]
+    else:
+        cid = _uid()
+        db.execute(
+            """INSERT INTO connectors(
+              id,connector_id,tool_name,version,supported_versions_json,status,
+              last_health_at,last_health_json,created_at,updated_at,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                cid, connector_id, tool_name, version or None, versions_json, status,
+                now if last_health else None, health_json, now, now, meta_json,
+            ),
+        )
+    db.commit()
+    return connector_get(connector_id) or {}
+
+
+def connector_get(connector_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM connectors WHERE connector_id=?", (connector_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def connector_list() -> list[dict]:
+    return [dict(r) for r in get_db().execute("SELECT * FROM connectors ORDER BY tool_name").fetchall()]
+
+
+def capability_upsert(
+    connector_id: str,
+    capability_id: str,
+    *,
+    display_name: str = "",
+    stage: str = "",
+    risk_level: str = "low",
+    requires_approval: bool = False,
+    input_schema: dict | None = None,
+    outputs: list[str] | None = None,
+    supports_stop: bool = True,
+    supports_mock: bool = True,
+) -> dict:
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM connector_capabilities WHERE connector_id=? AND capability_id=?",
+        (connector_id, capability_id),
+    ).fetchone()
+    schema_json = json.dumps(input_schema or {}, ensure_ascii=False)
+    outputs_json = json.dumps(outputs or [], ensure_ascii=False)
+    if row:
+        db.execute(
+            """UPDATE connector_capabilities SET display_name=?, stage=?, risk_level=?,
+               requires_approval=?, supports_stop=?, supports_mock=?,
+               input_schema_json=?, outputs_json=? WHERE id=?""",
+            (
+                display_name, stage, risk_level, int(requires_approval),
+                int(supports_stop), int(supports_mock), schema_json, outputs_json, row["id"],
+            ),
+        )
+        cap_id = row["id"]
+    else:
+        cap_id = _uid()
+        db.execute(
+            """INSERT INTO connector_capabilities(
+              id,connector_id,capability_id,display_name,stage,risk_level,
+              requires_approval,supports_stop,supports_mock,input_schema_json,outputs_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                cap_id, connector_id, capability_id, display_name, stage, risk_level,
+                int(requires_approval), int(supports_stop), int(supports_mock),
+                schema_json, outputs_json,
+            ),
+        )
+    db.commit()
+    return dict(db.execute("SELECT * FROM connector_capabilities WHERE id=?", (cap_id,)).fetchone())
+
+
+def capability_list(connector_id: str | None = None) -> list[dict]:
+    if connector_id:
+        q = "SELECT * FROM connector_capabilities WHERE connector_id=? ORDER BY stage, capability_id"
+        return [dict(r) for r in get_db().execute(q, (connector_id,)).fetchall()]
+    return [dict(r) for r in get_db().execute(
+        "SELECT * FROM connector_capabilities ORDER BY connector_id, stage"
+    ).fetchall()]
+
+
+def run_step_create(
+    run_id: str,
+    *,
+    session_id: str = "",
+    task_id: str = "",
+    connector_id: str = "",
+    capability_id: str = "",
+    stage: str,
+    name: str,
+    command_text: str = "",
+) -> dict:
+    sid = _uid()
+    now = _now()
+    get_db().execute(
+        """INSERT INTO run_steps(
+          id,run_id,session_id,task_id,connector_id,capability_id,stage,name,
+          state,started_at,command_text
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            sid, run_id, session_id or None, task_id or None,
+            connector_id or None, capability_id or None, stage, name,
+            "pending", now, command_text or None,
+        ),
+    )
+    get_db().commit()
+    return run_step_get(sid) or {}
+
+
+def run_step_get(step_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM run_steps WHERE id=?", (step_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def run_step_update(step_id: str, **fields) -> dict | None:
+    if not fields:
+        return run_step_get(step_id)
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [step_id]
+    get_db().execute(f"UPDATE run_steps SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return run_step_get(step_id)
+
+
+def run_step_list(run_id: str) -> list[dict]:
+    return [
+        dict(r)
+        for r in get_db().execute(
+            "SELECT * FROM run_steps WHERE run_id=? ORDER BY started_at ASC, id ASC",
+            (run_id,),
+        ).fetchall()
+    ]
+
+
+def parsed_report_create(
+    run_id: str,
+    connector_id: str,
+    report_type: str,
+    stage: str,
+    data: dict,
+    *,
+    step_id: str = "",
+    source_artifact_id: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    rid = _uid()
+    now = _now()
+    get_db().execute(
+        """INSERT INTO parsed_reports(
+          id,run_id,step_id,connector_id,report_type,stage,
+          source_artifact_id,data_json,created_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            rid, run_id, step_id or None, connector_id, report_type, stage,
+            source_artifact_id or None,
+            json.dumps(data, ensure_ascii=False), now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    get_db().commit()
+    return parsed_report_get(rid) or {}
+
+
+def parsed_report_get(report_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM parsed_reports WHERE id=?", (report_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("data_json"):
+        try:
+            d["data"] = json.loads(d["data_json"])
+        except json.JSONDecodeError:
+            d["data"] = {}
+    return d
+
+
+def parsed_report_trends(
+    report_type: str = "timing_summary",
+    *,
+    session_id: str = "",
+    metric: str = "wns",
+    limit: int = 20,
+) -> list[dict]:
+    """Time-series points for a metric across recent runs (IA-F)."""
+    q = """
+        SELECT pr.id, pr.run_id, pr.report_type, pr.stage, pr.data_json, pr.created_at,
+               r.session_id, r.name AS run_name, r.started_at
+        FROM parsed_reports pr
+        LEFT JOIN runs r ON r.id = pr.run_id
+        WHERE pr.report_type = ?
+    """
+    params: list = [report_type]
+    if session_id:
+        q += " AND r.session_id = ?"
+        params.append(session_id)
+    q += " ORDER BY pr.created_at ASC LIMIT ?"
+    params.append(limit)
+    points: list[dict] = []
+    for row in get_db().execute(q, params).fetchall():
+        d = dict(row)
+        data: dict = {}
+        if d.get("data_json"):
+            try:
+                data = json.loads(d["data_json"])
+            except json.JSONDecodeError:
+                data = {}
+        raw = data.get(metric)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        label = (d.get("run_name") or d.get("run_id") or d.get("id") or "")[:12]
+        points.append({
+            "report_id": d.get("id"),
+            "run_id": d.get("run_id"),
+            "session_id": d.get("session_id"),
+            "report_type": d.get("report_type"),
+            "stage": d.get("stage"),
+            "metric": metric,
+            "value": value,
+            "label": label,
+            "created_at": d.get("created_at"),
+        })
+    return points
+
+
+def parsed_report_list(run_id: str = "", step_id: str = "", report_type: str = "") -> list[dict]:
+    q = "SELECT * FROM parsed_reports WHERE 1=1"
+    params: list = []
+    if run_id:
+        q += " AND run_id=?"
+        params.append(run_id)
+    if step_id:
+        q += " AND step_id=?"
+        params.append(step_id)
+    if report_type:
+        q += " AND report_type=?"
+        params.append(report_type)
+    q += " ORDER BY created_at DESC"
+    out = []
+    for row in get_db().execute(q, params).fetchall():
+        d = dict(row)
+        if d.get("data_json"):
+            try:
+                d["data"] = json.loads(d["data_json"])
+            except json.JSONDecodeError:
+                d["data"] = {}
+        out.append(d)
+    return out
+
+
+# ── Patch proposals & approvals (Phase 6D) ───────────────────
+
+
+def patch_proposal_create(
+    connector_id: str,
+    target_file: str,
+    patch_type: str,
+    *,
+    run_id: str = "",
+    step_id: str = "",
+    session_id: str = "",
+    task_id: str = "",
+    problem_id: str = "",
+    capability_id: str = "",
+    risk_level: str = "medium",
+    reason: str = "",
+    diff_text: str = "",
+    approval_id: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    pid = _uid()
+    now = _now()
+    get_db().execute(
+        """INSERT INTO patch_proposals(
+          id,run_id,step_id,session_id,task_id,problem_id,connector_id,capability_id,
+          target_file,patch_type,risk_level,reason,diff_text,status,approval_id,
+          created_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            pid, run_id or None, step_id or None, session_id or None, task_id or None,
+            problem_id or None, connector_id, capability_id or None,
+            target_file, patch_type, risk_level, reason or None, diff_text or None,
+            "pending", approval_id or None, now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    get_db().commit()
+    return patch_proposal_get(pid) or {}
+
+
+def patch_proposal_get(patch_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM patch_proposals WHERE id=?", (patch_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def patch_proposal_list(
+    *,
+    run_id: str = "",
+    session_id: str = "",
+    status: str = "",
+    limit: int = 100,
+) -> list[dict]:
+    q = "SELECT * FROM patch_proposals WHERE 1=1"
+    params: list = []
+    if run_id:
+        q += " AND run_id=?"
+        params.append(run_id)
+    if session_id:
+        q += " AND session_id=?"
+        params.append(session_id)
+    if status:
+        q += " AND status=?"
+        params.append(status)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in get_db().execute(q, params).fetchall()]
+
+
+def patch_proposal_update(patch_id: str, **fields) -> dict | None:
+    if not fields:
+        return patch_proposal_get(patch_id)
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [patch_id]
+    get_db().execute(f"UPDATE patch_proposals SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return patch_proposal_get(patch_id)
+
+
+def approval_create(
+    approval_type: str,
+    payload: dict,
+    *,
+    session_id: str = "",
+    task_id: str = "",
+    run_id: str = "",
+    step_id: str = "",
+    connector_id: str = "",
+    capability_id: str = "",
+    risk_level: str = "low",
+    interaction_id: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    aid = _uid()
+    now = _now()
+    get_db().execute(
+        """INSERT INTO approvals(
+          id,session_id,task_id,run_id,step_id,connector_id,capability_id,
+          approval_type,risk_level,payload_json,status,interaction_id,
+          created_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            aid, session_id or None, task_id or None, run_id or None, step_id or None,
+            connector_id or None, capability_id or None,
+            approval_type, risk_level,
+            json.dumps(payload, ensure_ascii=False), "pending",
+            interaction_id or None, now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    get_db().commit()
+    return approval_get(aid) or {}
+
+
+def approval_get(approval_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("payload_json"):
+        try:
+            d["payload"] = json.loads(d["payload_json"])
+        except json.JSONDecodeError:
+            d["payload"] = {}
+    return d
+
+
+def approval_list(
+    *,
+    status: str = "pending",
+    session_id: str = "",
+    connector_id: str = "",
+    approval_type: str = "",
+    limit: int = 100,
+) -> list[dict]:
+    q = "SELECT * FROM approvals WHERE 1=1"
+    params: list = []
+    if status:
+        q += " AND status=?"
+        params.append(status)
+    if session_id:
+        q += " AND session_id=?"
+        params.append(session_id)
+    if connector_id:
+        q += " AND connector_id=?"
+        params.append(connector_id)
+    if approval_type:
+        q += " AND approval_type=?"
+        params.append(approval_type)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    out = []
+    for row in get_db().execute(q, params).fetchall():
+        d = dict(row)
+        if d.get("payload_json"):
+            try:
+                d["payload"] = json.loads(d["payload_json"])
+            except json.JSONDecodeError:
+                d["payload"] = {}
+        out.append(d)
+    return out
+
+
+def approval_update(approval_id: str, **fields) -> dict | None:
+    if not fields:
+        return approval_get(approval_id)
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [approval_id]
+    get_db().execute(f"UPDATE approvals SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return approval_get(approval_id)
+
+
+def approval_find_by_interaction(interaction_id: str) -> dict | None:
+    row = get_db().execute(
+        "SELECT * FROM approvals WHERE interaction_id=? ORDER BY created_at DESC LIMIT 1",
+        (interaction_id,),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("payload_json"):
+        try:
+            d["payload"] = json.loads(d["payload_json"])
+        except json.JSONDecodeError:
+            d["payload"] = {}
+    return d
+
+
+# ── Tool run requests (Phase 6 — Controlled Execution) ───────
+
+
+def tool_run_request_create(
+    run_id: str,
+    connector_id: str,
+    capability_id: str,
+    *,
+    step_id: str = "",
+    command_id: str = "",
+    executable: str = "",
+    args: list | None = None,
+    cwd: str = "",
+    env_profile: str = "",
+    allowed_paths: list | None = None,
+    timeout_sec: int = 3600,
+    state: str = "prepared",
+    metadata: dict | None = None,
+) -> dict:
+    rid = _uid()
+    now = _now()
+    get_db().execute(
+        """INSERT INTO tool_run_requests(
+          id,run_id,step_id,connector_id,capability_id,command_id,
+          executable,args_json,cwd,env_profile,allowed_paths_json,
+          timeout_sec,state,created_at,metadata_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            rid, run_id, step_id or None, connector_id, capability_id,
+            command_id or None, executable or None,
+            json.dumps(args or [], ensure_ascii=False),
+            cwd or None, env_profile or None,
+            json.dumps(allowed_paths or [], ensure_ascii=False),
+            timeout_sec, state, now,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )
+    get_db().commit()
+    return tool_run_request_get(rid) or {}
+
+
+def tool_run_request_get(request_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM tool_run_requests WHERE id=?", (request_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    for key, col in (("args", "args_json"), ("allowed_paths", "allowed_paths_json")):
+        if d.get(col):
+            try:
+                d[key] = json.loads(d[col])
+            except json.JSONDecodeError:
+                d[key] = []
+    return d
+
+
+def tool_run_request_list(run_id: str = "", step_id: str = "") -> list[dict]:
+    q = "SELECT * FROM tool_run_requests WHERE 1=1"
+    params: list = []
+    if run_id:
+        q += " AND run_id=?"
+        params.append(run_id)
+    if step_id:
+        q += " AND step_id=?"
+        params.append(step_id)
+    q += " ORDER BY created_at ASC"
+    out = []
+    for row in get_db().execute(q, params).fetchall():
+        d = dict(row)
+        if d.get("args_json"):
+            try:
+                d["args"] = json.loads(d["args_json"])
+            except json.JSONDecodeError:
+                d["args"] = []
+        out.append(d)
+    return out

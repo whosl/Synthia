@@ -6,14 +6,23 @@ import {
   CircuitBoard,
   Gauge,
   Home,
+  ListTodo,
+  Plug,
+  ScrollText,
   Settings,
+  Shield,
   Sparkles,
 } from 'lucide-react'
 import { useShellStore } from '../../stores/shellStore'
 
 const nav = [
   { key: 'nav.projects', path: '/', icon: Home },
+  { key: 'nav.sessions', path: '/sessions', icon: ListTodo },
+  { key: 'nav.runs', path: '/runs', icon: Gauge },
+  { key: 'nav.reports', path: '/reports', icon: ScrollText },
+  { key: 'nav.approvals', path: '/approvals', icon: Shield },
   { key: 'nav.monitor', path: '/monitor', icon: Gauge },
+  { key: 'nav.connectors', path: '/connectors', icon: Plug },
   { key: 'nav.vivado', path: '/vivado', icon: CircuitBoard },
   { key: 'nav.evolution', path: '/evolution', icon: Sparkles },
   { key: 'nav.settings', path: '/settings', icon: Settings },
