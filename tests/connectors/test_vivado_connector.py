@@ -16,12 +16,12 @@ def _fresh_registry():
     clear_registry()
 
 
-def test_register_lists_eleven_capabilities():
+def test_register_lists_vivado_capabilities():
     register()
     conn = get_connector("vivado")
     assert conn is not None
     caps = conn.list_capabilities()
-    assert len(caps) == 11
+    assert len(caps) == 18
     ids = {c.capability_id for c in caps}
     assert "run_synthesis" in ids
     assert "report_drc" in ids

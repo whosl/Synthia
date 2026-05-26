@@ -30,7 +30,7 @@ from edagent_vivado.tools.report_tools import (
     match_error_cases_tool, parse_timing_tool,
     parse_utilization_tool, parse_vivado_log_tool,
 )
-from edagent_vivado.tools.vivado_tools import run_vivado_synth_tool
+from edagent_vivado.agent.vivado_capability_shims import run_vivado_synth_tool
 
 logger = logging.getLogger(__name__)
 

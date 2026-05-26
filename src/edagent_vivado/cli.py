@@ -166,6 +166,30 @@ def diagnose_log(
     _safe_print("\n".join(lines))
 
 
+def _connector_cli_run(
+    capability_id: str,
+    manifest_path: str,
+    *,
+    inputs: dict | None = None,
+) -> dict:
+    import json as _json
+
+    from edagent_vivado.agent.run_capability import run_connector_capability
+    from edagent_vivado.connectors import ensure_connectors
+
+    ensure_connectors()
+    raw = run_connector_capability(
+        "vivado",
+        capability_id,
+        manifest_path=manifest_path,
+        inputs={"manifest_path": manifest_path, **(inputs or {})},
+    )
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError:
+        return {"success": False, "error": raw, "edagent_outcome": "execution_failed"}
+
+
 @app.command()
 def run_synth(
     manifest_path: str = typer.Argument(..., help="Path to eda.yaml manifest"),
@@ -184,6 +208,16 @@ def run_synth(
     if not p.exists():
         console.print(f"[red]ERROR:[/] Manifest not found: {manifest_path}")
         raise typer.Exit(1)
+
+    if not directive and not retiming and not mock_fail:
+        result = _connector_cli_run("run_synthesis", str(p))
+        console.print(f"\n[green]Synthesis {'succeeded' if result.get('success') else 'FAILED'}[/]")
+        console.print(f"  Outcome: {result.get('edagent_outcome', '')}")
+        if result.get("error"):
+            console.print(f"  Error: {result['error']}")
+        if not result.get("success"):
+            raise typer.Exit(1)
+        return
 
     manifest = Manifest.load(p)
     console.print(f"[blue]Project:[/] {manifest.name()}")
@@ -228,6 +262,20 @@ def run_impl(
     if not p.exists():
         console.print(f"[red]ERROR:[/] Manifest not found: {manifest_path}")
         raise typer.Exit(1)
+
+    if not mock_fail:
+        result = _connector_cli_run(
+            "run_implementation",
+            str(p),
+            inputs={"run_synth_first": True},
+        )
+        console.print(f"\n[green]Implementation {'succeeded' if result.get('success') else 'FAILED'}[/]")
+        console.print(f"  Outcome: {result.get('edagent_outcome', '')}")
+        if result.get("error"):
+            console.print(f"  Error: {result['error']}")
+        if not result.get("success"):
+            raise typer.Exit(1)
+        return
 
     manifest = Manifest.load(p)
     console.print(f"[blue]Project:[/] {manifest.name()}")

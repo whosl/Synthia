@@ -700,3 +700,22 @@ class VivadoRuntimeAdapter:
                 project_id=manifest.name(),
             )
         return results
+
+    def run_bitstream(
+        self,
+        manifest_path: str,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        """Generate bitstream — Phase 2 uses impl checkpoint; write_bitstream in Phase 5."""
+        impl = self.run_implementation(
+            manifest_path,
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            run_synth_first=False,
+        )
+        impl.setdefault("note", "bitstream via implementation checkpoint (write_bitstream in Phase 5)")
+        return impl

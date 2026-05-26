@@ -1,4 +1,8 @@
-"""Bridge LangChain Vivado tools to VivadoConnector capabilities."""
+"""DEPRECATED: legacy bridge for manifest/tcl paths.
+
+New code should use ``run_connector_capability`` / ``execute_with_steps``.
+Kept for ``vivado_tools`` tcl/script helpers until those gain connector capabilities.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from edagent_vivado.connectors import ensure_connectors
 from edagent_vivado.connectors.base.registry import get_connector
 from edagent_vivado.connectors.base.types import ToolRunRequest
 from edagent_vivado.connectors.run_execution import execute_with_steps
+from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
 from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter, VivadoResult
 
 _TOOL_CAPABILITY: dict[str, str] = {
@@ -36,15 +41,22 @@ def run_manifest_via_connector(
     run_id: str = "",
     run_synth_first: bool | None = None,
     event_sink: Any = None,
-) -> dict[str, Any] | None:
-    """Execute manifest flow via connector; None => caller should use legacy adapter."""
+) -> dict[str, Any]:
+    """Execute manifest flow via connector."""
     cap_id = _TOOL_CAPABILITY.get(tool_name)
     if not cap_id:
-        return None
+        return {
+            "success": False,
+            "error": f"unknown tool: {tool_name}",
+            "edagent_outcome": "execution_failed",
+        }
     ensure_connectors()
-    conn = get_connector("vivado")
-    if conn is None:
-        return None
+    if get_connector("vivado") is None:
+        return {
+            "success": False,
+            "error": "vivado connector not registered",
+            "edagent_outcome": "execution_failed",
+        }
 
     if run_synth_first is None:
         run_synth_first = tool_name != "run_vivado_impl_tool"
@@ -63,7 +75,7 @@ def run_manifest_via_connector(
             "run_synth_first": run_synth_first,
         },
         manifest_path=manifest_path,
-        auto_approved=True,
+        auto_approved=is_vivado_execution_approved(),
     )
     tool_result = execute_with_steps(req, event_sink=event_sink)
     if tool_result.edagent_outcome in ("policy_denied", "needs_approval"):
@@ -74,14 +86,13 @@ def run_manifest_via_connector(
         }
 
     workspace = _workspace_from_artifacts(tool_result.artifacts)
-    out: dict[str, Any] = {
+    return {
         "success": tool_result.success,
         "return_code": tool_result.exit_code,
         "workspace": workspace,
         "error": tool_result.error,
         "target_id": tool_result.target_id,
     }
-    return out
 
 
 def run_tcl_via_adapter(
@@ -99,7 +110,7 @@ def run_tcl_via_adapter(
         adapter = VivadoRuntimeAdapter(get_target(target_id))
     return adapter.run_tcl(
         command,
-        auto_approved=True,
+        auto_approved=is_vivado_execution_approved(),
         session_id=session_id,
         task_id=task_id,
         run_id=run_id,
@@ -121,7 +132,7 @@ def run_script_via_adapter(
         adapter = VivadoRuntimeAdapter(get_target(target_id))
     return adapter.run_script(
         script,
-        auto_approved=True,
+        auto_approved=is_vivado_execution_approved(),
         session_id=session_id,
         task_id=task_id,
         run_id=run_id,

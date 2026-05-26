@@ -54,6 +54,15 @@ def execute_with_steps(
             inputs["workspace_root"] = str(ws.root)
         except Exception:
             pass
+    if cap and not cap.requires_approval:
+        effective_auto = True
+    elif cap and cap.requires_approval:
+        from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
+
+        effective_auto = is_vivado_execution_approved()
+    else:
+        effective_auto = request.auto_approved
+
     request = ToolRunRequest(
         request_id=request.request_id,
         run_id=request.run_id,
@@ -63,7 +72,7 @@ def execute_with_steps(
         inputs=inputs,
         manifest_path=request.manifest_path,
         target_id=request.target_id,
-        auto_approved=request.auto_approved,
+        auto_approved=effective_auto,
     )
 
     session_id = str(request.inputs.get("session_id") or "")

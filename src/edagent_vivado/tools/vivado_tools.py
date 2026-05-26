@@ -52,34 +52,6 @@ def _gate_or_reject(tool_name: str) -> str | None:
     return None
 
 
-def _legacy_synth(manifest_path: str, session_id: str, task_id: str, run_id: str) -> dict:
-    adapter = VivadoRuntimeAdapter()
-    return adapter.run_synthesis(
-        manifest_path,
-        session_id=session_id,
-        task_id=task_id,
-        run_id=run_id,
-    )
-
-
-def _legacy_impl(
-    manifest_path: str,
-    session_id: str,
-    task_id: str,
-    run_id: str,
-    *,
-    run_synth_first: bool = True,
-) -> dict:
-    adapter = VivadoRuntimeAdapter()
-    return adapter.run_implementation(
-        manifest_path,
-        session_id=session_id,
-        task_id=task_id,
-        run_id=run_id,
-        run_synth_first=run_synth_first,
-    )
-
-
 def _run_manifest_tool(tool_name: str, manifest_path: str, scope: str) -> str:
     try:
         rejected = _gate_or_reject(tool_name)
@@ -103,17 +75,6 @@ def _run_manifest_tool(tool_name: str, manifest_path: str, scope: str) -> str:
             run_id=run_id,
             run_synth_first=run_synth_first,
         )
-        if result is None:
-            if tool_name == "run_vivado_synth_tool":
-                result = _legacy_synth(manifest_path, session_id, task_id, run_id)
-            else:
-                result = _legacy_impl(
-                    manifest_path,
-                    session_id,
-                    task_id,
-                    run_id,
-                    run_synth_first=run_synth_first if run_synth_first is not None else True,
-                )
 
         ws_path = Path(result.get("workspace") or "")
         if ws_path.is_dir():
@@ -131,28 +92,6 @@ def _run_manifest_tool(tool_name: str, manifest_path: str, scope: str) -> str:
         return tag_execution_result(result, scope)
     except Exception as e:
         return format_execution_failed(scope, str(e))
-
-
-@tool
-def run_vivado_synth_tool(manifest_path: str, approval_request: str = "") -> str:
-    """Run Vivado synthesis using the project manifest. Returns a JSON summary.
-
-    Args:
-        manifest_path: Path to eda.yaml project manifest.
-        approval_request: Required JSON string for the approval UI (see system prompt schema).
-    """
-    return _run_manifest_tool("run_vivado_synth_tool", manifest_path, SCOPE_VIVADO_SYNTH)
-
-
-@tool
-def run_vivado_impl_tool(manifest_path: str, approval_request: str = "") -> str:
-    """Run Vivado implementation (synth checkpoint + place/route) from eda.yaml manifest.
-
-    Args:
-        manifest_path: Path to eda.yaml project manifest.
-        approval_request: Required JSON string for the approval UI.
-    """
-    return _run_manifest_tool("run_vivado_impl_tool", manifest_path, SCOPE_VIVADO_IMPL)
 
 
 @tool
@@ -178,7 +117,9 @@ def run_vivado_tcl_tool(command: str, target_id: str = "", approval_request: str
 
             adapter = VivadoRuntimeAdapter(get_target(target_id))
 
-        policy = adapter.check_policy(command, auto_approved=True)
+        from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
+
+        policy = adapter.check_policy(command, auto_approved=is_vivado_execution_approved())
         if not policy.allowed:
             return format_execution_failed(
                 SCOPE_VIVADO_TCL,
@@ -221,7 +162,9 @@ def run_vivado_script_tool(script: str, target_id: str = "", approval_request: s
 
             adapter = VivadoRuntimeAdapter(get_target(target_id))
 
-        policy = adapter.check_script_policy(script, auto_approved=True)
+        from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
+
+        policy = adapter.check_script_policy(script, auto_approved=is_vivado_execution_approved())
         if not policy.allowed:
             return format_execution_failed(
                 SCOPE_VIVADO_SCRIPT,
@@ -241,12 +184,3 @@ def run_vivado_script_tool(script: str, target_id: str = "", approval_request: s
         return format_execution_failed(SCOPE_VIVADO_SCRIPT, str(e))
 
 
-@tool
-def run_vivado_flow_tool(manifest_path: str, approval_request: str = "") -> str:
-    """Run full Vivado flow: synthesis then implementation from eda.yaml.
-
-    Args:
-        manifest_path: Path to eda.yaml project manifest.
-        approval_request: Required JSON string for the approval UI.
-    """
-    return _run_manifest_tool("run_vivado_flow_tool", manifest_path, SCOPE_VIVADO_FLOW)

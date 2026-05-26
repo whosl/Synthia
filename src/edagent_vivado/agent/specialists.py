@@ -9,7 +9,7 @@ from edagent_vivado.tools.report_tools import (
     parse_utilization_tool,
     parse_vivado_log_tool,
 )
-from edagent_vivado.tools.vivado_tools import run_vivado_synth_tool
+from edagent_vivado.agent.vivado_capability_shims import run_vivado_synth_tool
 
 # ── Tool sets per specialist ───────────────────────────────
 

@@ -168,22 +168,31 @@ async def api_vivado_run_flow(request: Request):
             manifest_path = snapshot_manifest_path(sess)
     if not manifest_path:
         raise HTTPException(400, "manifest_path is required (or provide session_id with project snapshot)")
-    from edagent_vivado.harness.vivado_adapter import VivadoRuntimeAdapter
-
     sid = str(body.get("session_id") or "")
     tid = str(body.get("task_id") or "")
     rid = str(body.get("run_id") or "")
-    adapter = VivadoRuntimeAdapter()
-    result = adapter.run_implementation(
-        manifest_path,
-        session_id=sid,
-        task_id=tid,
-        run_id=rid,
-    )
-    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_FLOW, tag_execution_result
+    from edagent_vivado.agent.run_capability import run_connector_capability
+    from edagent_vivado.connectors import ensure_connectors
+    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_FLOW, parse_tool_outcome, tag_execution_result
     from edagent_vivado.harness.vivado_observed import observe_vivado_command
 
-    tagged = tag_execution_result(result, SCOPE_VIVADO_FLOW)
+    ensure_connectors()
+    out = run_connector_capability(
+        "vivado",
+        "run_implementation",
+        manifest_path=manifest_path,
+        inputs={
+            "manifest_path": manifest_path,
+            "session_id": sid,
+            "task_id": tid,
+            "run_id": rid,
+            "run_synth_first": True,
+        },
+        gate_tool_name="run_vivado_flow_tool",
+    )
+    parsed = parse_tool_outcome(out) or {}
+    result = parsed if isinstance(parsed, dict) else {"raw": out}
+    tagged = out if isinstance(out, str) else tag_execution_result(result, SCOPE_VIVADO_FLOW)
     if sid and rid:
         observe_vivado_command(
             session_id=sid,
@@ -194,7 +203,8 @@ async def api_vivado_run_flow(request: Request):
             output=tagged,
             event_create=event_create,
         )
-    return {"ok": bool(result.get("success")), "result": result, "tool_output": tagged}
+    ok = bool(parsed.get("success")) if isinstance(parsed, dict) else False
+    return {"ok": ok, "result": parsed, "tool_output": tagged}
 
 
 @router.get("/vivado/devices")

@@ -42,17 +42,6 @@ _TOOLS = [
     *CAPABILITY_AGENT_TOOLS,
 ]
 
-if _os.environ.get("EDAGENT_LEGACY_VIVADO_TOOLS", "").lower() in ("1", "true", "yes"):
-    from edagent_vivado.tools.vivado_tools import (
-        run_vivado_flow_tool as _legacy_flow,
-        run_vivado_impl_tool as _legacy_impl,
-        run_vivado_script_tool as _legacy_script,
-        run_vivado_synth_tool as _legacy_synth,
-        run_vivado_tcl_tool as _legacy_tcl,
-    )
-
-    _TOOLS.extend([_legacy_synth, _legacy_impl, _legacy_tcl, _legacy_script, _legacy_flow])
-
 _checkpointer = MemorySaver()
 
 

@@ -12,7 +12,16 @@ from edagent_vivado.connectors.base.types import ToolRunRequest
 from edagent_vivado.connectors.run_execution import execute_with_steps
 from edagent_vivado.harness.approval_outcomes import format_execution_failed, tag_execution_result
 from edagent_vivado.harness.run_context import get_agent_task_id
+from edagent_vivado.connectors.base.types import ToolCapability
 from edagent_vivado.tools.vivado_tools import _ctx_ids, _gate_or_reject
+
+
+def _resolve_auto_approved(cap: ToolCapability) -> bool:
+    if not cap.requires_approval:
+        return True
+    from edagent_vivado.harness.execution_approval import is_vivado_execution_approved
+
+    return is_vivado_execution_approved()
 
 
 def _event_sink():
@@ -63,7 +72,7 @@ def run_connector_capability(
             capability_id=capability_id,
             inputs=merged,
             manifest_path=manifest_path or None,
-            auto_approved=not cap.requires_approval,
+            auto_approved=_resolve_auto_approved(cap),
         )
         result = execute_with_steps(req, event_sink=_event_sink())
         payload = {
