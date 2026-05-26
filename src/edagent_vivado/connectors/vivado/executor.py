@@ -291,30 +291,11 @@ def collect_bitstream(connector: VivadoConnector, req: ToolRunRequest) -> ToolRu
 
 
 def run_full_flow(connector: VivadoConnector, req: ToolRunRequest) -> ToolRunResult:
-    stages = req.inputs.get("stages") or ["synth", "impl"]
-    if not isinstance(stages, list):
-        stages = [str(stages)]
-    if "synth" in stages or "impl" in stages:
-        synth_first = "synth" in stages
-        impl_req = ToolRunRequest(
-            request_id=req.request_id,
-            run_id=req.run_id,
-            step_id=req.step_id,
-            connector_id=req.connector_id,
-            capability_id="run_implementation",
-            inputs={**req.inputs, "run_synth_first": synth_first},
-            manifest_path=req.manifest_path,
-            target_id=req.target_id,
-            auto_approved=req.auto_approved,
-        )
-        impl_result = run_implementation(connector, impl_req)
-        if not impl_result.success:
-            return impl_result
-    if "bitstream" in stages:
-        return generate_bitstream(connector, req)
+    del connector
     return ToolRunResult(
         request_id=req.request_id,
-        success=True,
-        exit_code=0,
-        edagent_outcome="execution_succeeded",
+        success=False,
+        exit_code=1,
+        error="run_full_flow is deprecated — use RunOrchestrator via POST /api/v1/vivado/commands/flow",
+        edagent_outcome="execution_failed",
     )

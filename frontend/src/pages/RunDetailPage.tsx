@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Download, Play, RefreshCw } from 'lucide-react'
+import { Download, Play, RefreshCw, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router-dom'
-import { getRun, getRunContext, getRunWorkspace, listRunArtifacts, listRunEvents, listRunProblems, listRunToolRequests, rerunRun } from '../api/monitor'
+import { getRun, getRunContext, getRunWorkspace, listRunArtifacts, listRunEvents, listRunProblems, listRunToolRequests, rerunRun, stopRun } from '../api/monitor'
 import { Button } from '../components/common/Button'
 import { PageStickyTop } from '../components/layout/PageStickyTop'
 import { Panel } from '../components/common/Panel'
@@ -27,7 +27,15 @@ export default function RunDetailPage() {
     mutationFn: () => rerunRun(runId, true),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['run', runId] }),
   })
+  const stopM = useMutation({
+    mutationFn: () => stopRun(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['run', runId] })
+      qc.invalidateQueries({ queryKey: ['run-steps', runId] })
+    },
+  })
   const run = data?.run
+  const canStop = Boolean(run?.state && !['done', 'succeeded', 'failed', 'cancelled', 'policy_denied'].includes(String(run.state)))
   const toolcalls = data?.toolcalls ?? []
   const usage = data?.usage ?? []
   const totalIn = usage.reduce((a, u) => a + (u.input_tokens || 0), 0)
@@ -49,6 +57,11 @@ export default function RunDetailPage() {
           <p className="page-subtitle mono">{runId}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {canStop ? (
+            <Button className="ghost" onClick={() => stopM.mutate()} disabled={stopM.isPending}>
+              <Square size={14} /> {t('runDetail.stop', { defaultValue: 'Stop' })}
+            </Button>
+          ) : null}
           <Button className="ghost" onClick={() => rerunM.mutate()} disabled={rerunM.isPending}>
             <Play size={14} /> {t('runDetail.rerun')}
           </Button>
@@ -109,7 +122,7 @@ export default function RunDetailPage() {
             ))
             : <p className="muted">{t('runDetail.noToolRequests')}</p>}
         </Panel>
-        <StepTimeline runId={runId} />
+        <StepTimeline runId={runId} sessionId={run?.session_id ?? undefined} />
         <StructuredReportsPanel runId={runId} />
         <RunPatchesPanel runId={runId} />
         <div className="dashboard-grid">

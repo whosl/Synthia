@@ -28,7 +28,7 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–1 (auth, API split) and Phase 2 (Vivado connector single entry) on this branch.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–3 committed; Phase 4 (RunOrchestrator + event persistence + SSE replay) on this branch.
 
 ### Standard Commands
 

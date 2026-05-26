@@ -158,7 +158,7 @@ async def api_vivado_commands(session_id: str = "", limit: int = 50):
 
 @router.post("/vivado/commands/flow")
 async def api_vivado_run_flow(request: Request):
-    """Run synth+impl from manifest (observed when session/run ids provided)."""
+    """Run a multi-step Vivado flow via RunOrchestrator."""
     body = await request.json()
     manifest_path = str(body.get("manifest_path") or "")
     sid = str(body.get("session_id") or "")
@@ -168,43 +168,59 @@ async def api_vivado_run_flow(request: Request):
             manifest_path = snapshot_manifest_path(sess)
     if not manifest_path:
         raise HTTPException(400, "manifest_path is required (or provide session_id with project snapshot)")
-    sid = str(body.get("session_id") or "")
+
     tid = str(body.get("task_id") or "")
-    rid = str(body.get("run_id") or "")
-    from edagent_vivado.agent.run_capability import run_connector_capability
+    stages = body.get("stages") or ["synth", "impl"]
+    if not isinstance(stages, list):
+        stages = [str(stages)]
+    if "bitstream" in stages:
+        flow_name = "vivado_full_flow"
+    elif stages == ["synth"] or stages == ["synthesis"]:
+        flow_name = "vivado_synth_only"
+    else:
+        flow_name = "vivado_full_flow"
+
     from edagent_vivado.connectors import ensure_connectors
-    from edagent_vivado.harness.approval_outcomes import SCOPE_VIVADO_FLOW, parse_tool_outcome, tag_execution_result
-    from edagent_vivado.harness.vivado_observed import observe_vivado_command
+    from edagent_vivado.runs.orchestrator import create_run, start_run
 
     ensure_connectors()
-    out = run_connector_capability(
-        "vivado",
-        "run_implementation",
-        manifest_path=manifest_path,
-        inputs={
-            "manifest_path": manifest_path,
-            "session_id": sid,
-            "task_id": tid,
-            "run_id": rid,
-            "run_synth_first": True,
-        },
-        gate_tool_name="run_vivado_flow_tool",
-    )
-    parsed = parse_tool_outcome(out) or {}
-    result = parsed if isinstance(parsed, dict) else {"raw": out}
-    tagged = out if isinstance(out, str) else tag_execution_result(result, SCOPE_VIVADO_FLOW)
-    if sid and rid:
-        observe_vivado_command(
+    inputs = {
+        "manifest_path": manifest_path,
+        "stages": stages,
+        "strategy": body.get("strategy") or "",
+        "session_id": sid,
+        "task_id": tid,
+    }
+    existing_rid = str(body.get("run_id") or "")
+    if existing_rid:
+        from edagent_vivado.repository.store import run_get
+
+        if not run_get(existing_rid):
+            raise HTTPException(404, "run not found")
+        run_id = existing_rid
+    else:
+        run_id = create_run(
+            flow_name=flow_name,
             session_id=sid,
             task_id=tid,
-            run_id=rid,
-            tool_name="run_vivado_flow_tool",
-            input_payload={"manifest_path": manifest_path},
-            output=tagged,
-            event_create=event_create,
+            inputs=inputs,
         )
-    ok = bool(parsed.get("success")) if isinstance(parsed, dict) else False
-    return {"ok": ok, "result": parsed, "tool_output": tagged}
+
+    result = start_run(
+        run_id,
+        flow_name=flow_name,
+        inputs=inputs,
+        session_id=sid,
+        task_id=tid,
+        stages=stages,
+    )
+    ok = result.state in ("done", "succeeded", "succeeded_with_warnings")
+    return {
+        "ok": ok,
+        "run_id": result.run_id,
+        "state": result.state,
+        "steps": result.final_step_states,
+    }
 
 
 @router.get("/vivado/devices")

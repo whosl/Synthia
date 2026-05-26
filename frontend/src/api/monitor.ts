@@ -60,6 +60,10 @@ export function getRunWorkspace(runId: string) {
   )
 }
 
+export function stopRun(runId: string) {
+  return request<{ run_id: string; state: string }>(`/runs/${runId}/stop`, { method: 'POST' })
+}
+
 export function rerunRun(runId: string, autoStart = true) {
   return request<{
     run_id: string

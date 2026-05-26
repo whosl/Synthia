@@ -114,6 +114,16 @@ class VivadoConnector(BaseConnector):
             )
 
         try:
+            if cap == "detect_environment":
+                env = self.detect_environment()
+                ok = bool(env.reachable) or env.target_type == "mock"
+                return ToolRunResult(
+                    request_id=req.request_id,
+                    success=ok,
+                    exit_code=0 if ok else 1,
+                    edagent_outcome="execution_succeeded" if ok else "execution_failed",
+                    error="" if ok else "vivado environment not reachable",
+                )
             if cap == "validate_project":
                 vr = self.validate_manifest(
                     manifest_from_eda_yaml(manifest_path) if manifest_path else ToolManifest({}, {}, {}, {}, {})

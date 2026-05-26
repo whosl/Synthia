@@ -134,6 +134,28 @@ async def api_monitor_events(run_id: str, limit: int = 500):
 async def api_monitor_artifacts(run_id: str, limit: int = 100):
     return {"artifacts": artifact_list(run_id=run_id, limit=limit)}
 
+
+@router.get("/artifacts/{artifact_id}/download")
+async def api_artifact_download(artifact_id: str):
+    from edagent_vivado.repository.store import artifact_get
+    from fastapi.responses import FileResponse
+
+    art = artifact_get(artifact_id)
+    if not art:
+        raise HTTPException(404, "artifact not found")
+    path = Path(str(art.get("path") or ""))
+    if not path.is_file():
+        raise HTTPException(404, "artifact file missing on disk")
+    headers: dict[str, str] = {}
+    if art.get("sha256"):
+        headers["X-Artifact-SHA256"] = str(art["sha256"])
+    return FileResponse(
+        path,
+        media_type=art.get("mime_type") or "application/octet-stream",
+        filename=path.name,
+        headers=headers,
+    )
+
 @router.get("/monitor/runs/{run_id}/problems")
 async def api_monitor_problems(run_id: str, limit: int = 100):
     return {"problems": problem_list(run_id=run_id, limit=limit)}

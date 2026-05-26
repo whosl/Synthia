@@ -376,6 +376,11 @@ def event_list(session_id: str, after_seq: int = 0, limit: int = 500) -> list[di
         (session_id, after_seq, limit))]
 
 
+def events_after_seq(session_id: str, after_seq: int = 0, limit: int = 500) -> list[dict]:
+    """Alias for event_list — Phase 4 SSE replay."""
+    return event_list(session_id, after_seq=after_seq, limit=limit)
+
+
 def event_list_recent(session_id: str, limit: int = 5000) -> list[dict]:
     """Return the most recent events (chronological), for terminal UI rebuild."""
     rows = get_db().execute(

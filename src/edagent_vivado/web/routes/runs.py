@@ -156,11 +156,70 @@ async def api_runs_list(
     return {"runs": rows, "count": len(rows)}
 
 
+@router.post("/runs/{run_id}/stop")
+async def api_run_stop(run_id: str):
+    from edagent_vivado.runs.orchestrator import cancel_run
+
+    if not cancel_run(run_id, reason="user requested via API"):
+        raise HTTPException(400, "cannot cancel — run not active or already finished")
+    return {"run_id": run_id, "state": "cancelled"}
+
+
+@router.post("/runs/{run_id}/resume")
+async def api_run_resume(run_id: str):
+    from edagent_vivado.runs.orchestrator import resume_run
+
+    try:
+        result = resume_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"run_id": result.run_id, "state": result.state, "steps": result.final_step_states}
+
+
 @router.post("/runs/{run_id}/rerun")
 async def api_run_rerun(run_id: str, auto_start: bool = True):
     r = run_get(run_id)
     if not r:
         raise HTTPException(404, "run not found")
+
+    from edagent_vivado.runs.flow_definitions import FLOW_REGISTRY
+    from edagent_vivado.runs.orchestrator import create_run, start_run
+
+    flow_name = str(r.get("run_type") or "")
+    if flow_name in FLOW_REGISTRY:
+        import json
+
+        inputs: dict = {}
+        try:
+            meta = json.loads(r.get("metadata_json") or "{}")
+            inputs = dict(meta.get("inputs") or {})
+        except json.JSONDecodeError:
+            pass
+        session_id = str(r.get("session_id") or "")
+        task_id = str(r.get("task_id") or "")
+        new_id = create_run(
+            flow_name=flow_name,
+            session_id=session_id,
+            task_id=task_id,
+            inputs=inputs,
+        )
+        if not auto_start:
+            return {"run_id": new_id, "state": "created", "parent_run_id": run_id}
+        result = start_run(
+            new_id,
+            flow_name=flow_name,
+            inputs=inputs,
+            session_id=session_id,
+            task_id=task_id,
+            stages=inputs.get("stages") if isinstance(inputs.get("stages"), list) else None,
+        )
+        return {
+            "run_id": new_id,
+            "parent_run_id": run_id,
+            "state": result.state,
+            "steps": result.final_step_states,
+        }
+
     session_id = r.get("session_id") or ""
     task_id = r.get("task_id") or ""
     question = ""

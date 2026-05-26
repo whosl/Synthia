@@ -128,9 +128,15 @@ async def api_events(session_id: str, after_seq: int = 0, limit: int = 500, rece
     return {"events": [enrich_wire_event(e) for e in rows]}
 
 @router.get("/sessions/{session_id}/stream")
-async def api_stream(session_id: str, after_seq: int = 0):
+async def api_stream(session_id: str, request: Request, after_seq: int = 0):
+    if request is not None:
+        last_id = request.headers.get("Last-Event-ID", "")
+        if last_id:
+            tail = last_id.split(":")[-1]
+            if tail.isdigit():
+                after_seq = max(after_seq, int(tail))
     # Replay missed events first
-    missed = event_list(session_id, after_seq=after_seq, limit=200)
+    missed = event_list(session_id, after_seq=after_seq, limit=500)
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
     _stream_queues.setdefault(session_id, []).append(queue)
 
