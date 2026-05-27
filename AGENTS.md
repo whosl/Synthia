@@ -24,11 +24,29 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 4. **Agent features require LLM API key:** The `edagent ask` and `edagent ask-multi` commands require `ANTHROPIC_API_KEY` to be set (copy `.env.example` to `.env` and fill in your key).
 
-5. **Phase 0 (done):** Backend T1–T8 + frontend D1–D7. `pytest -k "not agent_smoke"` → 426+ passed. API auth uses `~/.synthia/token` (skipped under pytest). Frontend: warm/claude-dark themes, topbar, StatusPill, ToolCallBlock, Composer, ⌘K palette.
+5. **Phase 0 (done):** Backend T1–T8 + frontend D1–D7. `pytest -k "not agent_smoke"` → 426+ passed. API auth uses `~/.synthia/token`. Frontend: warm/claude-dark themes, topbar, StatusPill, ToolCallBlock, Composer, ⌘K palette.
+
+6. **API auth in tests (Phase 5.5):** The legacy "`PYTEST_CURRENT_TEST` disables auth" heuristic is gone. `tests/conftest.py` now sets `SYNTHIA_AUTH_TEST_MODE=1` autouse; opt in to the real middleware via the `enable_auth` fixture.
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–4 committed; Phase 5 (reports + artifacts + trend + summary) on this branch.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–5 committed; Phase 5.5 (hotfix: per-session run lock, `$PSRCDIR` resolution, strict state machine, explicit API auth test gate) on this branch. `pytest -k "not agent_smoke"` → 498 passed.
+
+#### Phase 5.5 hotfix notes
+
+- **Per-session run lock:** `edagent_vivado.runs.scheduler.run_in_session` /
+  `start_run_serial` serialise runs that share a `session_id`. The routes
+  `POST /api/v1/runs/{id}/rerun` and `POST /api/v1/vivado/commands/flow` now
+  return HTTP **409** when the session is already executing a run. v1 is
+  in-process; Phase 11 will swap to a Redis-backed lock + worker pool.
+- **`$PSRCDIR` / `$PRUNDIR`:** Vivado GUI project-mode `.xpr` files use these
+  placeholders. `_expand_path` now resolves them via `*.srcs` / `*.runs`
+  glob lookup, with a project-dir fallback when no match exists.
+- **Strict state machine:** `started` and `done` were removed from the
+  `RunState` set; `assert_transition` now ALWAYS raises `InvalidTransition`
+  unless `SYNTHIA_STATE_MACHINE_STRICT=0`. Callers needing a recovery
+  path must use `safe_transition_or_log`. `runs/trend.py` still accepts
+  legacy `'done'` rows from pre-P5.5 databases.
 
 ### Standard Commands
 
