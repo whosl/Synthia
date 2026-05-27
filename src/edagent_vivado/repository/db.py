@@ -610,6 +610,65 @@ CREATE TABLE IF NOT EXISTS tool_run_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_run_requests_run ON tool_run_requests(run_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    display_name TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    password_hash TEXT DEFAULT '',
+    api_token TEXT UNIQUE,
+    is_service_account INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    global_role TEXT DEFAULT 'viewer',
+    created_at INTEGER NOT NULL,
+    last_login_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_token ON users(api_token);
+
+CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT DEFAULT '',
+    permissions_json TEXT DEFAULT '[]',
+    is_builtin INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_members (
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role_name TEXT NOT NULL,
+    added_by TEXT DEFAULT '',
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proj_mem_user ON project_members(user_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id TEXT DEFAULT '',
+    actor_kind TEXT DEFAULT 'user',
+    action TEXT NOT NULL,
+    resource_type TEXT DEFAULT '',
+    resource_id TEXT DEFAULT '',
+    project_id TEXT DEFAULT '',
+    session_id TEXT DEFAULT '',
+    ip_address TEXT DEFAULT '',
+    user_agent TEXT DEFAULT '',
+    details_json TEXT DEFAULT '',
+    success INTEGER DEFAULT 1,
+    error_message TEXT DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_logs(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
 """
 
 
@@ -712,6 +771,231 @@ def _migrate_projects(db: sqlite3.Connection) -> None:
     backfill_project_ids(db)
 
 
+_BUILTIN_ROLES = [
+    ("admin", "Full system access", ["*"]),
+    (
+        "project_owner",
+        "Owns project, can manage members",
+        [
+            "project.create",
+            "project.read",
+            "project.update",
+            "project.delete",
+            "project.member.add",
+            "project.member.remove",
+            "run.create",
+            "run.cancel",
+            "run.read",
+            "patch.propose",
+            "patch.approve",
+            "patch.approve.low",
+            "patch.reject",
+            "patch.revert",
+            "report.read",
+            "artifact.read",
+            "artifact.download.bitstream",
+            "knowledge.read",
+            "knowledge.write",
+        ],
+    ),
+    (
+        "fpga_engineer",
+        "Create runs, propose patches",
+        [
+            "project.read",
+            "run.create",
+            "run.cancel",
+            "run.read",
+            "patch.propose",
+            "patch.approve.low",
+            "patch.reject",
+            "report.read",
+            "artifact.read",
+            "artifact.download.bitstream",
+            "knowledge.read",
+        ],
+    ),
+    (
+        "reviewer",
+        "Reviews patches, audit access",
+        [
+            "project.read",
+            "run.read",
+            "patch.read",
+            "patch.approve",
+            "patch.approve.low",
+            "patch.reject",
+            "report.read",
+            "artifact.read",
+            "knowledge.read",
+            "audit.read",
+        ],
+    ),
+    (
+        "viewer",
+        "Read-only access",
+        [
+            "project.read",
+            "run.read",
+            "report.read",
+            "artifact.read",
+            "knowledge.read",
+        ],
+    ),
+    (
+        "tool_admin",
+        "Manage connectors and licenses",
+        [
+            "connector.read",
+            "connector.write",
+            "license.read",
+            "license.write",
+            "tool_target.read",
+            "tool_target.write",
+        ],
+    ),
+]
+
+
+def _migrate_rbac_tables(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            display_name TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            password_hash TEXT DEFAULT '',
+            api_token TEXT UNIQUE,
+            is_service_account INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            global_role TEXT DEFAULT 'viewer',
+            created_at INTEGER NOT NULL,
+            last_login_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_users_token ON users(api_token);
+        CREATE TABLE IF NOT EXISTS roles (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT DEFAULT '',
+            permissions_json TEXT DEFAULT '[]',
+            is_builtin INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS project_members (
+            project_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role_name TEXT NOT NULL,
+            added_by TEXT DEFAULT '',
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (project_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_proj_mem_user ON project_members(user_id);
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id TEXT DEFAULT '',
+            actor_kind TEXT DEFAULT 'user',
+            action TEXT NOT NULL,
+            resource_type TEXT DEFAULT '',
+            resource_id TEXT DEFAULT '',
+            project_id TEXT DEFAULT '',
+            session_id TEXT DEFAULT '',
+            ip_address TEXT DEFAULT '',
+            user_agent TEXT DEFAULT '',
+            details_json TEXT DEFAULT '',
+            success INTEGER DEFAULT 1,
+            error_message TEXT DEFAULT '',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_logs(project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
+        """
+    )
+    db.commit()
+
+
+def _seed_builtin_roles(db: sqlite3.Connection) -> None:
+    import json
+    import time
+    import uuid
+
+    from edagent_vivado.auth.permissions import invalidate_perm_cache
+
+    existing = {r[0] for r in db.execute("SELECT name FROM roles").fetchall()}
+    now = int(time.time() * 1000)
+    for name, desc, perms in _BUILTIN_ROLES:
+        payload = json.dumps(perms)
+        if name in existing:
+            db.execute(
+                "UPDATE roles SET permissions_json=?, description=? WHERE name=?",
+                (payload, desc, name),
+            )
+        else:
+            db.execute(
+                "INSERT INTO roles (id, name, description, permissions_json, is_builtin, created_at) "
+                "VALUES (?,?,?,?,1,?)",
+                (str(uuid.uuid4()), name, desc, payload, now),
+            )
+    db.commit()
+    invalidate_perm_cache()
+
+
+def _bootstrap_admin(db: sqlite3.Connection) -> None:
+    import logging
+    import secrets
+    import time
+    import uuid
+    from pathlib import Path
+
+    row = db.execute("SELECT COUNT(*) FROM users").fetchone()
+    if row and row[0] > 0:
+        return
+
+    admin_id = str(uuid.uuid4())
+    admin_token = secrets.token_urlsafe(32)
+
+    legacy_path = Path.home() / ".synthia" / "token"
+    if legacy_path.exists():
+        legacy = legacy_path.read_text(encoding="utf-8").strip()
+        if legacy:
+            admin_token = legacy
+
+    env_tok = os.environ.get("SYNTHIA_API_TOKEN", "").strip()
+    if env_tok:
+        admin_token = env_tok
+
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO users (id, username, display_name, api_token, global_role, is_active, created_at) "
+        "VALUES (?,?,?,?,?,1,?)",
+        (admin_id, "admin", "Administrator", admin_token, "admin", now),
+    )
+    db.commit()
+
+    token_path = Path.home() / ".synthia" / "admin_token"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    if not legacy_path.exists() or legacy_path.read_text(encoding="utf-8").strip() != admin_token:
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(admin_token, encoding="utf-8")
+        try:
+            os.chmod(legacy_path, 0o600)
+        except OSError:
+            pass
+
+    try:
+        token_path.write_text(admin_token, encoding="utf-8")
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
+
+    logging.getLogger(__name__).warning(
+        "Bootstrap admin created (token in ~/.synthia/token and ~/.synthia/admin_token)"
+    )
+
+
 def init_db() -> None:
     db = get_db()
     db.executescript(SCHEMA)
@@ -719,6 +1003,9 @@ def init_db() -> None:
     _migrate_projects(db)
     _migrate_parsed_reports_metrics(db)
     _migrate_patch_audits(db)
+    _migrate_rbac_tables(db)
+    _seed_builtin_roles(db)
+    _bootstrap_admin(db)
 
 
 def close_db() -> None:

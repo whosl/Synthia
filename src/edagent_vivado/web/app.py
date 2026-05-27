@@ -10,22 +10,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
-
-from edagent_vivado.web.auth import auth_enabled, ensure_token, is_public_path, require_token
+from edagent_vivado.web.auth import IdentityMiddleware, auth_enabled, ensure_token
 
 _log = logging.getLogger(__name__)
-
-
-class _TokenMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if not auth_enabled() or is_public_path(request.url.path):
-            return await call_next(request)
-        try:
-            require_token(request)
-        except HTTPException as exc:
-            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-        return await call_next(request)
 
 
 def create_app() -> FastAPI:
@@ -41,8 +28,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         allow_credentials=False,
     )
-    app.add_middleware(_TokenMiddleware)
+    app.add_middleware(IdentityMiddleware)
     if auth_enabled():
+        try:
+            from edagent_vivado.repository.db import init_db
+
+            init_db()
+        except Exception:
+            _log.exception("RBAC init_db on startup failed")
         tok = ensure_token()
         _log.info("Synthia API token ready (len=%d). See ~/.synthia/token", len(tok))
 

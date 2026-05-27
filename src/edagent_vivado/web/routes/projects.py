@@ -8,7 +8,7 @@ import os as _os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
 from edagent_vivado.events.envelope import enrich_wire_event
@@ -22,7 +22,10 @@ from edagent_vivado.harness.file_patch_policy import (
     is_interaction_tool,
     normalize_tool_output,
 )
+from edagent_vivado.auth.audit import log_audit
+from edagent_vivado.auth.identity import add_project_member
 from edagent_vivado.projects.snapshot import snapshot_manifest_path
+from edagent_vivado.web.dependencies import get_identity, require_perm
 from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
 from edagent_vivado.repository.store import (
     approval_get,
@@ -117,13 +120,13 @@ router = APIRouter(tags=["projects"])
 
 # ── Project API ──────────────────────────────────────────────
 
-@router.get("/projects")
+@router.get("/projects", dependencies=[Depends(require_perm("project.read", project_id_param=""))])
 async def api_projects(status: str | None = None, limit: int = 100, include_archived: bool = False):
     return {"projects": project_list(status=status, limit=limit, include_archived=include_archived)}
 
 
-@router.post("/projects")
-async def api_projects_create(req: CreateProjectReq):
+@router.post("/projects", dependencies=[Depends(require_perm("project.create", project_id_param=""))])
+async def api_projects_create(req: CreateProjectReq, identity=Depends(get_identity)):
     try:
         validated = validate_project_paths(
             root_path=req.root_path,
@@ -152,6 +155,16 @@ async def api_projects_create(req: CreateProjectReq):
         "metadata": {**(req.metadata or {}), "flow": validated.get("flow")},
     }
     p = project_create(fields)
+    if not identity.user.is_admin:
+        add_project_member(p["id"], identity.user.id, "project_owner", added_by=identity.user.id)
+    log_audit(
+        actor_user_id=identity.user.id,
+        action="project.create",
+        resource_type="project",
+        resource_id=p["id"],
+        project_id=p["id"],
+        details={"name": fields.get("name")},
+    )
     kb_index = None
     try:
         from edagent_vivado.knowledge.semantic_kb import reindex_project_record
@@ -162,7 +175,7 @@ async def api_projects_create(req: CreateProjectReq):
     return {"project": p, "kb_index": kb_index}
 
 
-@router.get("/projects/{project_id}")
+@router.get("/projects/{project_id}", dependencies=[Depends(require_perm("project.read"))])
 async def api_project_get(project_id: str):
     p = project_get(project_id)
     if not p:
@@ -170,8 +183,8 @@ async def api_project_get(project_id: str):
     return {"project": p}
 
 
-@router.patch("/projects/{project_id}")
-async def api_project_update(project_id: str, req: UpdateProjectReq):
+@router.patch("/projects/{project_id}", dependencies=[Depends(require_perm("project.update"))])
+async def api_project_update(project_id: str, req: UpdateProjectReq, identity=Depends(get_identity)):
     existing = project_get(project_id)
     if not existing:
         raise HTTPException(404, "project not found")
@@ -208,6 +221,13 @@ async def api_project_update(project_id: str, req: UpdateProjectReq):
     p = project_update(project_id, **updates)
     if not p:
         raise HTTPException(404, "project not found")
+    log_audit(
+        actor_user_id=identity.user.id,
+        action="project.update",
+        resource_type="project",
+        resource_id=project_id,
+        project_id=project_id,
+    )
     return {"project": p}
 
 
@@ -231,8 +251,13 @@ async def api_project_reindex(project_id: str):
     return reindex_project_record(project)
 
 
-@router.delete("/projects/{project_id}")
-async def api_project_delete(project_id: str, hard: bool = False, confirm: str = ""):
+@router.delete("/projects/{project_id}", dependencies=[Depends(require_perm("project.delete"))])
+async def api_project_delete(
+    project_id: str,
+    hard: bool = False,
+    confirm: str = "",
+    identity=Depends(get_identity),
+):
     project = project_get(project_id)
     if not project:
         raise HTTPException(404, "project not found")
@@ -244,6 +269,14 @@ async def api_project_delete(project_id: str, hard: bool = False, confirm: str =
                 f"hard delete requires confirm={expected!r} query parameter",
             )
     project_delete(project_id, hard=hard)
+    log_audit(
+        actor_user_id=identity.user.id,
+        action="project.delete",
+        resource_type="project",
+        resource_id=project_id,
+        project_id=project_id,
+        details={"hard": hard},
+    )
     return {"ok": True, "hard": hard}
 
 

@@ -8,7 +8,7 @@ import os as _os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -25,6 +25,7 @@ from edagent_vivado.harness.file_patch_policy import (
     normalize_tool_output,
 )
 from edagent_vivado.projects.snapshot import snapshot_manifest_path
+from edagent_vivado.web.dependencies import require_perm
 from edagent_vivado.projects.validate import ProjectValidationError, validate_project_paths
 from edagent_vivado.repository.store import (
     approval_get,
@@ -156,7 +157,7 @@ async def api_vivado_commands(session_id: str = "", limit: int = 50):
         })
     return {"commands": commands}
 
-@router.post("/vivado/commands/flow")
+@router.post("/vivado/commands/flow", dependencies=[Depends(require_perm("run.create", project_id_param=""))])
 async def api_vivado_run_flow(request: Request):
     """Run a multi-step Vivado flow via RunOrchestrator."""
     body = await request.json()

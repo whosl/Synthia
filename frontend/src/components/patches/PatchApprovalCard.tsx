@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { approvePatch, getPatch, rejectPatch, type PatchRecord } from '../../api/patches'
+import { canUserDo, useMe } from '../../hooks/usePermissions'
 import { Button } from '../common/Button'
 import { DiffViewer } from './DiffViewer'
 
@@ -13,6 +14,7 @@ export function PatchApprovalCard({ patchId, onResolved }: PatchApprovalCardProp
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const me = useMe()
 
   const load = useCallback(async () => {
     if (!patchId) return
@@ -34,6 +36,11 @@ export function PatchApprovalCard({ patchId, onResolved }: PatchApprovalCardProp
     typeof risk === 'object' && risk.requires_strong_approval,
   )
   const isTerminal = ['applied', 'rejected', 'reverted', 'superseded'].includes(patch.state)
+  const canApprove = canUserDo(
+    me,
+    requiresStrong ? 'patch.approve' : 'patch.approve.low',
+  )
+  const canReject = canUserDo(me, 'patch.reject')
 
   const decide = async (action: 'approve' | 'reject') => {
     if (requiresStrong && action === 'approve' && !reason.trim()) {
@@ -82,12 +89,19 @@ export function PatchApprovalCard({ patchId, onResolved }: PatchApprovalCardProp
           )}
           {error && <div className="patch-card__error">{error}</div>}
           <div className="patch-card__actions">
-            <Button className="ghost" disabled={busy} onClick={() => decide('reject')}>
-              Reject
-            </Button>
-            <Button className="primary" disabled={busy} onClick={() => decide('approve')}>
-              {busy ? '…' : 'Approve & Apply'}
-            </Button>
+            {canReject && (
+              <Button className="ghost" disabled={busy} onClick={() => decide('reject')}>
+                Reject
+              </Button>
+            )}
+            {canApprove && (
+              <Button className="primary" disabled={busy} onClick={() => decide('approve')}>
+                {busy ? '…' : 'Approve & Apply'}
+              </Button>
+            )}
+            {!canApprove && !canReject && (
+              <span className="patch-card__muted">You do not have permission to approve this patch.</span>
+            )}
           </div>
         </>
       )}

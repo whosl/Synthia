@@ -8,7 +8,7 @@ import os as _os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -89,7 +89,10 @@ from edagent_vivado.repository.store import (
     usage_totals_for_session,
     vivado_command_list,
 )
+from edagent_vivado.auth.audit import log_audit
+from edagent_vivado.auth.permissions import check_permission
 from edagent_vivado.tools.patch_tools import is_patch_approved, set_patch_approval
+from edagent_vivado.web.dependencies import get_identity
 from edagent_vivado.web.schemas.monitor import MonitorCleanupBody
 from edagent_vivado.web.api_shared import (
     _archive_task_canvas,
@@ -136,16 +139,40 @@ async def api_monitor_artifacts(run_id: str, limit: int = 100):
 
 
 @router.get("/artifacts/{artifact_id}/download")
-async def api_artifact_download(artifact_id: str):
+async def api_artifact_download(artifact_id: str, request: Request, identity=Depends(get_identity)):
     from edagent_vivado.repository.store import artifact_get
     from fastapi.responses import FileResponse
 
     art = artifact_get(artifact_id)
     if not art:
         raise HTTPException(404, "artifact not found")
+    proj_id = str(art.get("project_id") or "")
+    role = identity.role_for_project(proj_id)
+    name = str(art.get("path") or "").lower()
+    is_bitstream = name.endswith((".bit", ".ltx", ".bin"))
+    perm = "artifact.download.bitstream" if is_bitstream else "artifact.read"
+    if not check_permission(role, perm):
+        log_audit(
+            actor_user_id=identity.user.id,
+            action="artifact.download.denied",
+            resource_type="artifact",
+            resource_id=artifact_id,
+            project_id=proj_id,
+            details={"perm": perm, "role": role, "path": name},
+            success=False,
+        )
+        raise HTTPException(403, f"forbidden: requires {perm}")
     path = Path(str(art.get("path") or ""))
     if not path.is_file():
         raise HTTPException(404, "artifact file missing on disk")
+    log_audit(
+        actor_user_id=identity.user.id,
+        action="artifact.download",
+        resource_type="artifact",
+        resource_id=artifact_id,
+        project_id=proj_id,
+        details={"path": name, "is_bitstream": is_bitstream},
+    )
     headers: dict[str, str] = {}
     if art.get("sha256"):
         headers["X-Artifact-SHA256"] = str(art["sha256"])

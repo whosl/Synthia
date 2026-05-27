@@ -30,8 +30,22 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–7 on this branch.
-  `pytest -k "not agent_smoke"` → 530+ passed after Phase 7.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–8 on this branch.
+  `pytest -k "not agent_smoke"` → 540+ passed after Phase 8.
+
+#### Phase 8 notes (RBAC + audit)
+
+- **Users / roles:** `users`, `roles`, `project_members` tables; bootstrap admin on first
+  `init_db()` (token in `~/.synthia/token`, legacy file reused when present).
+- **Auth:** `IdentityMiddleware` resolves Bearer token → `request.state.identity`.
+  `SYNTHIA_AUTH_TEST_MODE=1` injects anonymous-admin (pytest autouse).
+- **Permissions:** `auth/permissions.py` + `require_perm()` / `require_role()` in
+  `web/dependencies.py`. Project-level role overrides global role.
+- **Audit:** `audit_logs` table + `auth/audit.log_audit`; mutate routes on
+  projects / runs / patches / artifact download log actions.
+- **API:** `GET /api/v1/me`, `/api/v1/admin/users`, `/api/v1/audit/logs`.
+- **CLI:** `edagent admin create-user|list-users|rotate-token|add-member`.
+- **Frontend:** `/login` page, `ProtectedRoute`, `usePermissions` / `canUserDo`.
 
 #### Phase 7 notes (PatchProposal + approval)
 

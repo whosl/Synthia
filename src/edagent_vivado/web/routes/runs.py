@@ -8,11 +8,13 @@ import os as _os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from edagent_vivado.auth.audit import log_audit
 from edagent_vivado.events.catalog import ALL_WIRE_EVENT_TYPES, PROTOCOL_VERSION
+from edagent_vivado.web.dependencies import get_identity, require_perm
 from edagent_vivado.events.envelope import enrich_wire_event
 from edagent_vivado.harness.execution_approval import (
     is_vivado_execution_approved,
@@ -156,12 +158,22 @@ async def api_runs_list(
     return {"runs": rows, "count": len(rows)}
 
 
-@router.post("/runs/{run_id}/stop")
-async def api_run_stop(run_id: str):
+@router.post("/runs/{run_id}/stop", dependencies=[Depends(require_perm("run.cancel", project_id_param=""))])
+async def api_run_stop(run_id: str, identity=Depends(get_identity)):
     from edagent_vivado.runs.orchestrator import cancel_run
 
+    r = run_get(run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
     if not cancel_run(run_id, reason="user requested via API"):
         raise HTTPException(400, "cannot cancel — run not active or already finished")
+    log_audit(
+        actor_user_id=identity.user.id,
+        action="run.cancel",
+        resource_type="run",
+        resource_id=run_id,
+        project_id=str(r.get("project_id") or ""),
+    )
     return {"run_id": run_id, "state": "cancelled"}
 
 
@@ -176,8 +188,8 @@ async def api_run_resume(run_id: str):
     return {"run_id": result.run_id, "state": result.state, "steps": result.final_step_states}
 
 
-@router.post("/runs/{run_id}/rerun")
-async def api_run_rerun(run_id: str, auto_start: bool = True):
+@router.post("/runs/{run_id}/rerun", dependencies=[Depends(require_perm("run.create", project_id_param=""))])
+async def api_run_rerun(run_id: str, auto_start: bool = True, identity=Depends(get_identity)):
     r = run_get(run_id)
     if not r:
         raise HTTPException(404, "run not found")
@@ -227,6 +239,14 @@ async def api_run_rerun(run_id: str, auto_start: bool = True):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         assert result is not None
+        log_audit(
+            actor_user_id=identity.user.id,
+            action="run.create",
+            resource_type="run",
+            resource_id=new_id,
+            project_id=str(r.get("project_id") or ""),
+            details={"parent_run_id": run_id, "flow_name": flow_name},
+        )
         return {
             "run_id": new_id,
             "parent_run_id": run_id,

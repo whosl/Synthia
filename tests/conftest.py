@@ -37,19 +37,47 @@ def _synthia_auth_test_mode(monkeypatch):
 
 @pytest.fixture
 def enable_auth(monkeypatch, tmp_path):
-    """Opt-in fixture: run the token middleware as production would.
+    """Opt-in fixture: run RBAC middleware as production would.
 
-    Sets a deterministic token and points the on-disk token file at ``tmp_path``
-    so we don't trample the user's real ``~/.synthia/token``.
+    Creates an admin user in an isolated DB with a deterministic API token.
 
     Yields the token string for the test to use.
     """
+    import importlib
+
     monkeypatch.delenv("SYNTHIA_AUTH_TEST_MODE", raising=False)
     monkeypatch.delenv("EDAGENT_DISABLE_API_AUTH", raising=False)
     token = "test-token-deterministic-0123456789"
     monkeypatch.setenv("SYNTHIA_API_TOKEN", token)
+    monkeypatch.setenv("EDAGENT_DB_PATH", str(tmp_path / "rbac_auth.db"))
+    monkeypatch.setenv("EDAGENT_RUNTIME_DIR", str(tmp_path / "rt"))
 
+    from edagent_vivado.repository import db as db_mod
+    from edagent_vivado.repository import store as store_mod
     from edagent_vivado.web import auth as _auth
+
+    importlib.reload(db_mod)
+    importlib.reload(store_mod)
+    db_mod.close_db()
+    db_mod.init_db()
+
+    db = db_mod.get_db()
+    row = db.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    if row:
+        db.execute(
+            "UPDATE users SET api_token=?, global_role='admin', is_active=1 WHERE username='admin'",
+            (token,),
+        )
+    else:
+        from edagent_vivado.auth.identity import create_user
+
+        create_user(
+            username="admin",
+            display_name="Test Admin",
+            global_role="admin",
+            api_token=token,
+        )
+    db.commit()
 
     monkeypatch.setattr(_auth, "_TOKEN_FILE", tmp_path / "synthia_token")
     _auth.reset_token_cache()
@@ -57,3 +85,4 @@ def enable_auth(monkeypatch, tmp_path):
         yield token
     finally:
         _auth.reset_token_cache()
+        db_mod.close_db()

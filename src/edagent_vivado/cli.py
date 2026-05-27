@@ -651,5 +651,65 @@ def eval(
     )
 
 
+admin_app = typer.Typer(help="RBAC user administration (Phase 8)")
+app.add_typer(admin_app, name="admin")
+
+
+@admin_app.command("create-user")
+def cli_create_user(
+    username: str,
+    role: str = typer.Option("viewer", "--role", "-r"),
+    display: str = typer.Option("", "--display-name"),
+    service: bool = typer.Option(False, "--service-account"),
+):
+    """Create a user; prints API token (shown once)."""
+    from edagent_vivado.repository.db import init_db
+    from edagent_vivado.auth.identity import create_user
+
+    init_db()
+    u = create_user(
+        username=username,
+        display_name=display,
+        global_role=role,
+        is_service_account=service,
+    )
+    console.print(f"[green]Created[/] user {username} ({role})")
+    console.print(f"API token: [bold]{u['api_token']}[/]")
+    console.print("[dim]Save this token now; it cannot be retrieved later.[/]")
+
+
+@admin_app.command("list-users")
+def cli_list_users():
+    from edagent_vivado.repository.db import init_db
+    from edagent_vivado.auth.identity import list_users
+
+    init_db()
+    for u in list_users():
+        active = "✓" if u.get("is_active") else "✗"
+        console.print(f"  {active} {u['username']:20s} {u.get('global_role', ''):15s} {u.get('display_name', '')}")
+
+
+@admin_app.command("rotate-token")
+def cli_rotate_token(user_id: str):
+    import secrets
+    from edagent_vivado.repository.db import get_db, init_db
+
+    init_db()
+    new_tok = secrets.token_urlsafe(32)
+    get_db().execute("UPDATE users SET api_token=? WHERE id=?", (new_tok, user_id))
+    get_db().commit()
+    console.print(f"new token: {new_tok}")
+
+
+@admin_app.command("add-member")
+def cli_add_member(project_id: str, user_id: str, role_name: str):
+    from edagent_vivado.repository.db import init_db
+    from edagent_vivado.auth.identity import add_project_member
+
+    init_db()
+    add_project_member(project_id, user_id, role_name)
+    console.print(f"added {user_id} as {role_name} on {project_id}")
+
+
 if __name__ == "__main__":
     app()

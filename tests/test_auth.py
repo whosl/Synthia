@@ -76,7 +76,7 @@ def test_public_path_open_even_when_auth_required(enable_auth, _isolated_db):
     r = client.get("/")
     assert r.status_code == 200
     # ensure middleware did NOT swap a 401 in
-    assert "invalid or missing token" not in r.text.lower()
+    assert "auth:" not in r.text.lower() or "token" not in r.text.lower()
 
 
 def test_protected_endpoint_rejects_request_without_token(enable_auth, _isolated_db):
@@ -84,7 +84,7 @@ def test_protected_endpoint_rejects_request_without_token(enable_auth, _isolated
     r = client.get(_PROTECTED_PATH)
     assert r.status_code == 401
     body = r.json()
-    assert "invalid or missing token" in str(body).lower()
+    assert "token" in str(body).lower()
 
 
 def test_protected_endpoint_accepts_bearer_token(enable_auth, _isolated_db):

@@ -1,5 +1,7 @@
 ﻿import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { ProtectedRoute } from '../components/auth/ProtectedRoute'
 import { AppShell } from '../components/layout/AppShell'
+import LoginPage from '../pages/LoginPage'
 import ProjectsPage from '../pages/ProjectsPage'
 import ProjectImportPage from '../pages/ProjectImportPage'
 import ProjectExpandRedirect from '../pages/ProjectExpandRedirect'
@@ -23,8 +25,15 @@ function MonitorRunRedirect() {
 }
 
 export function AppRouter() {
-  return <AppShell>
+  return (
     <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/*"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <Routes>
       <Route path="/" element={<ProjectsPage />} />
       <Route path="/projects/import" element={<ProjectImportPage />} />
       <Route path="/projects/:projectId" element={<ProjectExpandRedirect />} />
@@ -54,6 +63,11 @@ export function AppRouter() {
       <Route path="/evolution" element={<Navigate to="/knowledge/evolution" replace />} />
 
       <Route path="/settings" element={<SettingsPage />} />
+              </Routes>
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
     </Routes>
-  </AppShell>
+  )
 }

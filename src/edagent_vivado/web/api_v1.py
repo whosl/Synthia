@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from edagent_vivado.web.routes import (
     admin,
+    audit_routes,
     approvals,
     connectors,
     evolution,
@@ -13,11 +14,13 @@ from edagent_vivado.web.routes import (
     interactions,
     kb,
     knowledge,
+    me,
     memory,
     metrics,
     monitor,
     patches,
     projects,
+    rbac_admin,
     reports,
     runs,
     sessions,
@@ -50,6 +53,9 @@ for _mod in (
     knowledge,
     vivado,
     memory,
+    me,
+    rbac_admin,
+    audit_routes,
 ):
     router.include_router(_mod.router)
 
