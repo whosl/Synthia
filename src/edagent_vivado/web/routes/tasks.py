@@ -843,11 +843,27 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             except Exception:
                 pass
 
-    asyncio.create_task(_run_agent())
-    event_type = "task.started"  # noqa: F841
+    from edagent_vivado.agent.intent_dispatch import try_intent_dispatch
 
-    return {"task_id": t["id"], "session_id": session_id, "state": "running",
-            "stream_url": f"/api/v1/sessions/{session_id}/stream"}
+    dispatched = try_intent_dispatch(
+        session_id,
+        sess,
+        t,
+        msg,
+        req,
+        event_create=event_create,
+    )
+    if dispatched is not None:
+        return dispatched
+
+    asyncio.create_task(_run_agent())
+
+    return {
+        "task_id": t["id"],
+        "session_id": session_id,
+        "state": "running",
+        "stream_url": f"/api/v1/sessions/{session_id}/stream",
+    }
 
 @router.get("/tasks/{task_id}")
 async def api_task_get(task_id: str):

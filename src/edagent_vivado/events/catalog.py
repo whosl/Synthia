@@ -101,6 +101,19 @@ MONITOR_EVENTS = (
     "memory.updated",
 )
 
+# Phase 6 — chat-first orchestration (intent cards, run progress in timeline)
+CHAT_ORCHESTRATION_EVENTS = (
+    "intent.classified",
+    "missing_info_required",
+    "missing_info_received",
+    "run.created",
+    "run.queued",
+    "run.succeeded",
+    "run.failed",
+    "run.cancelled",
+    "run.progress",
+)
+
 # Industrial Tool Connector Layer (SPEC §9B, Phase 6A)
 CONNECTOR_EVENTS = (
     "run.step.started",
@@ -146,6 +159,7 @@ ALL_WIRE_EVENT_TYPES: tuple[str, ...] = (
     *INTERACTION_EVENTS,
     *AGENT_EVENTS,
     *MONITOR_EVENTS,
+    *CHAT_ORCHESTRATION_EVENTS,
     *CONNECTOR_EVENTS,
     *EVOLUTION_EVENTS,
 )
