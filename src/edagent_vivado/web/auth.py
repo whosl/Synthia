@@ -1,4 +1,12 @@
-"""API token authentication — Synthia Phase 0."""
+"""API token authentication — Synthia (Phase 0 → Phase 5.5 hardened).
+
+Phase 5.5 changes:
+- Drop the implicit ``PYTEST_CURRENT_TEST`` test-mode bypass that hid auth
+  bugs from CI and from local pytest runs.
+- Replace it with an explicit, opt-in ``SYNTHIA_AUTH_TEST_MODE`` env switch
+  driven by ``tests/conftest.py``; the production server can no longer be
+  put into "no-auth" mode by accident.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +20,31 @@ _TOKEN: str | None = None
 _TOKEN_FILE = Path.home() / ".synthia" / "token"
 
 
+def _truthy(val: str | None) -> bool:
+    return (val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def auth_enabled() -> bool:
-    """Return False during pytest or when explicitly disabled."""
-    if os.environ.get("EDAGENT_DISABLE_API_AUTH", "").lower() in ("1", "true", "yes"):
+    """Return False only when an *explicit* opt-out env var is set.
+
+    - ``EDAGENT_DISABLE_API_AUTH=1``    : long-lived production opt-out.
+    - ``SYNTHIA_AUTH_TEST_MODE=1``      : pytest-only short-lived opt-out
+      (set autouse from ``tests/conftest.py``).
+
+    The legacy ``PYTEST_CURRENT_TEST`` heuristic was removed — accidentally
+    importing pytest at runtime no longer disables auth.
+    """
+    if _truthy(os.environ.get("EDAGENT_DISABLE_API_AUTH")):
         return False
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if _truthy(os.environ.get("SYNTHIA_AUTH_TEST_MODE")):
         return False
     return True
+
+
+def reset_token_cache() -> None:
+    """Drop the module-level token cache. Test-only helper."""
+    global _TOKEN
+    _TOKEN = None
 
 
 def ensure_token() -> str:
