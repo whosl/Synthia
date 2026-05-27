@@ -104,10 +104,8 @@ def start_run(
 
     def _transition(state: str, **fields: Any) -> None:
         prev = (run_get(run_id) or {}).get("state") or "created"
-        try:
-            assert_transition(prev, state)
-        except InvalidTransition:
-            logger.warning("run %s transition %s → %s (forced)", run_id, prev, state)
+        # strict by default; raises InvalidTransition on illegal moves.
+        assert_transition(prev, state)
         run_update(run_id, state=state, **fields)
 
     _transition("queued")
@@ -119,7 +117,7 @@ def start_run(
         event_create(session_id, "run.started", {"run_id": run_id}, task_id=task_id, run_id=run_id)
 
     step_states: list[dict[str, Any]] = []
-    overall_state = "done"
+    overall_state = "succeeded"
     error_msg = ""
     optional_failed = 0
 
@@ -214,10 +212,13 @@ def start_run(
                 break
             optional_failed += 1
 
-    if overall_state == "done" and optional_failed:
+    if overall_state == "succeeded" and optional_failed:
         overall_state = "succeeded_with_warnings"
 
     finished = int(time.time() * 1000)
+    prev_state = (run_get(run_id) or {}).get("state") or "running"
+    # Final transition through strict state machine.
+    assert_transition(prev_state, overall_state)
     run_update(
         run_id,
         state=overall_state,
@@ -235,7 +236,7 @@ def start_run(
         logger.exception("write_summary_md failed for run %s", run_id)
 
     if session_id:
-        evt = "run.succeeded" if overall_state in ("done", "succeeded", "succeeded_with_warnings") else "run.failed"
+        evt = "run.succeeded" if overall_state in ("succeeded", "succeeded_with_warnings") else "run.failed"
         event_create(
             session_id,
             evt,
@@ -249,6 +250,41 @@ def start_run(
         )
 
     return StartRunResult(run_id=run_id, state=overall_state, final_step_states=step_states)
+
+
+def start_run_serial(
+    run_id: str,
+    *,
+    flow_name: str,
+    inputs: dict[str, Any],
+    session_id: str = "",
+    task_id: str = "",
+    stages: list[str] | None = None,
+    background: bool = False,
+    timeout: float | None = None,
+) -> StartRunResult | None:
+    """Run *start_run* under the per-session scheduler lock (Phase 5.5).
+
+    background=True spawns a daemon worker and returns None immediately.
+    Foreground callers may pass ``timeout`` (seconds) to fail fast with
+    :class:`SessionBusy` instead of blocking forever.
+    """
+    from edagent_vivado.runs.scheduler import run_in_session, start_run_async
+
+    def _do() -> StartRunResult:
+        return start_run(
+            run_id,
+            flow_name=flow_name,
+            inputs=inputs,
+            session_id=session_id,
+            task_id=task_id,
+            stages=stages,
+        )
+
+    if background:
+        start_run_async(session_id, _do)
+        return None
+    return run_in_session(session_id, _do, timeout=timeout)
 
 
 def cancel_run(run_id: str, *, reason: str = "user requested") -> bool:

@@ -183,7 +183,8 @@ async def api_run_rerun(run_id: str, auto_start: bool = True):
         raise HTTPException(404, "run not found")
 
     from edagent_vivado.runs.flow_definitions import FLOW_REGISTRY
-    from edagent_vivado.runs.orchestrator import create_run, start_run
+    from edagent_vivado.runs.orchestrator import create_run, start_run_serial
+    from edagent_vivado.runs.scheduler import SessionBusy, is_session_busy
 
     flow_name = str(r.get("run_type") or "")
     if flow_name in FLOW_REGISTRY:
@@ -205,14 +206,27 @@ async def api_run_rerun(run_id: str, auto_start: bool = True):
         )
         if not auto_start:
             return {"run_id": new_id, "state": "created", "parent_run_id": run_id}
-        result = start_run(
-            new_id,
-            flow_name=flow_name,
-            inputs=inputs,
-            session_id=session_id,
-            task_id=task_id,
-            stages=inputs.get("stages") if isinstance(inputs.get("stages"), list) else None,
-        )
+
+        if session_id and is_session_busy(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"session {session_id} already has a run executing; please wait",
+            )
+
+        try:
+            result = start_run_serial(
+                new_id,
+                flow_name=flow_name,
+                inputs=inputs,
+                session_id=session_id,
+                task_id=task_id,
+                stages=inputs.get("stages") if isinstance(inputs.get("stages"), list) else None,
+                background=False,
+            )
+        except SessionBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        assert result is not None
         return {
             "run_id": new_id,
             "parent_run_id": run_id,

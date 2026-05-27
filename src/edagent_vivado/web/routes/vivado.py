@@ -181,7 +181,8 @@ async def api_vivado_run_flow(request: Request):
         flow_name = "vivado_full_flow"
 
     from edagent_vivado.connectors import ensure_connectors
-    from edagent_vivado.runs.orchestrator import create_run, start_run
+    from edagent_vivado.runs.orchestrator import create_run, start_run_serial
+    from edagent_vivado.runs.scheduler import SessionBusy, is_session_busy
 
     ensure_connectors()
     inputs = {
@@ -206,15 +207,27 @@ async def api_vivado_run_flow(request: Request):
             inputs=inputs,
         )
 
-    result = start_run(
-        run_id,
-        flow_name=flow_name,
-        inputs=inputs,
-        session_id=sid,
-        task_id=tid,
-        stages=stages,
-    )
-    ok = result.state in ("done", "succeeded", "succeeded_with_warnings")
+    if sid and is_session_busy(sid):
+        raise HTTPException(
+            status_code=409,
+            detail=f"session {sid} already has a run executing; please wait",
+        )
+
+    try:
+        result = start_run_serial(
+            run_id,
+            flow_name=flow_name,
+            inputs=inputs,
+            session_id=sid,
+            task_id=tid,
+            stages=stages,
+            background=False,
+        )
+    except SessionBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    assert result is not None  # foreground call always returns StartRunResult
+    ok = result.state in ("succeeded", "succeeded_with_warnings")
     return {
         "ok": ok,
         "run_id": result.run_id,
