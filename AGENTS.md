@@ -30,8 +30,20 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–10 on this branch.
-  `pytest -k "not agent_smoke"` → 555+ passed after Phase 10.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–11 on this branch.
+  `pytest -k "not agent_smoke"` → 560+ passed after Phase 11.
+
+#### Phase 11 notes (deployment + worker queue)
+
+- **DB:** SQLite default; optional Postgres via `SYNTHIA_DB_BACKEND=postgres` +
+  `SYNTHIA_DB_URL`. `repository/connection.py` wraps SQLAlchemy for postgres.
+- **Migrations:** `edagent db migrate|status|backup`; `repository/migrations/`.
+- **Queue:** Redis streams (`infra/queue.py`); `SYNTHIA_QUEUE_BACKEND=memory` for tests.
+- **License pool:** `scheduler/license_pool.py`; `SYNTHIA_LICENSE_POOLS=vivado:N`.
+- **Worker:** `synthia-worker` / `edagent worker run`; dequeue → license → `start_run`.
+- **Enqueue mode:** `SYNTHIA_USE_WORKER_QUEUE=1` + Redis (or memory queue in tests).
+- **Health:** `GET /health`, `/health/readiness`, `/health/full`.
+- **Docker:** `docker-compose.yml` (web + worker + postgres + redis). See `docs/DEPLOYMENT.md`.
 
 #### Phase 10 notes (Benchmark Flow v1)
 

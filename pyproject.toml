@@ -43,11 +43,24 @@ mcp = [
     "httpx>=0.27.0",
     "anyio>=4.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.1",
+    "sqlalchemy>=2.0",
+]
+redis = [
+    "redis>=5.0",
+]
+worker = [
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "sqlalchemy>=2.0",
+]
 
 [project.scripts]
 edagent = "edagent_vivado.cli:app"
 synthia = "edagent_vivado.cli:app"
 synthia-mcp = "edagent_vivado.mcp.server:run_main"
+synthia-worker = "edagent_vivado.workers.worker:main"
 synthia-web = "edagent_vivado.web.dashboard:start_server"
 edagent-web = "edagent_vivado.web.dashboard:start_server"
 

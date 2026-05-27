@@ -723,7 +723,17 @@ def _db_path() -> str:
     return str(runtime / "edagent.db")
 
 
+def get_backend() -> str:
+    from edagent_vivado.repository.connection import get_backend as _gb
+
+    return _gb()
+
+
 def get_db() -> sqlite3.Connection:
+    from edagent_vivado.repository.connection import get_backend as _gb, get_connection
+
+    if _gb() == "postgres":
+        return get_connection()  # type: ignore[return-value]
     if not hasattr(_local, "conn") or _local.conn is None:
         _local.conn = sqlite3.connect(_db_path(), check_same_thread=False)
         _local.conn.row_factory = sqlite3.Row
@@ -1123,6 +1133,11 @@ def init_db() -> None:
 
 
 def close_db() -> None:
+    from edagent_vivado.repository.connection import close_connection, get_backend as _gb
+
+    if _gb() == "postgres":
+        close_connection()
+        return
     if hasattr(_local, "conn") and _local.conn:
         _local.conn.close()
         _local.conn = None

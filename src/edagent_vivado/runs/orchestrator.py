@@ -268,7 +268,22 @@ def start_run_serial(
     background=True spawns a daemon worker and returns None immediately.
     Foreground callers may pass ``timeout`` (seconds) to fail fast with
     :class:`SessionBusy` instead of blocking forever.
+
+    When ``SYNTHIA_USE_WORKER_QUEUE=1`` and Redis (or memory queue) is available,
+    enqueues the run for a worker instead of executing in-process (Phase 11).
     """
+    from edagent_vivado.scheduler.scheduler import submit_run, worker_queue_enabled
+
+    if worker_queue_enabled():
+        submit_run(
+            run_id,
+            flow_name,
+            inputs,
+            session_id=session_id,
+            task_id=task_id,
+        )
+        return None
+
     from edagent_vivado.runs.scheduler import run_in_session, start_run_async
 
     def _do() -> StartRunResult:

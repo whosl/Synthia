@@ -57,6 +57,10 @@ def create_app() -> FastAPI:
 
         asyncio.create_task(_delayed())
 
+    from edagent_vivado.web.routes.health import router as health_router
+
+    app.include_router(health_router)
+
     # Phase 1 v1 API
     from edagent_vivado.web.api_v1 import router as api_v1_router
     from edagent_vivado.integrations.workbuddy import router as workbuddy_router

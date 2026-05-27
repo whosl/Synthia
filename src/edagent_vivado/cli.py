@@ -651,6 +651,80 @@ def eval(
     )
 
 
+db_app = typer.Typer(help="Database admin (Phase 11)")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("migrate")
+def cli_db_migrate():
+    """Apply pending DB migrations."""
+    from edagent_vivado.repository.db import get_db, init_db
+    from edagent_vivado.repository.migrations import apply_pending
+
+    init_db()
+    applied = apply_pending(get_db())
+    if applied:
+        console.print(f"[green]Applied:[/] {applied}")
+    else:
+        console.print("Database up to date.")
+
+
+@db_app.command("status")
+def cli_db_status():
+    from edagent_vivado.repository.db import get_backend, get_db
+    from edagent_vivado.repository.migrations import applied_migrations, list_migrations
+
+    conn = get_db()
+    console.print(f"Backend: {get_backend()}")
+    all_m = set(list_migrations())
+    applied = applied_migrations(conn)
+    for m in sorted(all_m):
+        mark = "✓" if m in applied else "·"
+        console.print(f"  {mark} {m}")
+
+
+@db_app.command("backup")
+def cli_db_backup(output: Path):
+    """Backup SQLite DB (use pg_dump for postgres)."""
+    from edagent_vivado.repository.db import get_backend
+
+    if get_backend() == "sqlite":
+        src = _os.environ.get("EDAGENT_DB_PATH") or str(Path.home() / ".edagent" / "edagent.db")
+        shutil.copy(src, output)
+        console.print(f"[green]Backed up[/] to {output}")
+    else:
+        console.print("Use pg_dump for postgres backend:")
+        console.print("  pg_dump $SYNTHIA_DB_URL > backup.sql")
+
+
+worker_app = typer.Typer(help="Worker pool (Phase 11)")
+app.add_typer(worker_app, name="worker")
+
+
+@worker_app.command("run")
+def cli_worker_run(
+    pool: str = typer.Option("vivado", "--pool", "-p"),
+    name: str = typer.Option("", "--name", "-n"),
+):
+    """Run a worker process."""
+    import sys
+
+    from edagent_vivado.workers.worker import main
+
+    args = ["--pool", pool]
+    if name:
+        args.extend(["--name", name])
+    sys.exit(main(args))
+
+
+@worker_app.command("status")
+def cli_worker_status():
+    """Show queue depth and license pool status."""
+    from edagent_vivado.scheduler.scheduler import get_pool_status
+
+    console.print(json.dumps(get_pool_status(), indent=2))
+
+
 bench_app = typer.Typer(help="Benchmark suites (Phase 10)")
 app.add_typer(bench_app, name="benchmark")
 
