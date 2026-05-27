@@ -81,9 +81,51 @@ def _classify_file(path: str) -> str:
     return "other"
 
 
+def _find_dir_by_glob(project_dir: str, pattern: str, fallback: str) -> str:
+    """Resolve a Vivado-style project sub-dir (e.g. ``*.srcs``) inside *project_dir*.
+
+    Falls back to ``project_dir/<fallback>`` when no match exists, then to the
+    project directory itself. We always return a POSIX-style absolute path so
+    downstream code can join further segments without re-normalising.
+    """
+    pd = Path(project_dir)
+    try:
+        matches = sorted(pd.glob(pattern))
+    except OSError:
+        matches = []
+    if matches:
+        return str(matches[0]).replace("\\", "/")
+    fb = pd / fallback
+    if fb.exists():
+        return str(fb).replace("\\", "/")
+    return str(pd).replace("\\", "/")
+
+
+def _find_srcs_dir(project_dir: str) -> str:
+    return _find_dir_by_glob(project_dir, "*.srcs", "sources")
+
+
+def _find_runs_dir(project_dir: str) -> str:
+    return _find_dir_by_glob(project_dir, "*.runs", "runs")
+
+
 def _expand_path(raw: str, project_dir: str) -> str:
-    p = raw.replace("$PPRDIR", project_dir).replace("$PRUNDIR", project_dir + "/runs")
-    return str(Path(p)).replace("\\", "/")
+    """Expand Vivado XML path placeholders to absolute POSIX paths.
+
+    Recognised placeholders:
+    - ``$PSRCDIR``  → ``<proj>.srcs`` (project-mode sources base)
+    - ``$PRUNDIR``  → ``<proj>.runs`` (project-mode runs base)
+    - ``$PPRDIR``   → directory containing the ``.xpr`` (non-project mode)
+    - ``$PCACHEDIR`` is left untouched (rare; IP cache).
+    """
+    out = raw
+    if "$PSRCDIR" in out:
+        out = out.replace("$PSRCDIR", _find_srcs_dir(project_dir))
+    if "$PRUNDIR" in out:
+        out = out.replace("$PRUNDIR", _find_runs_dir(project_dir))
+    if "$PPRDIR" in out:
+        out = out.replace("$PPRDIR", project_dir)
+    return str(Path(out)).replace("\\", "/")
 
 
 def parse_xpr(xpr_path: str | Path) -> XprDocument:

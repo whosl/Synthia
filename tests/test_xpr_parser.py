@@ -45,3 +45,55 @@ def test_path_expansion():
     rtl = doc.rtl_files[0]
     assert "$PPRDIR" not in rtl.abs_path
     assert rtl.abs_path.replace("\\", "/").endswith("/rtl/uart_top.v")
+
+
+def test_parse_project_mode_with_psrcdir():
+    """Vivado GUI project-mode xpr uses $PSRCDIR — must resolve via *.srcs glob."""
+    fix = FIXTURE_DIR / "project_mode" / "myproj.xpr"
+    doc = parse_xpr(fix)
+
+    assert doc.top_module == "top"
+    assert doc.part == "xc7a50tfgg484-2"
+
+    rtl = doc.rtl_files
+    xdc = doc.xdc_files
+    assert len(rtl) == 1
+    assert len(xdc) == 1
+
+    assert "$PSRCDIR" not in rtl[0].abs_path
+    assert "$PSRCDIR" not in xdc[0].abs_path
+    assert Path(rtl[0].abs_path).exists(), f"missing rtl: {rtl[0].abs_path}"
+    assert Path(xdc[0].abs_path).exists(), f"missing xdc: {xdc[0].abs_path}"
+
+
+def test_psrcdir_fallback_when_no_srcs_dir(tmp_path):
+    """When no <proj>.srcs dir exists, $PSRCDIR falls back to project_dir itself."""
+    from edagent_vivado.projects.xpr_parser import parse_xpr as _parse_xpr
+
+    xpr = tmp_path / "noproj.xpr"
+    xpr.write_text(
+        """<?xml version='1.0'?>
+<Project Version='7'>
+  <Configuration><Option Name='Part' Val='xc7'/></Configuration>
+  <FileSets><FileSet Name='sources_1' Type='DesignSrcs'>
+    <File Path='$PSRCDIR/dangling.v'/>
+  </FileSet></FileSets>
+</Project>""",
+        encoding="utf-8",
+    )
+
+    doc = _parse_xpr(str(xpr))
+    assert doc.name == "noproj"
+    rtl = doc.rtl_files
+    assert len(rtl) == 1
+    assert "$PSRCDIR" not in rtl[0].abs_path
+    # Expansion fell back to project_dir; resolved path now lives there
+    assert rtl[0].abs_path.endswith("/dangling.v")
+
+
+def test_prundir_resolves_to_runs_dir():
+    from edagent_vivado.projects.xpr_parser import _find_runs_dir
+
+    pd = str(FIXTURE_DIR / "project_mode")
+    runs = _find_runs_dir(pd)
+    assert runs.endswith("/myproj.runs"), runs
