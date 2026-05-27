@@ -1,0 +1,26 @@
+{
+  "name": "uart-strategies",
+  "description": "Compare 3 synth strategies for UART core",
+  "config": {
+    "continue_on_failure": true,
+    "timeout_per_case_s": 1800
+  },
+  "cases": [
+    {
+      "name": "default",
+      "flow_name": "vivado_full_flow",
+      "inputs": { "strategy": "" }
+    },
+    {
+      "name": "perf_optimized_high",
+      "flow_name": "vivado_full_flow",
+      "inputs": { "strategy": "Flow_PerfOptimized_high" }
+    },
+    {
+      "name": "area_optimized_high",
+      "flow_name": "vivado_full_flow",
+      "inputs": { "strategy": "Flow_AreaOptimized_high" },
+      "expected": { "require_bitstream": true, "WNS_min": 0 }
+    }
+  ]
+}

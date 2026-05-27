@@ -651,6 +651,93 @@ def eval(
     )
 
 
+bench_app = typer.Typer(help="Benchmark suites (Phase 10)")
+app.add_typer(bench_app, name="benchmark")
+
+
+@bench_app.command("run")
+def cli_bench_run(
+    suite_file: Path = typer.Argument(..., help="JSON file describing the suite"),
+    project_id: str = typer.Option(..., "--project-id", "-p"),
+):
+    """Run a benchmark suite from a JSON description file."""
+    from edagent_vivado.benchmarks.executor import execute_suite
+    from edagent_vivado.benchmarks.models import BenchmarkSuite, SuiteConfig, make_case
+    from edagent_vivado.benchmarks.suite_store import suite_create
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    spec = json.loads(suite_file.read_text(encoding="utf-8"))
+    cfg = SuiteConfig(
+        **{k: v for k, v in spec.get("config", {}).items() if k in SuiteConfig.__dataclass_fields__}
+    )
+    suite = BenchmarkSuite.new(
+        name=spec.get("name", suite_file.stem),
+        description=spec.get("description", ""),
+        project_id=project_id,
+        config=cfg,
+    )
+    suite.cases = [
+        make_case(
+            suite_id=suite.id,
+            name=c["name"],
+            sequence=i,
+            flow_name=c.get("flow_name", "vivado_synth_only"),
+            inputs=c.get("inputs", {}),
+            expected=c.get("expected", {}),
+            description=c.get("description", ""),
+        )
+        for i, c in enumerate(spec.get("cases", []))
+    ]
+    suite.total_cases = len(suite.cases)
+    suite_create(suite)
+    console.print(f"[green]Created[/] suite {suite.id} ({len(suite.cases)} cases)")
+    console.print("Running…")
+    result = execute_suite(suite.id)
+    console.print(f"Suite finished: {result.get('state', '')}")
+    console.print(f"  Success: {result.get('completed_cases', 0)}/{result.get('total_cases', 0)}")
+    console.print(f"  Failed:  {result.get('failed_cases', 0)}")
+    console.print("Export:")
+    console.print(f"  edagent benchmark export {suite.id} --csv")
+    console.print(f"  edagent benchmark export {suite.id} --md")
+
+
+@bench_app.command("export")
+def cli_bench_export(
+    suite_id: str,
+    csv_out: bool = typer.Option(False, "--csv"),
+    md_out: bool = typer.Option(False, "--md"),
+    json_out: bool = typer.Option(False, "--json"),
+    zip_out: Optional[Path] = typer.Option(None, "--zip"),
+):
+    from edagent_vivado.benchmarks.exporter import export_csv, export_json, export_markdown, export_zip
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    if csv_out:
+        typer.echo(export_csv(suite_id))
+    if md_out:
+        typer.echo(export_markdown(suite_id))
+    if json_out:
+        typer.echo(export_json(suite_id))
+    if zip_out:
+        p = export_zip(suite_id, str(zip_out))
+        typer.echo(f"wrote {p}")
+
+
+@bench_app.command("list")
+def cli_bench_list(project: str = typer.Option("", "--project")):
+    from edagent_vivado.benchmarks.suite_store import suite_list
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    for s in suite_list(project_id=project, limit=50):
+        console.print(
+            f"  {s['id'][:8]} {s['name']:30s} {s['state']:12s} "
+            f"{s.get('completed_cases', 0)}/{s.get('total_cases', 0)}"
+        )
+
+
 admin_app = typer.Typer(help="RBAC user administration (Phase 8)")
 app.add_typer(admin_app, name="admin")
 

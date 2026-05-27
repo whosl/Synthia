@@ -30,8 +30,19 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–9 on this branch.
-  `pytest -k "not agent_smoke"` → 545+ passed after Phase 9.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–10 on this branch.
+  `pytest -k "not agent_smoke"` → 555+ passed after Phase 10.
+
+#### Phase 10 notes (Benchmark Flow v1)
+
+- **Models:** `benchmark_suites` / `benchmark_cases` tables; `benchmarks/models.py`.
+- **Executor:** Serial case runner via `RunOrchestrator`; `continue_on_failure` default on.
+- **Metrics:** `metric_extractor.py` rolls up timing/util/DRC/bitstream from parsed reports.
+- **Export:** CSV, Markdown, JSON, ZIP (`benchmarks/exporter.py`).
+- **API:** `POST/GET /api/v1/benchmarks`, `…/run`, `…/cancel`, `…/export/{csv,markdown,json,zip}`.
+- **CLI:** `edagent benchmark run|list|export`; example `examples/benchmarks/sample-suite.json`.
+- **MCP:** `synthia_create_benchmark_suite`, `synthia_run_benchmark_suite`, etc.
+- **Frontend:** `/benchmarks` list + `/benchmarks/:id` detail with distribution bar.
 
 #### Phase 9 notes (MCP server)
 

@@ -1,6 +1,7 @@
 import { NavLink, useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
+  BarChart3,
   ChevronLeft,
   ChevronRight,
   CircuitBoard,
@@ -21,6 +22,7 @@ const nav = [
   { key: 'nav.runs', path: '/runs', icon: Gauge },
   { key: 'nav.reports', path: '/reports', icon: ScrollText },
   { key: 'nav.approvals', path: '/approvals', icon: Shield },
+  { key: 'nav.benchmarks', path: '/benchmarks', icon: BarChart3 },
   { key: 'nav.monitor', path: '/monitor', icon: Gauge },
   { key: 'nav.connectors', path: '/connectors', icon: Plug },
   { key: 'nav.vivado', path: '/vivado', icon: CircuitBoard },
@@ -35,6 +37,7 @@ function routeLabel(pathname: string, t: (k: string) => string): string {
   if (pathname.startsWith('/runs')) return t('nav.runs')
   if (pathname.startsWith('/reports')) return t('nav.reports')
   if (pathname.startsWith('/approvals')) return t('nav.approvals')
+  if (pathname.startsWith('/benchmarks')) return t('nav.benchmarks')
   if (pathname.startsWith('/monitor')) return t('nav.monitor')
   if (pathname.startsWith('/connectors')) return t('nav.connectors')
   if (pathname.startsWith('/settings')) return t('nav.settings')

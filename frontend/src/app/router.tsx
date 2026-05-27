@@ -18,6 +18,8 @@ import ReportsPage from '../pages/ReportsPage'
 import ReportDetailPage from '../pages/ReportDetailPage'
 import SessionDetailPage from '../pages/SessionDetailPage'
 import ApprovalsPage from '../pages/ApprovalsPage'
+import BenchmarksPage from '../pages/BenchmarksPage'
+import BenchmarkSuiteDetailPage from '../pages/BenchmarkSuiteDetailPage'
 
 function MonitorRunRedirect() {
   const { runId = '' } = useParams()
@@ -51,6 +53,9 @@ export function AppRouter() {
 
       <Route path="/approvals" element={<ApprovalsPage />} />
       <Route path="/approvals/:approvalId" element={<ApprovalsPage />} />
+
+      <Route path="/benchmarks" element={<BenchmarksPage />} />
+      <Route path="/benchmarks/:suiteId" element={<BenchmarkSuiteDetailPage />} />
 
       <Route path="/connectors" element={<ConnectorsPage />} />
       <Route path="/connectors/vivado" element={<VivadoConnectorPage />} />

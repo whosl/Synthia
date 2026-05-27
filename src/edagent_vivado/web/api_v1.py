@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from edagent_vivado.web.routes import (
     admin,
     audit_routes,
+    benchmarks,
     approvals,
     connectors,
     diagnose_api,
@@ -57,6 +58,7 @@ for _mod in (
     me,
     rbac_admin,
     audit_routes,
+    benchmarks,
     diagnose_api,
 ):
     router.include_router(_mod.router)

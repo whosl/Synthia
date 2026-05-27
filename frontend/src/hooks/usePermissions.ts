@@ -29,6 +29,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'patch.reject',
     'artifact.download.bitstream',
     'audit.read',
+    'benchmark.create',
+    'benchmark.read',
+    'benchmark.run',
   ],
   fpga_engineer: [
     'project.read',
@@ -38,6 +41,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'patch.approve.low',
     'patch.reject',
     'artifact.download.bitstream',
+    'benchmark.create',
+    'benchmark.read',
+    'benchmark.run',
   ],
   reviewer: [
     'project.read',
@@ -45,8 +51,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'patch.approve',
     'patch.reject',
     'audit.read',
+    'benchmark.read',
   ],
-  viewer: ['project.read', 'run.read'],
+  viewer: ['project.read', 'run.read', 'benchmark.read'],
   tool_admin: ['connector.write', 'tool_target.write'],
 }
 

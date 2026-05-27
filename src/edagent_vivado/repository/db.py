@@ -669,6 +669,49 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_user_id, created_
 CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_logs(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS benchmark_suites (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    project_id TEXT NOT NULL,
+    created_by TEXT DEFAULT '',
+    state TEXT DEFAULT 'draft',
+    total_cases INTEGER DEFAULT 0,
+    completed_cases INTEGER DEFAULT 0,
+    failed_cases INTEGER DEFAULT 0,
+    cancelled_cases INTEGER DEFAULT 0,
+    config_json TEXT DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    completed_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_bench_suites_proj ON benchmark_suites(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bench_suites_state ON benchmark_suites(state);
+
+CREATE TABLE IF NOT EXISTS benchmark_cases (
+    id TEXT PRIMARY KEY,
+    suite_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    sequence INTEGER NOT NULL,
+    flow_name TEXT NOT NULL,
+    inputs_json TEXT NOT NULL,
+    expected_json TEXT DEFAULT '{}',
+    state TEXT DEFAULT 'pending',
+    run_id TEXT DEFAULT '',
+    metrics_json TEXT DEFAULT '{}',
+    error TEXT DEFAULT '',
+    error_category TEXT DEFAULT '',
+    elapsed_ms INTEGER DEFAULT 0,
+    started_at INTEGER,
+    completed_at INTEGER,
+    FOREIGN KEY (suite_id) REFERENCES benchmark_suites(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bench_cases_suite ON benchmark_cases(suite_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_bench_cases_run ON benchmark_cases(run_id);
 """
 
 
@@ -796,6 +839,9 @@ _BUILTIN_ROLES = [
             "artifact.download.bitstream",
             "knowledge.read",
             "knowledge.write",
+            "benchmark.create",
+            "benchmark.read",
+            "benchmark.run",
         ],
     ),
     (
@@ -813,6 +859,9 @@ _BUILTIN_ROLES = [
             "artifact.read",
             "artifact.download.bitstream",
             "knowledge.read",
+            "benchmark.create",
+            "benchmark.read",
+            "benchmark.run",
         ],
     ),
     (
@@ -829,6 +878,7 @@ _BUILTIN_ROLES = [
             "artifact.read",
             "knowledge.read",
             "audit.read",
+            "benchmark.read",
         ],
     ),
     (
@@ -840,6 +890,7 @@ _BUILTIN_ROLES = [
             "report.read",
             "artifact.read",
             "knowledge.read",
+            "benchmark.read",
         ],
     ),
     (
@@ -996,6 +1047,68 @@ def _bootstrap_admin(db: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_benchmarks(db: sqlite3.Connection) -> None:
+    import logging
+
+    logger = logging.getLogger(__name__)
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS benchmark_suites (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            project_id TEXT NOT NULL,
+            created_by TEXT DEFAULT '',
+            state TEXT DEFAULT 'draft',
+            total_cases INTEGER DEFAULT 0,
+            completed_cases INTEGER DEFAULT 0,
+            failed_cases INTEGER DEFAULT 0,
+            cancelled_cases INTEGER DEFAULT 0,
+            config_json TEXT DEFAULT '{}',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_bench_suites_proj ON benchmark_suites(project_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_bench_suites_state ON benchmark_suites(state);
+        CREATE TABLE IF NOT EXISTS benchmark_cases (
+            id TEXT PRIMARY KEY,
+            suite_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            sequence INTEGER NOT NULL,
+            flow_name TEXT NOT NULL,
+            inputs_json TEXT NOT NULL,
+            expected_json TEXT DEFAULT '{}',
+            state TEXT DEFAULT 'pending',
+            run_id TEXT DEFAULT '',
+            metrics_json TEXT DEFAULT '{}',
+            error TEXT DEFAULT '',
+            error_category TEXT DEFAULT '',
+            elapsed_ms INTEGER DEFAULT 0,
+            started_at INTEGER,
+            completed_at INTEGER,
+            FOREIGN KEY (suite_id) REFERENCES benchmark_suites(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_bench_cases_suite ON benchmark_cases(suite_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_bench_cases_run ON benchmark_cases(run_id);
+        """
+    )
+    cur = db.execute("PRAGMA table_info(benchmark_cases)")
+    cols = {row[1] for row in cur.fetchall()}
+    needed = {
+        "error_category": "TEXT DEFAULT ''",
+        "elapsed_ms": "INTEGER DEFAULT 0",
+    }
+    for col, decl in needed.items():
+        if col not in cols:
+            try:
+                db.execute(f"ALTER TABLE benchmark_cases ADD COLUMN {col} {decl}")
+            except Exception as exc:
+                logger.warning("migrate benchmark_cases col=%s: %s", col, exc)
+    db.commit()
+
+
 def init_db() -> None:
     db = get_db()
     db.executescript(SCHEMA)
@@ -1004,6 +1117,7 @@ def init_db() -> None:
     _migrate_parsed_reports_metrics(db)
     _migrate_patch_audits(db)
     _migrate_rbac_tables(db)
+    _migrate_benchmarks(db)
     _seed_builtin_roles(db)
     _bootstrap_admin(db)
 

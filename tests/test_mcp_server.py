@@ -25,6 +25,10 @@ EXPECTED_TOOLS = {
     "synthia_approve_patch",
     "synthia_reject_patch",
     "synthia_diagnose_log",
+    "synthia_create_benchmark_suite",
+    "synthia_run_benchmark_suite",
+    "synthia_get_benchmark_suite",
+    "synthia_export_benchmark_markdown",
 }
 
 

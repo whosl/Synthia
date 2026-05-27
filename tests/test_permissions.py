@@ -38,6 +38,9 @@ def test_engineer_can_create_run():
     assert check_permission("fpga_engineer", "patch.propose")
     assert check_permission("fpga_engineer", "patch.approve.low")
     assert not check_permission("fpga_engineer", "patch.approve")
+    assert check_permission("fpga_engineer", "benchmark.run")
+    assert not check_permission("viewer", "benchmark.run")
+    assert check_permission("viewer", "benchmark.read")
 
 
 def test_reviewer_can_audit():
