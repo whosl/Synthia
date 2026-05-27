@@ -20,7 +20,7 @@ DEFAULT_METRIC_KEYS: tuple[str, ...] = (
     "impl_ok",
 )
 
-_STATE_FILTER = ("succeeded", "succeeded_with_warnings", "done", "failed")
+_STATE_FILTER = ("succeeded", "succeeded_with_warnings", "failed")
 
 
 def project_trend(
@@ -43,6 +43,17 @@ def project_trend(
             LIMIT ?""",
         (project_id, *_STATE_FILTER, int(limit)),
     ).fetchall()
+    # also accept legacy 'done' rows from pre-P5.5 databases (read-only compat)
+    if len(rows) < int(limit):
+        legacy_rows = db.execute(
+            """SELECT id, name, state, run_type, session_id,
+                      started_at, finished_at, elapsed_ms
+               FROM runs
+               WHERE project_id = ? AND state = 'done'
+               ORDER BY started_at DESC LIMIT ?""",
+            (project_id, int(limit) - len(rows)),
+        ).fetchall()
+        rows = list(rows) + list(legacy_rows)
 
     series: list[dict[str, Any]] = []
     for row in rows:

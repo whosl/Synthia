@@ -74,4 +74,9 @@ def test_start_run_creates_steps(store, monkeypatch):
     assert result.run_id == run_id
     steps = store.run_step_list(run_id)
     assert len(steps) >= 2
-    assert result.state in ("done", "failed", "succeeded_with_warnings", "waiting_for_approval")
+    assert result.state in (
+        "succeeded",
+        "succeeded_with_warnings",
+        "failed",
+        "waiting_for_approval",
+    )
