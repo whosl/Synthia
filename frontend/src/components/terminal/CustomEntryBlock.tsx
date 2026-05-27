@@ -3,6 +3,7 @@ import type { CustomEntryPayload } from '../../timeline/types'
 import { ArtifactCard } from '../chat/ArtifactCard'
 import { MissingInfoCard } from '../chat/MissingInfoCard'
 import { RunCard } from '../chat/RunCard'
+import { PatchApprovalCard } from '../patches/PatchApprovalCard'
 
 export function CustomEntryBlock({ payload }: { payload: CustomEntryPayload }) {
   const [searchParams] = useSearchParams()
@@ -20,6 +21,10 @@ export function CustomEntryBlock({ payload }: { payload: CustomEntryPayload }) {
       return <RunCard data={payload.data} />
     case 'artifact':
       return <ArtifactCard data={payload.data} />
+    case 'patch': {
+      const patchId = String((payload.data as Record<string, unknown>).patch_id || '')
+      return patchId ? <PatchApprovalCard patchId={patchId} /> : null
+    }
     default:
       break
   }

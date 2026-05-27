@@ -30,7 +30,22 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–5.5 committed; Phase 6 (chat-first intent dispatch + embedded run/missing-info/artifact cards) on this branch. `pytest -k "not agent_smoke"` → 509 passed.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–7 on this branch.
+  `pytest -k "not agent_smoke"` → 530+ passed after Phase 7.
+
+#### Phase 7 notes (PatchProposal + approval)
+
+- **Patch pipeline:** `patches/proposal.py` (state machine), `risk_classifier.py`,
+  `diff_engine.py`, `applier.py`, `service.py`. Full proposal in `metadata_json.v7`;
+  legacy `patch_proposals` columns kept for compat.
+- **API:** `POST /api/v1/patches/propose`, `…/approve`, `…/reject`, `…/revert`,
+  `GET /api/v1/patches/{id}`. Legacy `POST /api/v1/patches/{id}/apply` delegates to
+  v7 when `metadata_json.v7` is present.
+- **Risk matrix:** Tcl/manifest may auto-apply; XDC needs approval; RTL needs strong
+  approval (reason required); delete (non-tcl) denied.
+- **Audit:** `patch_audits` table + `patch_audit_log` / `patch_audits_for`.
+- **Auto-rerun:** After RTL/XDC apply, `maybe_spawn_rerun` starts a background orchestrator run.
+- **Frontend:** `DiffViewer`, `PatchApprovalCard`, timeline handler for `patch.proposed`.
 
 #### Phase 6 notes (chat-first UI)
 

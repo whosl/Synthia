@@ -276,6 +276,20 @@ async def api_patch_apply(patch_id: str):
     patch = patch_proposal_get(patch_id)
     if not patch:
         raise HTTPException(404, "patch not found")
+    try:
+        meta = json.loads(patch.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    if meta.get("v7"):
+        from edagent_vivado.patches.proposal import InvalidPatchTransition
+        from edagent_vivado.patches.service import approve_and_apply
+
+        try:
+            return approve_and_apply(patch_id, reviewer_id="user", reason="legacy apply endpoint")
+        except InvalidPatchTransition as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     payload = {}
     approval = approval_get(patch.get("approval_id") or "")
     if approval:

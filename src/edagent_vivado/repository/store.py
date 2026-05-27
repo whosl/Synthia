@@ -1926,6 +1926,37 @@ def patch_proposal_update(patch_id: str, **fields) -> dict | None:
     return patch_proposal_get(patch_id)
 
 
+def patch_audit_log(
+    patch_id: str,
+    action: str,
+    *,
+    actor_id: str = "",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> None:
+    get_db().execute(
+        "INSERT INTO patch_audits (patch_id, action, actor_id, reason, metadata_json, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (
+            patch_id,
+            action,
+            actor_id,
+            reason,
+            json.dumps(metadata or {}, ensure_ascii=False),
+            _now(),
+        ),
+    )
+    get_db().commit()
+
+
+def patch_audits_for(patch_id: str) -> list[dict]:
+    rows = get_db().execute(
+        "SELECT * FROM patch_audits WHERE patch_id=? ORDER BY created_at ASC",
+        (patch_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def approval_create(
     approval_type: str,
     payload: dict,

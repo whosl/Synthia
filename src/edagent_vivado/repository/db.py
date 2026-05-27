@@ -579,6 +579,18 @@ CREATE INDEX IF NOT EXISTS idx_patch_proposals_run ON patch_proposals(run_id);
 CREATE INDEX IF NOT EXISTS idx_patch_proposals_status ON patch_proposals(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 
+CREATE TABLE IF NOT EXISTS patch_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patch_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_id TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    metadata_json TEXT DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_patch_audits_patch ON patch_audits(patch_id, created_at);
+
 CREATE TABLE IF NOT EXISTS tool_run_requests (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -652,6 +664,24 @@ def _migrate_parsed_reports_metrics(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_patch_audits(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS patch_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patch_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            actor_id TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '',
+            created_at INTEGER NOT NULL
+        )"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patch_audits_patch ON patch_audits(patch_id, created_at)"
+    )
+    db.commit()
+
+
 def _migrate_projects(db: sqlite3.Connection) -> None:
     cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
     if "project_id" not in cols:
@@ -688,6 +718,7 @@ def init_db() -> None:
     db.commit()
     _migrate_projects(db)
     _migrate_parsed_reports_metrics(db)
+    _migrate_patch_audits(db)
 
 
 def close_db() -> None:

@@ -2,6 +2,8 @@ import { Check, ChevronDown, ChevronRight, Minus, ShieldCheck, X, XCircle } from
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { parseApprovalPayload } from '../../lib/approvalPayload'
+import { extractPatchDiffFromReason } from '../../lib/patchDiff'
+import { DiffViewer } from '../patches/DiffViewer'
 import { buildApprovalResponse } from '../../lib/approvalResponse'
 import { useTerminalStore } from '../../stores/terminalStore'
 import { Button } from '../common/Button'
@@ -53,6 +55,8 @@ export function ApprovalBlock({
     () => parseApprovalPayload(reason, message, files),
     [reason, message, files],
   )
+
+  const patchDiff = useMemo(() => extractPatchDiffFromReason(reason), [reason])
 
   const approvedIndices = useMemo(() => {
     const raw = response?.approved_indices
@@ -113,6 +117,18 @@ export function ApprovalBlock({
 
   const body = (
     <>
+      {patchDiff && (patchDiff.diff || patchDiff.changes.length > 0) && (
+        <div className="approval-patch-diff">
+          {patchDiff.diff ? (
+            <DiffViewer diffText={patchDiff.diff} filename={patchDiff.path} />
+          ) : (
+            patchDiff.changes.map((c, i) => (
+              <DiffViewer key={`${c.path}-${i}`} diffText={c.diff_text || ''} filename={c.path} />
+            ))
+          )}
+        </div>
+      )}
+
       {detailRows.length > 0 && (
         <dl className="approval-detail-grid">
           {detailRows.map((row) => (

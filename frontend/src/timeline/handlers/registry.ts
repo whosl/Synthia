@@ -4,6 +4,7 @@ import {
   handleCustomRunCard,
   handleIntentClassified,
   handleMissingInfoRequired,
+  handlePatchProposed,
   handleRunOrchestrationEvent,
 } from './chatOrchestration'
 import {
@@ -54,6 +55,8 @@ const builtinHandlers: Record<string, TimelineEventHandler> = {
   'intent.classified': handleIntentClassified,
   'missing_info_required': handleMissingInfoRequired,
   'artifact.created': handleArtifactCreatedChat,
+  'patch.proposed': handlePatchProposed,
+  'patch.proposal.created': handlePatchProposed,
   'run.created': handleRunOrchestrationEvent,
   'run.queued': handleRunOrchestrationEvent,
   'run.started': handleRunOrchestrationEvent,

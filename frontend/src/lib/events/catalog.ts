@@ -55,6 +55,7 @@ export const CONNECTOR_EVENTS = [
   'patch.proposal.created',
   'patch.proposal.applied',
   'patch.proposal.rejected',
+  'patch.proposed',
 ] as const
 
 export const MONITOR_EVENTS = [
@@ -92,6 +93,7 @@ export const CHAT_ORCHESTRATION_EVENTS = [
   'run.cancelled',
   'run.progress',
   'custom.run',
+  'patch.proposed',
 ] as const
 
 /** All event types the backend may emit on SSE (used for subscriptions). */

@@ -125,6 +125,7 @@ CONNECTOR_EVENTS = (
     "patch.proposal.created",
     "patch.proposal.applied",
     "patch.proposal.rejected",
+    "patch.proposed",
 )
 
 # Evolution / metrics / feedback / candidates / overlays / trials (SPEC §22.10)

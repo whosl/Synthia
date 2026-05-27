@@ -138,6 +138,25 @@ export function handleArtifactCreatedChat(ctx: TimelineHandlerContext): SessionT
   return state
 }
 
+export function handlePatchProposed(ctx: TimelineHandlerContext): SessionTimelineState {
+  const { payload, state: next } = ctx
+  const patchId = String(payload.patch_id || '')
+  if (!patchId) return next
+  const blockId = `patch-${patchId}`
+  const state = upsertCustomCard(
+    next,
+    blockId,
+    {
+      uiKind: 'patch',
+      title: String(payload.title || 'Patch proposal'),
+      data: { patch_id: patchId, approval_id: payload.approval_id },
+    },
+    ctx,
+  )
+  pushAudit(state, ctx.event, 'Patch', patchId, 'custom')
+  return state
+}
+
 export function handleCustomRunCard(ctx: TimelineHandlerContext): SessionTimelineState {
   const { payload, state: next } = ctx
   const inner = (payload.data as Record<string, unknown> | undefined) ?? {}

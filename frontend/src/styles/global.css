@@ -1,6 +1,7 @@
 @import './themes.css';
 @import './tokens.css';
 @import './chat-cards.css';
+@import './patch-diff.css';
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root {

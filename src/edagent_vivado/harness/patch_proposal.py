@@ -28,6 +28,43 @@ def record_patch_proposal(
     if not run_id and not session_id:
         return None
 
+    if session_id and old_text is not None and new_text is not None:
+        try:
+            from edagent_vivado.patches.service import propose_patch
+
+            result = propose_patch(
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                title=description or f"patch {file_path}",
+                rationale=description,
+                changes=[
+                    {
+                        "path": file_path,
+                        "action": "modify",
+                        "before_text": old_text,
+                        "after_text": new_text,
+                    }
+                ],
+            )
+            if event_sink:
+                patch = result.get("patch") or {}
+                event_sink(
+                    session_id,
+                    "patch.proposed",
+                    {
+                        "patch_id": patch.get("id"),
+                        "approval_id": patch.get("approval_id"),
+                        "target_file": file_path,
+                        "run_id": run_id,
+                    },
+                    task_id=task_id or None,
+                    run_id=run_id,
+                )
+            return result
+        except Exception:
+            pass
+
     approval = approval_create(
         "patch",
         {
