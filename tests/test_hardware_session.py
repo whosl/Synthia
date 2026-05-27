@@ -112,5 +112,5 @@ def test_approve_program_mock_flow(fresh_db, tmp_path):
     )
     job_id = result["job"]["id"]
 
-    final = approve_program(job_id, approver_id="u2", reason="smoke test")
+    final = approve_program(job_id, approver_id="u2", reason="smoke test", wait=True)
     assert final["state"] == "succeeded"

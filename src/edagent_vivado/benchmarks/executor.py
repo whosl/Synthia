@@ -11,7 +11,7 @@ from edagent_vivado.benchmarks.metric_extractor import classify_error, extract_m
 from edagent_vivado.benchmarks.models import CaseState, SuiteConfig, SuiteState
 from edagent_vivado.benchmarks.suite_store import case_update, suite_get, suite_update
 from edagent_vivado.repository.store import project_get, run_get
-from edagent_vivado.runs.orchestrator import cancel_run, create_run, start_run
+from edagent_vivado.runs.orchestrator import cancel_run, create_run, start_run_serial
 from edagent_vivado.runs.state_machine import is_terminal
 
 logger = logging.getLogger(__name__)
@@ -177,12 +177,14 @@ def _create_run_for_case(
         task_id="",
         inputs=inputs,
     )
-    start_run(
+    # Benchmarks never share a chat session — avoid bypassing per-session run locks.
+    start_run_serial(
         run_id,
         flow_name=flow_name,
         inputs=inputs,
-        session_id=session_id,
+        session_id="",
         task_id="",
+        background=False,
     )
     return run_id
 

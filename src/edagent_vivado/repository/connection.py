@@ -156,6 +156,16 @@ class ConnectionWrapper:
         if self._backend == "postgres":
             self._conn.commit()
 
+    def executescript(self, script: str) -> None:
+        """Run a multi-statement SQL script (init_db / migrations)."""
+        from edagent_vivado.repository.sql_dialect import split_sql_script, translate_sqlite_to_postgres
+
+        for stmt in split_sql_script(script):
+            sql = translate_sqlite_to_postgres(stmt) if self._backend == "postgres" else stmt
+            self.execute(sql)
+        if self._backend == "postgres":
+            self.commit()
+
     def close(self) -> None:
         if self._backend == "postgres":
             self._conn.close()

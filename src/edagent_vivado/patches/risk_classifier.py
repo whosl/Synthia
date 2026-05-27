@@ -71,6 +71,7 @@ def classify_risk(changes: Iterable[PatchChange]) -> RiskAssessment:
         if cat == "rtl":
             if _is_testbench_path(c.path):
                 overall = _max_level(overall, "medium")
+                auto_apply = False
                 reasons.append(f"RTL testbench change (medium): {c.path}")
             else:
                 requires_strong = True

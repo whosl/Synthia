@@ -472,7 +472,7 @@ def maybe_spawn_rerun(patch_row: dict, project: dict) -> str:
     if not any(c.file_category in ("rtl", "xdc") for c in proposal.changes):
         return ""
 
-    from edagent_vivado.repository.store import patch_proposal_update, run_get
+    from edagent_vivado.repository.store import patch_proposal_update, run_get, run_update
     from edagent_vivado.runs.orchestrator import create_run, start_run_serial
 
     src_run = run_get(proposal.run_id)
@@ -482,6 +482,13 @@ def maybe_spawn_rerun(patch_row: dict, project: dict) -> str:
         meta = json.loads(src_run.get("metadata_json") or "{}")
     except json.JSONDecodeError:
         meta = {}
+    if meta.get("spawned_from_patch_id"):
+        logger.info(
+            "skip patch rerun: source run %s was already spawned from patch %s",
+            proposal.run_id,
+            meta.get("spawned_from_patch_id"),
+        )
+        return ""
     flow_name = str(meta.get("flow_name") or src_run.get("run_type") or "vivado_synth_only")
     inputs = dict(meta.get("inputs") or {})
 
@@ -490,6 +497,17 @@ def maybe_spawn_rerun(patch_row: dict, project: dict) -> str:
         session_id=proposal.session_id,
         task_id=proposal.task_id,
         inputs=inputs,
+    )
+    run_update(
+        new_run_id,
+        metadata_json=json.dumps(
+            {
+                "flow_name": flow_name,
+                "inputs": inputs,
+                "spawned_from_patch_id": proposal.id,
+            },
+            ensure_ascii=False,
+        ),
     )
     proposal.spawned_run_id = new_run_id
     patch_proposal_update(

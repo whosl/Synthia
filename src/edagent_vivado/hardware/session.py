@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -16,50 +17,98 @@ from edagent_vivado.hardware.models import (
     assert_job_transition,
 )
 from edagent_vivado.hardware.programmer import program_target, sha256_file
-from edagent_vivado.hardware.target_registry import target_get
+from edagent_vivado.hardware.target_registry import (
+    target_get,
+    target_release,
+    target_try_reserve,
+)
 from edagent_vivado.repository.db import get_db
 
 logger = logging.getLogger(__name__)
+
+
+def _artifact_part(art: dict) -> str:
+    """Resolve FPGA part from artifact metadata or linked run/project."""
+    meta: dict = {}
+    try:
+        meta = json.loads(art.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        pass
+    for key in ("part", "fpga_part", "device", "fpga_device"):
+        val = str(meta.get(key) or "").strip()
+        if val:
+            return val
+    run_id = art.get("run_id")
+    if run_id:
+        from edagent_vivado.repository.store import project_get, run_get
+
+        run = run_get(str(run_id))
+        if run and run.get("project_id"):
+            proj = project_get(str(run["project_id"]))
+            if proj and proj.get("part"):
+                return str(proj["part"])
+    return ""
+
+
+def _normalize_part(part: str) -> str:
+    return part.lower().replace(" ", "").split("/")[0]
+
+
+def _parts_compatible(target_part: str, bitstream_part: str) -> bool:
+    if not target_part or not bitstream_part:
+        return True
+    a, b = _normalize_part(target_part), _normalize_part(bitstream_part)
+    return a == b or a in b or b in a
 
 
 def session_open(target_id: str, opened_by: str, project_id: str = "") -> dict:
     target = target_get(target_id)
     if not target:
         raise ValueError("target not found")
-    if target["state"] != "available":
-        raise RuntimeError(f"target busy or offline: state={target['state']}")
+    if target["state"] == "retired":
+        raise RuntimeError("target is retired")
+    if not target_try_reserve(target_id):
+        state = target.get("state", "unknown")
+        raise RuntimeError(f"target busy or offline: state={state}")
 
     s = HardwareSession.new(
         target_id=target_id,
         opened_by=opened_by,
         project_id=project_id,
     )
-    db = get_db()
-    db.execute(
-        "INSERT INTO hardware_sessions "
-        "(id, target_id, project_id, opened_by, state, metadata_json, opened_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (
-            s.id,
-            s.target_id,
-            s.project_id,
-            s.opened_by,
-            s.state,
-            json.dumps(s.metadata),
-            s.opened_at,
-        ),
-    )
-    db.commit()
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO hardware_sessions "
+            "(id, target_id, project_id, opened_by, state, metadata_json, opened_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                s.id,
+                s.target_id,
+                s.project_id,
+                s.opened_by,
+                s.state,
+                json.dumps(s.metadata),
+                s.opened_at,
+            ),
+        )
+        db.commit()
+    except Exception:
+        target_release(target_id)
+        raise
     return s.to_dict()
 
 
 def session_close(session_id: str) -> None:
+    sess = session_get(session_id)
     db = get_db()
     db.execute(
         "UPDATE hardware_sessions SET state=?, closed_at=? WHERE id=?",
         (SessionState.CLOSED.value, int(time.time() * 1000), session_id),
     )
     db.commit()
+    if sess:
+        target_release(str(sess["target_id"]))
 
 
 def session_get(session_id: str) -> dict | None:
@@ -93,8 +142,13 @@ def request_program(
 
     target_id = sess["target_id"]
     target = target_get(target_id)
-    if target and target.get("part"):
-        pass
+    if target:
+        bit_part = _artifact_part(art)
+        target_part = str(target.get("part") or "")
+        if bit_part and target_part and not _parts_compatible(target_part, bit_part):
+            raise ValueError(
+                f"bitstream part {bit_part!r} incompatible with target {target_part!r}"
+            )
 
     approval = approval_create(
         "hardware_program",
@@ -155,8 +209,8 @@ def request_program(
     return {"job": job.to_dict(), "approval": approval}
 
 
-def approve_program(job_id: str, approver_id: str, reason: str = "") -> dict:
-    """Transition pending_approval → approved → programming → succeeded/failed."""
+def approve_program(job_id: str, approver_id: str, reason: str = "", *, wait: bool = False) -> dict:
+    """Approve job and start programming (async by default; wait=True blocks until done)."""
     job = job_get(job_id)
     if not job:
         raise ValueError("job not found")
@@ -174,7 +228,26 @@ def approve_program(job_id: str, approver_id: str, reason: str = "") -> dict:
     assert_job_transition("approved", "programming")
     _job_update(job_id, state="programming", started_at=int(time.time() * 1000))
 
-    job_obj = _hydrate(job_get(job_id))
+    thread = threading.Thread(
+        target=_execute_program_job,
+        args=(job_id, approver_id),
+        daemon=True,
+        name=f"hw-program-{job_id[:8]}",
+    )
+    thread.start()
+
+    if wait:
+        thread.join()
+        return job_get(job_id) or {}
+    return job_get(job_id) or {}
+
+
+def _execute_program_job(job_id: str, approver_id: str) -> None:
+    job = job_get(job_id)
+    if not job:
+        return
+
+    job_obj = _hydrate(job)
     vivado_path = "mock" if os.environ.get("SYNTHIA_HW_MOCK_PROGRAM") else "vivado"
     result = program_target(job_obj, vivado_path=vivado_path)
 
@@ -219,8 +292,6 @@ def approve_program(job_id: str, approver_id: str, reason: str = "") -> dict:
             success=False,
             error_message=result.error,
         )
-
-    return job_get(job_id) or {}
 
 
 def reject_program(job_id: str, approver_id: str, reason: str = "") -> dict:

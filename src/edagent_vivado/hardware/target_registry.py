@@ -79,6 +79,26 @@ def target_mark_seen(target_id: str) -> None:
     )
 
 
+def target_try_reserve(target_id: str) -> bool:
+    """Atomically mark target busy if currently available."""
+    db = get_db()
+    now = int(time.time() * 1000)
+    cur = db.execute(
+        "UPDATE hardware_targets SET state=?, updated_at=? WHERE id=? AND state=?",
+        (TargetState.BUSY.value, now, target_id, TargetState.AVAILABLE.value),
+    )
+    db.commit()
+    return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+def target_release(target_id: str) -> None:
+    """Return target to available (e.g. after session close)."""
+    row = target_get(target_id)
+    if not row or row.get("state") == TargetState.RETIRED.value:
+        return
+    target_update(target_id, state=TargetState.AVAILABLE.value)
+
+
 def _row(r) -> dict:
     d = dict(r)
     d["capabilities"] = json.loads(d.pop("capabilities_json", None) or "{}")

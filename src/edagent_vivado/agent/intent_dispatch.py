@@ -177,7 +177,7 @@ def _start_orchestrator_run_background(
     """Run orchestrator in a background thread; finalize task when done."""
 
     def _worker() -> None:
-        from edagent_vivado.repository.store import run_update, session_update, task_update
+        from edagent_vivado.repository.store import session_update, task_update
         from edagent_vivado.runs.orchestrator import start_run_serial
 
         try:
@@ -190,10 +190,8 @@ def _start_orchestrator_run_background(
                 stages=inputs.get("stages") if isinstance(inputs.get("stages"), list) else None,
                 background=False,
             )
-            final_state = result.state if result else "failed"
             task_update(task_id, state="done", finished_at=int(time.time() * 1000))
             session_update(session_id, status="idle")
-            run_update(run_id, state=final_state)
             event_create(session_id, "task.done", {"task_id": task_id}, task_id=task_id)
         except Exception as exc:
             logger.exception("orchestrator run failed for %s", run_id)

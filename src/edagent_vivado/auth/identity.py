@@ -165,9 +165,22 @@ def add_project_member(
     *,
     added_by: str = "",
 ) -> None:
-    get_db().execute(
-        "INSERT OR REPLACE INTO project_members (project_id, user_id, role_name, added_by, added_at) "
-        "VALUES (?,?,?,?,?)",
-        (project_id, user_id, role_name, added_by, int(time.time() * 1000)),
-    )
-    get_db().commit()
+    from edagent_vivado.repository.connection import get_backend
+
+    db = get_db()
+    now = int(time.time() * 1000)
+    if get_backend() == "postgres":
+        db.execute(
+            "INSERT INTO project_members (project_id, user_id, role_name, added_by, added_at) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT (project_id, user_id) DO UPDATE SET "
+            "role_name = EXCLUDED.role_name, added_by = EXCLUDED.added_by, added_at = EXCLUDED.added_at",
+            (project_id, user_id, role_name, added_by, now),
+        )
+    else:
+        db.execute(
+            "INSERT OR REPLACE INTO project_members (project_id, user_id, role_name, added_by, added_at) "
+            "VALUES (?,?,?,?,?)",
+            (project_id, user_id, role_name, added_by, now),
+        )
+    db.commit()

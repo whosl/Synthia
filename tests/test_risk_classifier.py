@@ -37,3 +37,10 @@ def test_delete_rtl_denied():
 def test_classify_file_helper():
     assert classify_file("foo/bar.xdc") == "xdc"
     assert classify_file("rtl/uart.v") == "rtl"
+
+
+def test_classify_tb_rtl_no_auto_apply():
+    ch = PatchChange(path="tb/uart_tb.v", action="modify", file_category="rtl")
+    r = classify_risk([ch])
+    assert r.overall == "medium"
+    assert not r.auto_apply

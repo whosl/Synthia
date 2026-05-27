@@ -52,6 +52,7 @@ async def api_create_user(req: CreateUserReq, identity=Depends(get_identity)):
         resource_id=user["id"],
         details={"username": req.username, "role": req.global_role},
     )
+    invalidate_perm_cache()
     return user
 
 
@@ -65,6 +66,7 @@ async def api_deactivate_user(user_id: str, identity=Depends(get_identity)):
         resource_type="user",
         resource_id=user_id,
     )
+    invalidate_perm_cache()
     return {"ok": True}
 
 
@@ -98,6 +100,7 @@ async def api_add_member(project_id: str, req: AddMemberReq, identity=Depends(ge
         project_id=project_id,
         details={"user_id": req.user_id, "role": req.role_name},
     )
+    invalidate_perm_cache()
     return {"ok": True}
 
 
@@ -119,6 +122,7 @@ async def api_remove_member(project_id: str, user_id: str, identity=Depends(get_
         project_id=project_id,
         details={"user_id": user_id},
     )
+    invalidate_perm_cache()
     return {"ok": True}
 
 
