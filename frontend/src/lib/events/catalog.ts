@@ -80,6 +80,20 @@ export const MONITOR_EVENTS = [
   'memory.updated',
 ] as const
 
+/** Phase 6 — chat orchestration (intent cards, run progress in timeline) */
+export const CHAT_ORCHESTRATION_EVENTS = [
+  'intent.classified',
+  'missing_info_required',
+  'missing_info_received',
+  'run.created',
+  'run.queued',
+  'run.succeeded',
+  'run.failed',
+  'run.cancelled',
+  'run.progress',
+  'custom.run',
+] as const
+
 /** All event types the backend may emit on SSE (used for subscriptions). */
 export const ALL_WIRE_EVENT_TYPES: readonly string[] = [
   ...LIFECYCLE_EVENTS,
@@ -88,6 +102,7 @@ export const ALL_WIRE_EVENT_TYPES: readonly string[] = [
   ...INTERACTION_EVENTS,
   ...CONNECTOR_EVENTS,
   ...MONITOR_EVENTS,
+  ...CHAT_ORCHESTRATION_EVENTS,
 ]
 
 export const CANONICAL_BY_WIRE_TYPE: Record<string, string> = {

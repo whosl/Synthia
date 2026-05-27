@@ -1,5 +1,12 @@
 import type { TimelineEventHandler } from './types'
 import {
+  handleArtifactCreatedChat,
+  handleCustomRunCard,
+  handleIntentClassified,
+  handleMissingInfoRequired,
+  handleRunOrchestrationEvent,
+} from './chatOrchestration'
+import {
   auditOnly,
   handleAssistantStreamCompleted,
   handleAssistantStreamOpened,
@@ -44,6 +51,16 @@ const builtinHandlers: Record<string, TimelineEventHandler> = {
   'interaction.approved': handleInteractionResolved,
   'interaction.rejected': handleInteractionResolved,
   'interaction.responded': handleInteractionResolved,
+  'intent.classified': handleIntentClassified,
+  'missing_info_required': handleMissingInfoRequired,
+  'artifact.created': handleArtifactCreatedChat,
+  'run.created': handleRunOrchestrationEvent,
+  'run.queued': handleRunOrchestrationEvent,
+  'run.started': handleRunOrchestrationEvent,
+  'run.succeeded': handleRunOrchestrationEvent,
+  'run.failed': handleRunOrchestrationEvent,
+  'run.cancelled': handleRunOrchestrationEvent,
+  'custom.run': handleCustomRunCard,
 }
 
 const extensionHandlers = new Map<string, TimelineEventHandler>()

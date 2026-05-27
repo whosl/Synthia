@@ -1,0 +1,164 @@
+/* Phase 6 — embedded chat cards (run / missing info / artifact) */
+
+.syn-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  padding: 12px 14px;
+  margin: 10px 0;
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.04));
+}
+
+.syn-missing-info__title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+
+.syn-missing-info__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.syn-missing-info__field label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.syn-missing-info__field input,
+.syn-missing-info__field select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-inset, var(--bg-subtle));
+  color: var(--text);
+  font-size: 13px;
+}
+
+.syn-missing-info__actions {
+  margin-top: 8px;
+}
+
+.syn-button {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.syn-button--primary {
+  background: var(--accent);
+  color: var(--accent-on, #fff);
+}
+
+.syn-button--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.syn-button--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.syn-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.syn-run-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.syn-run-card__title {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.syn-run-card__link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.syn-run-card__steps {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.syn-run-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.syn-run-step__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.syn-run-step--succeeded .syn-run-step__dot,
+.syn-run-step--completed .syn-run-step__dot {
+  background: var(--success);
+}
+
+.syn-run-step--failed .syn-run-step__dot {
+  background: var(--error);
+}
+
+.syn-run-step--running .syn-run-step__dot {
+  background: var(--accent);
+}
+
+.syn-run-step__time {
+  margin-left: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.syn-artifact-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.syn-artifact-card__name {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.syn-artifact-card__meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.syn-composer__error {
+  background: var(--error-subtle);
+  color: var(--error);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 6px);
+  margin-bottom: 8px;
+  font-size: 12px;
+}

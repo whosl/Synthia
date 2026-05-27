@@ -30,7 +30,19 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–5 committed; Phase 5.5 (hotfix: per-session run lock, `$PSRCDIR` resolution, strict state machine, explicit API auth test gate) on this branch. `pytest -k "not agent_smoke"` → 498 passed.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–5.5 committed; Phase 6 (chat-first intent dispatch + embedded run/missing-info/artifact cards) on this branch. `pytest -k "not agent_smoke"` → 509 passed.
+
+#### Phase 6 notes (chat-first UI)
+
+- **Intent dispatch:** `agent/intent.py` + `agent/task_planner.py` + `agent/intent_dispatch.py`.
+  Vivado run keywords in chat short-circuit the LLM agent: create an orchestrator Run in the
+  background and stream progress via SSE. Set `SYNTHIA_INTENT_DISPATCH=0` to disable.
+- **Missing-info cards:** `missing_info_required` events render an inline form in the
+  terminal timeline (`MissingInfoCard`); submit re-posts to `POST /sessions/{id}/tasks`.
+- **Run / artifact cards:** `RunCard` polls `/runs/{id}/steps`; `ArtifactCard` links to
+  artifact download. Wired through `timeline/handlers/chatOrchestration.ts` + `CustomEntryBlock`.
+- **Events:** `intent.classified`, `missing_info_required`, orchestrator `run.*`, and
+  `artifact.created` (with `ui_kind`) added to both backend and frontend event catalogs.
 
 #### Phase 5.5 hotfix notes
 

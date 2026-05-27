@@ -1,5 +1,6 @@
 @import './themes.css';
 @import './tokens.css';
+@import './chat-cards.css';
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root {
