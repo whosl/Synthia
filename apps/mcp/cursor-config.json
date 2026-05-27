@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "synthia": {
+      "command": "synthia-mcp",
+      "env": {
+        "SYNTHIA_BASE_URL": "http://127.0.0.1:8484",
+        "SYNTHIA_MCP_TOKEN": "REPLACE_WITH_TOKEN_FROM_edagent_admin_create-user"
+      }
+    }
+  }
+}

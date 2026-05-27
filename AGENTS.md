@@ -30,8 +30,18 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–8 on this branch.
-  `pytest -k "not agent_smoke"` → 540+ passed after Phase 8.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–9 on this branch.
+  `pytest -k "not agent_smoke"` → 545+ passed after Phase 9.
+
+#### Phase 9 notes (MCP server)
+
+- **Thin HTTP client:** `mcp/client.py` is the only HTTP layer; tools call Synthia API.
+- **Entry:** `synthia-mcp` script → `mcp/server.py` (stdio default; `SYNTHIA_MCP_TRANSPORT=http` for SSE).
+- **Config:** `SYNTHIA_MCP_TOKEN`, `SYNTHIA_BASE_URL` (default `http://127.0.0.1:8484`).
+- **Tools:** 18 tools in `mcp/tools/` (projects, runs, reports, patches, diagnose).
+- **API mapping:** Runs via `POST /vivado/commands/flow`; monitor at `/monitor/runs/{id}`; stop at `/runs/{id}/stop`.
+- **Diagnose API:** `POST /api/v1/diagnose/log` (log_text | log_path | run_id).
+- **Install:** `pip install -e ".[mcp]"`. Docs: `docs/MCP_USAGE.md`, configs in `apps/mcp/`.
 
 #### Phase 8 notes (RBAC + audit)
 

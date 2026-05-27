@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "synthia": {
+      "command": "synthia-mcp",
+      "args": [],
+      "env": {
+        "SYNTHIA_BASE_URL": "http://127.0.0.1:8484",
+        "SYNTHIA_MCP_TOKEN": "REPLACE_WITH_TOKEN"
+      }
+    }
+  }
+}

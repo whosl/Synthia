@@ -9,6 +9,7 @@ from edagent_vivado.web.routes import (
     audit_routes,
     approvals,
     connectors,
+    diagnose_api,
     evolution,
     feedback,
     interactions,
@@ -56,6 +57,7 @@ for _mod in (
     me,
     rbac_admin,
     audit_routes,
+    diagnose_api,
 ):
     router.include_router(_mod.router)
 
