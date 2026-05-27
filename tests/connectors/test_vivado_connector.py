@@ -21,10 +21,11 @@ def test_register_lists_vivado_capabilities():
     conn = get_connector("vivado")
     assert conn is not None
     caps = conn.list_capabilities()
-    assert len(caps) == 18
+    assert len(caps) == 19
     ids = {c.capability_id for c in caps}
     assert "run_synthesis" in ids
     assert "report_drc" in ids
+    assert "program_device" in ids
 
 
 def test_detect_environment_mock_or_local():

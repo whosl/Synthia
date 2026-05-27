@@ -14,7 +14,15 @@ def build_server(config: McpConfig):
     from mcp.server.fastmcp import FastMCP
 
     from edagent_vivado.mcp.client import SynthiaClient
-    from edagent_vivado.mcp.tools import benchmarks, diagnose, patches, projects, reports, runs
+    from edagent_vivado.mcp.tools import (
+        benchmarks,
+        diagnose,
+        hardware,
+        patches,
+        projects,
+        reports,
+        runs,
+    )
 
     mcp = FastMCP(config.server_name)
     client = SynthiaClient(config.base_url, config.token, timeout=config.timeout)
@@ -24,6 +32,7 @@ def build_server(config: McpConfig):
     patches.register(mcp, client)
     diagnose.register(mcp, client)
     benchmarks.register(mcp, client)
+    hardware.register(mcp, client)
     return mcp
 
 

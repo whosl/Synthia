@@ -1,0 +1,10 @@
+.syn-hw__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.syn-mono-sm {
+  font-size: 0.85em;
+}

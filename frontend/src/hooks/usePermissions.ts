@@ -32,6 +32,10 @@ const ROLE_PERMS: Record<string, string[]> = {
     'benchmark.create',
     'benchmark.read',
     'benchmark.run',
+    'hardware.read',
+    'hardware.session.open',
+    'hardware.program.request',
+    'hardware.program.approve',
   ],
   fpga_engineer: [
     'project.read',
@@ -44,6 +48,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'benchmark.create',
     'benchmark.read',
     'benchmark.run',
+    'hardware.read',
+    'hardware.session.open',
+    'hardware.program.request',
   ],
   reviewer: [
     'project.read',
@@ -52,9 +59,17 @@ const ROLE_PERMS: Record<string, string[]> = {
     'patch.reject',
     'audit.read',
     'benchmark.read',
+    'hardware.read',
+    'hardware.program.approve',
   ],
-  viewer: ['project.read', 'run.read', 'benchmark.read'],
-  tool_admin: ['connector.write', 'tool_target.write'],
+  viewer: ['project.read', 'run.read', 'benchmark.read', 'hardware.read'],
+  tool_admin: [
+    'connector.write',
+    'tool_target.write',
+    'hardware.read',
+    'hardware.detect',
+    'hardware.admin',
+  ],
 }
 
 let _cached: Me | null = null

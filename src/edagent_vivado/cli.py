@@ -812,6 +812,87 @@ def cli_bench_list(project: str = typer.Option("", "--project")):
         )
 
 
+hw_app = typer.Typer(help="Hardware target management (Phase 12)")
+app.add_typer(hw_app, name="hw")
+
+
+@hw_app.command("detect")
+def cli_hw_detect(host: str = typer.Option("", "--host")):
+    """Detect connected FPGA targets."""
+    from edagent_vivado.hardware.detector import detect_targets, sync_detected_to_registry
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    detected = detect_targets()
+    if not detected:
+        console.print("No targets detected.")
+        return
+    stats = sync_detected_to_registry(detected, host=host)
+    console.print(f"Detected {len(detected)} device(s)")
+    for d in detected:
+        console.print(f"  {d.part} on {d.target} ({d.device})")
+    console.print(
+        f"Stats: created={stats['created']}, seen={stats['seen']}, offline={stats['offline']}"
+    )
+
+
+@hw_app.command("list")
+def cli_hw_list(state: str = typer.Option("", "--state")):
+    from edagent_vivado.hardware.target_registry import target_list
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    for t in target_list(state=state):
+        console.print(
+            f"  {t['id'][:8]}  {t['name']:30s} {t['part']:20s} "
+            f"state={t['state']:10s} host={t['host'] or '—'}"
+        )
+
+
+@hw_app.command("program")
+def cli_hw_program(
+    bit_path: Path = typer.Argument(...),
+    target_id: str = typer.Option(..., "--target", "-t"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Bypass confirmation"),
+):
+    """Program a target with a local .bit (admin CLI; bypasses session/approval)."""
+    if not yes:
+        console.print(f"⚠ This will flash {bit_path} to target {target_id}")
+        if not typer.confirm("Proceed?"):
+            raise typer.Abort()
+
+    from edagent_vivado.hardware.models import ProgramJob, ProgramJobState
+    from edagent_vivado.hardware.programmer import program_target, sha256_file
+    from edagent_vivado.hardware.target_registry import target_get
+    from edagent_vivado.repository.db import init_db
+
+    init_db()
+    target = target_get(target_id)
+    if not target:
+        console.print("target not found")
+        raise typer.Exit(1)
+
+    job = ProgramJob.new(
+        hardware_session_id="cli-admin",
+        target_id=target_id,
+        bitstream_artifact_id="local-cli",
+        bitstream_sha256=sha256_file(bit_path),
+        bitstream_path=str(bit_path),
+        approval_id="cli-bypass",
+        requested_by="cli-admin",
+    )
+    job.state = ProgramJobState.APPROVED.value
+
+    result = program_target(job, vivado_path="mock" if yes else "vivado")
+    if result.success:
+        console.print(f"✓ Programmed in {result.elapsed_ms / 1000:.1f}s")
+        console.print(f"log: {result.log_path}")
+    else:
+        console.print(f"✗ Failed: {result.error}")
+        console.print(f"log: {result.log_path}")
+        raise typer.Exit(1)
+
+
 admin_app = typer.Typer(help="RBAC user administration (Phase 8)")
 app.add_typer(admin_app, name="admin")
 

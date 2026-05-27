@@ -299,3 +299,42 @@ def run_full_flow(connector: VivadoConnector, req: ToolRunRequest) -> ToolRunRes
         error="run_full_flow is deprecated — use RunOrchestrator via POST /api/v1/vivado/commands/flow",
         edagent_outcome="execution_failed",
     )
+
+
+def execute_program_device(connector: VivadoConnector, req: ToolRunRequest) -> ToolRunResult:
+    """Create a ProgramJob; strong approval required before flashing."""
+    del connector
+    from edagent_vivado.hardware.session import request_program
+
+    hw_sess = str(req.inputs.get("hardware_session_id") or "")
+    bit_id = str(req.inputs.get("bitstream_artifact_id") or "")
+    if not hw_sess or not bit_id:
+        return ToolRunResult(
+            request_id=req.request_id,
+            success=False,
+            exit_code=1,
+            error="hardware_session_id and bitstream_artifact_id required",
+            edagent_outcome="execution_failed",
+        )
+    try:
+        result = request_program(
+            hardware_session_id=hw_sess,
+            bitstream_artifact_id=bit_id,
+            requested_by="connector",
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return ToolRunResult(
+            request_id=req.request_id,
+            success=False,
+            exit_code=1,
+            error=str(exc),
+            edagent_outcome="execution_failed",
+        )
+    job = result["job"]
+    return ToolRunResult(
+        request_id=req.request_id,
+        success=True,
+        exit_code=0,
+        edagent_outcome="execution_succeeded",
+        target_id=job["id"],
+    )

@@ -201,4 +201,18 @@ VIVADO_CAPABILITIES: list[ToolCapability] = [
         requires_approval=True,
         produces_reports=True,
     ),
+    ToolCapability(
+        connector_id="vivado",
+        capability_id="program_device",
+        display_name="Program FPGA Device (.bit)",
+        stage="hardware",
+        input_schema={
+            "hardware_session_id": "string",
+            "bitstream_artifact_id": "string",
+        },
+        outputs=["job_id", "success"],
+        risk_level="high",
+        requires_approval=True,
+        produces_reports=False,
+    ),
 ]

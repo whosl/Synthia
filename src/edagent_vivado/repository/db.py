@@ -712,6 +712,55 @@ CREATE TABLE IF NOT EXISTS benchmark_cases (
 
 CREATE INDEX IF NOT EXISTS idx_bench_cases_suite ON benchmark_cases(suite_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_bench_cases_run ON benchmark_cases(run_id);
+
+CREATE TABLE IF NOT EXISTS hardware_targets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    serial TEXT NOT NULL,
+    part TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    host TEXT DEFAULT '',
+    xvc_url TEXT DEFAULT '',
+    capabilities_json TEXT DEFAULT '{}',
+    state TEXT DEFAULT 'available',
+    last_seen_at BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hw_targets_state ON hardware_targets(state);
+CREATE INDEX IF NOT EXISTS idx_hw_targets_host ON hardware_targets(host);
+
+CREATE TABLE IF NOT EXISTS hardware_sessions (
+    id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    project_id TEXT DEFAULT '',
+    opened_by TEXT NOT NULL,
+    state TEXT DEFAULT 'open',
+    metadata_json TEXT DEFAULT '{}',
+    opened_at BIGINT NOT NULL,
+    closed_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_hw_sess_target ON hardware_sessions(target_id);
+
+CREATE TABLE IF NOT EXISTS program_jobs (
+    id TEXT PRIMARY KEY,
+    hardware_session_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    bitstream_artifact_id TEXT NOT NULL,
+    bitstream_sha256 TEXT NOT NULL,
+    bitstream_path TEXT DEFAULT '',
+    approval_id TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    approved_by TEXT DEFAULT '',
+    state TEXT DEFAULT 'pending_approval',
+    error_message TEXT DEFAULT '',
+    log_artifact_id TEXT DEFAULT '',
+    started_at BIGINT,
+    completed_at BIGINT,
+    created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pjobs_target ON program_jobs(target_id);
+CREATE INDEX IF NOT EXISTS idx_pjobs_state ON program_jobs(state);
 """
 
 
@@ -852,6 +901,10 @@ _BUILTIN_ROLES = [
             "benchmark.create",
             "benchmark.read",
             "benchmark.run",
+            "hardware.read",
+            "hardware.session.open",
+            "hardware.program.request",
+            "hardware.program.approve",
         ],
     ),
     (
@@ -872,6 +925,9 @@ _BUILTIN_ROLES = [
             "benchmark.create",
             "benchmark.read",
             "benchmark.run",
+            "hardware.read",
+            "hardware.session.open",
+            "hardware.program.request",
         ],
     ),
     (
@@ -889,6 +945,8 @@ _BUILTIN_ROLES = [
             "knowledge.read",
             "audit.read",
             "benchmark.read",
+            "hardware.read",
+            "hardware.program.approve",
         ],
     ),
     (
@@ -901,6 +959,7 @@ _BUILTIN_ROLES = [
             "artifact.read",
             "knowledge.read",
             "benchmark.read",
+            "hardware.read",
         ],
     ),
     (
@@ -913,6 +972,9 @@ _BUILTIN_ROLES = [
             "license.write",
             "tool_target.read",
             "tool_target.write",
+            "hardware.read",
+            "hardware.detect",
+            "hardware.admin",
         ],
     ),
 ]
@@ -1119,6 +1181,60 @@ def _migrate_benchmarks(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_hardware(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS hardware_targets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            serial TEXT NOT NULL,
+            part TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            host TEXT DEFAULT '',
+            xvc_url TEXT DEFAULT '',
+            capabilities_json TEXT DEFAULT '{}',
+            state TEXT DEFAULT 'available',
+            last_seen_at BIGINT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hw_targets_state ON hardware_targets(state);
+        CREATE INDEX IF NOT EXISTS idx_hw_targets_host ON hardware_targets(host);
+        CREATE TABLE IF NOT EXISTS hardware_sessions (
+            id TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            project_id TEXT DEFAULT '',
+            opened_by TEXT NOT NULL,
+            state TEXT DEFAULT 'open',
+            metadata_json TEXT DEFAULT '{}',
+            opened_at BIGINT NOT NULL,
+            closed_at BIGINT
+        );
+        CREATE INDEX IF NOT EXISTS idx_hw_sess_target ON hardware_sessions(target_id);
+        CREATE TABLE IF NOT EXISTS program_jobs (
+            id TEXT PRIMARY KEY,
+            hardware_session_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            bitstream_artifact_id TEXT NOT NULL,
+            bitstream_sha256 TEXT NOT NULL,
+            bitstream_path TEXT DEFAULT '',
+            approval_id TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            approved_by TEXT DEFAULT '',
+            state TEXT DEFAULT 'pending_approval',
+            error_message TEXT DEFAULT '',
+            log_artifact_id TEXT DEFAULT '',
+            started_at BIGINT,
+            completed_at BIGINT,
+            created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pjobs_target ON program_jobs(target_id);
+        CREATE INDEX IF NOT EXISTS idx_pjobs_state ON program_jobs(state);
+        """
+    )
+    db.commit()
+
+
 def init_db() -> None:
     db = get_db()
     db.executescript(SCHEMA)
@@ -1128,6 +1244,7 @@ def init_db() -> None:
     _migrate_patch_audits(db)
     _migrate_rbac_tables(db)
     _migrate_benchmarks(db)
+    _migrate_hardware(db)
     _seed_builtin_roles(db)
     _bootstrap_admin(db)
 

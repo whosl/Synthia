@@ -161,6 +161,8 @@ class VivadoConnector(BaseConnector):
                 return vivado_executor.collect_bitstream(self, req)
             if cap == "run_full_flow":
                 return vivado_executor.run_full_flow(self, req)
+            if cap == "program_device":
+                return vivado_executor.execute_program_device(self, req)
             if cap == "classify_vivado_error":
                 return vivado_executor.classify_error_from_log(self, req)
             if cap in REPORT_CAPS:

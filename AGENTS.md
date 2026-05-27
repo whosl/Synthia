@@ -30,8 +30,19 @@ EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL 
 
 ### Active development branch
 
-- **`product/synthia-workbench`** — Synthia workbench: Phase 0–11 on this branch.
-  `pytest -k "not agent_smoke"` → 560+ passed after Phase 11.
+- **`product/synthia-workbench`** — Synthia workbench: Phase 0–12 on this branch.
+  `pytest -k "not agent_smoke"` → 570+ passed after Phase 12.
+
+#### Phase 12 notes (v1.1 hardware programming)
+
+- **Tables:** `hardware_targets`, `hardware_sessions`, `program_jobs`.
+- **Flow:** detect → open session → request program (sha256) → strong approval → Vivado HW Manager flash.
+- **Mock env:** `SYNTHIA_HW_MOCK_DETECT=1`, `SYNTHIA_HW_MOCK_PROGRAM=1` for CI without Vivado/cable.
+- **API:** `GET/POST /api/v1/hardware/targets`, `…/detect`, `…/sessions`, `…/program/*`, `…/bitstreams`.
+- **CLI:** `edagent hw detect|list|program`.
+- **MCP:** `synthia_list_hardware_targets`, `synthia_detect_hardware_targets`, etc.
+- **Frontend:** `/hardware`, `/hardware/:targetId/program` with `ProgramConfirmModal`.
+- **Capability:** `program_device` (high risk, requires approval; queues job only).
 
 #### Phase 11 notes (deployment + worker queue)
 

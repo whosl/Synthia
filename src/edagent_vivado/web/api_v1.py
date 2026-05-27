@@ -13,6 +13,7 @@ from edagent_vivado.web.routes import (
     diagnose_api,
     evolution,
     feedback,
+    hardware,
     interactions,
     kb,
     knowledge,
@@ -59,6 +60,7 @@ for _mod in (
     rbac_admin,
     audit_routes,
     benchmarks,
+    hardware,
     diagnose_api,
 ):
     router.include_router(_mod.router)
