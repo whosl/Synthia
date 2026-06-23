@@ -109,7 +109,11 @@ edagent ask examples/uart_demo/eda.yaml "为什么综合失败了？"
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | agent 模式必需 | — | Anthropic API key 或 GLM auth token |
 | `ANTHROPIC_BASE_URL` | 否 | — | 自定义 API base URL（用于 GLM 等兼容接口） |
+| `EDAGENT_MODEL_PROVIDER` | 否 | `anthropic` | 设为 `openai` 可使用 OpenAI-compatible 网关 |
+| `OPENAI_API_KEY` | OpenAI-compatible 模式必需 | — | BYOK 或网关 API key |
+| `OPENAI_BASE_URL` | 否 | — | OpenAI-compatible API base URL，例如 `https://api.example.com/v1` |
 | `EDAGENT_MODEL` | 否 | `claude-sonnet-4-20250514` | 模型名 |
+| `EDAGENT_REASONING_EFFORT` | 否 | — | OpenAI-compatible 推理强度：`low`、`medium`、`high`、`xhigh` |
 | `LANGSMITH_TRACING` | 否 | — | 设为 `true` 启用 LangSmith |
 | `LANGSMITH_API_KEY` | 否 | — | LangSmith API key |
 | `LANGSMITH_PROJECT` | 否 | — | LangSmith 项目名 |
@@ -517,6 +521,16 @@ export EDAGENT_MODEL=GLM-5-turbo
 ```
 
 已验证：GLM-5-turbo 可正常完成 agent smoke test（工具调用 + 日志分析）。
+
+也可以切换到 OpenAI-compatible BYOK 或网关：
+
+```bash
+export EDAGENT_MODEL_PROVIDER=openai
+export OPENAI_API_KEY=your-api-key
+export OPENAI_BASE_URL=https://api.example.com/v1
+export EDAGENT_MODEL=gpt-5.5
+export EDAGENT_REASONING_EFFORT=medium
+```
 
 ---
 

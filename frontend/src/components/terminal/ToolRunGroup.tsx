@@ -1,5 +1,6 @@
 import { ChevronRight } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   buildFailureCard,
   buildToolGroupSummary,
@@ -38,8 +39,10 @@ function ApprovalInGroup({
   sticky?: boolean
   onInteractionRespond?: ToolRunGroupProps['onInteractionRespond']
 }) {
+  const { t } = useTranslation()
   return (
     <div className={`tool-run-approval${sticky ? ' sticky-pending-approval' : ''}`}>
+      {sticky && <div className="tool-run-blocking-label">{t('approval.currentBlocking')}</div>}
       {renderTimelineEntry({ entry, onInteractionRespond })}
     </div>
   )
@@ -103,7 +106,6 @@ function ToolRunBatchSegment({
     if (isToolEntry(entry)) {
       const tool = memberToToolViewModel(entry)
       if (!tool) return false
-      if (primaryFailure?.toolId === tool.id) return false
       if (tool.state === 'running') return true
       return expanded
     }
@@ -147,14 +149,6 @@ function ToolRunBatchSegment({
           ) : null,
         )}
       </>
-    )
-  }
-
-  if (tools.length === 1 && primaryFailure && !members.some(isApprovalInteractionEntry)) {
-    return (
-      <div className="message-turn assistant timeline-entry kind-tool">
-        <ToolFailureCard model={primaryFailure} />
-      </div>
     )
   }
 

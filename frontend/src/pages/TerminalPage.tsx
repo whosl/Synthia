@@ -76,6 +76,7 @@ export default function TerminalPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] }),
         queryClient.invalidateQueries({ queryKey: ['session', sessionId] }),
+        queryClient.refetchQueries({ queryKey: ['turns', sessionId] }),
         queryClient.refetchQueries({ queryKey: ['events', sessionId] }),
       ])
     },
@@ -104,6 +105,7 @@ export default function TerminalPage() {
       body: JSON.stringify(response),
       headers: { 'Content-Type': 'application/json' },
     })
+    queryClient.invalidateQueries({ queryKey: ['turns', sessionId] })
     queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
     queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
     queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })

@@ -7,6 +7,7 @@ export type TimelineEntryKind =
   | 'reasoning'
   | 'tool'
   | 'interaction'
+  | 'error'
   | 'custom'
 
 export interface UserEntryPayload {
@@ -34,10 +35,17 @@ export interface ToolEntryPayload {
   state: 'running' | 'completed' | 'error' | 'rejected' | 'stopped'
   args?: string
   result?: string
+  error?: string
   startedAt?: number
   /** Wall-clock ms from tool.started (preferred for live timer). */
   startedAtMs?: number
   elapsedMs?: number
+}
+
+export interface ErrorEntryPayload {
+  title: string
+  message: string
+  source?: string
 }
 
 /** Extension UI block — wire: custom.* or payload.ui_kind */
@@ -72,6 +80,7 @@ export type TimelineEntryPayload =
   | ReasoningEntryPayload
   | ToolEntryPayload
   | InteractionEntryPayload
+  | ErrorEntryPayload
   | CustomEntryPayload
 
 export interface TimelineEntry {
@@ -83,6 +92,24 @@ export interface TimelineEntry {
   taskId: string | null
   createdAt?: number
   payload: TimelineEntryPayload
+}
+
+export type TranscriptTurnStatus = 'running' | 'done' | 'error' | 'stopped'
+
+export interface TranscriptTurn {
+  key: string
+  id: string
+  taskId: string | null
+  user: TimelineEntry
+  items: TimelineEntry[]
+  status: TranscriptTurnStatus
+  startedAt?: number
+  updatedAt?: number
+}
+
+export interface TranscriptOrphanGroup {
+  key: string
+  items: TimelineEntry[]
 }
 
 export interface AuditLogItem {

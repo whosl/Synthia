@@ -17,6 +17,7 @@ import {
   type UserEntryPayload,
 } from '../context'
 import type { CustomEntryPayload, SessionTimelineState, TimelineEntry } from '../types'
+import type { ErrorEntryPayload } from '../types'
 
 function auditOnly(ctx: TimelineHandlerContext, title?: string, detail?: string, auditState?: string): SessionTimelineState {
   const { state, event, payload } = ctx
@@ -28,6 +29,88 @@ function auditOnly(ctx: TimelineHandlerContext, title?: string, detail?: string,
     auditState ?? String(payload.state || ''),
   )
   return state
+}
+
+function payloadText(payload: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.trim()) return value
+    if (value != null && typeof value !== 'object') return String(value)
+  }
+  return ''
+}
+
+function upsertErrorEntry(
+  state: SessionTimelineState,
+  event: TimelineHandlerContext['event'],
+  taskId: string | null,
+  payload: Record<string, unknown>,
+  title: string,
+): SessionTimelineState {
+  const message = payloadText(payload, ['error', 'message', 'detail', 'result'])
+  const runId = String(payload.run_id || event.run_id || '')
+  const scope = taskId ? `task:${taskId}` : runId ? `run:${runId}` : event.id
+  const key = `error:${scope}`
+  const errorPayload: ErrorEntryPayload = {
+    title,
+    message: message || title,
+    source: event.event_type,
+  }
+  if (state.indexByKey[key] !== undefined) {
+    return updateEntry(state, key, (e) => ({
+      ...e,
+      payload: errorPayload,
+    }))
+  }
+  return insertEntry(state, {
+    key,
+    id: key,
+    seq: event.seq || state.lastSeq,
+    kind: 'error',
+    taskId,
+    createdAt: event.created_at,
+    payload: errorPayload,
+  })
+}
+
+function closeRunningToolsForTask(
+  state: SessionTimelineState,
+  taskId: string | null,
+  result: string,
+): SessionTimelineState {
+  const entries = state.entries.map((entry) => {
+    if (entry.kind !== 'tool') return entry
+    if (taskId && entry.taskId !== taskId) return entry
+    const payload = entry.payload as ToolEntryPayload
+    if (payload.state !== 'running') return entry
+    return {
+      ...entry,
+      payload: {
+        ...payload,
+        state: 'error',
+        error: result,
+        result: payload.result || result,
+      } satisfies ToolEntryPayload,
+    }
+  })
+  const indexByKey: Record<string, number> = {}
+  entries.forEach((entry, index) => { indexByKey[entry.key] = index })
+  const tools = state.tools.map((tool) => {
+    if (tool.state !== 'running') return tool
+    const matchingEntry = entries.find((entry) => {
+      if (entry.kind !== 'tool') return false
+      if (taskId && entry.taskId !== taskId) return false
+      return (entry.payload as ToolEntryPayload).toolcallId === tool.toolcallId
+    })
+    if (!matchingEntry) return tool
+    return {
+      ...tool,
+      state: 'error',
+      error: result,
+      result: tool.result || result,
+    } satisfies ToolEntryPayload
+  })
+  return { ...state, entries, indexByKey, tools }
 }
 
 export function handleMessageUserCreated(ctx: TimelineHandlerContext): SessionTimelineState {
@@ -93,11 +176,21 @@ export function handleTaskDone(ctx: TimelineHandlerContext): SessionTimelineStat
 }
 
 export function handleTaskError(ctx: TimelineHandlerContext): SessionTimelineState {
-  const { event, payload, state: next } = ctx
+  const { event, payload, taskId, state: next } = ctx
   next.taskState = 'error'
   next.activeTaskId = null
-  pushAudit(next, event, 'Task failed', String(payload.error || ''), 'error')
-  return next
+  let state = closeRunningToolsForTask(next, taskId, payloadText(payload, ['error', 'message']) || 'Task failed')
+  state = upsertErrorEntry(state, event, taskId, payload, 'Task failed')
+  pushAudit(state, event, 'Task failed', String(payload.error || ''), 'error')
+  return state
+}
+
+export function handleRunError(ctx: TimelineHandlerContext): SessionTimelineState {
+  const { event, payload, taskId, state: next } = ctx
+  let state = closeRunningToolsForTask(next, taskId, payloadText(payload, ['error', 'message']) || 'Run failed')
+  state = upsertErrorEntry(state, event, taskId, payload, 'Run failed')
+  pushAudit(state, event, 'Run failed', String(payload.error || ''), 'error')
+  return state
 }
 
 export function handleAssistantStreamOpened(ctx: TimelineHandlerContext): SessionTimelineState {
@@ -365,9 +458,58 @@ export function handleToolCompleted(ctx: TimelineHandlerContext): SessionTimelin
 }
 
 export function handleToolError(ctx: TimelineHandlerContext): SessionTimelineState {
-  const { event, payload, state: next } = ctx
-  pushAudit(next, event, `Tool error: ${String(payload.tool_name || 'tool')}`, String(payload.error || ''), 'error')
-  return next
+  const { event, payload, taskId, state: next } = ctx
+  const toolcallId = String(payload.toolcall_id || payload.call_id || payload.id || '')
+  const name = String(payload.tool_name || payload.name || 'tool')
+  const error = payloadText(payload, ['error', 'message', 'result']) || 'Tool failed'
+  const result = payloadText(payload, ['result', 'output']) || error
+  const key = toolcallId ? `tool:${toolcallId}` : null
+  const patch = (p: ToolEntryPayload): ToolEntryPayload => ({
+    ...p,
+    state: 'error',
+    error,
+    result: p.result || result,
+    elapsedMs: payload.elapsed_ms != null ? Number(payload.elapsed_ms) : p.elapsedMs,
+  })
+  let state = next
+  if (key && state.indexByKey[key] !== undefined) {
+    state = updateEntry(state, key, (e) => ({ ...e, payload: patch(e.payload as ToolEntryPayload) }))
+    const updated = state.entries[state.indexByKey[key]].payload as ToolEntryPayload
+    state.tools = upsertToolList(state.tools, updated)
+  } else if (key) {
+    const startedAtMs = toolStartedAtMs(payload, event)
+    const toolPayload: ToolEntryPayload = {
+      toolcallId,
+      name,
+      state: 'error',
+      error,
+      result,
+      startedAt: startedAtMs != null ? Math.floor(startedAtMs / 1000) : event.created_at,
+      startedAtMs,
+      elapsedMs: payload.elapsed_ms != null ? Number(payload.elapsed_ms) : undefined,
+    }
+    state = insertEntry(state, {
+      key,
+      id: key,
+      seq: event.seq || state.lastSeq,
+      kind: 'tool',
+      taskId,
+      createdAt: event.created_at,
+      payload: toolPayload,
+    })
+    state.tools = upsertToolList(state.tools, toolPayload)
+  } else {
+    state.entries = state.entries.map((e) => {
+      if (e.kind !== 'tool') return e
+      const p = e.payload as ToolEntryPayload
+      if (p.name !== name || p.state !== 'running') return e
+      const updated = patch(p)
+      state.tools = upsertToolList(state.tools, updated)
+      return { ...e, payload: updated }
+    })
+  }
+  pushAudit(state, event, `Tool error: ${name}`, error, 'error')
+  return state
 }
 
 export function handleInteractionRequested(ctx: TimelineHandlerContext): SessionTimelineState {

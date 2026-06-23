@@ -1,7 +1,7 @@
 /**
  * Wire event catalog — keep in sync with src/edagent_vivado/events/catalog.py
  */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 export const LIFECYCLE_EVENTS = [
   'session.created',
@@ -104,6 +104,7 @@ export const CANONICAL_BY_WIRE_TYPE: Record<string, string> = {
   'tool.delta': 'TOOL_CALL_ARGS',
   'tool.completed': 'TOOL_CALL_END',
   'tool.error': 'RUN_ERROR',
+  'run.error': 'RUN_ERROR',
   'interaction.requested': 'TOOL_CALL_START',
   'interaction.approved': 'TOOL_CALL_RESULT',
   'interaction.rejected': 'TOOL_CALL_RESULT',
@@ -127,5 +128,6 @@ export const CHAT_ENTRY_KINDS = [
   'reasoning',
   'tool',
   'interaction',
+  'error',
   'custom',
 ] as const

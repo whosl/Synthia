@@ -1,4 +1,4 @@
-import { User } from 'lucide-react'
+import { AlertCircle, User } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Markdown } from '../../components/common/Markdown'
 import { ApprovalBlock } from '../../components/terminal/ApprovalBlock'
@@ -11,6 +11,7 @@ import { buildApprovalResponse } from '../../lib/approvalResponse'
 import type {
   AssistantTextPayload,
   CustomEntryPayload,
+  ErrorEntryPayload,
   InteractionEntryPayload,
   ReasoningEntryPayload,
   TimelineEntryKind,
@@ -75,12 +76,31 @@ function ToolRenderer({ entry }: TimelineRenderContext) {
         state: p.state,
         args: p.args,
         result: p.result,
+        error: p.error,
         startedAt: p.startedAt ?? entry.createdAt,
         startedAtMs: p.startedAtMs ?? createdMs,
         elapsedMs: p.elapsedMs,
         completedAtMs: p.state !== 'running' ? createdMs : undefined,
       }}
     />
+  )
+}
+
+function ErrorRenderer({ entry }: TimelineRenderContext) {
+  const { t } = useTranslation()
+  const p = entry.payload as ErrorEntryPayload
+  return (
+    <div className="trace-block error-block">
+      <div className="trace-header">
+        <AlertCircle size={14} className="error-status-icon" />
+        <span>{p.title || t('terminal.error')}</span>
+        <span className="spacer" />
+        {p.source && <span className="tool-state">{p.source}</span>}
+      </div>
+      <div className="trace-body error-body">
+        {p.message || t('terminal.errorFallback')}
+      </div>
+    </div>
   )
 }
 
@@ -126,6 +146,7 @@ const builtinRenderers: Record<TimelineEntryKind, TimelineEntryRenderer> = {
   reasoning: ReasoningRenderer,
   tool: ToolRenderer,
   interaction: InteractionRenderer,
+  error: ErrorRenderer,
   custom: CustomRenderer,
 }
 

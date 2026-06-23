@@ -6,6 +6,7 @@ import {
   ensureEmptyTurnPlaceholders,
   getChatEntries,
   mergeAssistantMessagesFromDb,
+  rebuildTimelineFromTurns,
   rebuildTimelineFromSources,
   removeOptimisticUserEntries,
 } from './reducer'
@@ -223,5 +224,163 @@ describe('timeline reducer', () => {
       .filter((e) => e.kind === 'assistant_text')
       .map((e) => (e.payload as { text: string }).text)
     expect(texts).toEqual(['A', 'B'])
+  })
+
+  it('rebuilds chat entries from turns API rows as the primary transcript source', () => {
+    const state = rebuildTimelineFromTurns([
+      {
+        id: 'turn-1',
+        session_id: 's1',
+        task_id: 'task-a',
+        user_message_id: 'u1',
+        status: 'done',
+        started_at: 1,
+        updated_at: 5,
+        items: [
+          {
+            id: 'ti-user',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'user:u1',
+            item_type: 'user',
+            status: 'completed',
+            seq: 1,
+            created_at: 1,
+            payload: { text: 'run', message_id: 'u1' },
+          },
+          {
+            id: 'ti-assistant',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'assistant:task-a-s0',
+            item_type: 'assistant_text',
+            status: 'completed',
+            seq: 2,
+            created_at: 2,
+            stream_id: 'task-a-s0',
+            payload: { stream_id: 'task-a-s0', text: 'done', partial: false },
+          },
+          {
+            id: 'ti-tool',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'tool:tc1',
+            item_type: 'tool',
+            status: 'completed',
+            seq: 3,
+            created_at: 3,
+            tool_call_id: 'tc1',
+            payload: { toolcall_id: 'tc1', tool_name: 'grep_tool', state: 'completed', result: 'ok' },
+          },
+        ],
+      },
+    ], [], null, 99)
+
+    const chat = getChatEntries(state)
+    expect(chat.map((entry) => entry.key)).toEqual(['user:u1', 'assistant:task-a-s0', 'tool:tc1'])
+    expect(chat.every((entry) => entry.taskId === 'task-a')).toBe(true)
+    expect(state.lastSeq).toBe(99)
+    expect(state.tools).toHaveLength(1)
+    expect(state.tools[0].name).toBe('grep_tool')
+  })
+
+  it('merges pending interactions onto turns API transcript rows', () => {
+    const state = rebuildTimelineFromTurns([
+      {
+        id: 'turn-1',
+        session_id: 's1',
+        task_id: 'task-a',
+        user_message_id: 'u1',
+        status: 'running',
+        started_at: 1,
+        updated_at: 1,
+        items: [
+          {
+            id: 'ti-user',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'user:u1',
+            item_type: 'user',
+            status: 'completed',
+            seq: 1,
+            created_at: 1,
+            payload_json: '{"text":"approve?","message_id":"u1"}',
+          },
+        ],
+      },
+    ], [{
+      id: 'ia1',
+      task_id: 'task-a',
+      interaction_type: 'approval',
+      title: 'Run Vivado',
+      message: 'Proceed',
+      created_at: 2,
+    }])
+
+    const pending = getChatEntries(state).find((entry) => entry.key === 'interaction:ia1')
+    expect(pending?.kind).toBe('interaction')
+    expect(pending?.taskId).toBe('task-a')
+    expect((pending?.payload as { status?: string }).status).toBe('pending')
+  })
+
+  it('filters completed empty assistant stream rows from turns unless explicitly marked empty', () => {
+    const state = rebuildTimelineFromTurns([
+      {
+        id: 'turn-1',
+        session_id: 's1',
+        task_id: 'task-a',
+        user_message_id: 'u1',
+        status: 'done',
+        started_at: 1,
+        updated_at: 4,
+        items: [
+          {
+            id: 'ti-user',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'user:u1',
+            item_type: 'user',
+            status: 'completed',
+            seq: 1,
+            created_at: 1,
+            payload: { text: 'run', message_id: 'u1' },
+          },
+          {
+            id: 'ti-empty',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'assistant:empty-stream',
+            item_type: 'assistant_text',
+            status: 'completed',
+            seq: 2,
+            created_at: 2,
+            payload: { stream_id: 'empty-stream', text: '', partial: false, empty_turn: false },
+          },
+          {
+            id: 'ti-explicit-empty',
+            turn_id: 'turn-1',
+            session_id: 's1',
+            task_id: 'task-a',
+            item_key: 'assistant:explicit-empty',
+            item_type: 'assistant_text',
+            status: 'completed',
+            seq: 3,
+            created_at: 3,
+            payload: { stream_id: 'explicit-empty', text: '', partial: false, empty_turn: true },
+          },
+        ],
+      },
+    ])
+
+    expect(getChatEntries(state).map((entry) => entry.key)).toEqual([
+      'user:u1',
+      'assistant:explicit-empty',
+    ])
   })
 })

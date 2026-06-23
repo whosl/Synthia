@@ -9,6 +9,8 @@ _SESSION_SCOPED_TABLES = (
     "tasks",
     "messages",
     "events",
+    "turns",
+    "turn_items",
     "runs",
     "tool_calls",
     "llm_usage",

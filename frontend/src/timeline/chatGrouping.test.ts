@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildTranscriptDisplayItems,
+  buildTranscriptTurns,
   collectPendingApprovalEntries,
   filterInlineChatEntries,
   groupChatEntries,
@@ -13,8 +15,9 @@ function entry(
   kind: TimelineEntry['kind'],
   payload: TimelineEntry['payload'],
   seq = 1,
+  taskId: string | null = null,
 ): TimelineEntry {
-  return { key, id: key, seq, kind, taskId: null, createdAt: seq, payload }
+  return { key, id: key, seq, kind, taskId, createdAt: seq, payload }
 }
 
 function displayKeys(items: ReturnType<typeof groupChatEntries>): string[] {
@@ -106,7 +109,7 @@ describe('groupChatEntries', () => {
     expect(items[1]?.type).toBe('tool_group')
   })
 
-  it('routes pending approvals to the dock instead of inline chat', () => {
+  it('keeps pending approvals inline while also collecting them for the dock', () => {
     const pending = entry('interaction:wait', 'interaction', {
       interaction_type: 'approval',
       title: 'Second',
@@ -124,12 +127,27 @@ describe('groupChatEntries', () => {
       pending,
     ]
     expect(collectPendingApprovalEntries(all)).toEqual([pending])
-    expect(filterInlineChatEntries(all).map((e) => e.key)).toEqual(['interaction:done', 'tool:t1'])
+    expect(filterInlineChatEntries(all).map((e) => e.key)).toEqual(['interaction:done', 'tool:t1', 'interaction:wait'])
 
     const items = groupChatEntries(all)
-    expect(items.some((i) => i.type === 'entry' && i.entry.key === pending.key)).toBe(false)
-    expect(items).toHaveLength(1)
+    expect(items.some((i) => i.type === 'entry' && i.entry.key === pending.key)).toBe(true)
+    expect(items).toHaveLength(2)
     expect(items[0]?.type).toBe('tool_group')
+  })
+
+  it('groups entries by task id under the owning user turn', () => {
+    const items = groupChatEntries([
+      entry('user:a', 'user', { text: 'first', messageId: 'a' }, 1, 'task-a'),
+      entry('user:b', 'user', { text: 'second', messageId: 'b' }, 2, 'task-b'),
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'grep_tool', state: 'completed' }, 3, 'task-a'),
+      entry('text:b', 'assistant_text', { streamId: 'b', text: 'done' }, 4, 'task-b'),
+    ])
+    expect(displayKeys(items)).toEqual([
+      'user:a',
+      'tool-group:tool:a',
+      'user:b',
+      'text:b',
+    ])
   })
 
   it('shows assistant entries in timeline order while streaming', () => {
@@ -139,5 +157,115 @@ describe('groupChatEntries', () => {
       entry('text:partial', 'assistant_text', { streamId: 's1', text: 'Typing…', partial: true }, 3),
     ])
     expect(displayKeys(items)).toEqual(['user:1', 'tool-group:tool:t1', 'text:partial'])
+  })
+})
+
+describe('buildTranscriptTurns', () => {
+  function summarize(blocks: ReturnType<typeof buildTranscriptDisplayItems>): string[] {
+    return blocks.map((block) => {
+      if (block.type === 'orphan') {
+        return `orphan:${block.items.map((item) => item.key).join(',')}`
+      }
+      return `turn:${block.turn.user.key}:${block.items.map((item) => item.key).join(',')}`
+    })
+  }
+
+  it('projects interleaved task entries under their owning user turns', () => {
+    const blocks = buildTranscriptDisplayItems([
+      entry('user:a', 'user', { text: 'first', messageId: 'a' }, 1, 'task-a'),
+      entry('user:b', 'user', { text: 'second', messageId: 'b' }, 2, 'task-b'),
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'grep_tool', state: 'completed' }, 3, 'task-a'),
+      entry('text:b', 'assistant_text', { streamId: 'b', text: 'done' }, 4, 'task-b'),
+    ])
+    expect(summarize(blocks)).toEqual([
+      'turn:user:a:tool-group:tool:a',
+      'turn:user:b:text:b',
+    ])
+  })
+
+  it('keeps task entries that arrive before the owning user in that turn', () => {
+    const blocks = buildTranscriptDisplayItems([
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'grep_tool', state: 'completed' }, 1, 'task-a'),
+      entry('user:a', 'user', { text: 'first', messageId: 'a' }, 2, 'task-a'),
+    ])
+    expect(summarize(blocks)).toEqual(['turn:user:a:tool-group:tool:a'])
+  })
+
+  it('emits orphan groups for task entries without an owning user', () => {
+    const blocks = buildTranscriptDisplayItems([
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'grep_tool', state: 'completed' }, 1, 'task-a'),
+      entry('text:x', 'assistant_text', { streamId: 'x', text: 'orphan' }, 2, null),
+    ])
+    expect(summarize(blocks)).toEqual(['orphan:tool-group:tool:a,text:x'])
+  })
+
+  it('keeps pending approvals inline and resolved approvals grouped with following tools', () => {
+    const pending = entry('interaction:pending', 'interaction', {
+      interaction_type: 'approval',
+      title: 'Pending',
+      message: '',
+      status: 'pending',
+    }, 2, 'task-a')
+    const blocks = buildTranscriptDisplayItems([
+      entry('user:a', 'user', { text: 'go', messageId: 'a' }, 1, 'task-a'),
+      pending,
+      entry('interaction:approved', 'interaction', {
+        interaction_type: 'approval',
+        title: 'Approved',
+        message: '',
+        status: 'approved',
+      }, 3, 'task-a'),
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'run_tool', state: 'completed' }, 4, 'task-a'),
+    ])
+    expect(collectPendingApprovalEntries([pending])).toEqual([pending])
+    expect(summarize(blocks)).toEqual([
+      'turn:user:a:interaction:pending,tool-group:interaction:approved',
+    ])
+  })
+
+  it('derives turn status from active, error, and stopped items', () => {
+    const active = buildTranscriptTurns([
+      entry('user:a', 'user', { text: 'go', messageId: 'a' }, 1, 'task-a'),
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'run_tool', state: 'running' }, 2, 'task-a'),
+    ], 'task-a', 'running')
+    expect(active[0]).toMatchObject({ status: 'running' })
+
+    const failed = buildTranscriptTurns([
+      entry('user:a', 'user', { text: 'go', messageId: 'a' }, 1, 'task-a'),
+      entry('error:a', 'error', { title: 'Task failed', message: 'boom' }, 2, 'task-a'),
+    ])
+    expect(failed[0]).toMatchObject({ status: 'error' })
+
+    const stopped = buildTranscriptTurns([
+      entry('user:a', 'user', { text: 'go', messageId: 'a' }, 1, 'task-a'),
+      entry('tool:a', 'tool', { toolcallId: 'a', name: 'run_tool', state: 'stopped' }, 2, 'task-a'),
+    ])
+    expect(stopped[0]).toMatchObject({ status: 'stopped' })
+  })
+
+  it('suppresses duplicate run.error rows when a failed tool already provides the primary failure', () => {
+    const blocks = buildTranscriptDisplayItems([
+      entry('user:a', 'user', { text: 'go', messageId: 'a' }, 1, 'task-a'),
+      entry('tool:a', 'tool', {
+        toolcallId: 'a',
+        name: 'run_vivado_synth_tool',
+        state: 'error',
+        error: 'failed',
+      }, 2, 'task-a'),
+      entry('error:run', 'error', {
+        title: 'Run failed',
+        message: 'failed',
+        source: 'run.error',
+      }, 3, 'task-a'),
+      entry('error:task', 'error', {
+        title: 'Task failed',
+        message: 'task failed',
+        source: 'task.error',
+      }, 4, 'task-a'),
+    ])
+
+    expect(summarize(blocks)).toEqual([
+      'turn:user:a:tool-group:tool:a,error:task',
+    ])
   })
 })

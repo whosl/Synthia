@@ -165,6 +165,7 @@ CANONICAL_BY_WIRE_TYPE: dict[str, str] = {
     "tool.delta": "TOOL_CALL_ARGS",
     "tool.completed": "TOOL_CALL_END",
     "tool.error": "RUN_ERROR",
+    "run.error": "RUN_ERROR",
     "interaction.requested": "TOOL_CALL_START",
     "interaction.approved": "TOOL_CALL_RESULT",
     "interaction.rejected": "TOOL_CALL_RESULT",

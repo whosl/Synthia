@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchEventProtocol, listEvents } from '../api/events'
 import { setSubscribedWireEventTypes } from '../lib/sse'
 import { listMessages } from '../api/messages'
+import { listTurns } from '../api/turns'
 import { request } from '../api/client'
 import type { SessionEvent } from '../api/types'
 import { getActiveTask, startTask } from '../api/tasks'
@@ -12,6 +13,7 @@ import {
   applyOptimisticUser,
   applyTimelineEvent,
   removeOptimisticUserEntries,
+  rebuildTimelineFromTurns,
   rebuildTimelineFromSources,
 } from './reducer'
 import type { SessionTimelineState } from './types'
@@ -27,15 +29,20 @@ export function useSessionTimeline(sessionId: string) {
   const streamRef = useRef<SessionEventStream | null>(null)
   const sendingRef = useRef(false)
 
-  const messagesQ = useQuery({
-    queryKey: ['messages', sessionId],
-    queryFn: () => listMessages(sessionId, 2000),
+  const turnsQ = useQuery({
+    queryKey: ['turns', sessionId],
+    queryFn: () => listTurns(sessionId, 200),
     enabled: Boolean(sessionId),
   })
   const eventsQ = useQuery({
     queryKey: ['events', sessionId],
     queryFn: () => listEvents(sessionId, 0, 5000, true),
     enabled: Boolean(sessionId),
+  })
+  const messagesQ = useQuery({
+    queryKey: ['messages', sessionId],
+    queryFn: () => listMessages(sessionId, 2000),
+    enabled: Boolean(sessionId) && turnsQ.isError,
   })
   const activeQ = useQuery({
     queryKey: ['active-task', sessionId],
@@ -55,6 +62,10 @@ export function useSessionTimeline(sessionId: string) {
 
   const activeTask = activeQ.data?.task
   const taskActive = activeTask?.state === 'running' || activeTask?.state === 'stopping'
+  const baselineReady = Boolean(
+    sessionId
+    && (turnsQ.data || (turnsQ.isError && eventsQ.data && messagesQ.data)),
+  )
 
   useEffect(() => {
     if (taskActive) sendingRef.current = false
@@ -66,21 +77,45 @@ export function useSessionTimeline(sessionId: string) {
   }, [sessionId])
 
   useEffect(() => {
-    if (!messagesQ.data || !eventsQ.data || !sessionId) return
+    if (!sessionId) return
     const pending = pendingInteractionsQ.data?.interactions || []
-    const rebuilt = rebuildTimelineFromSources(
-      eventsQ.data.events,
-      messagesQ.data.messages,
-      pending,
-      activeTask,
-    )
+    const auditState = eventsQ.data
+      ? rebuildTimelineFromSources(eventsQ.data.events, [], [], activeTask)
+      : null
+    let rebuilt = turnsQ.data
+      ? rebuildTimelineFromTurns(turnsQ.data.turns, pending, activeTask, turnsQ.data.lastEventSeq)
+      : null
+    if (!rebuilt && turnsQ.isError && eventsQ.data && messagesQ.data) {
+      rebuilt = rebuildTimelineFromSources(
+        eventsQ.data.events,
+        messagesQ.data.messages,
+        pending,
+        activeTask,
+      )
+    }
+    if (!rebuilt) return
+    rebuilt = {
+      ...rebuilt,
+      auditLog: auditState?.auditLog ?? rebuilt.auditLog,
+      lastSeq: Math.max(rebuilt.lastSeq, auditState?.lastSeq ?? 0),
+    }
     setTimeline((prev) => {
       if (!taskActive && !sendingRef.current) return rebuilt
       if (prev.entries.length === 0) return rebuilt
       return prev.lastSeq >= rebuilt.lastSeq ? prev : rebuilt
     })
     if (rebuilt.lastSeq > 0) setLastSeq(sessionId, rebuilt.lastSeq)
-  }, [messagesQ.data, eventsQ.data, pendingInteractionsQ.data, sessionId, activeTask, taskActive, setLastSeq])
+  }, [
+    turnsQ.data,
+    turnsQ.isError,
+    messagesQ.data,
+    eventsQ.data,
+    pendingInteractionsQ.data,
+    sessionId,
+    activeTask,
+    taskActive,
+    setLastSeq,
+  ])
 
   const onStreamEvent = useCallback((event: SessionEvent) => {
     setTimeline((prev) =>
@@ -103,6 +138,7 @@ export function useSessionTimeline(sessionId: string) {
         sendingRef.current = false
       }
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['turns', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['events', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
@@ -117,7 +153,7 @@ export function useSessionTimeline(sessionId: string) {
   }, [])
 
   useEffect(() => {
-    if (!sessionId) return
+    if (!sessionId || !baselineReady) return
     streamRef.current?.disconnect()
     const stream = new SessionEventStream(sessionId, getLastSeq(sessionId), onStreamEvent, (status) =>
       setStreamStatus(sessionId, status),
@@ -125,7 +161,7 @@ export function useSessionTimeline(sessionId: string) {
     streamRef.current = stream
     stream.connect()
     return () => stream.disconnect()
-  }, [sessionId, getLastSeq, onStreamEvent, setStreamStatus])
+  }, [sessionId, baselineReady, getLastSeq, onStreamEvent, setStreamStatus])
 
   const start = useMutation({
     mutationFn: (question: string) => startTask(sessionId, { question }),
@@ -141,7 +177,7 @@ export function useSessionTimeline(sessionId: string) {
       queryClient.invalidateQueries({ queryKey: ['active-task', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
       await Promise.all([
-        queryClient.refetchQueries({ queryKey: ['messages', sessionId] }),
+        queryClient.refetchQueries({ queryKey: ['turns', sessionId] }),
         queryClient.refetchQueries({ queryKey: ['events', sessionId] }),
       ])
     },
@@ -154,6 +190,7 @@ export function useSessionTimeline(sessionId: string) {
     running: activeTask?.state === 'running',
     stopping: activeTask?.state === 'stopping',
     start,
+    turnsQ,
     messagesQ,
     eventsQ,
     activeQ,

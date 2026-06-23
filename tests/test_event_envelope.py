@@ -5,6 +5,7 @@ from edagent_vivado.events.catalog import PROTOCOL_VERSION, ALL_WIRE_EVENT_TYPES
 def test_to_canonical_custom():
     assert to_canonical_type("custom.metrics") == "CUSTOM"
     assert to_canonical_type("tool.started") == "TOOL_CALL_START"
+    assert to_canonical_type("run.error") == "RUN_ERROR"
 
 
 def test_enrich_wire_event():

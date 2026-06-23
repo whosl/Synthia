@@ -1,45 +1,31 @@
-# AGENTS.md
+# Repository Guidelines
 
-## Cursor Cloud specific instructions
+## Project Structure & Module Organization
 
-### Project Overview
+This repository contains a Python backend for the EdAgent Vivado RTL debugging agent plus a Vite/React frontend. Core Python code lives in `src/edagent_vivado/`, organized by domain: `agent/`, `harness/`, `parsers/`, `tools/`, `memory/`, `evolution/`, `connectors/`, and `web/`. Tests live in `tests/`, with connector tests in `tests/connectors/` and evaluation fixtures in `tests/eval_set/`. Frontend code is under `frontend/src/`; static assets are in `frontend/public/`. Example projects are in `examples/`, and config templates are in `configs/`.
 
-EdAgent-Vivado is a Python + React application for AI-powered Xilinx Vivado RTL debugging. It has:
-- **Python backend** (FastAPI + LangChain/LangGraph) at `src/edagent_vivado/`
-- **React frontend** (Vite + TypeScript) at `frontend/`
-- Pre-built frontend assets committed in `src/edagent_vivado/web/static/`
+## Build, Test, and Development Commands
 
-### Running Services
+- `python -m venv .venv && source .venv/bin/activate`: create and enter a local Python environment.
+- `pip install -e ".[dev,all]"`: install the backend, CLI, test tools, web extras, and optional SSH support.
+- `./scripts/dev.sh web`: start the backend web service, defaulting to port `8484`.
+- `./scripts/dev.sh frontend`: start the Vite frontend on `127.0.0.1:5173`.
+- `python -m pytest tests/ -v -k "not agent_smoke"`: run the standard test suite without LLM-backed smoke tests.
+- `python -m edagent_vivado.cli diagnose-log examples/uart_demo/logs/sample_vivado_error.log`: run a CLI smoke command.
+- `cd frontend && npm install && npm run build`: install and build the frontend.
 
-- **Backend:** `edagent web --port 8484` (serves both API and pre-built SPA)
-- **Frontend dev server:** `cd frontend && npm run dev` (Vite on port 5173, proxies API to 8484)
+## Coding Style & Naming Conventions
 
-### Key Caveats
+Use Python 3.11+ and the existing `src/` package layout. Keep modules focused by subsystem and prefer typed interfaces for public helpers. Python files and functions use `snake_case`; classes use `PascalCase`; tests follow `test_*.py` and `test_*` names. Frontend code uses TypeScript and React components in `PascalCase`. CI runs `ruff check src/ tests/` and `mypy src/edagent_vivado --ignore-missing-imports`; address reported issues even though these lint steps are currently non-blocking.
 
-1. **`.env` loads automatically with `override=True`** via `python-dotenv` in `src/edagent_vivado/__init__.py`. The committed `.env` sets `VIVADO_REMOTE_HOST` which causes SSH connection attempts to an unreachable host. When testing locally, either unset `VIVADO_REMOTE_HOST` or use `force_mock=True` in VivadoRunner.
+## Testing Guidelines
 
-2. **Mock mode:** Vivado is not installed in this environment. The system auto-detects this and falls back to mock mode when `VIVADO_REMOTE_HOST` is empty and no local `vivado` binary exists. Use `force_mock=True` or clear `VIVADO_REMOTE_HOST` env var to ensure mock mode.
+Add focused pytest coverage next to related behavior in `tests/`. Use fixtures or sample projects from `examples/` for Vivado flows. Avoid requiring a real Vivado installation unless the test is explicitly integration-oriented; mock Vivado paths support offline development. LLM-dependent tests belong in `tests/test_agent_smoke.py` or must be gated by variables such as `ANTHROPIC_API_KEY`.
 
-3. **`edagent` CLI:** Installed to `~/.local/bin/edagent`. Ensure `$HOME/.local/bin` is on PATH.
+## Commit & Pull Request Guidelines
 
-4. **Agent features require LLM API key:** The `edagent ask` and `edagent ask-multi` commands require `ANTHROPIC_API_KEY` to be set (copy `.env.example` to `.env` and fill in your key).
+Recent history uses Conventional Commit-style messages such as `feat(phase-6): ...`, `fix(chat): ...`, and `build(frontend): ...`. Follow that pattern with a concise scope. Pull requests should describe the user-visible change, list validation commands, link issues or spec sections, and include screenshots for UI changes. Note skipped tests or required external services.
 
-5. **Pre-existing test failures (3):** `test_e2e_cases.py::test_case6_remote_runner_check` (missing class export), `test_integration.py::test_vivado_runner_mock_synth_with_parse` and `test_vivado_runner_mock_synth_failure_parse` (tests expect keys not present in runner return dict). These are code issues, not env issues.
+## Security & Configuration Tips
 
-### Active development branch
-
-- **`cursor/phase-4-monitor`** — Monitor Dashboard (Phase 4): overview API, token/tool charts, retention cleanup dry-run. Prior work on `master` includes timeline chat + Vivado HITL (Phase 3/3A).
-
-### Standard Commands
-
-| Task | Command |
-|------|---------|
-| Install deps | `pip install -e ".[dev]"` |
-| Run tests | `python3 -m pytest -k "not agent_smoke"` |
-| Type check (Python) | `python3 -m mypy src/edagent_vivado --ignore-missing-imports` |
-| Type check (TS) | `cd frontend && npx tsc -b --noEmit` |
-| Build frontend | `cd frontend && npm run build` |
-| Start backend | `edagent web --port 8484` |
-| Start frontend dev | `cd frontend && npm run dev` |
-| Run diagnosis | `edagent diagnose-log examples/uart_demo/logs/sample_vivado_error.log` |
-| Run mock synth | Use Python API with `force_mock=True` or clear `VIVADO_REMOTE_HOST` |
+Copy `.env.example` to `.env` for local secrets; never commit `.env`, API keys, LangSmith tokens, or machine-specific Vivado paths. Use `VIVADO_PATH` only when automatic discovery is insufficient.

@@ -222,9 +222,24 @@
     "synthia": "Synthia",
     "partial": "部分完成",
     "emptyTurn": "工具执行已完成，无额外文字回复。",
+    "error": "错误",
+    "errorFallback": "任务失败，但没有返回更多细节。",
     "taskAlreadyRunning": "已有任务在运行，请等待完成或先停止当前任务。",
     "dismissToast": "关闭",
     "unknownEntry": "未知条目类型: {{kind}}"
+  },
+
+  "turn": {
+    "status": {
+      "running": "运行中",
+      "done": "已完成",
+      "error": "失败",
+      "stopped": "已停止"
+    },
+    "elapsed": "{{elapsed}}",
+    "tools": "{{count}} 个工具",
+    "failures": "{{count}} 个失败",
+    "blocked": "等待审批"
   },
 
   "composer": {
@@ -326,6 +341,7 @@
 
   "reasoning": {
     "title": "推理过程",
+    "working": "正在处理",
     "empty": "推理过程以事件流形式记录。"
   },
 
@@ -345,7 +361,8 @@
     "rejectAll": "全部拒绝",
     "rejectedHint": "已拒绝 — 可在对话中继续说明需求",
     "selectFile": "选择 {{path}}",
-    "dockRegion": "待审批操作"
+    "dockRegion": "待审批操作",
+    "currentBlocking": "当前阻塞项"
   },
 
   "inputRequest": {
@@ -513,6 +530,7 @@
     "loading": "加载中...",
     "candidates": "候选",
     "candidateCount": "{{n}} 个候选",
+    "candidateCount_plural": "{{n}} 个候选",
     "nothingToReview": "没有待审核内容",
     "noPendingCandidatesDetail": "没有待审核候选。运行一些任务或点击「运行生成器」来回填。",
     "noMatchingCandidates": "没有匹配此过滤器的候选。",
@@ -544,6 +562,7 @@
     "runnerEnabled": "运行器已启用",
     "runnerPlaceholder": "SPEC Section 22.6B -- 运行器尚未实现（SE-PR6 占位）",
     "caseCount": "{{count}} 个案例",
+    "caseCount_plural": "{{count}} 个案例",
     "evalSet": "评估集",
     "noteOptional": "备注（可选）",
     "notePlaceholder": "例如：发布前检查",
@@ -653,7 +672,36 @@
     "langEn": "English",
     "langZh": "中文",
     "runtimeConfig": "运行时配置",
-    "runtimeConfigDesc": "模型、Vivado 目标和运行时路径通过 .env 配置并在服务器启动时加载。完整配置架构见 SPEC.md §18。"
+    "runtimeConfigDesc": "模型、Vivado 目标和运行时路径通过 .env 配置并在服务器启动时加载。完整配置架构见 SPEC.md §18。",
+    "modelConfig": "模型配置",
+    "modelConfigDesc": "选择 GPT 预设，或使用自带的 OpenAI 兼容端点。API Key 仅保存在服务端，此处只显示脱敏状态。",
+    "modelPreset": "模型预设",
+    "provider": "Provider",
+    "openaiCompatible": "OpenAI 兼容",
+    "baseUrl": "Base URL",
+    "modelName": "模型",
+    "apiKey": "API Key",
+    "apiKeyPlaceholderKeep": "留空以保留当前 Key",
+    "apiKeyPlaceholderNew": "粘贴 API Key",
+    "apiKeyPresent": "已配置 Key：{{key}}（{{source}}）",
+    "apiKeyMissing": "尚未配置 API Key",
+    "apiKeySource": {
+      "stored": "已保存",
+      "env": "环境变量",
+      "none": "无"
+    },
+    "reasoningEffort": "推理强度",
+    "reasoning": {
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "超高"
+    },
+    "saveModelConfig": "保存模型配置",
+    "saving": "保存中...",
+    "modelConfigSaved": "模型配置已保存。",
+    "modelConfigFailed": "模型配置保存失败。",
+    "loadingModelConfig": "正在加载模型配置..."
   },
 
   "runDetail": {

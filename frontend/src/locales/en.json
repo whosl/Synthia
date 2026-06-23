@@ -30,6 +30,18 @@
     "meadowDesc": "Mint canvas, lime panels, and soft pastel accents from your reference."
   },
 
+  "themeNames": {
+    "warm": "Warm",
+    "obsidian": "Obsidian",
+    "meadow": "Meadow"
+  },
+
+  "themeDescriptions": {
+    "warm": "Light cream surfaces with amber accents (default).",
+    "obsidian": "True-black shell inspired by your Figma site reference.",
+    "meadow": "Mint canvas, lime panels, and soft pastel accents from your reference."
+  },
+
   "status": {
     "idle": "idle",
     "running": "running",
@@ -210,9 +222,33 @@
     "synthia": "Synthia",
     "partial": "partial",
     "emptyTurn": "Completed tool run — no additional reply.",
+    "error": "Error",
+    "errorFallback": "The task failed without additional details.",
     "taskAlreadyRunning": "A task is already running. Wait for it to finish or stop it first.",
     "dismissToast": "Dismiss",
     "unknownEntry": "Unsupported entry kind: {{kind}}"
+  },
+
+  "turn": {
+    "status": {
+      "running": "Running",
+      "done": "Completed",
+      "error": "Failed",
+      "stopped": "Stopped"
+    },
+    "elapsed": "{{elapsed}}",
+    "tools": "{{count}} tools",
+    "failures": "{{count}} failures",
+    "blocked": "Waiting for approval"
+  },
+
+  "composer": {
+    "placeholder": "Ask about synthesis, timing, constraints...",
+    "running": "Synthia is running...",
+    "archived": "Project archived — read-only",
+    "send": "Send",
+    "stop": "Stop",
+    "stopping": "Stopping..."
   },
 
   "rightPanel": {
@@ -305,6 +341,7 @@
 
   "reasoning": {
     "title": "Reasoning",
+    "working": "Working",
     "empty": "Reasoning captured as event stream."
   },
 
@@ -324,7 +361,8 @@
     "rejectAll": "Reject all",
     "rejectedHint": "Rejected — you can continue to explain requirements in the conversation",
     "selectFile": "Select {{path}}",
-    "dockRegion": "Pending approval"
+    "dockRegion": "Pending approval",
+    "currentBlocking": "Current blocker"
   },
 
   "inputRequest": {
@@ -632,7 +670,36 @@
     "langEn": "English",
     "langZh": "中文",
     "runtimeConfig": "Runtime Configuration",
-    "runtimeConfigDesc": "Model, Vivado target, and runtime paths are configured via .env and loaded at server startup. See SPEC.md §18 for the full configuration schema."
+    "runtimeConfigDesc": "Model, Vivado target, and runtime paths are configured via .env and loaded at server startup. See SPEC.md §18 for the full configuration schema.",
+    "modelConfig": "Model Configuration",
+    "modelConfigDesc": "Choose a GPT preset or use your own OpenAI-compatible endpoint. API keys are stored server-side and only shown masked here.",
+    "modelPreset": "Model preset",
+    "provider": "Provider",
+    "openaiCompatible": "OpenAI-compatible",
+    "baseUrl": "Base URL",
+    "modelName": "Model",
+    "apiKey": "API key",
+    "apiKeyPlaceholderKeep": "Leave blank to keep current key",
+    "apiKeyPlaceholderNew": "Paste API key",
+    "apiKeyPresent": "Key configured: {{key}} ({{source}})",
+    "apiKeyMissing": "No API key configured",
+    "apiKeySource": {
+      "stored": "saved",
+      "env": "environment",
+      "none": "none"
+    },
+    "reasoningEffort": "Reasoning effort",
+    "reasoning": {
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra high"
+    },
+    "saveModelConfig": "Save model config",
+    "saving": "Saving...",
+    "modelConfigSaved": "Model configuration saved.",
+    "modelConfigFailed": "Failed to save model configuration.",
+    "loadingModelConfig": "Loading model configuration..."
   },
 
   "runDetail": {

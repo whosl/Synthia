@@ -1,12 +1,14 @@
 """Session, Task, Message, Event, Run, ToolCall CRUD for Phase 1."""
 
 from __future__ import annotations
-import json, time, uuid as _uuid
+import json, logging, time, uuid as _uuid
 from edagent_vivado.repository.db import get_db, init_db
 from edagent_vivado.repository.project_scope import project_id_for_session
 
 # ensure tables exist on first import
 init_db()
+
+logger = logging.getLogger(__name__)
 
 
 def _pid(session_id: str) -> str | None:
@@ -320,6 +322,17 @@ def message_create(session_id: str, role: str, content: str, task_id: str = "",
     db.commit()
     return dict(db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
 
+def message_update(mid: str, **fields) -> dict | None:
+    if not fields:
+        row = get_db().execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+        return dict(row) if row else None
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [mid]
+    get_db().execute(f"UPDATE messages SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    row = get_db().execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+    return dict(row) if row else None
+
 # ── Tasks ────────────────────────────────────────────────────
 
 def task_create(session_id: str, user_message_id: str = "") -> dict:
@@ -368,7 +381,12 @@ def event_create(session_id: str, event_type: str, payload: dict, task_id: str =
         ),
     )
     db.commit()
-    return dict(db.execute("SELECT * FROM events WHERE id=?", (eid,)).fetchone())
+    evt = dict(db.execute("SELECT * FROM events WHERE id=?", (eid,)).fetchone())
+    try:
+        transcript_apply_event(evt)
+    except Exception as exc:
+        logger.debug("transcript projection skipped for event %s: %s", eid, exc)
+    return evt
 
 def event_list(session_id: str, after_seq: int = 0, limit: int = 500) -> list[dict]:
     return [dict(r) for r in get_db().execute(
@@ -392,6 +410,670 @@ def event_list_by_type(event_type: str, limit: int = 200) -> list[dict]:
         (event_type, limit),
     ).fetchall()
     return [dict(r) for r in reversed(rows)]
+
+# ── Transcript turns/items ─────────────────────────────────────
+
+def _json_obj(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def transcript_turn_get(turn_id: str) -> dict | None:
+    row = get_db().execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def transcript_turn_for_task(task_id: str) -> dict | None:
+    if not task_id:
+        return None
+    row = get_db().execute("SELECT * FROM turns WHERE task_id=?", (task_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def transcript_turn_ensure(
+    session_id: str,
+    *,
+    task_id: str = "",
+    user_message_id: str = "",
+    status: str = "running",
+    started_at: int | None = None,
+) -> dict:
+    if task_id:
+        existing = transcript_turn_for_task(task_id)
+        if existing:
+            updates: dict = {"updated_at": _now()}
+            if user_message_id and not existing.get("user_message_id"):
+                updates["user_message_id"] = user_message_id
+            if status and existing.get("status") in ("created", "running"):
+                updates["status"] = status
+            if updates:
+                return transcript_turn_update(existing["id"], **updates) or existing
+            return existing
+    now = _now()
+    tid = _uid()
+    db = get_db()
+    pid = _pid(session_id)
+    db.execute(
+        """INSERT INTO turns(
+          id,session_id,project_id,task_id,user_message_id,status,started_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            tid,
+            session_id,
+            pid,
+            task_id or None,
+            user_message_id or None,
+            status,
+            started_at or now,
+            now,
+        ),
+    )
+    db.commit()
+    return transcript_turn_get(tid) or {}
+
+
+def transcript_turn_update(turn_id: str, **fields) -> dict | None:
+    if not fields:
+        return transcript_turn_get(turn_id)
+    allowed = {
+        "task_id", "user_message_id", "status", "started_at", "updated_at",
+        "completed_at", "metadata_json",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return transcript_turn_get(turn_id)
+    sets = ", ".join(f"{k}=?" for k in updates)
+    vals = list(updates.values()) + [turn_id]
+    get_db().execute(f"UPDATE turns SET {sets} WHERE id=?", vals)
+    get_db().commit()
+    return transcript_turn_get(turn_id)
+
+
+def transcript_item_get(session_id: str, item_key: str) -> dict | None:
+    row = get_db().execute(
+        "SELECT * FROM turn_items WHERE session_id=? AND item_key=?",
+        (session_id, item_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def transcript_item_delete(session_id: str, item_key: str) -> None:
+    get_db().execute(
+        "DELETE FROM turn_items WHERE session_id=? AND item_key=?",
+        (session_id, item_key),
+    )
+    get_db().commit()
+
+
+def transcript_item_upsert(
+    session_id: str,
+    *,
+    item_key: str,
+    item_type: str,
+    payload: dict,
+    task_id: str = "",
+    turn_id: str = "",
+    run_id: str = "",
+    status: str = "running",
+    seq: float | int = 0,
+    created_at: int | None = None,
+    source_event_id: str = "",
+    parent_item_id: str = "",
+    stream_id: str = "",
+    tool_call_id: str = "",
+    message_id: str = "",
+    interaction_id: str = "",
+    artifact_id: str = "",
+    merge_payload: bool = True,
+) -> dict:
+    if not turn_id:
+        turn = transcript_turn_ensure(session_id, task_id=task_id, status="running")
+        turn_id = turn["id"]
+    existing = transcript_item_get(session_id, item_key)
+    now = _now()
+    pid = _pid(session_id)
+    if existing:
+        previous_payload = _json_obj(existing.get("payload_json"))
+        next_payload = {**previous_payload, **payload} if merge_payload else dict(payload)
+        next_seq = existing.get("seq") or seq or 0
+        if seq and (not next_seq or float(seq) < float(next_seq)):
+            next_seq = seq
+        updates = {
+            "item_type": item_type or existing.get("item_type"),
+            "status": status or existing.get("status") or "running",
+            "seq": next_seq,
+            "updated_at": now,
+            "payload_json": json.dumps(next_payload, ensure_ascii=False),
+            "source_event_id": source_event_id or existing.get("source_event_id"),
+            "run_id": run_id or existing.get("run_id"),
+            "parent_item_id": parent_item_id or existing.get("parent_item_id"),
+            "stream_id": stream_id or existing.get("stream_id"),
+            "tool_call_id": tool_call_id or existing.get("tool_call_id"),
+            "message_id": message_id or existing.get("message_id"),
+            "interaction_id": interaction_id or existing.get("interaction_id"),
+            "artifact_id": artifact_id or existing.get("artifact_id"),
+        }
+        sets = ", ".join(f"{k}=?" for k in updates)
+        vals = list(updates.values()) + [existing["id"]]
+        get_db().execute(f"UPDATE turn_items SET {sets} WHERE id=?", vals)
+        get_db().commit()
+        return dict(get_db().execute("SELECT * FROM turn_items WHERE id=?", (existing["id"],)).fetchone())
+
+    iid = _uid()
+    created = created_at or now
+    get_db().execute(
+        """INSERT INTO turn_items(
+          id,turn_id,session_id,project_id,task_id,run_id,item_key,item_type,status,
+          seq,created_at,updated_at,payload_json,source_event_id,parent_item_id,
+          stream_id,tool_call_id,message_id,interaction_id,artifact_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            iid,
+            turn_id,
+            session_id,
+            pid,
+            task_id or None,
+            run_id or None,
+            item_key,
+            item_type,
+            status or "running",
+            float(seq or 0),
+            created,
+            now,
+            json.dumps(payload, ensure_ascii=False),
+            source_event_id or None,
+            parent_item_id or None,
+            stream_id or None,
+            tool_call_id or None,
+            message_id or None,
+            interaction_id or None,
+            artifact_id or None,
+        ),
+    )
+    get_db().commit()
+    return dict(get_db().execute("SELECT * FROM turn_items WHERE id=?", (iid,)).fetchone())
+
+
+def transcript_turn_list(session_id: str, limit: int = 200) -> list[dict]:
+    return [dict(r) for r in get_db().execute(
+        "SELECT * FROM turns WHERE session_id=? ORDER BY started_at ASC, updated_at ASC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()]
+
+
+def transcript_item_list(session_id: str, limit: int = 2000) -> list[dict]:
+    return [dict(r) for r in get_db().execute(
+        "SELECT * FROM turn_items WHERE session_id=? ORDER BY seq ASC, created_at ASC, item_key ASC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()]
+
+
+def transcript_get(session_id: str, limit_turns: int = 200, rebuild: bool = False) -> dict:
+    if rebuild:
+        transcript_rebuild_for_session(session_id, reset=True)
+    turns = transcript_turn_list(session_id, limit=limit_turns)
+    if not turns:
+        transcript_rebuild_for_session(session_id)
+        turns = transcript_turn_list(session_id, limit=limit_turns)
+    items = transcript_item_list(session_id, limit=max(500, limit_turns * 50))
+    items_by_turn: dict[str, list[dict]] = {t["id"]: [] for t in turns}
+    for item in items:
+        item["payload"] = _json_obj(item.get("payload_json"))
+        items_by_turn.setdefault(item["turn_id"], []).append(item)
+    for turn in turns:
+        turn["items"] = items_by_turn.get(turn["id"], [])
+    last_seq = get_db().execute(
+        "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id=?",
+        (session_id,),
+    ).fetchone()[0]
+    return {"turns": turns, "last_event_seq": int(last_seq or 0)}
+
+
+def _assistant_text_for_task(session_id: str, task_id: str) -> str:
+    rows = get_db().execute(
+        """SELECT payload_json FROM turn_items
+           WHERE session_id=? AND task_id=? AND item_type='assistant_text'
+           ORDER BY seq ASC, created_at ASC""",
+        (session_id, task_id),
+    ).fetchall()
+    parts = []
+    for row in rows:
+        payload = _json_obj(row["payload_json"])
+        text = str(payload.get("text") or "")
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _task_id_for_user_message(message_id: str) -> str:
+    if not message_id:
+        return ""
+    row = get_db().execute(
+        "SELECT id FROM tasks WHERE user_message_id=? ORDER BY started_at ASC LIMIT 1",
+        (message_id,),
+    ).fetchone()
+    return str(row["id"]) if row else ""
+
+
+def transcript_rebuild_for_session(session_id: str, reset: bool = False) -> dict:
+    """Rebuild durable transcript projection from existing events/messages."""
+    if reset:
+        db = get_db()
+        db.execute("DELETE FROM turn_items WHERE session_id=?", (session_id,))
+        db.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
+        db.commit()
+
+    for evt in event_list(session_id, after_seq=0, limit=1_000_000):
+        transcript_apply_event(evt)
+
+    for msg in message_list(session_id, limit=1_000_000):
+        task_id = str(msg.get("task_id") or "")
+        if not task_id and msg.get("role") == "user":
+            task_id = _task_id_for_user_message(str(msg.get("id") or ""))
+        if not task_id:
+            continue
+        turn = transcript_turn_ensure(
+            session_id,
+            task_id=task_id,
+            user_message_id=str(msg.get("id") or "") if msg.get("role") == "user" else "",
+            status="running",
+            started_at=int(msg.get("created_at") or _now()),
+        )
+        if msg.get("role") == "user":
+            key = f"user:{msg['id']}"
+            if transcript_item_get(session_id, key):
+                continue
+            transcript_item_upsert(
+                session_id,
+                turn_id=turn["id"],
+                task_id=task_id,
+                item_key=key,
+                item_type="user",
+                status="completed",
+                seq=float(msg.get("created_at") or 0),
+                created_at=int(msg.get("created_at") or _now()),
+                message_id=str(msg.get("id") or ""),
+                payload={"text": str(msg.get("content") or ""), "message_id": str(msg.get("id") or "")},
+                merge_payload=False,
+            )
+            continue
+        if msg.get("role") == "assistant" and str(msg.get("content") or "").strip():
+            existing_text = _assistant_text_for_task(session_id, task_id)
+            if len(existing_text.strip()) >= len(str(msg.get("content") or "").strip()):
+                continue
+            key = f"assistant:msg:{msg['id']}"
+            transcript_item_upsert(
+                session_id,
+                turn_id=turn["id"],
+                task_id=task_id,
+                item_key=key,
+                item_type="assistant_text",
+                status="stopped" if msg.get("stopped") else "completed",
+                seq=float(msg.get("created_at") or 0),
+                created_at=int(msg.get("created_at") or _now()),
+                message_id=str(msg.get("id") or ""),
+                stream_id=f"msg:{msg['id']}",
+                payload={
+                    "stream_id": f"msg:{msg['id']}",
+                    "text": str(msg.get("content") or ""),
+                    "partial": bool(msg.get("partial")),
+                    "stopped": bool(msg.get("stopped")),
+                },
+                merge_payload=False,
+            )
+    return {"turns": transcript_turn_list(session_id)}
+
+
+def _event_payload(evt: dict) -> dict:
+    payload = evt.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    return _json_obj(evt.get("payload_json"))
+
+
+def _event_task_id(evt: dict, payload: dict) -> str:
+    task_id = str(evt.get("task_id") or payload.get("task_id") or "")
+    if task_id:
+        return task_id
+    if str(evt.get("event_type") or "") == "message.user.created":
+        return _task_id_for_user_message(str(payload.get("message_id") or ""))
+    return ""
+
+
+def _event_run_id(evt: dict, payload: dict) -> str:
+    return str(evt.get("run_id") or payload.get("run_id") or "")
+
+
+def _tool_status(payload: dict, fallback: str) -> str:
+    state = str(payload.get("state") or fallback or "")
+    if state in {"running", "completed", "error", "rejected", "stopped"}:
+        return state
+    result = str(payload.get("result") or "")
+    if "user_rejected" in result:
+        return "rejected"
+    if "execution_failed" in result:
+        return "error"
+    return fallback
+
+
+def _interaction_id(payload: dict, evt: dict) -> str:
+    return str(payload.get("id") or payload.get("interaction_id") or evt.get("id") or "")
+
+
+def _assistant_item_key(task_id: str, payload: dict) -> tuple[str, str]:
+    stream_id = str(payload.get("stream_id") or "")
+    if not stream_id:
+        stream_id = f"{task_id}:assistant"
+    return f"assistant:{stream_id}", stream_id
+
+
+def _append_text_payload(session_id: str, item_key: str, text: str, field: str = "text") -> dict:
+    existing = transcript_item_get(session_id, item_key) or {}
+    payload = _json_obj(existing.get("payload_json"))
+    payload[field] = str(payload.get(field) or "") + text
+    return payload
+
+
+def transcript_apply_event(evt: dict) -> None:
+    """Best-effort durable transcript projection from append-only events."""
+    event_type = str(evt.get("event_type") or "")
+    payload = _event_payload(evt)
+    session_id = str(evt.get("session_id") or "")
+    task_id = _event_task_id(evt, payload)
+    run_id = _event_run_id(evt, payload)
+    if not session_id:
+        return
+
+    event_id = str(evt.get("id") or "")
+    seq = evt.get("seq") or 0
+    created_at = int(evt.get("created_at") or _now())
+    turn = None
+    if task_id:
+        turn = transcript_turn_ensure(session_id, task_id=task_id, status="running", started_at=created_at)
+
+    if event_type == "message.user.created":
+        message_id = str(payload.get("message_id") or event_id)
+        text = str(payload.get("text") or "")
+        turn = transcript_turn_ensure(
+            session_id,
+            task_id=task_id,
+            user_message_id=message_id,
+            status="running",
+            started_at=created_at,
+        )
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn["id"],
+            task_id=task_id,
+            run_id=run_id,
+            item_key=f"user:{message_id}",
+            item_type="user",
+            status="completed",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            message_id=message_id,
+            payload={"text": text, "message_id": message_id},
+            merge_payload=False,
+        )
+        return
+
+    if not turn:
+        return
+
+    turn_id = turn["id"]
+    if event_type in {"task.created", "task.started"}:
+        transcript_turn_update(turn_id, status="running", updated_at=created_at)
+        return
+    if event_type == "task.done":
+        transcript_turn_update(turn_id, status="done", updated_at=created_at, completed_at=created_at)
+        return
+    if event_type == "task.stopped":
+        transcript_turn_update(turn_id, status="stopped", updated_at=created_at, completed_at=created_at)
+        return
+    if event_type == "task.stopping":
+        transcript_turn_update(turn_id, status="stopped", updated_at=created_at)
+        return
+
+    if event_type == "assistant.stream.opened":
+        item_key, stream_id = _assistant_item_key(task_id, payload)
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="assistant_text",
+            status="running",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            stream_id=stream_id,
+            payload={
+                "stream_id": stream_id,
+                "text": "",
+                "partial": True,
+                "segment_index": payload.get("segment_index"),
+            },
+        )
+        return
+
+    if event_type == "message.assistant.delta":
+        item_key, stream_id = _assistant_item_key(task_id, payload)
+        text = str(payload.get("text") or "")
+        next_payload = _append_text_payload(session_id, item_key, text)
+        next_payload.update({"stream_id": stream_id, "partial": True})
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="assistant_text",
+            status="running",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            stream_id=stream_id,
+            payload=next_payload,
+            merge_payload=False,
+        )
+        return
+
+    if event_type == "message.assistant.snapshot":
+        item_key, stream_id = _assistant_item_key(task_id, payload)
+        text = str(payload.get("text") or "")
+        existing = transcript_item_get(session_id, item_key) or {}
+        previous = _json_obj(existing.get("payload_json"))
+        if len(text) < len(str(previous.get("text") or "")):
+            text = str(previous.get("text") or "")
+        previous.update({"stream_id": stream_id, "text": text, "partial": False})
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="assistant_text",
+            status="completed",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            stream_id=stream_id,
+            payload=previous,
+            merge_payload=False,
+        )
+        return
+
+    if event_type in {"assistant.stream.completed", "message.assistant.completed", "message.assistant.stopped"}:
+        item_key, stream_id = _assistant_item_key(task_id, payload)
+        existing = transcript_item_get(session_id, item_key) or {}
+        next_payload = _json_obj(existing.get("payload_json"))
+        explicit_empty = bool(payload.get("empty") or next_payload.get("empty_turn"))
+        stopped = event_type == "message.assistant.stopped" or bool(payload.get("stopped"))
+        next_payload.update({
+            "stream_id": stream_id,
+            "partial": False,
+            "empty_turn": explicit_empty,
+            "stopped": stopped,
+        })
+        if not str(next_payload.get("text") or "").strip() and not explicit_empty and not stopped:
+            transcript_item_delete(session_id, item_key)
+            return
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="assistant_text",
+            status="stopped" if next_payload.get("stopped") else "completed",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            stream_id=stream_id,
+            payload=next_payload,
+            merge_payload=False,
+        )
+        return
+
+    if event_type == "reasoning.delta":
+        item_key = f"reasoning:{task_id}"
+        text = str(payload.get("text") or "")
+        next_payload = _append_text_payload(session_id, item_key, text)
+        next_payload["state"] = "running"
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="reasoning",
+            status="running",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            payload=next_payload,
+            merge_payload=False,
+        )
+        return
+
+    if event_type == "reasoning.summary":
+        item_key = f"reasoning:{task_id}"
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=item_key,
+            item_type="reasoning",
+            status="completed",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            payload={"text": str(payload.get("text") or payload.get("summary") or ""), "state": "done"},
+        )
+        return
+
+    if event_type in {"tool.started", "tool.completed", "tool.error"}:
+        toolcall_id = str(payload.get("toolcall_id") or payload.get("call_id") or payload.get("id") or event_id)
+        status = "running" if event_type == "tool.started" else _tool_status(payload, "error" if event_type == "tool.error" else "completed")
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=f"tool:{toolcall_id}",
+            item_type="tool",
+            status=status,
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            tool_call_id=toolcall_id,
+            payload={
+                "toolcall_id": toolcall_id,
+                "tool_name": str(payload.get("tool_name") or payload.get("name") or "tool"),
+                "state": status,
+                "args": payload.get("args"),
+                "result": payload.get("result") or payload.get("output"),
+                "error": payload.get("error") or payload.get("message"),
+                "started_at": payload.get("started_at"),
+                "started_at_ms": payload.get("started_at_ms"),
+                "elapsed_ms": payload.get("elapsed_ms"),
+            },
+        )
+        return
+
+    if event_type in {"interaction.requested", "interaction.approved", "interaction.rejected", "interaction.responded"}:
+        interaction_id = _interaction_id(payload, evt)
+        if not interaction_id:
+            return
+        status = "pending"
+        if event_type == "interaction.approved":
+            status = "approved"
+        elif event_type == "interaction.rejected":
+            status = "rejected"
+        elif event_type == "interaction.responded":
+            status = "responded"
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=f"interaction:{interaction_id}",
+            item_type="interaction",
+            status=status,
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            interaction_id=interaction_id,
+            payload={**payload, "status": status, "interaction_id": interaction_id},
+        )
+        return
+
+    if event_type in {"run.error", "task.error"}:
+        error_key = f"error:{task_id or run_id or event_id}"
+        transcript_turn_update(turn_id, status="error", updated_at=created_at, completed_at=created_at)
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=error_key,
+            item_type="error",
+            status="error",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            payload={
+                "title": "Task failed" if event_type == "task.error" else "Run failed",
+                "message": str(payload.get("error") or payload.get("message") or payload.get("detail") or ""),
+                "source": event_type,
+            },
+        )
+        return
+
+    if event_type.startswith("custom.") or payload.get("ui_kind") or payload.get("component"):
+        block_id = str(payload.get("block_id") or payload.get("id") or event_id)
+        transcript_item_upsert(
+            session_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            run_id=run_id,
+            item_key=f"custom:{block_id}",
+            item_type="custom",
+            status="completed",
+            seq=seq,
+            created_at=created_at,
+            source_event_id=event_id,
+            payload=dict(payload),
+        )
+        return
 
 # ── Runs ─────────────────────────────────────────────────────
 

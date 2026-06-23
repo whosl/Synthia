@@ -80,3 +80,150 @@
 [data-theme='obsidian'] .theme-swatch {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
+
+.model-settings {
+  display: grid;
+  gap: 14px;
+}
+
+.model-settings-head {
+  display: grid;
+  gap: 10px;
+}
+
+.model-settings-copy {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.model-key-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.model-key-state svg {
+  flex: 0 0 auto;
+}
+
+.model-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.model-preset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+
+.model-preset:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--bg-subtle);
+}
+
+.model-preset.active {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.model-preset:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.model-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-field.wide {
+  grid-column: 1 / -1;
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-field input:focus,
+.settings-field select:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.settings-save-state {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-save-state.success {
+  color: var(--success);
+}
+
+.settings-save-state.error {
+  color: var(--danger);
+}
+
+@media (max-width: 720px) {
+  .language-picker,
+  .model-preset-grid,
+  .model-form-grid {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+}

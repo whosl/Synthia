@@ -13,7 +13,7 @@ from edagent_vivado.repository.store import (
     project_list, project_get, project_create, project_update, project_delete,
     project_is_archived,
     session_list, session_get, session_create, session_update, session_delete,
-    message_list, message_create,
+    message_list, message_create, message_update, transcript_get,
     task_create, task_get, task_update, task_active_for_session,
     event_create, event_list,
     run_create, run_update, run_list, run_get,
@@ -30,6 +30,7 @@ from edagent_vivado.repository.store import (
     run_step_list, parsed_report_list, parsed_report_get, parsed_report_trends,
     patch_proposal_list, patch_proposal_get, patch_proposal_update,
     approval_list, approval_get, approval_update,
+    settings_get, settings_set,
 )
 from edagent_vivado.repository.db import get_db
 from edagent_vivado.tools.patch_tools import set_patch_approval, is_patch_approved
@@ -490,6 +491,12 @@ async def api_session_delete(session_id: str, hard: bool = False):
 async def api_messages(session_id: str, before: int | None = None, limit: int = 100):
     return {"messages": message_list(session_id, before=before, limit=limit)}
 
+@router.get("/sessions/{session_id}/turns")
+async def api_session_turns(session_id: str, limit: int = 200, rebuild: bool = False):
+    if not session_get(session_id):
+        raise HTTPException(404, "session not found")
+    return transcript_get(session_id, limit_turns=limit, rebuild=rebuild)
+
 # ── Task API ─────────────────────────────────────────────────
 
 class StartTaskReq(BaseModel):
@@ -515,12 +522,17 @@ async def api_task_start(session_id: str, req: StartTaskReq):
             "error": "session_task_running", "session_id": session_id,
             "task_id": active["id"], "state": active["state"],
         }, status_code=409)
-    # Save user message
+    # Save user message, then bind it to the task before publishing transcript state.
     msg = message_create(session_id, "user", req.question)
-    _memory_pipeline_on_message(session_id, role="user")
-    event_create(session_id, "message.user.created", {"message_id": msg["id"], "text": req.question})
-    # Create task
     t = task_create(session_id, msg["id"])
+    msg = message_update(msg["id"], task_id=t["id"]) or msg
+    _memory_pipeline_on_message(session_id, role="user")
+    event_create(
+        session_id,
+        "message.user.created",
+        {"message_id": msg["id"], "text": req.question, "task_id": t["id"]},
+        task_id=t["id"],
+    )
     if req.metadata:
         try:
             task_update(t["id"], metadata_json=json.dumps(req.metadata, ensure_ascii=False))
@@ -550,6 +562,7 @@ async def api_task_start(session_id: str, req: StartTaskReq):
                 task_id=t["id"],
                 parent_run_id=parent_run,
             )
+            task_update(t["id"], active_run_id=run["id"], updated_at=int(time.time()))
             try:
                 from edagent_vivado.harness.run_workspace import ensure_run_workspace
 
@@ -1924,6 +1937,168 @@ async def api_retrieval_audit(audit_id: str):
     return {"audit": audit, "items": retrieval_audit_items(audit_id)}
 
 # ── Approval API ─────────────────────────────────────────────
+
+MODEL_SETTINGS_KEY = "model_config"
+DEFAULT_MODEL_PROVIDER = "openai-compatible"
+DEFAULT_MODEL_BASE_URL = "https://api-slb.krill-ai.com/codex/v1"
+DEFAULT_MODEL_NAME = "gpt-5.5"
+DEFAULT_REASONING_EFFORT = "medium"
+MODEL_PRESETS = [
+    {"id": "gpt-5.5", "label": "GPT-5.5", "model": "gpt-5.5"},
+    {"id": "gpt-5.4", "label": "GPT-5.4", "model": "gpt-5.4"},
+    {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "model": "gpt-5.4-mini"},
+    {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex", "model": "gpt-5.3-codex"},
+]
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def _env_model_api_key() -> str:
+    return _os.environ.get("OPENAI_API_KEY") or _os.environ.get("ANTHROPIC_API_KEY") or ""
+
+
+def _mask_api_key(api_key: str) -> str:
+    if not api_key:
+        return ""
+    if len(api_key) <= 8:
+        return "****"
+    return f"{api_key[:4]}...{api_key[-4:]}"
+
+
+def _reasoning_effort_error() -> str:
+    return f"reasoning_effort must be one of {', '.join(REASONING_EFFORTS)}"
+
+
+def _stored_model_config() -> dict:
+    raw = settings_get(MODEL_SETTINGS_KEY, default={})
+    return raw if isinstance(raw, dict) else {}
+
+
+def _effective_model_config() -> dict:
+    stored = _stored_model_config()
+    api_key = str(stored.get("api_key") or _env_model_api_key() or "")
+    model = str(stored.get("model") or _os.environ.get("EDAGENT_MODEL") or DEFAULT_MODEL_NAME)
+    base_url = str(
+        stored.get("base_url")
+        or _os.environ.get("OPENAI_BASE_URL")
+        or _os.environ.get("ANTHROPIC_BASE_URL")
+        or DEFAULT_MODEL_BASE_URL
+    )
+    provider = str(
+        stored.get("provider")
+        or _os.environ.get("EDAGENT_MODEL_PROVIDER")
+        or DEFAULT_MODEL_PROVIDER
+    )
+    if provider in {"openai", "chatopenai"}:
+        provider = DEFAULT_MODEL_PROVIDER
+    reasoning_effort = str(
+        stored.get("reasoning_effort")
+        or _os.environ.get("OPENAI_REASONING_EFFORT")
+        or _os.environ.get("EDAGENT_REASONING_EFFORT")
+        or DEFAULT_REASONING_EFFORT
+    )
+    selected_preset = str(stored.get("selected_preset") or "")
+    if not selected_preset and any(p["model"] == model for p in MODEL_PRESETS):
+        selected_preset = model
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "selected_preset": selected_preset,
+        "has_api_key": bool(api_key),
+        "masked_api_key": _mask_api_key(api_key),
+        "api_key_source": (
+            "stored"
+            if stored.get("api_key")
+            else ("env" if _env_model_api_key() else "none")
+        ),
+        "presets": MODEL_PRESETS,
+        "reasoning_efforts": list(REASONING_EFFORTS),
+    }
+
+
+class ModelSettingsReq(BaseModel):
+    provider: str = DEFAULT_MODEL_PROVIDER
+    base_url: str = DEFAULT_MODEL_BASE_URL
+    model: str = DEFAULT_MODEL_NAME
+    api_key: str | None = None
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    clear_api_key: bool = False
+
+
+class ModelPresetReq(BaseModel):
+    preset_id: str
+    reasoning_effort: str | None = None
+
+
+def _normalized_model_payload(req: ModelSettingsReq, previous: dict) -> dict:
+    provider = req.provider.strip().lower()
+    if provider not in {"openai-compatible", "openai"}:
+        raise HTTPException(400, "provider must be openai-compatible")
+    base_url = req.base_url.strip().rstrip("/")
+    model = req.model.strip()
+    reasoning_effort = req.reasoning_effort.strip().lower()
+    if not base_url:
+        raise HTTPException(400, "base_url is required")
+    if not model:
+        raise HTTPException(400, "model is required")
+    if reasoning_effort not in REASONING_EFFORTS:
+        raise HTTPException(400, _reasoning_effort_error())
+
+    payload = {
+        "provider": DEFAULT_MODEL_PROVIDER,
+        "base_url": base_url,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "selected_preset": model if any(p["model"] == model for p in MODEL_PRESETS) else "",
+    }
+    api_key = (req.api_key or "").strip()
+    if req.clear_api_key:
+        pass
+    elif api_key:
+        payload["api_key"] = api_key
+    elif previous.get("api_key"):
+        payload["api_key"] = previous["api_key"]
+    return payload
+
+
+@router.get("/settings/model")
+async def api_model_settings_get():
+    return _effective_model_config()
+
+
+@router.post("/settings/model")
+async def api_model_settings_set(req: ModelSettingsReq):
+    previous = _stored_model_config()
+    settings_set(MODEL_SETTINGS_KEY, _normalized_model_payload(req, previous))
+    return _effective_model_config()
+
+
+@router.post("/settings/model/preset")
+async def api_model_settings_preset(req: ModelPresetReq):
+    preset = next((p for p in MODEL_PRESETS if p["id"] == req.preset_id), None)
+    if not preset:
+        raise HTTPException(400, "unknown model preset")
+    previous = _stored_model_config()
+    reasoning_effort = (
+        req.reasoning_effort
+        or previous.get("reasoning_effort")
+        or DEFAULT_REASONING_EFFORT
+    ).strip().lower()
+    if reasoning_effort not in REASONING_EFFORTS:
+        raise HTTPException(400, _reasoning_effort_error())
+    payload = {
+        "provider": DEFAULT_MODEL_PROVIDER,
+        "base_url": DEFAULT_MODEL_BASE_URL,
+        "model": preset["model"],
+        "reasoning_effort": reasoning_effort,
+        "selected_preset": preset["id"],
+    }
+    if previous.get("api_key"):
+        payload["api_key"] = previous["api_key"]
+    settings_set(MODEL_SETTINGS_KEY, payload)
+    return _effective_model_config()
+
 
 @router.get("/settings/approvals")
 async def api_approvals_get():

@@ -95,6 +95,47 @@ export interface SessionEvent {
   canonical_type?: string
 }
 
+export type TranscriptTurnStatus = 'running' | 'done' | 'error' | 'stopped' | string
+
+export interface TranscriptTurnItem {
+  id: ID
+  turn_id: ID
+  session_id: ID
+  project_id?: ID | null
+  task_id?: ID | null
+  run_id?: ID | null
+  item_key: string
+  item_type: string
+  status: string
+  seq: number
+  created_at: number
+  updated_at?: number
+  payload_json?: string | null
+  payload?: Record<string, unknown>
+  source_event_id?: ID | null
+  parent_item_id?: ID | null
+  stream_id?: string | null
+  tool_call_id?: string | null
+  message_id?: string | null
+  interaction_id?: string | null
+  artifact_id?: ID | null
+  metadata_json?: string | null
+}
+
+export interface TranscriptTurnRow {
+  id: ID
+  session_id: ID
+  project_id?: ID | null
+  task_id?: ID | null
+  user_message_id?: ID | null
+  status: TranscriptTurnStatus
+  started_at: number
+  updated_at: number
+  completed_at?: number | null
+  metadata_json?: string | null
+  items: TranscriptTurnItem[]
+}
+
 export interface Run {
   id: ID
   session_id?: ID | null

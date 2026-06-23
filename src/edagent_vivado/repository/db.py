@@ -72,6 +72,29 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE(session_id, seq)
 );
 
+CREATE TABLE IF NOT EXISTS turns (
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project_id TEXT,
+    task_id TEXT, user_message_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, completed_at INTEGER,
+    metadata_json TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_task_id ON turns(task_id) WHERE task_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS turn_items (
+    id TEXT PRIMARY KEY, turn_id TEXT NOT NULL,
+    session_id TEXT NOT NULL, project_id TEXT, task_id TEXT, run_id TEXT,
+    item_key TEXT NOT NULL, item_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    seq REAL NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_event_id TEXT, parent_item_id TEXT, stream_id TEXT,
+    tool_call_id TEXT, message_id TEXT, interaction_id TEXT, artifact_id TEXT,
+    metadata_json TEXT,
+    UNIQUE(session_id, item_key)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, session_id TEXT, task_id TEXT, parent_run_id TEXT,
     agent_id TEXT, run_type TEXT NOT NULL, name TEXT NOT NULL,
