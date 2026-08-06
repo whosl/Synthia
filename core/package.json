@@ -1,0 +1,18 @@
+{
+  "name": "synthia-core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Synthia Core — engineering domain authority (Project/Artifact/Snapshot/Gate/Approval/Baseline/Trace/ToolRun/Evidence)",
+  "scripts": {
+    "test": "bun test",
+    "check": "tsc --noEmit",
+    "migrate": "bun run src/db/migrate.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.6.0"
+  }
+}

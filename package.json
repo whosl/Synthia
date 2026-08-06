@@ -1,0 +1,7 @@
+{
+  "name": "synthia-pre-d1",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test core/tests connector runtime", "check": "tsc --noEmit -p core/tsconfig.json" },
+  "devDependencies": { "typescript": "^5.6.0" }
+}
