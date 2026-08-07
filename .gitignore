@@ -19,6 +19,11 @@ gjb-standards/
 
 # Logs
 *.log
+real-vivado-evidence/
+*.dcp
+*.rpt
+*probe*.log
+environment-probe.raw.txt
 logs/
 
 # OS / editor

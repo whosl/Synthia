@@ -16,4 +16,6 @@ export class FakeConnector {
   evidence(id: string): EvidenceManifest { const job = this.status(id); if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE"); return structuredClone(job.evidence); }
 }
 export class McpConnectorFacade { constructor(private readonly connector: FakeConnector) {} discover() { return this.connector.discover(); } submit(request: JobRequest) { return this.connector.submit(request); } status(id: string) { return this.connector.status(id); } cancel(id: string) { return this.connector.cancel(id); } evidence(id: string) { return this.connector.evidence(id); } proposeTcl(proposal: { commands: readonly string[]; purpose: string }): never { if (!proposal.commands.length || proposal.commands.some(c => /(^|\s)(exec|open_project|write_bitstream|program_hw|source)\b/i.test(c))) throw new Error("TCL_POLICY_REJECTED"); throw new Error("TCL_PROPOSAL_REQUIRES_REVIEW"); } }
+export * from "./vivado.ts";
 export * from "./remote.ts";
+export * from "./worker.ts";
