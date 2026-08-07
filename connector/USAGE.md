@@ -19,15 +19,26 @@ Classification scope: internal
 
 ## 重要安全边界
 
-当前 Cloudflare 公网边缘 TLS 已启用，origin 到 66 的 mTLS 已启用；但 Cloudflare Access/service-token 身份层尚未配置。因此公网入口不能视为 Core 到 Worker 的端到端 mTLS，不能把它用于 formal、gate_check 或任何敏感项目正式运行。
+当前 Cloudflare 公网边缘 TLS、Cloudflare Access Service Auth 和 NAS 到 66 的 origin mTLS 均已启用。未携带 Service Token 的请求会在 Cloudflare 边缘返回 `403 Forbidden`，不会到达 Worker。
 
-正式接入前应至少完成一项：
+Access 应用：
 
-1. 为 `connect.wenzhuolin.xyz` 配置 Cloudflare Access service-token/application；或
-2. 让 Core 使用专用身份代理，并在 Worker 前置层验证 Core 身份；或
-3. 只在内网/VPN 中使用 66 的直接 mTLS 地址。
+```text
+Application: Synthia Core Service Auth
+Hostname: connect.wenzhuolin.xyz
+Team: cool-surf-f1be
+AUD tag: a1c0073d22df53d3a65282de2600f52bdd2b32611a719eb2b0c4ef6451b50f34
+```
 
-不要把 client PFX、私钥、PFX 密码或 CA 私钥提交到 GitHub。当前证书只存在 66 和 NAS 的受控目录。
+调用方在受控密钥存储中保存 Service Token，并通过 HTTPS headers 发送：
+
+```text
+CF-Access-Client-Id: <client-id>
+CF-Access-Client-Secret: <client-secret>
+```
+
+不要把 client ID/secret、client PFX、私钥、PFX 密码或 CA 私钥提交到 GitHub。当前证书只存在 66 和 NAS 的受控目录。
+
 
 ## Envelope
 
