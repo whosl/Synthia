@@ -4,8 +4,8 @@ import { sha256, stableId } from "../core/src/hashing.ts";
 export type JobOutcome = "success" | "failure" | "cancel" | "timeout" | "lost" | "unknown_effect";
 export interface ConnectorCapability { operation: string; version: string; runClasses: readonly string[]; }
 export interface JobRequest { jobId?: string; idempotencyKey: string; projectId: string; operation: string; runClass: "exploratory" | "gate_check" | "formal"; input: string; correlationId: string; outcome?: JobOutcome; }
-export interface Job { id: string; request: JobRequest; state: ToolRunState; inputSha256: string; outputSha256?: string; evidence?: EvidenceManifest; }
-export interface EvidenceManifest { jobId: string; entries: { name: string; sha256: string; sizeBytes: number; mediaType: string }[]; }
+export interface Job { id: string; request: JobRequest; state: ToolRunState; inputSha256: string; outputSha256?: string; evidence?: EvidenceManifest; errorCode?: string; }
+export interface EvidenceManifest { jobId: string; entries: { name: string; uri?: string; sha256: string; sizeBytes: number; mediaType: string }[]; }
 const states: Record<JobOutcome, ToolRunState> = { success: "succeeded", failure: "failed", cancel: "cancelled", timeout: "timeout", lost: "lost", unknown_effect: "unknown_effect" };
 export class FakeConnector {
   private jobs = new Map<string, Job>();
@@ -19,3 +19,4 @@ export class McpConnectorFacade { constructor(private readonly connector: FakeCo
 export * from "./vivado.ts";
 export * from "./remote.ts";
 export * from "./worker.ts";
+export * from "./http.ts";

@@ -1,0 +1,39 @@
+design:
+  top_module: example_top
+  version: 0.1.0
+  sources:
+    - doc/intake/summary.md
+
+clocks:
+  - name: clk_sys
+    frequency_hz: null
+    reset: rstn_sys
+
+resets:
+  - name: rstn_sys
+    polarity: active_low
+    assertion: async
+    release: sync_to_clk_sys
+
+modules:
+  - name: example_top
+    kind: top
+    clock_domain: clk_sys
+    reset_domain: rstn_sys
+    ports:
+      - name: clk_sys
+        direction: input
+        width: 1
+        role: clock
+      - name: rstn_sys
+        direction: input
+        width: 1
+        role: reset
+    submodules: []
+
+cdc:
+  - source_domain: cfg_clk
+    destination_domain: clk_sys
+    signal_group: cfg_shadow
+    pattern: handshake_shadow_capture
+    verification: update coherency check

@@ -56,6 +56,7 @@ class WorkerRuntime {
   registration;
   discovery;
   active = 0;
+  leaseExpiresAt;
   jobs = new Map;
   keys = new Map;
   pending = [];
@@ -66,6 +67,12 @@ class WorkerRuntime {
     this.clock = o.now ?? (() => new Date);
     if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1)
       throw new Error("CONFIG_INVALID");
+  }
+  discoveryReady() {
+    return this.discovery?.license_status === "available" && this.discovery.capabilities.length > 0 && this.discovery.unsupported?.length === undefined;
+  }
+  hasDrift(discovery) {
+    return discovery.connector_protocol_version !== this.endpoint.protocol_version || discovery.toolchain_profile_hash !== this.endpoint.toolchain_profile_hash || this.endpoint.expected_capability_map_version !== undefined && discovery.capability_map_version !== this.endpoint.expected_capability_map_version || this.endpoint.expected_part_catalog_hash !== undefined && discovery.part_catalog_hash !== this.endpoint.expected_part_catalog_hash || this.endpoint.expected_sdk_worker_build_hash !== undefined && discovery.sdk_worker_build_hash !== this.endpoint.expected_sdk_worker_build_hash || discovery.license_status !== "available";
   }
   async handle(request) {
     if (request.method !== "POST")
@@ -111,12 +118,10 @@ class WorkerRuntime {
     return;
   }
   async route(path, e) {
-    if (!this.endpoint.project_scope.includes(e.project_id))
-      throw new Error("PROJECT_NOT_ALLOWED");
-    if (!this.endpoint.data_classification_scope.includes(e.classification))
-      throw new Error("CLASSIFICATION_NOT_ALLOWED");
-    const p = e.payload;
+    const p = e.payload && typeof e.payload === "object" && !Array.isArray(e.payload) ? e.payload : {};
     if (path === "/registration") {
+      if (this.endpoint.registration_state === "revoked")
+        throw new Error("ENDPOINT_REVOKED");
       this.registration = { ...copy(this.endpoint), registration_state: "approved" };
       return { status: 200, body: this.envelope(e, this.registration) };
     }
@@ -127,13 +132,22 @@ class WorkerRuntime {
     if (path === "/heartbeat") {
       if (!this.registration)
         throw new Error("NOT_REGISTERED");
+      if (this.endpoint.registration_state === "revoked")
+        throw new Error("ENDPOINT_REVOKED");
       if (!this.discovery)
         this.discovery = await this.execution.discover();
       const now = this.clock();
-      this.registration = { ...this.registration, registration_state: "ready", discovered: copy(this.discovery), last_heartbeat_at: now.toISOString(), lease_expires_at: new Date(now.getTime() + this.endpoint.lease_seconds * 1000).toISOString(), capability_drift: this.discovery.connector_protocol_version !== this.endpoint.protocol_version || this.discovery.toolchain_profile_hash !== this.endpoint.toolchain_profile_hash };
+      const drift = this.hasDrift(this.discovery);
+      const ready = this.discoveryReady() && !drift;
+      this.leaseExpiresAt = now.getTime() + this.endpoint.lease_seconds * 1000;
+      this.registration = { ...this.registration, registration_state: ready ? "ready" : "degraded", discovered: copy(this.discovery), last_heartbeat_at: now.toISOString(), lease_expires_at: new Date(this.leaseExpiresAt).toISOString(), capability_drift: drift };
       return { status: 200, body: this.envelope(e, this.registration) };
     }
     if (path === "/jobs/submit") {
+      if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) {
+        this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration;
+        throw new Error("LEASE_EXPIRED");
+      }
       return this.submit(e, p.request, p.approval);
     }
     const jobId = p.job_id;
@@ -158,7 +172,7 @@ class WorkerRuntime {
   }
   submit(e, request, approval) {
     const capability = this.discovery?.capabilities.find((c) => c.operation === request?.operation);
-    if (!this.registration || this.registration.registration_state !== "ready" && (request?.runClass === "formal" || request?.runClass === "gate_check"))
+    if (!this.registration || this.registration.registration_state !== "ready" || this.registration.capability_drift === true)
       throw new Error("ENDPOINT_NOT_APPROVED");
     if (!request || request.projectId !== e.project_id || !good(request.idempotencyKey) || !good(request.operation) || !good(request.input) || !good(request.correlationId))
       throw new Error("INVALID_JOB_REQUEST");
@@ -201,21 +215,32 @@ class WorkerRuntime {
   }
   async run(job) {
     const workspace = join(this.root, job.id);
-    await mkdir(workspace, { recursive: true });
-    await writeFile(join(workspace, "input"), job.request.input, "utf8");
-    job.state = "preparing";
-    job.state = "running";
     try {
+      await mkdir(workspace, { recursive: true });
+      await writeFile(join(workspace, "input"), job.request.input, "utf8");
+      job.state = "preparing";
+      job.state = "running";
       const result = await this.execution.execute(copy(job.request), workspace);
       if (this.jobs.get(job.id)?.state === "cancelled")
         return;
       job.state = result.outcome === "success" ? "succeeded" : result.outcome === "timeout" ? "timeout" : result.outcome === "lost" ? "lost" : result.outcome === "unknown_effect" ? "unknown_effect" : "failed";
+      if (result.error_code)
+        job.errorCode = result.error_code;
       if (result.output !== undefined) {
         job.outputSha256 = sha256(result.output);
-        job.evidence = result.evidence ?? { jobId: job.id, entries: [{ name: "output.txt", sha256: job.outputSha256, sizeBytes: new TextEncoder().encode(result.output).byteLength, mediaType: "text/plain" }] };
-      }
+        const outputPath = join(workspace, "output", "worker-result.json");
+        await mkdir(join(workspace, "output"), { recursive: true });
+        await writeFile(outputPath, result.output, "utf8");
+        const outputEntry = { name: "worker-result.json", uri: `workspace://${job.id}/output/worker-result.json`, sha256: job.outputSha256, sizeBytes: new TextEncoder().encode(result.output).byteLength, mediaType: "application/json" };
+        job.evidence = { jobId: job.id, entries: [...result.evidence?.entries ?? [], outputEntry] };
+      } else if (result.evidence)
+        job.evidence = result.evidence;
     } catch {
+      if (this.jobs.get(job.id)?.state === "cancelled")
+        return;
       job.state = "failed";
+      if (!job.errorCode)
+        job.errorCode = "WORKER_EXECUTION_ERROR";
     }
   }
   envelope(e, payload) {
@@ -234,7 +259,7 @@ import { createHash as createHash2 } from "node:crypto";
 import { access, constants } from "node:fs";
 import { mkdir as mkdir2, readFile, readdir, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { join as join2, resolve } from "node:path";
+import { dirname, join as join2, resolve } from "node:path";
 var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
 var VIVADO_CAPABILITIES = [
   ["discover_toolchain", "node", "toolchain_snapshot"],
@@ -246,6 +271,8 @@ var VIVADO_CAPABILITIES = [
   ["report_sta", "design_request", "sta_report"],
   ["report_resources", "design_request", "resource_report"]
 ].map(([operation, inputKind, outputKind]) => ({ operation, version: VIVADO_CAPABILITY_VERSION, runClasses: ["exploratory", "gate_check", "formal"], inputKind, outputKind, execution: "vivado_batch" }));
+var VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+var VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 var idRe2 = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 var hash = (data) => createHash2("sha256").update(data).digest("hex");
 function reject(code) {
@@ -259,39 +286,176 @@ function safeToken(value, name) {
   if (!value || value.length > 256 || /[\0\r\n{}\[\]$;]/.test(value))
     reject(`UNSAFE_${name.toUpperCase()}`);
 }
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var VERILOG_MEDIA_TYPES = { "text/verilog": true, "text/x-verilog": true, "text/systemverilog": true, "application/systemverilog": true };
+function assertSourceLanguage(source) {
+  const lower = source.path.toLowerCase();
+  const extOk = lower.endsWith(".v") || lower.endsWith(".sv");
+  const mediaOk = source.mediaType === undefined || VERILOG_MEDIA_TYPES[source.mediaType] === true;
+  if (!extOk || !mediaOk)
+    reject("UNSUPPORTED_SOURCE_LANGUAGE");
+}
+function stripVerilogLexical(text) {
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    const next = i + 1 < n ? text[i + 1] : "";
+    if (c === "/" && next === "/") {
+      i += 2;
+      while (i < n && text[i] !== `
+`)
+        i++;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      i += 2;
+      while (i < n && !(text[i] === "*" && i + 1 < n && text[i + 1] === "/"))
+        i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"') {
+      i += 1;
+      while (i < n && text[i] !== '"') {
+        if (text[i] === "\\" && i + 1 < n)
+          i += 2;
+        else
+          i += 1;
+      }
+      if (i < n)
+        i += 1;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+var moduleDeclRe = /\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b/g;
+function declaredModules(source) {
+  const text = stripVerilogLexical(typeof source.content === "string" ? source.content : Buffer.from(source.content).toString("utf8"));
+  const names = [];
+  let m;
+  moduleDeclRe.lastIndex = 0;
+  while ((m = moduleDeclRe.exec(text)) !== null)
+    names.push(m[1]);
+  return names;
+}
+function assertSimulateModules(request) {
+  const totals = new Map;
+  for (const source of request.sources)
+    for (const name of declaredModules(source))
+      totals.set(name, (totals.get(name) ?? 0) + 1);
+  const topCount = totals.get(request.top) ?? 0;
+  const tbCount = totals.get(request.testbench) ?? 0;
+  if (topCount === 0 || tbCount === 0)
+    reject("MISSING_TOP_MODULE");
+  if (topCount > 1 || tbCount > 1)
+    reject("AMBIGUOUS_TOP_MODULE");
+  for (const source of request.sources) {
+    const names = new Set(declaredModules(source));
+    if (names.has(request.top) && names.has(request.testbench))
+      reject("AMBIGUOUS_SOURCE_ROLE");
+  }
+}
 function validateVivadoRequest(request) {
-  if (!request || !idRe2.test(request.jobId) || !idRe2.test(request.projectId))
+  if (!isPlainObject(request))
+    reject("INVALID_REQUEST");
+  if (typeof request.jobId !== "string" || typeof request.projectId !== "string" || !idRe2.test(request.jobId) || !idRe2.test(request.projectId))
     reject("INVALID_ID");
+  if (request.runClass !== "exploratory" && request.runClass !== "gate_check" && request.runClass !== "formal")
+    reject("INVALID_RUN_CLASS");
+  if (request.timeoutMs !== undefined) {
+    const t = request.timeoutMs;
+    if (typeof t !== "number" || !Number.isFinite(t) || !Number.isInteger(t) || t <= 0 || t > VIVADO_MAX_TIMEOUT_MS)
+      reject("INVALID_TIMEOUT");
+  }
   if (!VIVADO_CAPABILITIES.some((c) => c.operation === request.operation))
     reject("CAPABILITY_UNAVAILABLE");
-  if (request.toolchain?.vivadoBinary)
-    safeToken(request.toolchain.vivadoBinary, "binary");
-  if ("part" in request)
+  if (request.toolchain !== undefined) {
+    if (!isPlainObject(request.toolchain))
+      reject("INVALID_TOOLCHAIN");
+    if (request.toolchain.vivadoBinary !== undefined && typeof request.toolchain.vivadoBinary !== "string")
+      reject("INVALID_TOOLCHAIN");
+    if (request.toolchain.requiredLicense !== undefined && typeof request.toolchain.requiredLicense !== "string")
+      reject("INVALID_TOOLCHAIN");
+    if (request.toolchain.part !== undefined && typeof request.toolchain.part !== "string")
+      reject("INVALID_TOOLCHAIN");
+    if (request.toolchain.profileHash !== undefined && typeof request.toolchain.profileHash !== "string")
+      reject("INVALID_TOOLCHAIN");
+    if (request.toolchain.vivadoBinary)
+      safeToken(request.toolchain.vivadoBinary, "binary");
+  }
+  if ("part" in request) {
+    if (typeof request.part !== "string")
+      reject("INVALID_PART");
     safeToken(request.part, "part");
-  if ("top" in request)
+  }
+  if ("top" in request) {
+    if (typeof request.top !== "string")
+      reject("INVALID_TOP");
     safeToken(request.top, "top");
-  if ("pattern" in request && request.pattern)
+  }
+  if (request.operation === "simulate") {
+    const tb = request.testbench;
+    if (tb === undefined)
+      reject("NO_TESTBENCH");
+    if (typeof tb !== "string")
+      reject("INVALID_TESTBENCH");
+    safeToken(tb, "testbench");
+    if (request.top === tb)
+      reject("SAME_TOP_TESTBENCH");
+  }
+  if ("pattern" in request && request.pattern) {
+    if (typeof request.pattern !== "string")
+      reject("INVALID_PATTERN");
     safeToken(request.pattern, "pattern");
-  if ("family" in request && request.family)
+  }
+  if ("family" in request && request.family) {
+    if (typeof request.family !== "string")
+      reject("INVALID_FAMILY");
     safeToken(request.family, "family");
+  }
   if ("sources" in request) {
+    if (!Array.isArray(request.sources))
+      reject("INVALID_SOURCES");
     if (!request.sources.length)
       reject("NO_SOURCES");
     for (const source of request.sources) {
+      if (!isPlainObject(source))
+        reject("INVALID_SOURCE");
+      if (typeof source.path !== "string")
+        reject("INVALID_SOURCE_PATH");
       safePath(source.path);
+      if (typeof source.content !== "string" && !(source.content instanceof Uint8Array))
+        reject("INVALID_SOURCE_CONTENT");
+      if (source.mediaType !== undefined && typeof source.mediaType !== "string")
+        reject("INVALID_SOURCE_MEDIA_TYPE");
+      assertSourceLanguage(source);
       const size = typeof source.content === "string" ? Buffer.byteLength(source.content) : source.content.byteLength;
       if (!size)
         reject("EMPTY_SOURCE");
       if (size > 16 * 1024 * 1024)
         reject("SOURCE_TOO_LARGE");
     }
+    if (request.operation === "simulate")
+      assertSimulateModules(request);
   }
 }
 function tclQuote(value) {
   return `{${value.replace(/[{}]/g, (c) => `\\${c}`)}}`;
 }
+function readSourceLine(source, inputDir) {
+  const target = tclQuote(join2(inputDir, source.path));
+  const isSystemVerilog = source.path.toLowerCase().endsWith(".sv") || source.mediaType === "text/systemverilog" || source.mediaType === "application/systemverilog";
+  return isSystemVerilog ? `read_verilog -sv ${target}` : `read_verilog ${target}`;
+}
 function scriptFor(request, inputDir, outputDir) {
-  const sources = "sources" in request ? request.sources.map((s) => `read_verilog ${tclQuote(join2(inputDir, s.path))}`).join(`
+  const sources = "sources" in request ? request.sources.map((s) => readSourceLine(s, inputDir)).join(`
 `) : "";
   const top = "top" in request ? `-top ${tclQuote(request.top)}` : "";
   const part = "part" in request ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
@@ -303,10 +467,20 @@ puts [join [get_parts *] \\"\\n\\"]`;
   if (request.operation === "validate_sources")
     return `${sources}
 puts SOURCE_VALIDATION_OK`;
-  if (request.operation === "simulate")
-    return `${sources}
-launch_simulation -mode behavioral
-puts SIMULATION_OK`;
+  if (request.operation === "simulate") {
+    const designPaths = [];
+    const simPaths = [];
+    for (const source of request.sources) {
+      const target = tclQuote(join2(inputDir, source.path));
+      (declaredModules(source).includes(request.testbench) ? simPaths : designPaths).push(target);
+    }
+    const addDesign = designPaths.length ? `add_files -fileset sources_1 ${designPaths.join(" ")}` : "";
+    const addSim = simPaths.length ? `add_files -fileset sim_1 ${simPaths.join(" ")}` : "";
+    const reads = request.sources.map((s) => readSourceLine(s, inputDir)).join(`
+`);
+    return ["create_project -in_memory", reads, addDesign, addSim, `set_property top ${tclQuote(request.top)} [current_fileset]`, `set_property top ${tclQuote(request.testbench)} [get_filesets sim_1]`, "update_compile_order -fileset sources_1", "update_compile_order -fileset sim_1", "launch_simulation -mode behavioral", "run all", "puts SIMULATION_OK"].filter(Boolean).join(`
+`);
+  }
   if (request.operation === "synthesize")
     return `${sources}
 synth_design ${part} ${top}
@@ -326,18 +500,23 @@ async function evidence(workspace, jobId) {
   }
   return { jobId, entries };
 }
-var defaultRunner = (command, args, cwd, timeoutMs) => new Promise((ok, fail) => {
+var defaultRunner = (command, args, cwd, timeoutMs) => {
+  const { promise, resolve: resolve2, reject: reject2 } = Promise.withResolvers();
   const child = spawn(command, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-  let stdout = "", stderr = "";
+  let stdout = "", stderr = "", timedOut = false;
   child.stdout.on("data", (d) => stdout += d);
   child.stderr.on("data", (d) => stderr += d);
-  const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
-  child.once("error", fail);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGTERM");
+  }, timeoutMs);
+  child.once("error", reject2);
   child.once("close", (exitCode) => {
     clearTimeout(timer);
-    ok({ exitCode: exitCode ?? 1, stdout, stderr });
+    resolve2({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout, stderr, timedOut, signal: timedOut ? "SIGTERM" : null });
   });
-});
+  return promise;
+};
 
 class VivadoBatchAdapter {
   run;
@@ -363,7 +542,9 @@ class VivadoBatchAdapter {
     if ("sources" in request)
       for (const source of request.sources) {
         safePath(source.path);
-        await writeFile2(join2(inputDir, source.path), source.content);
+        const target = join2(inputDir, source.path);
+        await mkdir2(dirname(target), { recursive: true });
+        await writeFile2(target, source.content);
       }
     const inputSha256 = hash(JSON.stringify(request));
     const binary = request.toolchain?.vivadoBinary ?? this.defaultBinary;
@@ -376,20 +557,32 @@ class VivadoBatchAdapter {
       return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE" };
     }
     await writeFile2(join2(workspace, "run.tcl"), scriptFor(request, inputDir, outputDir), "utf8");
+    const effectiveTimeout = request.timeoutMs ?? VIVADO_DEFAULT_TIMEOUT_MS;
     let result;
     try {
-      result = await this.run(binary, command.slice(1), workspace, request.timeoutMs ?? 30 * 60 * 1000);
-    } catch {
-      return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE", evidence: await evidence(workspace, request.jobId) };
+      result = await this.run(binary, command.slice(1), workspace, effectiveTimeout);
+    } catch (error) {
+      const code = error?.code;
+      const ev2 = await evidence(workspace, request.jobId);
+      if (code === "ENOENT" || code === "EACCES")
+        return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE", evidence: ev2 };
+      return { ...base, status: "lost", evidence: ev2 };
+    }
+    if (result.timedOut) {
+      const ev2 = await evidence(workspace, request.jobId);
+      return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev2 };
     }
     const text = `${result.stdout}
 ${result.stderr}`;
     const ev = await evidence(workspace, request.jobId);
-    if (/license|checkout|feature.*not found/i.test(text))
+    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b/i.test(text);
+    const licenseFailure = !licenseSuccess && /\b(?:license|licence|checkout|feature)\b.*\b(?:not\s*(?:available|found|licensed)|fail\w*|denied|unable|could\s*not|error|missing)\b/i.test(text);
+    if (licenseFailure)
       return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev };
     if (/part.*(not found|does not exist|unknown)/i.test(text))
       return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev };
-    return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "available" }, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
+    const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" : base.toolchain.licenseStatus };
+    return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
   }
 }
 
@@ -416,18 +609,43 @@ function execution(config) {
       try {
         await access2(config.vivado_binary, constants2.X_OK);
       } catch {
-        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] };
+        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: "unknown", vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: "unknown", sdk_worker_build_hash: "unknown", capabilities: [], toolchain_profile_hash: "unknown", license_status: "unavailable", unsupported: ["vivado_binary"] };
       }
-      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: VIVADO_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
+      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unknown", vivado_patch: "unknown", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unknown", unsupported: ["vivado_license"] };
     },
     async execute(request, _workspace) {
       const candidate = request.parameters;
       if (!candidate || typeof candidate !== "object")
-        return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED" };
-      const result = await adapter.execute(candidate);
-      if (result.status === "unsupported")
-        return { outcome: "failure", error_code: result.unsupportedReason ?? "VIVADO_UNSUPPORTED" };
-      return { outcome: result.status === "succeeded" ? "success" : "failure", output: JSON.stringify({ command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain }), evidence: result.evidence };
+        return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
+      let result;
+      try {
+        result = await adapter.execute(candidate);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "VIVADO_EXECUTION_ERROR";
+        const errorCode = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";
+        const jobId = request.jobId ?? "worker";
+        return { outcome: "failure", error_code: errorCode, output: JSON.stringify({ status: "rejected", jobId, errorCode }), evidence: { jobId, entries: [] } };
+      }
+      const outcome = result.status === "succeeded" ? "success" : result.status === "timeout" ? "timeout" : result.status === "lost" ? "lost" : result.status === "unknown_effect" ? "unknown_effect" : "failure";
+      const meta = { status: result.status, command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain };
+      if (result.exitCode !== undefined)
+        meta.exitCode = result.exitCode;
+      if (result.timeoutMs !== undefined)
+        meta.timeoutMs = result.timeoutMs;
+      if (result.timedOut !== undefined)
+        meta.timedOut = result.timedOut;
+      if (result.signal !== undefined)
+        meta.signal = result.signal;
+      if (result.unsupportedReason !== undefined)
+        meta.unsupportedReason = result.unsupportedReason;
+      if (result.output && typeof result.output === "object") {
+        const o = result.output;
+        if (o.stdout !== undefined)
+          meta.stdout = o.stdout;
+        if (o.stderr !== undefined)
+          meta.stderr = o.stderr;
+      }
+      return { outcome, error_code: result.status === "unsupported" ? result.unsupportedReason ?? "VIVADO_UNSUPPORTED" : undefined, output: JSON.stringify(meta), evidence: result.evidence };
     }
   };
 }

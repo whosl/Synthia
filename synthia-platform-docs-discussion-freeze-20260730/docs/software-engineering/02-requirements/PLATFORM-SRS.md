@@ -99,7 +99,7 @@
 | SRS-F-063 | 外部人工/夹具证据应记录来源、操作者、时间、环境、方法、目标硬件和原始哈希，并以候选 Evidence 导入。 |
 | SRS-F-064 | Bitstream 应追溯至 B2、批准 G5/G6/G7 结果、part、Vivado/strategy、生成 ToolRun 和目标硬件。 |
 | SRS-F-065 | 平台应支持远程兼容模式：授权的任意 Linux/Windows + licensed Vivado 主机可注册为版本化 ConnectorEndpoint；配置只存证书/信任引用不存 secret；本轮经 mTLS 和 allowlist 建立 direct_https 通道；bootstrap token 仅为后续一次性短期引导预留，当前未实现，真实 PoC 前必须补齐或由部署侧完成等价受控引导；outbound_tunnel 为 typed reserved，不得隐式启用（SYNTHIA-FLOW-006 §16.2/§16.3、SYNTHIA-IF-001 §9.1）。
-| SRS-F-066 | 远程端点生命周期应为 registering→approved→ready→degraded→offline→revoked；heartbeat/lease 过期或能力漂移应阻断 formal 运行并审计；在完成真实 Vivado 主机 PoC 前，远程模式的验证证据只限 FakeConnector 与注入 transport/fetch 的 HTTP 契约测试，平台报告不得声称已通过真实 Vivado 验证（SYNTHIA-FLOW-006 §16.4～§16.7）。 |
+| SRS-F-066 | 远程端点生命周期应为 registering→approved→ready→degraded→offline→revoked；heartbeat/lease 过期或能力漂移应阻断 formal 运行并审计。当前已完成 vivado-66-xc7k70t 的真实 Vivado Worker discovery、part/license、XSim、综合、DRC、STA、资源报告和 DCP 验证；公网 Cloudflare Access 授权链路仍须通过 Service Token discovery 后，才可作为 Core 正式接入证据（SYNTHIA-FLOW-006 §16.4～§16.8）。 |
 
 ### 3.8 知识、审计和报告
 

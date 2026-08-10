@@ -30,14 +30,23 @@ Team: cool-surf-f1be
 AUD tag: a1c0073d22df53d3a65282de2600f52bdd2b32611a719eb2b0c4ef6451b50f34
 ```
 
-调用方在受控密钥存储中保存 Service Token，并通过 HTTPS headers 发送：
+调用方必须从受控密钥存储读取 Service Token，并只通过 HTTPS headers 发送。仓库、日志、envelope 和普通配置中不得出现 token 值。
+
+推荐环境变量名（仅由部署环境注入，不提交 `.env`）：
 
 ```text
-CF-Access-Client-Id: <client-id>
-CF-Access-Client-Secret: <client-secret>
+SYNTHIA_CF_ACCESS_CLIENT_ID
+SYNTHIA_CF_ACCESS_CLIENT_SECRET
 ```
 
-不要把 client ID/secret、client PFX、私钥、PFX 密码或 CA 私钥提交到 GitHub。当前证书只存在 66 和 NAS 的受控目录。
+请求 headers：
+
+```text
+CF-Access-Client-Id: <从受控密钥存储读取>
+CF-Access-Client-Secret: <从受控密钥存储读取>
+```
+
+当前 Service Token 由用户决定继续用于调试，但 2026-08-07 的真实 `/registration` 与 `/discover` 请求仍被 Cloudflare Access 返回 `403`；它不得被视为已授权或正式可用。代码和文档只允许保存引用，不保存明文。
 
 
 ## Envelope
@@ -60,11 +69,19 @@ CF-Access-Client-Secret: <client-secret>
 ## Discovery
 
 ```bash
-curl --cert <client-cert.pem> --key <client-key.pem> --cacert <worker-ca.pem> \\
-  -X POST https://connect.wenzhuolin.xyz/discover \\
-  -H 'Content-Type: application/json' \\
-  -d @discover-envelope.json
+export SYNTHIA_CF_ACCESS_CLIENT_ID='<从受控密钥存储读取>'
+export SYNTHIA_CF_ACCESS_CLIENT_SECRET='<从受控密钥存储读取>'
+curl \
+  -X POST https://connect.wenzhuolin.xyz/discover \
+  -H 'Content-Type: application/json' \
+  -H "CF-Access-Client-Id: ${SYNTHIA_CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${SYNTHIA_CF_ACCESS_CLIENT_SECRET}" \
+  --data-binary @discover-envelope.json
 ```
+
+公网 Cloudflare 入口使用 Cloudflare/系统公共 CA 验证边缘证书，**不要**使用 Worker origin CA，也不要在公网请求上附加仅供内网直连 Worker 的 origin client certificate。只有内网直连 `192.168.31.66:8443` 时，才使用 Worker CA、client certificate 和 client key。
+
+当前验收状态：公网 IPv4/TLS 与无 Token `403` 拒绝已验证；携带现有 Service Token 的 `POST /registration` 和 `POST /discover` 仍返回 Access `403`，尚未到达 Worker。修复 Access policy/Token 绑定并完成 `/registration → /heartbeat → /discover → exploratory Job → status/evidence` 前，endpoint 不得进入正式 `ready`，`formal`/`gate_check` 必须继续阻断。
 
 `/discover` 返回的能力版本为 `vivado-batch-1`。当前能力：
 

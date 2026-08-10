@@ -1,0 +1,38 @@
+block:
+  name: example_regs
+  bus: AXI-Lite
+  data_width: 32
+  address_width: 12
+  endian: little
+  version: 0.1.0
+
+registers:
+  - name: CTRL
+    offset: 0x000
+    width: 32
+    reset: 0x00000000
+    access: RW
+    description: Control register
+    fields:
+      - name: enable
+        bit_range: 0
+        access: RW
+        reset: 0
+        side_effect: none
+      - name: soft_reset
+        bit_range: 1
+        access: WO
+        reset: 0
+        side_effect: one_cycle_pulse
+  - name: STATUS
+    offset: 0x004
+    width: 32
+    reset: 0x00000000
+    access: RO
+    description: Status register
+    fields:
+      - name: busy
+        bit_range: 0
+        access: RO
+        reset: 0
+        side_effect: hardware_owned

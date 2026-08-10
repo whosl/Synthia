@@ -220,7 +220,7 @@ Worker 重启后应从运行锁、进程和输出清单恢复状态。不能确�
 7. 码流能反向追溯至 B2、实现运行、工具/part 和批准；
 8. 工业软件嵌入 UI 不在线时，独立 Synthia UI/Core/Connector 主流程仍完整可用；
 9. 远程兼容模式端点未经批准、lease 过期或能力漂移时，formal/gate_check 提交被拒绝并审计（§16.4、§16.5）；
-10. 远程兼容模式的验证证据只来自 FakeConnector 与注入 transport 的 HTTP 契约测试；在用户提供真实 Vivado 主机完成 §16.8 步骤前，不得声称完成真实 Vivado PoC。
+10. 远程兼容模式必须分别保存本地契约测试、真实 Worker/Vivado 能力验证和公网 Core 接入验证证据；任一层未通过时，不得把下一层或 formal/gate_check 声称为已验收。
 
 ## 16. 远程兼容模式（Remote Compatibility Mode）
 
@@ -280,15 +280,17 @@ stateDiagram-v2
 - 取消、超时、`lost`、`unknown_effect` 语义同 §5.2 与 §10：远程链路断开按失联处理，非幂等硬件操作禁止自动重试；
 - 证据清单（EvidenceManifest）经 envelope 返回描述符，大型对象仍走对象存储/检疫区；Worker 初算哈希、Core/证据服务独立复算并登记，孤儿与损坏对账同 §9。
 
-### 16.7 验证边界（无真实 Vivado PoC 声明）
+### 16.7 验证边界（真实 Worker 已验证，公网正式接入待闭环）
 
-截至本版，远程兼容模式未在真实 Vivado 主机上完成 PoC；实现与本文档的验证证据仅包括 FakeConnector 单元测试和注入 transport/fetch 的 HTTP 契约测试。任何报告不得声称远程模式已通过真实 Vivado 验证。
+截至本版，`vivado-66-xc7k70t` 已在真实 Windows/Vivado 2021.1 主机完成 discovery、`get_parts`、Synthesis license checkout、XSim、最小综合、DRC、STA、资源报告和 DCP 验证；代码侧已完成 FakeConnector、注入 transport/fetch 的 HTTP 契约测试以及 Cloudflare Access Service Token header 注入测试。这些证据证明 Worker/Vivado 能力和客户端协议实现，不等于公网 Core 正式链路已经验收。
 
-### 16.8 真实 Vivado 主机接入步骤（未来）
+当前公网 `connect.wenzhuolin.xyz` 已验证 IPv4、TLS 和无 Token 的 Cloudflare Access `403` 拒绝；现有 Service Token 请求仍返回 `403`，尚未到达 Worker。因此 endpoint 保持非 `ready` 正式状态，`formal`/`gate_check` 继续阻断。只有完成 §16.8 的公网生命周期与证据复核后，才可声明正式接入。
 
-1. 用户提供授权的 Linux/Windows 主机，安装 licensed Vivado 和 Connector Worker；
-2. 为 Worker 生成服务身份与证书（CSR），平台侧登记信任引用；
-3. 管理员创建 ConnectorEndpoint 记录并批准（`registering`→`approved`）；
-4. Worker 使用 mTLS 建立 direct_https 通道并进入心跳（→`ready`）；bootstrap token 引导尚未实现，真实 PoC 前必须补齐或由部署侧提供等价受控引导；
-5. 平台执行 `discover_toolchain`/`query_parts` 复核 capability map 与 `toolchain_profile_hash`；
-6. 在该主机完成黄金项目回归并保留原始证据后，才允许向其提交 formal Job。
+### 16.8 公网正式接入闭环步骤
+
+1. 在 Cloudflare Access 审计日志中定位 Service Token `403` 的策略命中原因，修正应用/策略/Token 绑定；
+2. Core 从受控密钥存储读取 Service Token，通过系统公共 CA 访问公网入口；Token 值不得进入端点记录、envelope 或普通日志；
+3. 按顺序执行 `/registration`、`/heartbeat`、`/discover`，复核 connector ID、Vivado/patch、license、part catalog、capability map 和 `toolchain_profile_hash`；
+4. 执行一个受控 exploratory Job，并通过 `/jobs/status` 与 `/jobs/evidence` 恢复状态和证据；
+5. Core/证据服务独立复算 EvidenceManifest 中的哈希并登记，确认无能力漂移后批准 endpoint 进入 `ready`；
+6. 完成黄金项目回归并保留原始证据后，才允许向该 endpoint 提交 `gate_check`/`formal` Job。

@@ -1,0 +1,12 @@
+rules:
+  - id: CMP-001
+    behavior_rule: BEH-001
+    signal: state
+    sample_edge: posedge clk_sys
+    expected: IDLE after reset_release
+    tolerance_cycles: 0
+    classify_mismatch_as:
+      dut: state transition differs after valid stimulus
+      tb: stimulus violates precondition
+      rule: expected state conflicts with requirement
+      external_wave_evidence: external pre-existing waveform evidence missing or signal sampled on wrong edge

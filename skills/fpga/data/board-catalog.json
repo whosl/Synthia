@@ -1,0 +1,597 @@
+{
+  "schema_version": "synthia.fpga-board-catalog.v1",
+  "catalog_id": "synthia.fpga.board-catalog",
+  "status": "candidate",
+  "generated_at": "2026-08-10",
+  "summary": {
+    "vendor_count": 3,
+    "toolchain_count": 6,
+    "featured_board_count": 7,
+    "upstream_device_row_count": 398,
+    "reference_count": 59
+  },
+  "usage_policy": {
+    "allowed_uses": [
+      "candidate_selection：为需求理解与规划阶段提供板卡/器件候选",
+      "context_enrichment：为 Skill 的输入快照提供供应商、系列、资源量级上下文",
+      "hardware_material_collection：指出关闭 constraint_ready 缺口所需收集的硬件资料清单"
+    ],
+    "prohibited_uses": [
+      "禁止把 resource_summary 当作 pin/XDC 事实或最终约束证据",
+      "禁止在 constraint_ready=false 的记录上直接生成最终管脚约束（XDC/SDC/ADC 等）",
+      "禁止把本目录中的工具链条目当作 Connector capability；工具链是否可执行以 Connector 已注册能力（如 vivado-batch-1 的 8 项能力）为准",
+      "禁止把板卡目录当作硬件事实已验证的结论库；本目录未做任何板级硬件事实验证"
+    ],
+    "constraint_rule": "最终 pin/XDC 约束只能来自经证据链确认的硬件资料（原理图、官方 pinout、板卡手册抽取事实，见 doc/hw/extracted_facts.json 边界说明）或用户在 Core 流程中批准的基线；本目录最多产出候选与上下文。",
+    "toolchain_boundary": "Vivado/Quartus/TD/Vitis/ISE/Icarus Verilog 均为外部执行工具链。目录中出现某工具链只表示上游数据声明的适配关系，不代表 Synthia 已通过 Connector 具备对应执行能力。"
+  },
+  "provenance": {
+    "upstream": {
+      "origin_package": "外部 FPGA 工程参考数据快照",
+      "files": [
+        {
+          "path": "featured-boards.json",
+          "role": "featured 板卡的板级描述（外设、手册引用、亮点）",
+          "board_count": 2
+        },
+        {
+          "path": "boards.js",
+          "role": "主数据：recommended_boards / vendors / chips / toolchains / sources / selection_schema",
+          "upstream_version": "1.2.12",
+          "upstream_last_updated": "2026-06-11",
+          "upstream_source_base_file": "boards(1).js version 1.2.6",
+          "upstream_vendor_data_files": [
+            "vendors/amd-vivado.json",
+            "vendors/intel-quartus.json",
+            "vendors/anlogic-td.json"
+          ],
+          "approx_size_mb": 2.5
+        }
+      ]
+    },
+    "conversion": {
+      "date": "2026-08-10",
+      "method": "人工审读 + 静态结构化改写（未执行上游 JS，未复制原始文件）",
+      "not_copied": [
+        "原始 boards.js（约 2.5MB、79,543 行）未入库；完整 chips[] 逐器件行以 device_coverage 汇总索引替代",
+        "featured-boards.json 中的 UI 专属字段（color/color_end/highlights 颜色标签）",
+        "boards.js 中的 UI 契约字段（ui_selectable、ui_metric_cards、resource_display_schema、selection_schema 中的 UI 步骤契约、display fallback 旧字段策略）",
+        "iverilog 的 install_method=bundled 等插件运行时命名",
+        "__MACOSX、.DS_Store、node_modules 及插件运行时"
+      ],
+      "mojibake_cleaned": [
+        "boards.js data_scope 中 chip_model_granularity / ordering_code_policy / current_frontend_compatibility / package_data_scope 四个中文字段存在编码损坏（连续 ? 占位），未纳入本目录，语义以保留下来的英文字段与 exclusions 为准",
+        "个别 ui_metric_cards 中文标签（如 \"LUT ??\"）损坏，相关字段整体随 UI 契约一并剔除"
+      ],
+      "normalization": [
+        "vendor 统一为三值：xilinx（AMD/Xilinx）、intel（Intel/Altera）、anlogic（安路科技），保留上游 id 并补充 canonical_name 消除 AMD 与 Xilinx、Intel 与 Altera 的命名歧义",
+        "featured-boards.json 的 vendor=milianke 实为板卡厂商而非芯片供应商，已拆分为 board_manufacturer 与 silicon.vendor 两个字段",
+        "featured-boards.json 与 recommended_boards 中 id 相同但名称不同的 anlogic-pang-eg4s20 已合并为一条记录并保留双名称",
+        "资源数值保留 value/unit/display_text 与来源字段，并补充 confidence 分级（见 data_status_enums.metric_confidence）"
+      ]
+    },
+    "coverage": {
+      "featured_boards": "7 块板卡 = featured-boards.json 2 块（含与 recommended 合并 1 块）+ boards.js recommended_boards 6 块去重后 5 块",
+      "device_rows": "上游 chips[] 共 398 行：anlogic 56、intel 164、xilinx 178；本目录不复制逐行数据，仅以 device_coverage 提供可审计的系列级索引",
+      "upstream_exclusions": [
+        "上游未展开 AMD/Intel 每个封装和速度等级的完整订货号",
+        "上游未纳入 XC4000、Spartan-3/6、Virtex-4/5/6、Cyclone I/II/III、Stratix I/II/III、MAX 7000/3000 等旧系列",
+        "AMD CPLD（CoolRunner-II/XC9500 系列）Vivado 不支持，上游作为 ISE legacy 器件保留"
+      ]
+    },
+    "known_issues": [
+      "featured-boards.json 引用的板卡手册（HX4S20开发板使用手册.md、MLK-F3P-CZ02硬件使用手册.md）未随上游数据快照提供，相关板级声明标记为 unverified_board_manual",
+      "上游 io_banks 大量为 estimated_from_user_io_or_package_pins（按 User I/O 或封装引脚数推算），上游自身声明仅用于展示、最终约束前必须用 pinout/原理图确认",
+      "featured-boards.json 中 anlogic-pang-eg4s20 的名称为“康芯 HX4S20”，boards.js 同 id 名称为“安路 PANG EG4S20”，疑似同一 EG4S20 教学板的不同销售命名，未能在上游确认",
+      "上游 last_updated=2026-06-11，之后供应商产品表可能更新；本目录不承诺时效性"
+    ]
+  },
+  "data_status_enums": {
+    "package_data_status": {
+      "official_table_model": "供应商官方选型表直接给出完整型号（含封装/变体后缀），以安路为主",
+      "official_device_package_options": "器件/封装组合来自官方产品表或官方 package pinout 文件",
+      "family_level_candidates": "封装为家族级候选（如 Agilex 部分系列），采购与约束前必须核对确切订货号"
+    },
+    "resource_data_status": {
+      "official_table": "资源数值来自供应商官方产品表/选型指南",
+      "estimated": "资源数值为推算值（如 io_banks_source_type=estimated_from_user_io_or_package_pins），仅可作上下文"
+    },
+    "metric_confidence": {
+      "official_table": "芯片级官方产品表数据，可信到器件资源量级，但不构成板级管脚事实",
+      "unverified_board_manual": "来自板卡手册的声明，手册未随数据包提供，未经核对",
+      "estimated": "推算值，禁止作为约束证据"
+    },
+    "constraint_ready": {
+      "false": "缺少板级 pinout/原理图或关键数据为估算值，禁止下游据此生成最终约束"
+    }
+  },
+  "vendors": [
+    {
+      "vendor_id": "xilinx",
+      "canonical_name": "AMD / Xilinx",
+      "also_known_as": ["amd", "AMD Xilinx"],
+      "primary_toolchain": "vivado",
+      "toolchains": ["vivado", "vitis", "iverilog"],
+      "website": "https://www.amd.com/en/products/adaptive-socs-and-fpgas.html",
+      "model_granularity": "base_device",
+      "note": "Vivado 支持 FPGA/SoC/Adaptive SoC；CoolRunner-II/XC9500XL/XV CPLD 为 ISE legacy 器件，Vivado 不支持。"
+    },
+    {
+      "vendor_id": "intel",
+      "canonical_name": "Intel / Altera",
+      "also_known_as": ["altera", "Intel Altera"],
+      "primary_toolchain": "quartus",
+      "toolchains": ["quartus", "iverilog"],
+      "website": "https://www.altera.com/products/fpga/overview",
+      "model_granularity": "base_device",
+      "note": "按 Quartus Prime 常用当前/存量系列整理基础器件型号，不展开封装、速度等级和完整订货码。"
+    },
+    {
+      "vendor_id": "anlogic",
+      "canonical_name": "安路科技",
+      "also_known_as": ["Anlogic"],
+      "primary_toolchain": "td",
+      "toolchains": ["td", "iverilog"],
+      "website": "https://www.anlogic.com",
+      "model_granularity": "official_table_model",
+      "note": "安路官网选型表多按完整型号/封装粒度列出，本数据保留官网表格型号。"
+    }
+  ],
+  "toolchains": [
+    {
+      "toolchain_id": "vivado",
+      "name": "AMD Vivado",
+      "vendor_id": "xilinx",
+      "role": "综合/实现/约束/烧录",
+      "execution": "external",
+      "status": "active",
+      "synthia_boundary": "外部执行工具链。Synthia 侧仅以 Connector 能力档 vivado-batch-1 暴露已验证的 8 项真实能力；本条目不代表任何额外能力。"
+    },
+    {
+      "toolchain_id": "vitis",
+      "name": "AMD Vitis",
+      "vendor_id": "xilinx",
+      "role": "软件协同/HLS/加速平台",
+      "execution": "external",
+      "status": "active",
+      "synthia_boundary": "外部执行工具链；当前无对应 Connector 能力档。"
+    },
+    {
+      "toolchain_id": "ise",
+      "name": "Xilinx ISE",
+      "vendor_id": "xilinx",
+      "role": "Legacy CPLD/旧 FPGA 工程",
+      "execution": "external",
+      "status": "legacy",
+      "synthia_boundary": "外部执行工具链（legacy）；当前无对应 Connector 能力档。"
+    },
+    {
+      "toolchain_id": "quartus",
+      "name": "Intel Quartus Prime",
+      "vendor_id": "intel",
+      "role": "综合/实现/约束/烧录",
+      "execution": "external",
+      "status": "active",
+      "synthia_boundary": "外部执行工具链；当前无对应 Connector 能力档。"
+    },
+    {
+      "toolchain_id": "td",
+      "name": "安路 TD / TangDynasty",
+      "vendor_id": "anlogic",
+      "role": "综合/实现/约束/烧录",
+      "execution": "external",
+      "status": "active",
+      "synthia_boundary": "外部执行工具链；当前无对应 Connector 能力档。"
+    },
+    {
+      "toolchain_id": "iverilog",
+      "name": "Icarus Verilog",
+      "vendor_id": null,
+      "role": "仿真",
+      "execution": "external",
+      "status": "active",
+      "synthia_boundary": "开源仿真器；上游标记 install_method=bundled 属插件运行时概念，Synthia 一律按外部工具经 Connector/Worker 路径执行，Skill 不得直接调用。"
+    }
+  ],
+  "featured_boards": [
+    {
+      "board_id": "anlogic-ef2l45-evb",
+      "display_name": "安路 EF2L45 评估板",
+      "aliases": [],
+      "board_manufacturer": null,
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "anlogic",
+        "series": "EF2",
+        "device": "EF2L45BG256B/H",
+        "category": "fpga"
+      },
+      "toolchains": ["td", "iverilog"],
+      "primary_toolchain": "td",
+      "summary": "低成本 FPGA 评估板，适合教学、接口验证和小规模控制逻辑。",
+      "feature_hints": ["gpio", "uart", "spi"],
+      "resource_summary": [
+        { "key": "logic", "label": "LUT", "value": 4480, "unit": "LUTs", "display_text": "4,480 LUTs", "source_field": "lut4_approx", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 684, "unit": "Kb", "display_text": "684 Kb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 15, "unit": "M18x18", "display_text": "15 M18x18", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 206, "unit": "pins", "display_text": "206 pins", "source_field": "user_io_count", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog",
+        "io_bank_data_missing_or_estimated"
+      ],
+      "required_materials_to_close": ["board_schematic_or_official_pinout", "board_user_manual"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "vendor_product_table", "ref": "anlogic-ef2-product-table" }
+      ]
+    },
+    {
+      "board_id": "anlogic-pang-eg4s20",
+      "display_name": "康芯 HX4S20",
+      "aliases": ["安路 PANG EG4S20"],
+      "board_manufacturer": "康芯",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "anlogic",
+        "series": "EG4",
+        "device": "EG4S20BG256B",
+        "category": "fpga"
+      },
+      "toolchains": ["td", "iverilog"],
+      "primary_toolchain": "td",
+      "summary": "采用安路 EG4S20BG256 芯片的教学板：板载 USB-JTAG、Type-C 供电/串口、千兆网口、HDMI×2、VGA、TF 卡槽、SPI FLASH、数码管与 2 组 40 芯 GPIO 扩展口。适合 FPGA 入门、中小规模 RTL 原型验证及接口协议开发。",
+      "feature_hints": ["gpio", "uart", "spi", "ethernet", "hdmi", "vga", "sd"],
+      "resource_summary": [
+        { "key": "logic", "label": "LUT", "value": 19600, "unit": "LUTs", "display_text": "19,600 LUTs", "source_field": "lut4_approx", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 1088, "unit": "Kb", "display_text": "1,088 Kb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 29, "unit": "M18x18", "display_text": "29 M18x18", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 193, "unit": "pins", "display_text": "193 pins", "source_field": "user_io_count", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [
+        { "claim": "RAM 156.8K · BRAM 1,008K · DSP M18×18 × 29 · PLL × 4 · BGA256 封装 193 可用 IO", "confidence": "unverified_board_manual" },
+        { "claim": "内置 2M×32bit EM SDRAM；千兆以太网（RTL8211 + HR911130A）；SPI FLASH W25Q64（64Mbit）；8 段数码管 × 8 + 8 路双色 LED；HDMI 输入/输出 × 2；VGA（RGB 444）；2 组 40 芯 GPIO 扩展口（36 IO / 18 对差分，3.3V）", "confidence": "unverified_board_manual" }
+      ],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog",
+        "board_manual_referenced_but_not_included"
+      ],
+      "required_materials_to_close": ["HX4S20开发板使用手册.md（上游引用但未随包提供）", "board_schematic_or_official_pinout"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "featured-boards.json" },
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "board_manual", "ref": "HX4S20开发板使用手册.md", "availability": "referenced_not_included" },
+        { "type": "vendor_product_table", "ref": "anlogic-eg4-product-table" }
+      ]
+    },
+    {
+      "board_id": "mlk-f3p-cz02-dr1m90",
+      "display_name": "米联客 MLK-F3P-CZ02 DR1",
+      "aliases": [],
+      "board_manufacturer": "米联客 (Milianke)",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "anlogic",
+        "series": "DR1",
+        "device": "DR1M90GEG400",
+        "category": "soc-fpga"
+      },
+      "toolchains": ["td"],
+      "primary_toolchain": "td",
+      "summary": "米联客 DR1 系列高端开发平台：DR1M90GEG400（双核 ARM Cortex-A7 1GHz + 94K LUT FPGA），DDR3 1GB、EMMC 8GB、QSPI FLASH 256Mbit，双路千兆网、USB2.0 OTG+HOST、HDMI OUT、WIFI+BT、4G、CAN、RS485、音频、FEP 高速扩展接口，预装 Linux，可 PS/PL 协同开发。",
+      "feature_hints": ["ps-pl", "ddr3", "emmc", "ethernet", "usb", "hdmi", "can", "rs485", "audio"],
+      "resource_summary": [
+        { "key": "logic", "label": "LUT", "value": 94464, "unit": "LUTs", "display_text": "94,464 LUTs", "source_field": "lut4_approx", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 5600, "unit": "Kb", "display_text": "5,600 Kb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 240, "unit": "DSP blocks", "display_text": "240 DSP blocks", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "pll", "label": "PLL", "value": 8, "unit": "blocks", "display_text": "8 blocks", "source_field": "pll_count", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 126, "unit": "pins", "display_text": "126 pins (BGA400)", "source_field": "package_options[].user_io_count", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [
+        { "claim": "双核 ARM Cortex-A7 最高 1GHz；PS DDR3 1GB（1333MHz×32bit）；EMMC 8GB + QSPI FLASH 256Mbit；PS 晶振 33.3333MHz · PL 晶振 100MHz", "confidence": "unverified_board_manual" },
+        { "claim": "PS/PL 双千兆网（YT8531DH-CA PHY）、USB2.0 OTG Type-C + 2×USB2.0 HOST、HDMI 输出 1080@60fps、WIFI+BT、4G、CAN、RS485、ES8388 音频、24LC02 EEPROM、DS1337 RTC、FEP（48 GPIO / 24 对差分）、CEP（250Mbps 单端 / 500Mbps LVDS）", "confidence": "unverified_board_manual" }
+      ],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog",
+        "board_manual_referenced_but_not_included",
+        "io_bank_data_missing_or_estimated"
+      ],
+      "required_materials_to_close": ["MLK-F3P-CZ02硬件使用手册.md（上游引用但未随包提供）", "board_schematic_or_official_pinout", "核心板/底板连接器引脚定义"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "featured-boards.json" },
+        { "type": "board_manual", "ref": "MLK-F3P-CZ02硬件使用手册.md", "availability": "referenced_not_included" },
+        { "type": "vendor_product_table", "ref": "anlogic-dr1-product-table" }
+      ]
+    },
+    {
+      "board_id": "amd-arty-a7-35t",
+      "display_name": "Digilent Arty A7-35T",
+      "aliases": [],
+      "board_manufacturer": "Digilent",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "xilinx",
+        "series": "Artix-7",
+        "device": "XC7A35T",
+        "category": "fpga"
+      },
+      "toolchains": ["vivado", "iverilog"],
+      "primary_toolchain": "vivado",
+      "summary": "Artix-7 入门开发板，适合通用 RTL、外设接口和 AXI-Lite 教学。",
+      "feature_hints": ["ethernet", "usb", "pmod", "xdc"],
+      "resource_summary": [
+        { "key": "logic", "label": "LUT", "value": 20800, "unit": "CLB LUTs", "display_text": "20,800 CLB LUTs", "source_field": "lut4_approx", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 1800, "unit": "Kb", "display_text": "1.8 Mb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 90, "unit": "DSP Slices", "display_text": "90 DSP Slices", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 250, "unit": "pins", "display_text": "250 pins", "source_field": "max_user_io", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog"
+      ],
+      "required_materials_to_close": ["Digilent Arty A7 原理图/参考手册", "器件封装确认（上游器件级 package pinout 存在，但不等于板级管脚映射）"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "vendor_product_table", "ref": "amd-7series-product-selection-guide" }
+      ]
+    },
+    {
+      "board_id": "amd-zcu102-zynqmp",
+      "display_name": "AMD ZCU102",
+      "aliases": [],
+      "board_manufacturer": "AMD",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "xilinx",
+        "series": "Zynq UltraScale+ MPSoC EG",
+        "device": "XCZU9EG",
+        "category": "soc-fpga"
+      },
+      "toolchains": ["vivado", "vitis", "iverilog"],
+      "primary_toolchain": "vivado",
+      "summary": "Zynq UltraScale+ MPSoC 常用评估平台，适合 PS/PL 协同和高速接口设计。",
+      "feature_hints": ["ps-pl", "ddr4", "ethernet", "pcie", "xdc"],
+      "resource_summary": [
+        { "key": "logic", "label": "Logic Cells", "value": 600000, "unit": "logic cells", "display_text": "600,000 logic cells", "source_field": "logic_cells", "confidence": "official_table" },
+        { "key": "memory", "label": "Memory", "value": 40.9, "unit": "Mb", "display_text": "40.9 Mb", "source_field": "total_memory_mb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 2520, "unit": "DSP Slices", "display_text": "2,520 DSP Slices", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 328, "unit": "pins", "display_text": "328 pins", "source_field": "max_user_io", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog"
+      ],
+      "required_materials_to_close": ["ZCU102 官方原理图/用户指南", "PS/PL 管脚分配表"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "vendor_product_table", "ref": "amd-zynq-us-plus-mpsoc-psg" }
+      ]
+    },
+    {
+      "board_id": "intel-de10-nano",
+      "display_name": "Terasic DE10-Nano",
+      "aliases": [],
+      "board_manufacturer": "Terasic",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "intel",
+        "series": "Cyclone V SE",
+        "device": "5CSEA6",
+        "category": "soc-fpga"
+      },
+      "toolchains": ["quartus", "iverilog"],
+      "primary_toolchain": "quartus",
+      "summary": "Cyclone V SoC 经典开发板，适合 HPS/FPGA 协同和入门原型。",
+      "feature_hints": ["hps", "ddr3", "ethernet", "quartus"],
+      "resource_summary": [
+        { "key": "logic", "label": "LE", "value": 110000, "unit": "LE", "display_text": "110,000 LE", "source_field": "logic_elements", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 5570, "unit": "Kb", "display_text": "5,570 Kb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 112, "unit": "variable-precision DSP blocks", "display_text": "112 variable-precision DSP blocks", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 288, "unit": "pins", "display_text": "288 pins", "source_field": "user_io_count", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog"
+      ],
+      "required_materials_to_close": ["Terasic DE10-Nano 原理图/用户手册", "HPS/FPGA 管脚分配表"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "vendor_product_table", "ref": "intel-cyclone5-product-table" }
+      ]
+    },
+    {
+      "board_id": "intel-max10-10m50",
+      "display_name": "Intel MAX 10 10M50 Kit",
+      "aliases": [],
+      "board_manufacturer": "Intel",
+      "status": "candidate",
+      "silicon": {
+        "vendor_id": "intel",
+        "series": "MAX 10",
+        "device": "10M50",
+        "category": "fpga"
+      },
+      "toolchains": ["quartus", "iverilog"],
+      "primary_toolchain": "quartus",
+      "summary": "MAX 10 非易失 FPGA 平台，适合低成本控制逻辑和片上 ADC 应用。",
+      "feature_hints": ["adc", "flash", "quartus"],
+      "resource_summary": [
+        { "key": "logic", "label": "LE", "value": 50000, "unit": "LE", "display_text": "50,000 LE", "source_field": "logic_elements", "confidence": "official_table" },
+        { "key": "bram", "label": "BRAM", "value": 1638, "unit": "Kb", "display_text": "1,638 Kb", "source_field": "bram_kb", "confidence": "official_table" },
+        { "key": "dsp", "label": "DSP", "value": 144, "unit": "18 x 18 multipliers", "display_text": "144 18 x 18 multipliers", "source_field": "dsp_blocks", "confidence": "official_table" },
+        { "key": "io", "label": "User I/O", "value": 500, "unit": "pins", "display_text": "500 pins", "source_field": "user_io_count", "confidence": "official_table" }
+      ],
+      "board_manual_claims": [],
+      "constraint_ready": false,
+      "constraint_blockers": [
+        "no_board_pinout_in_catalog",
+        "no_schematic_in_catalog"
+      ],
+      "required_materials_to_close": ["Intel MAX 10 10M50 套件原理图/用户指南"],
+      "sources": [
+        { "type": "upstream_dataset", "ref": "boards.js recommended_boards" },
+        { "type": "vendor_product_table", "ref": "intel-max10-product-table" }
+      ]
+    }
+  ],
+  "device_coverage": [
+    {
+      "vendor_id": "xilinx",
+      "device_count": 178,
+      "package_data_status_dominant": "official_device_package_options",
+      "package_data_note": "AMD 器件的 package_options 来自官方 package pinout JSON/ZIP（7 系列、UltraScale/UltraScale+、Versal、Zynq）；legacy CPLD 无 package_options 且 vivado_supported=false。",
+      "series": [
+        { "series": "Artix-7", "device_count": 8, "category": "fpga" },
+        { "series": "Kintex-7", "device_count": 7, "category": "fpga" },
+        { "series": "Virtex-7", "device_count": 10, "category": "fpga" },
+        { "series": "Spartan-7", "device_count": 6, "category": "fpga" },
+        { "series": "Artix UltraScale+", "device_count": 5, "category": "fpga" },
+        { "series": "Kintex UltraScale", "device_count": 7, "category": "fpga" },
+        { "series": "Kintex UltraScale+", "device_count": 7, "category": "fpga" },
+        { "series": "Virtex UltraScale", "device_count": 7, "category": "fpga" },
+        { "series": "Virtex UltraScale+", "device_count": 7, "category": "fpga" },
+        { "series": "Virtex UltraScale+ HBM", "device_count": 7, "category": "fpga" },
+        { "series": "Zynq-7000", "device_count": 10, "category": "soc-fpga" },
+        { "series": "Zynq UltraScale+ MPSoC CG", "device_count": 8, "category": "soc-fpga" },
+        { "series": "Zynq UltraScale+ MPSoC EG", "device_count": 12, "category": "soc-fpga" },
+        { "series": "Zynq UltraScale+ MPSoC EV", "device_count": 3, "category": "soc-fpga" },
+        { "series": "Zynq UltraScale+ RFSoC", "device_count": 16, "category": "soc-fpga" },
+        { "series": "Versal AI Core", "device_count": 6, "category": "adaptive-soc" },
+        { "series": "Versal AI Edge", "device_count": 7, "category": "adaptive-soc" },
+        { "series": "Versal AI RF", "device_count": 4, "category": "adaptive-soc" },
+        { "series": "Versal HBM", "device_count": 5, "category": "adaptive-soc" },
+        { "series": "Versal Premium", "device_count": 12, "category": "adaptive-soc" },
+        { "series": "Versal Prime", "device_count": 10, "category": "adaptive-soc" },
+        { "series": "CoolRunner-II", "device_count": 6, "category": "cpld", "status": "legacy", "note": "Vivado 不支持，ISE legacy" },
+        { "series": "XC9500XL", "device_count": 4, "category": "cpld", "status": "legacy", "note": "Vivado 不支持，ISE legacy" },
+        { "series": "XC9500XV", "device_count": 4, "category": "cpld", "status": "legacy", "note": "Vivado 不支持，ISE legacy" }
+      ]
+    },
+    {
+      "vendor_id": "intel",
+      "device_count": 164,
+      "package_data_status_dominant": "official_device_package_options",
+      "package_data_note": "Arria/Cyclone/MAX/Stratix 器件/封装组合来自官方产品表矩阵；Agilex 5/7 全部及 Agilex 3 部分变体为 family_level_candidates（家族级候选，须核对确切订货号）；A3C025D/A3C050A/A3C100A 标记 legacy 且使用 family_package_options。",
+      "series": [
+        { "series": "Agilex 3 C-Series", "device_count": 8, "category": "fpga" },
+        { "series": "Agilex 5 D-Series", "device_count": 5, "category": "soc-fpga" },
+        { "series": "Agilex 5 E-Series", "device_count": 13, "category": "fpga" },
+        { "series": "Agilex 7 F-Series", "device_count": 8, "category": "fpga" },
+        { "series": "Agilex 7 I-Series", "device_count": 7, "category": "fpga" },
+        { "series": "Agilex 7 M-Series", "device_count": 2, "category": "fpga" },
+        { "series": "Arria 10 GT", "device_count": 2, "category": "fpga" },
+        { "series": "Arria 10 GX", "device_count": 9, "category": "fpga" },
+        { "series": "Arria 10 SX", "device_count": 7, "category": "soc-fpga" },
+        { "series": "Cyclone 10 GX", "device_count": 4, "category": "fpga" },
+        { "series": "Cyclone 10 LP", "device_count": 8, "category": "fpga" },
+        { "series": "Cyclone IV E", "device_count": 9, "category": "fpga" },
+        { "series": "Cyclone IV GX", "device_count": 7, "category": "fpga" },
+        { "series": "Cyclone V E", "device_count": 5, "category": "fpga" },
+        { "series": "Cyclone V GT", "device_count": 3, "category": "fpga" },
+        { "series": "Cyclone V GX", "device_count": 5, "category": "fpga" },
+        { "series": "Cyclone V SE", "device_count": 4, "category": "soc-fpga" },
+        { "series": "Cyclone V ST", "device_count": 2, "category": "soc-fpga" },
+        { "series": "Cyclone V SX", "device_count": 4, "category": "soc-fpga" },
+        { "series": "MAX 10", "device_count": 7, "category": "fpga" },
+        { "series": "MAX II", "device_count": 6, "category": "cpld" },
+        { "series": "MAX V", "device_count": 7, "category": "cpld" },
+        { "series": "Stratix 10 DX", "device_count": 3, "category": "fpga" },
+        { "series": "Stratix 10 GX", "device_count": 11, "category": "fpga" },
+        { "series": "Stratix 10 MX", "device_count": 3, "category": "fpga" },
+        { "series": "Stratix 10 SX", "device_count": 8, "category": "soc-fpga" },
+        { "series": "Stratix 10 TX", "device_count": 7, "category": "fpga" }
+      ]
+    },
+    {
+      "vendor_id": "anlogic",
+      "device_count": 56,
+      "package_data_status_dominant": "official_table_model",
+      "package_data_note": "安路官网选型表按完整型号（含封装/变体后缀）列出，package_data_status 全部为 official_table_model。",
+      "series": [
+        { "series": "AL3", "device_count": 2, "category": "fpga" },
+        { "series": "DR1", "device_count": 6, "category": "soc-fpga" },
+        { "series": "EF2", "device_count": 13, "category": "fpga" },
+        { "series": "EF3", "device_count": 8, "category": "fpga" },
+        { "series": "EF3L15", "device_count": 3, "category": "fpga" },
+        { "series": "EG4", "device_count": 6, "category": "fpga" },
+        { "series": "PH1A", "device_count": 7, "category": "fpga" },
+        { "series": "PH1P", "device_count": 8, "category": "fpga" },
+        { "series": "SF1", "device_count": 3, "category": "fpga" }
+      ]
+    }
+  ],
+  "references": [
+    { "ref_id": "amd-vivado-supported-devices", "vendor_id": "xilinx", "title": "AMD Vivado Design Suite 2025.2 Supported Devices", "url": "https://docs.amd.com/r/en-US/ug973-vivado-release-notes-install-license/Supported-Devices", "used_for": ["Vivado 支持系列边界"] },
+    { "ref_id": "amd-product-family-pages", "vendor_id": "xilinx", "title": "AMD adaptive SoC and FPGA product family pages", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas.html", "used_for": ["7 Series", "UltraScale", "UltraScale+", "Zynq", "Versal 器件代码核对"] },
+    { "ref_id": "amd-package-pinout-json", "vendor_id": "xilinx", "title": "AMD package/device pinout JSON tables", "url": "https://download.amd.com/json/adaptive-socs-and-fpgas/developer/resources/package-pinout-files/", "used_for": ["AMD device/package combinations"] },
+    { "ref_id": "amd-usapackages-zip", "vendor_id": "xilinx", "title": "AMD UltraScale/UltraScale+ package ZIP", "url": "https://download.amd.com/adaptive-socs-and-fpgas/developer/adaptive-socs-and-fpgas/package-pinout-files/usapackages/usaall.zip", "used_for": ["UltraScale and UltraScale+ device/package combinations"] },
+    { "ref_id": "amd-ug483-7series-pcb", "vendor_id": "xilinx", "title": "AMD 7 Series FPGAs PCB Design Guide UG483", "url": "https://www.amd.com/content/dam/xilinx/support/documents/user_guides/ug483_7Series_PCB.pdf", "used_for": ["Virtex-7 HT package/device table fallback"] },
+    { "ref_id": "amd-versal-rf-psg", "vendor_id": "xilinx", "title": "AMD Versal RF Series Product Selection Guide", "url": "https://docs.amd.com/api/khub/documents/LLwf~6xQPkRWqhxcjKlTIw/content", "used_for": ["Versal RF device/resource/order-grade confirmation"] },
+    { "ref_id": "amd-versal-rf-xmp508", "vendor_id": "xilinx", "title": "AMD Versal RF Series Product Selection Guide XMP508", "url": "https://docs.amd.com/api/khub/documents/LLwf~6xQPkRWqhxcjKlTIw/content", "used_for": ["Versal RF device resources", "Versal RF package options", "ordering grade options"] },
+    { "ref_id": "amd-7series-product-selection-guide", "vendor_id": "xilinx", "title": "AMD 7 Series Product Selection Guide", "url": "https://www.amd.com/content/dam/xilinx/support/documents/selection-guides/7-series-product-selection-guide.pdf", "used_for": ["Artix-7 device resources"] },
+    { "ref_id": "amd-zynq7000-psg", "vendor_id": "xilinx", "title": "AMD Zynq-7000 SoC Product Selection Guide", "url": "https://docs.amd.com/v/u/en-US/zynq-7000-product-selection-guide", "used_for": ["Zynq-7000 programmable logic resources"] },
+    { "ref_id": "amd-ultrascale-plus-psg", "vendor_id": "xilinx", "title": "AMD UltraScale+ FPGAs Product Selection Guide", "url": "https://docs.amd.com/v/u/en-US/ultrascale-plus-fpga-product-selection-guide", "used_for": ["Artix UltraScale+ device resources"] },
+    { "ref_id": "amd-ds886-xa-artix-us-plus", "vendor_id": "xilinx", "title": "AMD Artix UltraScale+ XA FPGA Data Sheet: Overview (DS886)", "url": "https://docs.amd.com/v/u/en-US/ds886-xa-artix-ultrascale-overview", "used_for": ["Artix UltraScale+ AU7P/AU10P/AU15P package I/O resources"] },
+    { "ref_id": "amd-zynq-us-plus-mpsoc-psg", "vendor_id": "xilinx", "title": "AMD Zynq UltraScale+ MPSoC Data Sheet and Product Selection Guide", "url": "https://docs.amd.com/v/u/en-US/zynq-ultrascale-plus-product-selection-guide", "used_for": ["Zynq UltraScale+ MPSoC programmable logic resources"] },
+    { "ref_id": "amd-ultrascale-psg", "vendor_id": "xilinx", "title": "AMD UltraScale FPGA Product Selection Guide and product tables", "url": "https://docs.amd.com/v/u/en-US/ultrascale-fpga-product-selection-guide", "used_for": ["Kintex UltraScale and Virtex UltraScale device resources"] },
+    { "ref_id": "amd-zynq-us-plus-rfsoc-table", "vendor_id": "xilinx", "title": "AMD Zynq UltraScale+ RFSoC Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/soc/zynq-ultrascale-plus-rfsoc.html", "used_for": ["Zynq UltraScale+ RFSoC programmable logic resources"] },
+    { "ref_id": "amd-versal-prime-table", "vendor_id": "xilinx", "title": "AMD Versal Prime Series Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/prime-series.html", "used_for": ["Versal Prime logic and DSP resources"] },
+    { "ref_id": "amd-versal-ai-core-table", "vendor_id": "xilinx", "title": "AMD Versal AI Core Series Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/ai-core-series.html", "used_for": ["Versal AI Core logic, AI Engine and DSP resources"] },
+    { "ref_id": "amd-versal-ai-edge-table", "vendor_id": "xilinx", "title": "AMD Versal AI Edge Series Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/ai-edge-series.html", "used_for": ["Versal AI Edge logic, memory, AI Engine and DSP resources"] },
+    { "ref_id": "amd-versal-premium-table", "vendor_id": "xilinx", "title": "AMD Versal Premium Series Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/premium-series.html", "used_for": ["Versal Premium logic and DSP resources"] },
+    { "ref_id": "amd-versal-hbm-table", "vendor_id": "xilinx", "title": "AMD Versal HBM Series Product Table", "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/hbm-series.html", "used_for": ["Versal HBM logic, memory and DSP resources"] },
+    { "ref_id": "intel-quartus-device-support", "vendor_id": "intel", "title": "Intel/Altera Quartus Prime software and device support release notes", "url": "https://www.intel.com/content/www/us/en/docs/programmable/683472/25-1/device-support-and-pin-out-status.html", "used_for": ["Quartus 支持系列边界"] },
+    { "ref_id": "intel-altera-device-overview", "vendor_id": "intel", "title": "Altera device overview/product table PDFs", "url": "https://docs.altera.com", "used_for": ["Agilex", "Cyclone", "MAX", "Arria", "Stratix 器件代码核对"] },
+    { "ref_id": "intel-cyclone10lp-product-table", "vendor_id": "intel", "title": "Intel Cyclone 10 LP FPGA Product Table", "url": "https://docs.altera.com/api/khub/documents/yY5ignwF2HgtWTakDnPR1g/content", "used_for": ["Cyclone 10 LP package options and I/O pins"] },
+    { "ref_id": "intel-max10-product-table", "vendor_id": "intel", "title": "Intel MAX 10 FPGA Product Table", "url": "https://docs.altera.com/api/khub/documents/hrQKZ0GrJmewJc93~A5nRQ/content", "used_for": ["MAX 10 package options and I/O pins"] },
+    { "ref_id": "intel-cyclone10gx-product-table", "vendor_id": "intel", "title": "Intel Cyclone 10 GX FPGA Product Table", "url": "https://docs.altera.com/api/khub/documents/yhSA_leraNkMqklBlaOtzA/content", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-cyclone5-product-table", "vendor_id": "intel", "title": "Intel Cyclone V FPGA and SoC FPGA Product Table", "url": "https://docs.altera.com/api/khub/documents/s60vJiu_kjIh2yag_Ea_yg/content", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-cyclone4-product-table", "vendor_id": "intel", "title": "Intel Cyclone IV FPGA Product Table", "url": "https://docs.altera.com/api/khub/documents/MyZkIjsVBjCUCNhGUQeMWQ/content", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-max5-product-table", "vendor_id": "intel", "title": "Intel MAX V CPLD Product Table", "url": "https://docs.altera.com/api/khub/documents/ymHVQ9f6SFvfKs5vbrPcvA/content", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-max2-ark", "vendor_id": "intel", "title": "Intel MAX II CPLD ARK", "url": "https://www.intel.com/content/www/us/en/ark/products/series/98849/max-ii-cplds.html", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-arria10-product-table", "vendor_id": "intel", "title": "Intel Arria 10 FPGA and SoC Product Table", "url": "https://www.intel.com/content/www/us/en/content-details/714167/arria-10-fpga-and-soc-product-table.html", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-stratix10-gxsx-table", "vendor_id": "intel", "title": "Intel Stratix 10 GX/SX Product Table", "url": "https://www.intel.com/content/www/us/en/products/details/fpga/stratix/10/gx/products.html", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-stratix10-tx-table", "vendor_id": "intel", "title": "Intel Stratix 10 TX Product Table", "url": "https://docs.altera.com/api/khub/documents/ZbkWx1ZIdLJw_DAndns33A/content", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-stratix10-dx-table", "vendor_id": "intel", "title": "Intel Stratix 10 DX Product Table", "url": "https://cdrdv2-public.intel.com/652414/stratix-10-dx-product-table.pdf", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-agilex5-migration-guidelines", "vendor_id": "intel", "title": "Intel Agilex 5 E-Series Migration Guidelines", "url": "https://device.report/m/4b72b5e20bb84da3d1af248cf4c855cd697f0d70d078edfbe4f16fee07a77efc", "used_for": ["package_options", "device/package selection"] },
+    { "ref_id": "intel-max10-max-resources", "vendor_id": "intel", "title": "Altera MAX 10 FPGA Device Maximum Resources", "url": "https://docs.altera.com/r/docs/683658/current/max-10-fpga-device-overview/max-10-device-maximum-resources", "used_for": ["MAX 10 logic, memory, multiplier, PLL and GPIO resources"] },
+    { "ref_id": "intel-cyclone10lp-max-resources", "vendor_id": "intel", "title": "Altera Cyclone 10 LP Maximum Resources", "url": "https://docs.altera.com/r/docs/683879/current/cyclone-10-lp-device-overview/cyclone-10-lp-maximum-resources", "used_for": ["Cyclone 10 LP device resources"] },
+    { "ref_id": "intel-cyclone10gx-max-resources", "vendor_id": "intel", "title": "Altera Cyclone 10 GX Maximum Resources", "url": "https://docs.altera.com/r/docs/683485/current/cyclone-10-gx-device-overview/cyclone-10-gx-maximum-resources", "used_for": ["Cyclone 10 GX device resources"] },
+    { "ref_id": "intel-cyclone5-resources", "vendor_id": "intel", "title": "Altera Cyclone V FPGA and SoC FPGA Product Table", "url": "https://docs.altera.com/v/u/docs/714205/cyclone-v-fpga-and-soc-fpga-product-table", "used_for": ["Cyclone V FPGA and SoC FPGA resources"] },
+    { "ref_id": "intel-max2-specs", "vendor_id": "intel", "title": "Intel MAX II CPLD product specifications and device handbook", "url": "https://www.intel.com/content/www/us/en/products/sku/210264/max-ii-epm240-cpld/specifications.html", "used_for": ["MAX II CPLD LE, macrocell and UFM resources"] },
+    { "ref_id": "intel-agilex3-cseries-table", "vendor_id": "intel", "title": "Altera Agilex 3 FPGAs and SoCs C-Series Product Table", "url": "https://www.mouser.com/pdfDocs/agilex-3-fpgas-c-series-product-table.pdf", "used_for": ["Agilex 3 C-Series resources"] },
+    { "ref_id": "intel-agilex5-eseries-table", "vendor_id": "intel", "title": "Altera Agilex 5 FPGAs and SoCs E-Series Product Table", "url": "https://docs.altera.com/api/khub/documents/rcQSreUhbuYGXCo7Np10cw/content", "used_for": ["Agilex 5 E-Series resources"] },
+    { "ref_id": "intel-agilex5-dseries-table", "vendor_id": "intel", "title": "Altera Agilex 5 FPGAs and SoCs D-Series Product Table", "url": "https://cdrdv2-public.intel.com/744050/agilex-5-fpgas-and-socs-d-series-product-table.pdf", "used_for": ["Agilex 5 D-Series resources"] },
+    { "ref_id": "intel-agilex7-fseries-table", "vendor_id": "intel", "title": "Altera Agilex 7 FPGAs and SoCs F-Series Product Table", "url": "https://docs.altera.com/api/khub/documents/T99La5fz4bf~McCaFB0bPw/content", "used_for": ["Agilex 7 F-Series resources"] },
+    { "ref_id": "intel-agilex7-iseries-table", "vendor_id": "intel", "title": "Altera Agilex 7 FPGAs and SoCs I-Series Product Table", "url": "https://docs.altera.com/api/khub/documents/jrw0XR8_YOVpoxxVA2o6KQ/content", "used_for": ["Agilex 7 I-Series resources"] },
+    { "ref_id": "intel-agilex7-mseries-table", "vendor_id": "intel", "title": "Altera Agilex 7 FPGAs and SoCs M-Series Product Table", "url": "https://docs.altera.com/api/khub/documents/WbI73V2I687MZLEtHO2uUw/content", "used_for": ["Agilex 7 M-Series resources"] },
+    { "ref_id": "intel-arria10-resources", "vendor_id": "intel", "title": "Altera Arria 10 FPGA and SoC Product Table", "url": "https://docs.altera.com/api/khub/documents/aqSpifwWNUDBSqxgeKvQGg/content", "used_for": ["Arria 10 GX/SX/GT resources"] },
+    { "ref_id": "intel-cyclone4-resources", "vendor_id": "intel", "title": "Altera Cyclone IV FPGA Product Table", "url": "https://cdrdv2-public.intel.com/714186/cyclone-iv-product-table.pdf", "used_for": ["Cyclone IV E/GX resources"] },
+    { "ref_id": "intel-stratix10-gxsx-resources", "vendor_id": "intel", "title": "Altera Stratix 10 GX/SX FPGA Product Table", "url": "https://docs.altera.com/v/u/docs/652463/stratix-10-gx/sx-fpga-product-table", "used_for": ["Stratix 10 GX/SX resources"] },
+    { "ref_id": "intel-stratix10-tx-resources", "vendor_id": "intel", "title": "Altera Stratix 10 TX FPGA Product Table", "url": "https://cdrdv2-public.intel.com/652589/stratix-10-tx-product-table.pdf", "used_for": ["Stratix 10 TX resources"] },
+    { "ref_id": "intel-stratix10-dx-resources", "vendor_id": "intel", "title": "Altera Stratix 10 DX Product Table", "url": "https://docs.altera.com/api/khub/documents/biw9YPoMJaO3QtXDbfPi0Q/content", "used_for": ["Stratix 10 DX resources"] },
+    { "ref_id": "anlogic-product-center", "vendor_id": "anlogic", "title": "安路科技产品中心与选型表", "url": "https://www.anlogic.com/product/fpga", "used_for": ["PH1A/PH1P/EG4/AL3/EF2/EF3/DR1/SF1 官网型号与资源表"] },
+    { "ref_id": "anlogic-al3-product-table", "vendor_id": "anlogic", "title": "Anlogic AL3 Product Table", "url": "https://www.anlogic.com/en/product/fpga/saleagle/salal3", "used_for": ["AL3 resources and package options"] },
+    { "ref_id": "anlogic-eg4-product-table", "vendor_id": "anlogic", "title": "Anlogic EG4 Product Table", "url": "https://www.anlogic.com/jp/product/fpga/saleagle/eg4", "used_for": ["EG4 resources and package options"] },
+    { "ref_id": "anlogic-ph1a-product-table", "vendor_id": "anlogic", "title": "Anlogic PH1A Product Table", "url": "https://www.anlogic.com/en/product/fpga/phoenix/ph1a", "used_for": ["PH1A resources and package options"] },
+    { "ref_id": "anlogic-ph1p-product-table", "vendor_id": "anlogic", "title": "Anlogic PH1P Product Table", "url": "https://www.anlogic.com/product/fpga/phoenix/ph1p", "used_for": ["PH1P resources and package options"] },
+    { "ref_id": "anlogic-ef2-product-table", "vendor_id": "anlogic", "title": "Anlogic EF2 Product Table", "url": "https://www.anlogic.com/en/product/fpga/salelf/salelf2", "used_for": ["EF2 resources and package options"] },
+    { "ref_id": "anlogic-ef3-product-table", "vendor_id": "anlogic", "title": "Anlogic EF3 Product Table", "url": "https://www.anlogic.com/en/product/fpga/salelf/salelf3", "used_for": ["EF3 resources and package options"] },
+    { "ref_id": "anlogic-ef3l15-product-table", "vendor_id": "anlogic", "title": "Anlogic EF3L15 Product Table and Family Overview", "url": "https://www.anlogic.com/en/product/fpga/salelf/elf3l15", "used_for": ["EF3L15 resources, user I/O and bank count"] },
+    { "ref_id": "anlogic-sf1-product-table", "vendor_id": "anlogic", "title": "Anlogic SF1 Product Table", "url": "https://www.anlogic.com/product/fpga/salswift/salswift1", "used_for": ["SF1 resources and package options"] },
+    { "ref_id": "anlogic-dr1-product-table", "vendor_id": "anlogic", "title": "Anlogic DR1 Product Table", "url": "https://www.anlogic.com/product/fpga/saldragon/dr1", "used_for": ["DR1 programmable logic resources and max user I/O"] }
+  ]
+}

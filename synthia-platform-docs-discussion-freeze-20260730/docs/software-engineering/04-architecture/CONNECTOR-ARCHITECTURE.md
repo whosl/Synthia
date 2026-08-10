@@ -126,16 +126,18 @@ Tcl 正文、变量、工作目录、输入输出、环境和预计副作用进�
 
 ```mermaid
 flowchart LR
-    CORE["Synthia Core\nConnector Port"] -->|"direct_https\nmTLS + envelope connector.remote.v1"| ADP["HTTP Adapter\n注入 transport/fetch"]
-    ADP --> RW["远程 Vivado Connector Worker\n用户 Linux/Windows 主机"]
+    CORE["Synthia Core\nConnector Port"] -->|"HTTPS + Access Service Token\nconnector.remote.v1"| EDGE["Cloudflare Access + Tunnel"]
+    EDGE --> PROXY["NAS origin proxy"]
+    PROXY -->|"origin mTLS"| RW["远程 Vivado Connector Worker\n用户 Linux/Windows 主机"]
     RW --> VIV["licensed Vivado"]
     RW --> STORE["对象存储/检疫区\n哈希初算，Core 复算"]
     TUN["outbound_tunnel\ntyped reserved，未实现"] -.->|"禁止隐式启用"| RW
 ```
 
-- 端点与注册：Core 保存版本化 ConnectorEndpoint/ConnectorRegistration；配置只存证书/信任引用（`tls_trust_ref`、`tls_client_cert_ref`），不存 secret；bootstrap token 一次性使用；
-- 传输：`direct_https` 为唯一已实现传输；`outbound_tunnel`（Worker 反向出站长连接）为 typed reserved 枚举，未实现且禁止以其他配置隐式启用；
-- 安全：mTLS + bootstrap token + 双向 allowlist + 基于 `idempotency_key`/单调序号/时间窗的重放防护；任何校验失败 fail-closed，不执行 Vivado 操作；
+- 端点与注册：Core 保存版本化 ConnectorEndpoint/ConnectorRegistration；配置只存证书/信任引用和 Service Token 引用，不存 secret 值；bootstrap token 仍为 typed reserved，未实现；
+- 传输：协议层仍为 `direct_https`；当前公网部署通过 Cloudflare Access/Tunnel 和 NAS origin proxy 转发，Core→Cloudflare 使用 Service Token，NAS proxy→Worker 使用 origin mTLS；不得把该代理链路表述为 Core→Worker 端到端 mTLS；
+- `outbound_tunnel`（Worker 自建反向出站长连接）仍为 typed reserved 枚举，未实现且禁止以其他配置隐式启用；
+- 安全：公网 HTTPS + Access Service Auth + origin mTLS + hostname/project/classification/capability allowlist；任何校验失败 fail-closed，不执行 Vivado 操作；
 - 生命周期：`registering→approved→ready→degraded→offline→revoked`，心跳 `heartbeat_interval_seconds`、租约 `lease_seconds`；仅 `ready` 接受 formal/gate_check；
 - 能力漂移：心跳携带 capability map 摘要，与注册 `toolchain_profile_hash` 不一致即漂移，阻断 formal 并要求重新复核批准；
-- 验证边界：截至本版无真实 Vivado PoC；远程模式仅经 FakeConnector 与注入 transport/fetch 的 HTTP 契约测试验证。真实主机接入步骤见 SYNTHIA-FLOW-006 §16.8。
+- 验证边界：真实 `vivado-66-xc7k70t` Worker/Vivado 能力已验证；公网 IPv4/TLS 与无 Token `403` 已验证，但现有 Service Token 仍被 Access `403` 拒绝。公网生命周期闭环前 endpoint 不得进入正式 `ready`。

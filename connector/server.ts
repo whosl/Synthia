@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { access, constants } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { WorkerRuntime, type WorkerExecution, type WorkerRuntimeOptions, type WorkerExecutionResult } from "./worker.ts";
-import { VivadoBatchAdapter, VIVADO_CAPABILITIES, VIVADO_CAPABILITY_VERSION, type VivadoRequest } from "./vivado.ts";
+import { VivadoBatchAdapter, type VivadoRequest } from "./vivado.ts";
 import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot, type JobRequest } from "./remote.ts";
 
 interface WorkerConfig extends ConnectorEndpoint {
@@ -39,15 +39,33 @@ function execution(config: WorkerConfig): WorkerExecution {
   const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary });
   return {
     async discover(): Promise<DiscoverySnapshot> {
-      try { await access(config.vivado_binary, constants.X_OK); } catch { return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] }; }
-      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: VIVADO_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
+      try { await access(config.vivado_binary, constants.X_OK); } catch { return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: "unknown", vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: "unknown", sdk_worker_build_hash: "unknown", capabilities: [], toolchain_profile_hash: "unknown", license_status: "unavailable", unsupported: ["vivado_binary"] }; }
+      // Binary exists, but executable access is NOT a license-checkout fact: without an
+      // independent toolchain probe we cannot assert version, patch, capabilities, or
+      // availability. Stay conservative so callers never act on a fabricated Vivado identity.
+      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unknown", vivado_patch: "unknown", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unknown", unsupported: ["vivado_license"] };
     },
     async execute(request: JobRequest, _workspace: string): Promise<WorkerExecutionResult> {
       const candidate = (request as JobRequest & { parameters?: unknown }).parameters;
-      if (!candidate || typeof candidate !== "object") return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED" };
-      const result = await adapter.execute(candidate as VivadoRequest);
-      if (result.status === "unsupported") return { outcome: "failure", error_code: result.unsupportedReason ?? "VIVADO_UNSUPPORTED" };
-      return { outcome: result.status === "succeeded" ? "success" : "failure", output: JSON.stringify({ command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain }), evidence: result.evidence };
+      if (!candidate || typeof candidate !== "object") return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
+      let result;
+      try {
+        result = await adapter.execute(candidate as VivadoRequest);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "VIVADO_EXECUTION_ERROR";
+        const errorCode = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";
+        const jobId = request.jobId ?? "worker";
+        return { outcome: "failure", error_code: errorCode, output: JSON.stringify({ status: "rejected", jobId, errorCode }), evidence: { jobId, entries: [] } };
+      }
+      const outcome = result.status === "succeeded" ? "success" : result.status === "timeout" ? "timeout" : result.status === "lost" ? "lost" : result.status === "unknown_effect" ? "unknown_effect" : "failure";
+      const meta: Record<string, unknown> = { status: result.status, command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain };
+      if (result.exitCode !== undefined) meta.exitCode = result.exitCode;
+      if (result.timeoutMs !== undefined) meta.timeoutMs = result.timeoutMs;
+      if (result.timedOut !== undefined) meta.timedOut = result.timedOut;
+      if (result.signal !== undefined) meta.signal = result.signal;
+      if (result.unsupportedReason !== undefined) meta.unsupportedReason = result.unsupportedReason;
+      if (result.output && typeof result.output === "object") { const o = result.output as { stdout?: unknown; stderr?: unknown }; if (o.stdout !== undefined) meta.stdout = o.stdout; if (o.stderr !== undefined) meta.stderr = o.stderr; }
+      return { outcome, error_code: result.status === "unsupported" ? (result.unsupportedReason ?? "VIVADO_UNSUPPORTED") : undefined, output: JSON.stringify(meta), evidence: result.evidence };
     },
   };
 }

@@ -1,0 +1,32 @@
+# wave_plan.yaml — 行为与波形检查点计划模板
+#
+# 重要边界：波形导出（VCD/FST 等）当前 post-MVP 未启用。
+# - 本模板只描述检查点语义（信号角色、事件、观察窗口），不得包含任何
+#   波形生成开关、dump 配置或执行命令，也不得承诺产出波形文件。
+# - 如已有外部波形资料，只能作为输入证据并经 Core 登记后引用。
+module: example_module
+clock: clk_sys
+reset: rstn_sys
+signals:
+  - name: clk_sys
+    role: clock
+  - name: rstn_sys
+    role: reset
+  - name: state
+    role: fsm_state
+  - name: s_valid
+    role: input_handshake
+  - name: s_ready
+    role: input_handshake
+events:
+  - id: reset_release
+    expression: rstn_sys rises
+    sample_edge: posedge clk_sys
+  - id: transaction_accept
+    expression: s_valid && s_ready
+    sample_edge: posedge clk_sys
+windows:
+  - id: normal_transaction
+    start_event: transaction_accept
+    pre_cycles: 4
+    post_cycles: 32

@@ -198,9 +198,13 @@ P0-P5 与角色/operation 的映射（引用 SYNTHIA-FLOW-004 §3/§4）：
 
 `beforeModelCall`（经 `setBeforeModelCall(fn)` 设置）在每次发模型前检查装配后的提示是否越域；越域返回 `{stop: true, reason}`，不发起该次请求、不计费、不留开放 turn（SYNTHIA-ARC-004 数据域继承）。
 
-### 6.2 关于"skill"
+### 6.2 Skill 的定义与边界
 
-Synthia 文档体系中无"skill"概念。其它语境下的对应物在本架构中由四者组合表达：① 角色 Profile（`systemPrompt`）；② 任务契约 `allowed_tools`；③ Connector 强类型能力（capability map，SYNTHIA-FLOW-006 §6）；④ 批准知识库条目（带来源/状态/版本/数据域/失效条件，见 SYNTHIA-FLOW-005 §11 知识库与评测集契约）。Agent 不加载外部插件式技能；能力被任务契约（上侧裁剪）与 Connector capability map（下侧声明）共同夹定。
+Skill 是**版本化任务方法/资产**：由 Core 注册与校验（`synthia.skill-pack.v1` descriptor，见 `core/src/skill-catalog.ts`），Runtime 按冻结 TaskPackage 使用。Skill 描述前置条件、输入快照、输出 Artifact 类型、所需 Core 权限/能力、风险、失败处理和证据要求，但**不等于插件、不等于自主执行器、不拥有流程真相和批准权**。
+
+Skill 不引入新的执行通道或事实源。其能力表达仍由四者组合：① 角色 Profile（`systemPrompt`）；② 任务契约 `allowed_tools`；③ Connector 强类型能力（capability map，SYNTHIA-FLOW-006 §6）；④ 批准知识库条目（带来源/状态/版本/数据域/失效条件，见 SYNTHIA-FLOW-005 §11）。Agent 不加载外部插件式技能；能力被任务契约（上侧裁剪）与 Connector capability map（下侧声明）共同夹定。
+
+Core 侧校验器在注册边界对每个 descriptor 做 fail-closed 结构校验，硬约束包括：① skill/agent 不得声明 `approve`/`baseline`/`publish`/`hardware_write`（复用 SYNTHIA-ARC-005 §6.1 与 `policy.ts` 的禁止集合）；② `required_capabilities` 必须是版本化 Connector 能力（形如 `vivado-batch-1:<operation>`），不得是 MCP 生成名或自由文本 Tcl 入口（`execute_tcl`/`execute_tcl(any_string)`/`vivado_raw_tcl`）；③ skill 直接输出只允许 `candidate`/`diagnostic` 状态，不得把候选冒充批准结论（SYNTHIA-ARC-002 §6 不变量 1-2）。校验器不修改现有 RBAC 语义，也不取代 §6.1 的双层运行时强制。
 
 ## 7. 输入装配与工作区隔离
 

@@ -1,0 +1,308 @@
+{
+  "schema_version": "synthia.skill-pack.v1",
+  "pack_id": "synthia.fpga",
+  "version": "0.1.0",
+  "skills": [
+    {
+      "skill_id": "fpga-intake",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G1",
+      "purpose": "需求入口：把原始 FPGA/RTL 需求澄清为一份冻结的需求梳理摘要（candidate），判定硬件依赖、验收口径与下一步交接技能；不做架构、RTL、TB、约束或修复实现。",
+      "inputs": [
+        "用户原始需求文本（TaskPackage 冻结）",
+        "可选：SOURCE_PACKAGE 中的需求/接口/寄存器表/日志/波形等上传资料",
+        "可选：doc/hw/config.json 板卡配置快照"
+      ],
+      "outputs": [
+        { "artifact_type": "DEVELOPMENT_REQUIREMENTS", "declared_status": "candidate", "description": "doc/intake/summary.md：汇总需求梳理摘要，含任务摘要、已确认事实、硬件依赖、假设、缺失信息、所需证据、验收标准、交接建议" },
+        { "artifact_type": "OPEN_QUESTION_SET", "declared_status": "candidate", "description": "doc/intake/summary.md 内 Missing Information 章节：阻塞/非阻塞缺失信息清单，不单独成文" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "doc/intake/summary.md 内 Handoff and Next Step 章节：建议的下一个技能及理由" }
+      ],
+      "preconditions": [
+        "存在由 Workflow Engine 创建的不可变 TaskPackage，且输入引用已冻结为 ConfigurationSnapshot 成员",
+        "需求澄清类问题仅在阻塞时提出；存在合理暂定路径时记录假设并继续"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "summary.md 中每条 Confirmed Fact 必须可回指到 TaskPackage 输入或上传资料路径",
+        "关键事实缺失时产出状态只能为 needs_input 语义的候选，不得臆造板卡/管脚/时钟/验收事实"
+      ],
+      "failure_policy": "defer_to_human"
+    },
+    {
+      "skill_id": "fpga-architecture",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G3",
+      "purpose": "架构设计：冻结模块拆分、接口契约、时钟复位与 CDC 策略，产出架构七件套候选与 RTL 顶层骨架（不含业务逻辑），为 RTL/TB/约束阶段提供稳定契约。",
+      "inputs": [
+        "doc/intake/summary.md（需求梳理摘要候选）",
+        "可选：doc/hw/config.json 板卡配置快照",
+        "可选：产品需求、寄存器表、协议说明、已有 RTL 头文件"
+      ],
+      "outputs": [
+        { "artifact_type": "ARCHITECTURE_DESIGN", "declared_status": "candidate", "description": "doc/arch/interface_contract.yaml：外部端口与子模块端口契约（方向、位宽、时钟域、复位域、协议、语义）" },
+        { "artifact_type": "ARCHITECTURE_DESIGN", "declared_status": "candidate", "description": "doc/arch/clock_reset_cdc.md：时钟域、复位同步、数据/控制 CDC 及验证证据要求" },
+        { "artifact_type": "ARCHITECTURE_DESIGN", "declared_status": "candidate", "description": "doc/arch/module_partition.md：模块表、职责归属、状态/FIFO/RAM 归属、黑盒清单" },
+        { "artifact_type": "ARCHITECTURE_DESIGN", "declared_status": "candidate", "description": "doc/arch/connection_matrix.md：生产者-信号组-消费者连接矩阵、协议、时钟域、延迟/反压注记" },
+        { "artifact_type": "RTL_SOURCE_SET", "declared_status": "candidate", "description": "rtl/top_skeleton.sv：面向编译的顶层骨架（参数、端口、本地连线、黑盒实例），无业务逻辑；标注 NON_DELIVERABLE_SCAFFOLD，禁止登记为完成 RTL" },
+        { "artifact_type": "ISSUE_RISK_DECISION", "declared_status": "candidate", "description": "doc/arch/risks.md：架构假设、未决硬件事实、时序/资源风险、下游证据要求" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "doc/arch/handoff_packet.md：指向七件套的交接说明与下游读取路径" }
+      ],
+      "preconditions": [
+        "命中多模块拆分、协议初始化时序、CDC 策略、顶层边界未定或协议时序敏感判定标准之一",
+        "不得在架构阶段产出已实现业务逻辑的子模块 RTL 或 rtl/top.v"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "每个外部端口和子模块接口必须有时钟/复位域、协议规则和下游验证挂点",
+        "未决决策以开放问题显式列出，不得隐藏在 RTL 注释中"
+      ],
+      "failure_policy": "defer_to_human"
+    },
+    {
+      "skill_id": "fpga-behavior-and-wave-plan",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G2",
+      "purpose": "行为与波形规划：把需求语言转化为带规则 ID、可观测信号和 PASS/FAIL 条件的行为规格、波形检查计划与首失配比对规则，供 RTL/TB/波形分析共同引用。",
+      "inputs": [
+        "doc/intake/summary.md",
+        "可选：doc/arch/interface_contract.yaml、rtl/top_skeleton.sv",
+        "可选：doc/reg/register_map.yaml、doc/reg/semantics_notes.md",
+        "可选：已有 RTL/TB 头部、失败仿真日志、外部既有 VCD/FST（仅作输入证据，经 Core 登记后引用；诊断既有失配时；平台不生成波形）"
+      ],
+      "outputs": [
+        { "artifact_type": "DETAILED_DESIGN", "declared_status": "candidate", "description": "doc/spec/behavior_spec.md：带规则 ID 的行为规格（复位、正常流、边界、错误处理、恢复、非法条件）" },
+        { "artifact_type": "VERIFICATION_METHOD_MAP", "declared_status": "candidate", "description": "doc/spec/wave_plan.yaml：波形计划（信号、别名、触发事件、窗口、期望序列、最小观察/检查点范围（仅计划语义，不配置 dump、不产出波形））" },
+        { "artifact_type": "VERIFICATION_METHOD_MAP", "declared_status": "candidate", "description": "doc/spec/wave_compare_rules.yaml：首失配比对规则（采样沿、容差、延迟、无关窗口、分类）" },
+        { "artifact_type": "VERIFICATION_METHOD_MAP", "declared_status": "candidate", "description": "doc/spec/scenario_matrix.md：规格级测试场景（行为与期望信号），区别于 TB 实现级场景" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "doc/spec/handoff_packet.md：推荐下游技能与其应读取的产物路径" }
+      ],
+      "preconditions": [
+        "每条规则必须有可观测信号与 PASS/FAIL 条件",
+        "DUT 错误、TB 激励错误、期望规则错误、外部既有波形证据缺失/采样错误必须分类记录"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "关键行为必须具有规则 ID、触发、可观测信号、期望结果、合法容差/窗口与验证方法",
+        "下游 TB 无需重新解读需求即可实现检查器"
+      ],
+      "failure_policy": "defer_to_human"
+    },
+    {
+      "skill_id": "fpga-register-spec",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G3",
+      "purpose": "寄存器契约：生成并审计寄存器地图、字段语义、读写副作用与验证口径，形成软件、RTL、TB、文档共享的结构化寄存器契约候选。",
+      "inputs": [
+        "可选：用户提供的寄存器表（Markdown/CSV/YAML/JSON/文本）",
+        "doc/intake/summary.md 或架构交接包",
+        "可选：已有 RTL 头文件中的寄存器定义"
+      ],
+      "outputs": [
+        { "artifact_type": "DETAILED_DESIGN", "declared_status": "candidate", "description": "doc/reg/register_map.yaml：结构化寄存器地图（偏移、位宽、复位值、访问类型、字段、副作用、属主时钟域）" },
+        { "artifact_type": "DETAILED_DESIGN", "declared_status": "candidate", "description": "doc/reg/register_map.md：人读寄存器表，由结构化地图渲染" },
+        { "artifact_type": "DETAILED_DESIGN", "declared_status": "candidate", "description": "doc/reg/semantics_notes.md：副作用、优先级、原子性、CDC 可见性语义" },
+        { "artifact_type": "VERIFICATION_METHOD_MAP", "declared_status": "candidate", "description": "doc/reg/tb_access_plan.md：TB 访问计划（合法/非法读写、字节选通、副作用检查、复位检查、CDC 可见性）" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "doc/reg/handoff_packet.md：面向 RTL/TB 的文件与假设交接" }
+      ],
+      "preconditions": [
+        "不得臆造偏移、复位值、访问类型；未知项显式标记缺失",
+        "每个读写副作用必须含触发、优先级、时钟域、清除机制与验证挂点"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "每个字段具备复位值、访问类型、位域、属主时钟域、副作用规则、非法访问行为、验证挂点",
+        "register_map.yaml 须通过 tools/regmap_validate.py 结构校验后再渲染 Markdown（校验由 Runtime 受控环境执行，技能不直接运行脚本）"
+      ],
+      "failure_policy": "fail_closed"
+    },
+    {
+      "skill_id": "fpga-rtl-build",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G4",
+      "purpose": "RTL 生成：在已确认的架构/接口/行为契约下生成或修改可综合 Verilog RTL 候选；简单单模块需求可按文档化默认值直接实现（仅限纯内部单模块）；一次调用只产出一个模块；板级 top 受硬件事实门禁：interface_contract 仅为设计端口契约，板级 top 需 Core 登记的 extracted_facts 或用户等价板级契约。",
+      "inputs": [
+        "可选：doc/intake/summary.md",
+        "可选：doc/arch/interface_contract.yaml（仅设计端口/模块契约，非板级物理证据）、doc/arch/connection_matrix.md、rtl/top_skeleton.sv",
+        "可选：doc/reg/register_map.yaml、doc/spec/behavior_spec.md、doc/spec/wave_plan.yaml",
+        "可选：已有 RTL 源文件（修改场景）",
+        "直接调用时：TaskPackage 中的用户请求为唯一事实来源"
+      ],
+      "outputs": [
+        { "artifact_type": "RTL_SOURCE_SET", "declared_status": "candidate", "description": "rtl/<module>.v：可综合 RTL 源文件，一次调用一个模块" },
+        { "artifact_type": "DETAILED_DESIGN", "declared_status": "candidate", "description": "doc/spec/behavior_spec.md：模块行为规格（端口表、参数、时钟复位、逐周期行为、时序延迟、假设、验收标准）" },
+        { "artifact_type": "RTL_SOURCE_SET", "declared_status": "candidate", "description": "rtl/top.v：板级顶层封装，仅在板级端口/时钟/复位事实经 Core 登记的 extracted_facts.json（每条带 source_ref/evidence_kind）或用户明确提交且具等价可追溯字段的板级契约确认时生成；架构 interface_contract 单独不构成板级证据；硬件事实缺失不得登记；仅例化与连线，无业务逻辑" }
+      ],
+      "preconditions": [
+        "协议时序敏感模块在边沿语义/相位次序/片选生命周期/命令响应边界未冻结时不得进入本阶段",
+        "不得改变已确认端口、参数、层次、寄存器语义或时序契约；必要变更回退架构/寄存器阶段",
+        "板级 top 仅在板级端口/时钟/复位事实经 Core 登记的 extracted_facts.json（source_ref/evidence_kind 齐备）或用户明确提交且具等价可追溯字段的板级契约确认时生成；interface_contract.yaml 只是设计端口契约，不能单独充当硬件事实；缺失时以 needs_input 收尾或回退 intake→architecture→hardware extraction"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "RTL 不得含 stub/TODO/省略占位、未闭合 FSM 分支或语义替代性反模式（见 references/verilog_antipatterns.md）",
+        "AXI-Lite/APB 外设必须完整实现写/读事务状态机与寄存器译码（见 references/axi_peripheral_checklist.md）",
+        "behavior_spec.md 必须具体到下游 TB 无需重读需求即可验证",
+        "板级 top 候选仅在 Core 登记的 extracted_facts.json 或用户等价板级契约齐备时登记；禁止接 0/上拉/分频等默认占位连接；设计端口映射回指 interface_contract.yaml，板级映射逐条回指 source_ref/evidence_kind"
+      ],
+      "failure_policy": "defer_to_human"
+    },
+    {
+      "skill_id": "fpga-tb-write",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G4",
+      "purpose": "TB 生成：生成自检 TestBench 源码候选（时钟/复位/驱动/检查/超时/PASS-FAIL），不执行编译与仿真；一次调用产出一套 TB 产物。",
+      "inputs": [
+        "rtl/ 下已有 RTL 候选源（必须先读取并提取精确端口/参数）",
+        "可选：doc/spec/behavior_spec.md、doc/spec/scenario_matrix.md",
+        "可选：doc/arch/interface_contract.yaml、doc/intake/summary.md"
+      ],
+      "outputs": [
+        { "artifact_type": "TB_SOURCE_SET", "declared_status": "candidate", "description": "tb/tb_top.v：TB 顶层（时钟、复位、驱动、检查器、超时看门狗、PASS/FAIL）" },
+        { "artifact_type": "TB_SOURCE_SET", "declared_status": "candidate", "description": "tb/dut_inst.vh：DUT 例化，与 RTL 声明精确一致的端口映射与参数覆盖" },
+        { "artifact_type": "VERIFICATION_METHOD_MAP", "declared_status": "candidate", "description": "tb/scenario_matrix.md：实现级场景覆盖计划（具体激励序列）" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "tb/handoff_packet.md：面向编译检查/仿真阶段的交接（源集清单、顶层模块、风险与停止条件）" }
+      ],
+      "preconditions": [
+        "rtl/ 下存在可读取的 RTL 候选源；缺失时以 needs_input 失败并指明缺失输入",
+        "TB 必须能在仿真运行时产生显式 PASS/FAIL；不得在本技能内编译或运行仿真"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "dut_inst.vh 端口映射逐信号来自 RTL 声明，禁止 defparam，localparam 不覆盖",
+        "全部声明产物必须真实登记为候选 ArtifactRevision（路径+内容哈希），文字描述不视为已产出",
+        "scenario_matrix.md 至少 2 行具体场景；无 stub/TODO/省略占位"
+      ],
+      "failure_policy": "fail_closed"
+    },
+    {
+      "skill_id": "fpga-compile-and-repair",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G4",
+      "purpose": "编译检查与最小修复：通过 Connector validate_sources 能力对 RTL+TB 候选源集做语法/展开检查，基于真实工具证据诊断并以最小补丁收敛修复；不运行仿真。",
+      "inputs": [
+        "rtl/ 与 tb/ 下候选源集（作为 validate_sources 输入 manifest）",
+        "可选：doc/intake/summary.md、doc/spec/behavior_spec.md",
+        "修复场景：上一轮 validate_sources 的 ToolRun 证据与日志"
+      ],
+      "outputs": [
+        { "artifact_type": "TOOL_RUN", "declared_status": "diagnostic", "description": "toolruns/validate_sources/<jobId>：vivado-batch-1:validate_sources 运行记录（exploratory 级），含输入哈希与 EvidenceManifest" },
+        { "artifact_type": "STATIC_REPORT_SET", "declared_status": "diagnostic", "description": "doc/compile/check_report.md：编译检查报告（PASS/FAIL、诊断摘要、建议下游技能），结论引用证据哈希" },
+        { "artifact_type": "STATIC_REPORT_SET", "declared_status": "diagnostic", "description": "doc/compile/repair_report.md：收敛失败报告（诊断、补丁清单、根因与下一步），仅修复未收敛时产出" },
+        { "artifact_type": "RTL_SOURCE_SET", "declared_status": "candidate", "description": "rtl/：修复后的 RTL 候选新修订，仅需要修复时产出" },
+        { "artifact_type": "TB_SOURCE_SET", "declared_status": "candidate", "description": "tb/：修复后的 TB 候选新修订，仅需要修复时产出" }
+      ],
+      "preconditions": [
+        "存在可提交的候选源集；工具可用性以 vivado-batch-1:discover_toolchain 快照为准",
+        "修复仅限最小补丁；连续 3 轮未通过必须停止并产出修复报告，不得无界重试"
+      ],
+      "required_permissions": ["read", "candidate_write", "tool_submit"],
+      "required_capabilities": ["vivado-batch-1:validate_sources"],
+      "evidence": [
+        "所有诊断必须来自 validate_sources ToolRun 的真实输出，报告引用 EvidenceManifest 条目 SHA-256",
+        "PASS 结论仅在 ToolRun succeeded 且退出码为 0 时成立；diagnostic 报告不等于门禁通过"
+      ],
+      "failure_policy": "fail_closed"
+    },
+    {
+      "skill_id": "fpga-sim-run",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G4",
+      "purpose": "仿真运行：在用户明确要求时通过 Connector simulate 能力运行已有 RTL+TB 候选的行为仿真，产出运行记录、日志证据与运行报告；不生成 RTL/TB。",
+      "inputs": [
+        "rtl/ 下至少一个 RTL 候选源",
+        "tb/ 下至少一个 TB 候选源（含自检 PASS/FAIL）",
+        "可选：doc/compile/check_report.md（最近编译检查诊断）"
+      ],
+      "outputs": [
+        { "artifact_type": "TOOL_RUN", "declared_status": "diagnostic", "description": "toolruns/simulate/<jobId>：vivado-batch-1:simulate 运行记录（exploratory 级），含输入哈希与 EvidenceManifest" },
+        { "artifact_type": "TEST_RUN", "declared_status": "diagnostic", "description": "doc/compile/run_report.md：仿真运行报告（请求参数、PASS/FAIL、日志证据引用、失败阶段与建议下游技能）" }
+      ],
+      "preconditions": [
+        "用户在本轮明确要求运行仿真；不因 RTL/TB 完成而自动触发",
+        "RTL 缺失路由 fpga-rtl-build，TB 缺失路由 fpga-tb-write，编译失败路由 fpga-compile-and-repair",
+        "VCD/波形导出不在当前 simulate 强类型契约内，post-mvp 未启用；不得在报告中承诺波形文件"
+      ],
+      "required_permissions": ["read", "candidate_write", "tool_submit"],
+      "required_capabilities": ["vivado-batch-1:simulate"],
+      "evidence": [
+        "仿真 PASS/FAIL 仅以 simulate ToolRun 退出状态与 TB 自检输出为据，引用 EvidenceManifest 条目哈希",
+        "失败报告必须记录失败阶段（编译/展开/运行）、日志证据路径与建议修复技能"
+      ],
+      "failure_policy": "fail_closed"
+    },
+    {
+      "skill_id": "fpga-hw-manual-extraction",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G1",
+      "purpose": "硬件事实提取：从板卡手册、原理图、管脚表、参考约束中提取当前任务所需的 pin_map/clock_facts/electrical_facts 三组事实候选，逐条带 source_ref；不生成约束文件。",
+      "inputs": [
+        "用户上传的板卡手册/数据手册（PDF）、原理图、管脚表（CSV/Excel/Markdown）、参考 XDC/UCF/PCF/QSF/SDC",
+        "可选：doc/intake/summary.md（限定硬件范围）",
+        "可选：既有 doc/hw/extracted_facts.json（保留已确认事实）"
+      ],
+      "outputs": [
+        { "artifact_type": "PROJECT_PROFILE", "declared_status": "candidate", "description": "doc/hw/extracted_facts.json：三组硬件事实（pin_map、clock_facts、electrical_facts），每条含 source_ref 与 evidence_kind" },
+        { "artifact_type": "OPEN_QUESTION_SET", "declared_status": "candidate", "description": "doc/hw/extracted_facts.missing.md：缺失事实清单与板级顶层缺口提示，仅存在缺口时产出" }
+      ],
+      "preconditions": [
+        "提取范围限定为用户当前硬件相关任务；范围歧义时以 needs_input 失败",
+        "不得改写 doc/hw/config.json"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "每条事实必须带 source_ref（文档路径+章节）；未确认的管脚/频率/IOSTANDARD 一律记缺口，禁止按惯例臆造",
+        "status=complete 仅当所有范围内信号的三组事实齐备；否则 partial 并产出 missing 文档"
+      ],
+      "failure_policy": "fail_closed"
+    },
+    {
+      "skill_id": "fpga-xdc-gen",
+      "schema_version": "synthia.skill-pack.v1",
+      "version": "0.1.0",
+      "phase": "G4",
+      "purpose": "约束生成：基于已确认 RTL 顶层端口与 extracted_facts 硬件事实生成/更新物理约束候选（XDC/QSF/SDC 等），模板感知且不臆造管脚、电平、时钟或时序数值。",
+      "inputs": [
+        "doc/hw/extracted_facts.json（唯一 pin/XDC 事实来源）",
+        "doc/hw/config.json（厂商、器件、工具链上下文）",
+        "rtl/ 顶层候选源（识别板级端口与位宽）",
+        "可选：用户上传的约束模板（**/*.xdc、**/*.qsf、**/*.sdc、**/*.ucf、**/*.pcf、**/*.pin）"
+      ],
+      "outputs": [
+        { "artifact_type": "XDC_CANDIDATE", "declared_status": "candidate", "description": "prj/constr/top.xdc：主约束文件候选（按厂商为 top.xdc/top.qsf/top.sdc/top.pin 等）；仅 status=complete 且物理映射可证明时产出" },
+        { "artifact_type": "CONSTRAINT_DESIGN", "declared_status": "candidate", "description": "prj/constr/pin_summary.md：端口-管脚-电平映射摘要，逐条含 source_ref 与缺口标注" },
+        { "artifact_type": "TASK_HANDOFF", "declared_status": "candidate", "description": "prj/constr/handoff_packet.md：下一步、产物路径、模板命中与来源说明" },
+        { "artifact_type": "OPEN_QUESTION_SET", "declared_status": "candidate", "description": "prj/constr/missing_info.md：硬件资料缺失说明，needs_input/partial 时产出，替代主约束文件" },
+        { "artifact_type": "OPEN_QUESTION_SET", "declared_status": "candidate", "description": "prj/constr/missing_top_module.md：顶层缺板级端口说明，仅该缺口时产出，替代主约束文件" }
+      ],
+      "preconditions": [
+        "主约束候选仅在 extracted_facts.json status=complete 且每条映射带 source_ref/evidence_kind 时产出；partial/needs_input 只写 missing_info.md/pin_summary.md/handoff_packet.md 并停止",
+        "RTL 顶层必须具备板级端口；纯内部端口时按缺口路径提示补硬件事实或生成板级 top.v",
+        "约束综合验证（synthesize 携带 XDC）不在当前能力契约内，post-mvp 未启用"
+      ],
+      "required_permissions": ["read", "candidate_write"],
+      "required_capabilities": [],
+      "evidence": [
+        "主约束每条端口-管脚-电气映射必须回指 source_ref（evidence_kind=explicit/derived）；fallback/缺失事实只记入缺口文档，不进入主约束",
+        "模板命中时记录命中的模板与理由；生成文件须对目标厂商工具链语法有效（语法验证属 post-mvp 能力）"
+      ],
+      "failure_policy": "fail_closed"
+    }
+  ]
+}
