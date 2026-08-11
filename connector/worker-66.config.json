@@ -10,11 +10,30 @@
   "server_certificate_path": "D:\\synthia-worker\\server.pfx",
   "server_private_key_path": "D:\\synthia-worker\\server.pfx",
   "trusted_client_ca_path": "D:\\synthia-worker\\client-ca.cer",
-  "project_scope": ["p1"],
-  "data_classification_scope": ["internal"],
-  "allowed_capability_ids": ["discover_toolchain", "query_parts", "validate_sources", "simulate", "synthesize", "report_drc", "report_sta", "report_resources"],
+  "project_scope": [
+    "p1"
+  ],
+  "data_classification_scope": [
+    "internal"
+  ],
+  "allowed_capability_ids": [
+    "discover_toolchain",
+    "query_parts",
+    "validate_sources",
+    "simulate",
+    "synthesize",
+    "implement",
+    "report_drc",
+    "report_sta",
+    "report_resources"
+  ],
   "toolchain_profile_hash": "57fd8374073877701cda45e6a84f516e6d9aef0df4affb03482280312c352755",
-  "worker_labels": {"os": "windows", "host": "DESKTOP-DVFFB09", "part": "xc7k70tfbv676-1", "vivado": "2021.1"},
+  "worker_labels": {
+    "os": "windows",
+    "host": "DESKTOP-DVFFB09",
+    "part": "xc7k70tfbv676-1",
+    "vivado": "2021.1"
+  },
   "heartbeat_interval_seconds": 10,
   "lease_seconds": 30,
   "max_concurrency": 1,
