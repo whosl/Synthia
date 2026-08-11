@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import type { ConnectorCapability, EvidenceManifest } from "./index.ts";
 
 export const VIVADO_CAPABILITY_VERSION = "vivado-batch-1" as const;
-export type VivadoOperation = "discover_toolchain" | "query_parts" | "validate_sources" | "simulate" | "synthesize" | "report_drc" | "report_sta" | "report_resources";
+export type VivadoOperation = "discover_toolchain" | "query_parts" | "validate_sources" | "simulate" | "synthesize" | "implement" | "report_drc" | "report_sta" | "report_resources";
 export type VivadoRunClass = "exploratory" | "gate_check" | "formal";
 export type VivadoResultStatus = "succeeded" | "failed" | "unsupported" | "timeout" | "lost" | "unknown_effect";
 export interface SourceInput { readonly path: string; readonly content: string | Uint8Array; readonly mediaType?: string; }
@@ -16,11 +16,13 @@ export interface QueryPartsRequest extends VivadoRequestBase { readonly operatio
 export interface ValidateSourcesRequest extends VivadoRequestBase { readonly operation: "validate_sources"; readonly sources: readonly SourceInput[]; readonly top?: string }
 export interface SimulateRequest extends VivadoRequestBase { readonly operation: "simulate"; readonly sources: readonly SourceInput[]; readonly top: string; readonly testbench: string }
 export interface SynthesizeRequest extends VivadoRequestBase { readonly operation: "synthesize"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string }
+export interface ConstraintInput { readonly path: string; readonly content: string | Uint8Array; readonly mediaType?: string }
+export interface ImplementRequest extends VivadoRequestBase { readonly operation: "implement"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string; readonly constraints?: readonly ConstraintInput[] }
 export interface ReportRequest extends VivadoRequestBase { readonly operation: "report_drc" | "report_sta" | "report_resources"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string }
-export type VivadoRequest = DiscoverToolchainRequest | QueryPartsRequest | ValidateSourcesRequest | SimulateRequest | SynthesizeRequest | ReportRequest;
+export type VivadoRequest = DiscoverToolchainRequest | QueryPartsRequest | ValidateSourcesRequest | SimulateRequest | SynthesizeRequest | ImplementRequest | ReportRequest;
 export interface CapabilityDefinition<I extends VivadoRequest = VivadoRequest> extends ConnectorCapability { readonly operation: I["operation"]; readonly inputKind: string; readonly outputKind: string; readonly execution: "vivado_batch" }
 export const VIVADO_CAPABILITIES: readonly CapabilityDefinition[] = [
-  ["discover_toolchain", "node", "toolchain_snapshot"], ["query_parts", "part_query", "part_list"], ["validate_sources", "source_manifest", "source_validation"], ["simulate", "simulation_request", "simulation_result"], ["synthesize", "synthesis_request", "synthesis_result"], ["report_drc", "design_request", "drc_report"], ["report_sta", "design_request", "sta_report"], ["report_resources", "design_request", "resource_report"],
+  ["discover_toolchain", "node", "toolchain_snapshot"], ["query_parts", "part_query", "part_list"], ["validate_sources", "source_manifest", "source_validation"], ["simulate", "simulation_request", "simulation_result"], ["synthesize", "synthesis_request", "synthesis_result"], ["implement", "implementation_request", "bitstream_artifact"], ["report_drc", "design_request", "drc_report"], ["report_sta", "design_request", "sta_report"], ["report_resources", "design_request", "resource_report"],
 ].map(([operation, inputKind, outputKind]) => ({ operation, version: VIVADO_CAPABILITY_VERSION, runClasses: ["exploratory", "gate_check", "formal"], inputKind, outputKind, execution: "vivado_batch" })) as readonly CapabilityDefinition[];
 export interface EvidenceReference { readonly name: string; readonly uri: string; readonly sha256: string; readonly sizeBytes: number; readonly mediaType: string }
 export interface ToolchainMetadata { readonly binary: string; readonly vivadoVersion?: string; readonly licenseStatus: "available" | "unavailable" | "unknown"; readonly part?: string; readonly profileHash?: string }
@@ -110,6 +112,20 @@ export function validateVivadoRequest(request: VivadoRequest): void {
     }
     if (request.operation === "simulate") assertSimulateModules(request);
   }
+  if ("constraints" in request && request.constraints !== undefined) {
+    if (!Array.isArray(request.constraints)) reject("INVALID_CONSTRAINTS");
+    for (const constraint of request.constraints) {
+      if (!isPlainObject(constraint)) reject("INVALID_CONSTRAINT");
+      if (typeof constraint.path !== "string") reject("INVALID_CONSTRAINT_PATH");
+      safePath(constraint.path);
+      if (!constraint.path.toLowerCase().endsWith(".xdc")) reject("UNSUPPORTED_CONSTRAINT_FORMAT");
+      if (typeof constraint.content !== "string" && !(constraint.content instanceof Uint8Array)) reject("INVALID_CONSTRAINT_CONTENT");
+      if (constraint.mediaType !== undefined && typeof constraint.mediaType !== "string") reject("INVALID_CONSTRAINT_MEDIA_TYPE");
+      const size = typeof constraint.content === "string" ? Buffer.byteLength(constraint.content) : constraint.content.byteLength;
+      if (!size) reject("EMPTY_CONSTRAINT");
+      if (size > 4 * 1024 * 1024) reject("CONSTRAINT_TOO_LARGE");
+    }
+  }
 }
 function tclQuote(value: string): string { return `{${value.replace(/[{}]/g, c => `\\${c}`)}}`; }
 function readSourceLine(source: SourceInput, inputDir: string): string {
@@ -135,6 +151,13 @@ function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string):
     return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }\nset phase elaborate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }\nset phase simulate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }\nputs "PHASE=simulate"\nputs "PHASE_EXIT_CODE=0"\nputs "SIMULATOR_OUTPUT_BEGIN"\nputs $sim_output\nputs "SIMULATOR_OUTPUT_END"\nputs SIMULATION_OK`;
   }
   if (request.operation === "synthesize") return `${sources}\nsynth_design ${part} ${top}\nreport_utilization -file ${tclQuote(join(outputDir, "resources.rpt"))}`;
+  if (request.operation === "implement") {
+    const constraints = (request.constraints ?? []).map(c => `read_xdc ${tclQuote(join(inputDir, c.path))}`).join("\n");
+    const out = (name: string) => tclQuote(join(outputDir, name));
+    // Single-session full flow: DCPs and the bitstream never leave the job workspace,
+    // so every stage consumes state produced earlier in THIS run — no cross-job artifact transfer.
+    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join("\n");
+  }
   const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join(outputDir, "resources.rpt"))}`;
   return `${sources}\nsynth_design ${part} ${top}\n${report}`;
 }
@@ -175,6 +198,7 @@ export class VivadoBatchAdapter {
   async execute(request: VivadoRequest): Promise<VivadoExecutionResult> {
     validateVivadoRequest(request); const workspace = join(this.root, request.jobId); const inputDir = join(workspace, "input"); const outputDir = join(workspace, "output"); await mkdir(inputDir, { recursive: true }); await mkdir(outputDir, { recursive: true });
     if ("sources" in request) for (const source of request.sources) { safePath(source.path); const target = join(inputDir, source.path); await mkdir(dirname(target), { recursive: true }); await writeFile(target, source.content); }
+    if ("constraints" in request && request.constraints) for (const constraint of request.constraints) { safePath(constraint.path); const target = join(inputDir, constraint.path); await mkdir(dirname(target), { recursive: true }); await writeFile(target, constraint.content); }
     const inputSha256 = hash(JSON.stringify(request)); const binary = request.toolchain?.vivadoBinary ?? this.defaultBinary; const command = [binary, "-mode", "batch", "-nolog", "-nojournal", "-notrace", "-source", join(workspace, "run.tcl")]; const base = { jobId: request.jobId, operation: request.operation, command, inputSha256, workspace, toolchain: { binary, licenseStatus: "unknown" as const, part: "part" in request ? request.part : request.toolchain?.part, profileHash: request.toolchain?.profileHash }, evidence: { jobId: request.jobId, entries: [] } satisfies EvidenceManifest };
     try { if (!this.injected && (binary.includes("/") || binary.includes("\\"))) await access(binary, constants.X_OK); } catch { return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE" }; }
     await writeFile(join(workspace, "run.tcl"), scriptFor(request, inputDir, outputDir), "utf8");
