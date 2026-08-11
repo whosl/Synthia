@@ -267,6 +267,7 @@ var VIVADO_CAPABILITIES = [
   ["validate_sources", "source_manifest", "source_validation"],
   ["simulate", "simulation_request", "simulation_result"],
   ["synthesize", "synthesis_request", "synthesis_result"],
+  ["implement", "implementation_request", "bitstream_artifact"],
   ["report_drc", "design_request", "drc_report"],
   ["report_sta", "design_request", "sta_report"],
   ["report_resources", "design_request", "resource_report"]
@@ -445,6 +446,28 @@ function validateVivadoRequest(request) {
     if (request.operation === "simulate")
       assertSimulateModules(request);
   }
+  if ("constraints" in request && request.constraints !== undefined) {
+    if (!Array.isArray(request.constraints))
+      reject("INVALID_CONSTRAINTS");
+    for (const constraint of request.constraints) {
+      if (!isPlainObject(constraint))
+        reject("INVALID_CONSTRAINT");
+      if (typeof constraint.path !== "string")
+        reject("INVALID_CONSTRAINT_PATH");
+      safePath(constraint.path);
+      if (!constraint.path.toLowerCase().endsWith(".xdc"))
+        reject("UNSUPPORTED_CONSTRAINT_FORMAT");
+      if (typeof constraint.content !== "string" && !(constraint.content instanceof Uint8Array))
+        reject("INVALID_CONSTRAINT_CONTENT");
+      if (constraint.mediaType !== undefined && typeof constraint.mediaType !== "string")
+        reject("INVALID_CONSTRAINT_MEDIA_TYPE");
+      const size = typeof constraint.content === "string" ? Buffer.byteLength(constraint.content) : constraint.content.byteLength;
+      if (!size)
+        reject("EMPTY_CONSTRAINT");
+      if (size > 4 * 1024 * 1024)
+        reject("CONSTRAINT_TOO_LARGE");
+    }
+  }
 }
 function tclQuote(value) {
   return `{${value.replace(/[{}]/g, (c) => `\\${c}`)}}`;
@@ -515,6 +538,13 @@ puts SIMULATION_OK`;
     return `${sources}
 synth_design ${part} ${top}
 report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
+  if (request.operation === "implement") {
+    const constraints = (request.constraints ?? []).map((c) => `read_xdc ${tclQuote(join2(inputDir, c.path))}`).join(`
+`);
+    const out = (name) => tclQuote(join2(outputDir, name));
+    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
+`);
+  }
   const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join2(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join2(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
   return `${sources}
 synth_design ${part} ${top}
@@ -591,6 +621,13 @@ class VivadoBatchAdapter {
         const target = join2(inputDir, source.path);
         await mkdir2(dirname(target), { recursive: true });
         await writeFile2(target, source.content);
+      }
+    if ("constraints" in request && request.constraints)
+      for (const constraint of request.constraints) {
+        safePath(constraint.path);
+        const target = join2(inputDir, constraint.path);
+        await mkdir2(dirname(target), { recursive: true });
+        await writeFile2(target, constraint.content);
       }
     const inputSha256 = hash(JSON.stringify(request));
     const binary = request.toolchain?.vivadoBinary ?? this.defaultBinary;
