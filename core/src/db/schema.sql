@@ -17,7 +17,9 @@ DO $$ BEGIN CREATE TYPE tool_run_state AS ENUM ('submitted','rejected','queued',
 DO $$ BEGIN CREATE TYPE run_class AS ENUM ('exploratory','gate_check','formal'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE TYPE trace_state AS ENUM ('candidate','in_review','approved','rejected','review_required','superseded','invalidated'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE TYPE approval_decision AS ENUM ('approve','reject','approve_with_actions','request_changes','revoke','confirm_no_impact','accept_waiver'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE TYPE actor_type AS ENUM ('human','agent','connector','system'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE actor_type AS ENUM ('human','agent','connector','system','service'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- 0003: widen an existing actor_type enum (re-run / upgrade path) with 'service'.
+ALTER TYPE actor_type ADD VALUE IF NOT EXISTS 'service';
 DO $$ BEGIN CREATE TYPE data_classification AS ENUM ('UNCLASSIFIED','D1','D2','D3','D4'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ── project & process ─────────────────────────────────────────────────────────
@@ -274,7 +276,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
 CREATE INDEX IF NOT EXISTS outbox_events_unpublished_idx ON outbox_events (occurred_at, event_id) WHERE published_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS idempotency_records (
-  actor_type text NOT NULL CHECK (actor_type IN ('human','agent','connector','system')),
+  actor_type text NOT NULL CHECK (actor_type IN ('human','agent','connector','system','service')),
   actor_id text NOT NULL,
   project_id text NOT NULL,
   operation text NOT NULL,
@@ -319,3 +321,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS baseline_unique_active_project_kind
     ON baseline (project_id, kind) WHERE state = 'active';
 CREATE UNIQUE INDEX IF NOT EXISTS baseline_unique_approved_gate_result
     ON baseline (approved_gate_result_id);
+
+-- ── identity & API auth (0003, IF-001 first slice, Q-011) ─────────────────────
+
+-- Platform-internal identity with LDAP-forward field names (uid/cn/displayName/
+-- memberOf/mail). `uid` is the login identity; human vs service by actor_type.
+CREATE TABLE IF NOT EXISTS user_account (
+    id              text PRIMARY KEY,
+    uid             text NOT NULL UNIQUE,
+    cn              text NOT NULL DEFAULT '',
+    display_name    text NOT NULL DEFAULT '',
+    member_of       text[] NOT NULL DEFAULT '{}',
+    mail            text NOT NULL DEFAULT '',
+    actor_type      actor_type NOT NULL,
+    status          text NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','locked')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_user_account_uid ON user_account (uid);
+CREATE INDEX IF NOT EXISTS idx_user_account_actor_type ON user_account (actor_type);
+
+-- Bearer tokens: only the SHA-256 hash is stored. The plaintext is shown once
+-- at provisioning and never persisted or logged. Invalid on revoke or expiry.
+CREATE TABLE IF NOT EXISTS auth_token (
+    token_hash      text PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+    user_id         text NOT NULL REFERENCES user_account(id),
+    scope           text[] NOT NULL DEFAULT '{}',
+    issued_at       timestamptz NOT NULL DEFAULT now(),
+    expires_at      timestamptz,
+    revoked_at      timestamptz,
+    last_used_at    timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_token_user ON auth_token (user_id);

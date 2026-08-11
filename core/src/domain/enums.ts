@@ -154,7 +154,7 @@ export type ArtifactType =
 
 // ── Actor types ───────────────────────────────────────────────────────────────
 
-export type ActorType = "human" | "agent" | "connector" | "system";
+export type ActorType = "human" | "agent" | "connector" | "system" | "service";
 
 // ── Data classification (Q-006 decision: reserved, formal level TBD) ──────────
 
