@@ -81,7 +81,7 @@ curl \
 
 公网 Cloudflare 入口使用 Cloudflare/系统公共 CA 验证边缘证书，**不要**使用 Worker origin CA，也不要在公网请求上附加仅供内网直连 Worker 的 origin client certificate。只有内网直连 `192.168.31.66:8443` 时，才使用 Worker CA、client certificate 和 client key。
 
-当前验收状态：公网 IPv4/TLS 与无 Token `403` 拒绝已验证；携带现有 Service Token 的 `POST /registration` 和 `POST /discover` 仍返回 Access `403`，尚未到达 Worker。修复 Access policy/Token 绑定并完成 `/registration → /heartbeat → /discover → exploratory Job → status/evidence` 前，endpoint 不得进入正式 `ready`，`formal`/`gate_check` 必须继续阻断。
+当前验收状态：Cloudflare Access Service Token 认证、`/registration → /heartbeat → /discover → exploratory Job → status/evidence` 全链路已在真实 66 主机验证通过。Worker 仅当 `ready` 且能力无漂移时接受任务；`formal`/`gate_check` 仍需完整审批上下文。
 
 `/discover` 返回的能力版本为 `vivado-batch-1`。当前能力：
 
@@ -91,10 +91,13 @@ query_parts
 validate_sources
 simulate
 synthesize
+implement
 report_drc
 report_sta
 report_resources
 ```
+
+`implement` 为单会话全链路：`synth_design → opt_design → place_design → route_design → DRC/STA/资源报告 → synth.dcp/routed.dcp → write_bitstream`，支持可选 XDC 约束（`.xdc`，写入 Job workspace 后在综合前 `read_xdc`）。输出 `synthia.bit`、两级 DCP 与三份报告。注意：无引脚约束的设计会在 `write_bitstream` 的 DRC（NSTD-1/UCIO-1）处按预期失败；smoke 场景须在 XDC 中显式降级该两项检查，真实工程必须提供完整引脚约束。
 
 ## 生命周期调用顺序
 
@@ -143,15 +146,14 @@ POST /jobs/evidence
 
 ## 当前真实验证
 
-真实 66 主机已完成：
+真实 66 主机（Vivado 2021.1 / patch 3247384 / xc7k70tfbv676-1）已完成：
 
-- Vivado discovery
-- `get_parts` 查询
-- Synthesis license checkout
-- XSim 编译/展开/运行
-- 最小综合
-- DRC、STA、资源报告
-- DCP 生成
+- Vivado discovery、license available、8+1 项能力无漂移
+- `validate_sources`：真实成功（`verify-validate-001`）
+- `simulate`：XSim 真实仿真成功，含 `$fatal` 强断言 XOR 真值表验证（`verify-sim-002`、`verify-sim-fatal-002`）
+- `synthesize`：真实综合成功（`verify-synth-003`）
+- `implement`：`synth_design → opt/place/route → DRC/STA/资源报告 → 两级 DCP → write_bitstream` 全链路真实成功，`synthia.bit` 3,011,437 字节（`verify-implement-003`）；无约束设计在 `write_bitstream` DRC 处按预期 fail-closed（`verify-implement-002`）
+- 失败路径：Worker 保留 `errorCode`、`worker-result.json` 与 SHA-256 EvidenceManifest
 
 项目候选 `xc7vx690tffg1761-2` 不在 66 的 Vivado 2021.1 安装中；当前真实 profile 使用 `xc7k70tfbv676-1`。
 
