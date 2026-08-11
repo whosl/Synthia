@@ -217,9 +217,20 @@ CREATE TABLE IF NOT EXISTS trace_relation (
 -- The approver_id is a human identity. Agent/connector auth is rejected by RBAC.
 -- This is a soft constraint — the service layer must enforce actor_type=human.
 
--- Invariant: no candidate baseline (baseline always starts active from approval)
-ALTER TABLE baseline ADD CONSTRAINT baseline_no_candidate
-    CHECK (state != 'candidate');
+-- Invariant: no candidate baseline (baseline always starts active from approval).
+-- Idempotent: mirrors the CHECK added in migration 0002.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'baseline_no_candidate'
+       AND conrelid = 'public.baseline'::regclass
+  ) THEN
+    ALTER TABLE baseline ADD CONSTRAINT baseline_no_candidate
+      CHECK (state::text <> 'candidate');
+  END IF;
+END;
+$$;
 
 -- Invariant: milestone gates only create baselines (G1/G3/G4/G7/G9)
 -- Enforced at service layer; documented here for auditors.
@@ -236,3 +247,75 @@ CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence (tool_run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_source ON trace_relation (project_id, source_id);
 CREATE INDEX IF NOT EXISTS idx_trace_target ON trace_relation (project_id, target_id);
 CREATE INDEX IF NOT EXISTS idx_trace_search ON trace_relation USING gin (source_id gin_trgm_ops, target_id gin_trgm_ops);
+
+-- ── outbox, idempotency & append-only governance (0001 / 0002) ────────────────
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version text PRIMARY KEY,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+  event_id uuid PRIMARY KEY,
+  aggregate_type text NOT NULL,
+  aggregate_id text NOT NULL,
+  sequence bigint NOT NULL CHECK (sequence > 0),
+  event_type text NOT NULL,
+  project_id text NOT NULL,
+  payload jsonb NOT NULL,
+  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  correlation_id text NOT NULL,
+  causation_id text,
+  classification text NOT NULL CHECK (classification IN ('D1','D2','D3','D4','UNCLASSIFIED')),
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  published_at timestamptz,
+  UNIQUE (aggregate_type, aggregate_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS outbox_events_unpublished_idx ON outbox_events (occurred_at, event_id) WHERE published_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS idempotency_records (
+  actor_type text NOT NULL CHECK (actor_type IN ('human','agent','connector','system')),
+  actor_id text NOT NULL,
+  project_id text NOT NULL,
+  operation text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  status text NOT NULL CHECK (status IN ('in_progress','completed','failed')),
+  response jsonb,
+  error jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz,
+  PRIMARY KEY (actor_type, actor_id, project_id, operation, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idempotency_records_created_idx ON idempotency_records (created_at);
+
+-- Append-only guard: governed records (ApprovalRecord, ApprovedGateResult,
+-- Baseline) reject UPDATE / DELETE. Revocation is a new ApprovalRecord with
+-- decision 'revoke'; supersession is a new Baseline linked via
+-- superseded_by_baseline_id. Never an in-place mutation.
+CREATE OR REPLACE FUNCTION synthia_reject_append_only_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'append-only table % rejects %', TG_TABLE_NAME, TG_OP USING ERRCODE = '55000';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS approval_record_append_only ON approval_record;
+CREATE TRIGGER approval_record_append_only BEFORE UPDATE OR DELETE ON approval_record
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS approved_gate_result_append_only ON approved_gate_result;
+CREATE TRIGGER approved_gate_result_append_only BEFORE UPDATE OR DELETE ON approved_gate_result
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS baseline_append_only ON baseline;
+CREATE TRIGGER baseline_append_only BEFORE UPDATE OR DELETE ON baseline
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
+
+-- Deterministic uniqueness for the approval slice.
+CREATE UNIQUE INDEX IF NOT EXISTS approved_gate_result_unique_submission
+    ON approved_gate_result (gate_submission_id);
+CREATE UNIQUE INDEX IF NOT EXISTS baseline_unique_active_project_kind
+    ON baseline (project_id, kind) WHERE state = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS baseline_unique_approved_gate_result
+    ON baseline (approved_gate_result_id);

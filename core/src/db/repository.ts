@@ -227,6 +227,19 @@ export async function getReverseTrace(client: Client, projectId: string, targetI
   }));
 }
 
+
+export interface OutboxEventInput {
+  eventId: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  projectId: string;
+  payload: unknown;
+  headers?: Record<string, unknown>;
+  correlationId: string;
+  causationId?: string | null;
+  classification: string;
+}
 export interface TransactionClient {
   query(text: string, values?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount?: number | null }>;
 }
@@ -258,4 +271,222 @@ export async function appendOutboxEvent(client: TransactionClient, event: Outbox
     );
     return sequence;
   });
+}
+/** Append an outbox event on a transaction client that is ALREADY inside a BEGIN..COMMIT scope.
+ *  Allocates the per-aggregate sequence under a transaction-scoped advisory lock (pg_advisory_xact_lock). */
+export async function appendOutboxEventInTx(client: TransactionClient, event: OutboxEventInput): Promise<number> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${event.aggregateType}:${event.aggregateId}`]);
+  const sequenceResult = await client.query("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM outbox_events WHERE aggregate_type = $1 AND aggregate_id = $2", [event.aggregateType, event.aggregateId]);
+  const row = sequenceResult.rows[0];
+  if (!row || typeof row !== "object" || !("sequence" in row) || (typeof row.sequence !== "number" && typeof row.sequence !== "string")) throw new Error("OUTBOX_SEQUENCE_ALLOCATION_FAILED");
+  const sequence = Number(row.sequence);
+  await client.query(
+    `INSERT INTO outbox_events(event_id, aggregate_type, aggregate_id, sequence, event_type, project_id, payload, headers, correlation_id, causation_id, classification)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11)`,
+    [event.eventId, event.aggregateType, event.aggregateId, sequence, event.eventType, event.projectId, JSON.stringify(event.payload), JSON.stringify(event.headers ?? {}), event.correlationId, event.causationId ?? null, event.classification],
+  );
+  return sequence;
+}
+
+// ── Approval slice DB primitives ──────────────────────────────────────────────
+// Each helper writes on the caller's transaction client (no nested BEGIN/COMMIT).
+
+export interface ApprovalRecordRow {
+  id: string;
+  projectId: string;
+  gateSubmissionId: string;
+  decision: string;
+  approverId: string;
+  approverRole: string;
+  authorizationBasis: string;
+  reason: string;
+  issues: string[];
+  risks: string[];
+  waivers: string[];
+  checkResultsHash: string;
+  signedAt: string;
+  signatureMethod: string;
+  clientAuditDigest: string | null;
+  approvedGateResultId: string | null;
+}
+
+/** Append an approval record (append-only). `approved_gate_result_id` is pre-set. */
+export async function appendApprovalRecord(client: TransactionClient, record: ApprovalRecordRow): Promise<void> {
+  await client.query(
+    `INSERT INTO approval_record
+       (id, project_id, gate_submission_id, decision, approver_id, approver_role,
+        authorization_basis, reason, issues, risks, waivers, check_results_hash,
+        signed_at, signature_method, client_audit_digest, approved_gate_result_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    [record.id, record.projectId, record.gateSubmissionId, record.decision,
+     record.approverId, record.approverRole, record.authorizationBasis, record.reason,
+     record.issues, record.risks, record.waivers, record.checkResultsHash,
+     record.signedAt, record.signatureMethod, record.clientAuditDigest, record.approvedGateResultId],
+  );
+}
+
+export interface ApprovedGateResultRow {
+  id: string;
+  projectId: string;
+  gate: string;
+  gateSubmissionId: string;
+  approvalRecordId: string;
+  snapshotId: string;
+}
+
+/** Create an approved gate result (append-only). */
+export async function createApprovedGateResult(client: TransactionClient, result: ApprovedGateResultRow): Promise<void> {
+  await client.query(
+    `INSERT INTO approved_gate_result
+       (id, project_id, gate, gate_submission_id, approval_record_id, snapshot_id)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [result.id, result.projectId, result.gate, result.gateSubmissionId,
+     result.approvalRecordId, result.snapshotId],
+  );
+}
+
+export interface GateSubmissionLock {
+  projectId: string;
+  processInstanceId: string;
+  gate: string;
+  snapshotId: string;
+  state: string;
+  submitterId: string;
+}
+
+/** SELECT FOR UPDATE on gate_submission; returns null if not found. */
+export async function lockGateSubmission(client: TransactionClient, submissionId: string): Promise<GateSubmissionLock | null> {
+  const { rows } = await client.query(
+    `SELECT project_id, process_instance_id, gate, snapshot_id, state, submitter_id
+       FROM gate_submission WHERE id = $1 FOR UPDATE`,
+    [submissionId],
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    projectId: r.project_id as string,
+    processInstanceId: r.process_instance_id as string,
+    gate: r.gate as string,
+    snapshotId: r.snapshot_id as string,
+    state: r.state as string,
+    submitterId: r.submitter_id as string,
+  };
+}
+
+export interface ConfigurationSnapshotLock {
+  projectId: string;
+  memberRevisionIds: string[];
+  traceRelationIds: string[];
+  gateProfileVersion: string;
+  toolModelPolicyHash: string;
+  manifestHash: string;
+}
+
+/** SELECT FOR UPDATE on configuration_snapshot; returns null if not found. */
+export async function lockConfigurationSnapshot(client: TransactionClient, snapshotId: string): Promise<ConfigurationSnapshotLock | null> {
+  const { rows } = await client.query(
+    `SELECT project_id, member_revision_ids, trace_relation_ids, gate_profile_version,
+            tool_model_policy_hash, manifest_hash
+       FROM configuration_snapshot WHERE id = $1 FOR UPDATE`,
+    [snapshotId],
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    projectId: r.project_id as string,
+    memberRevisionIds: r.member_revision_ids as string[],
+    traceRelationIds: r.trace_relation_ids as string[],
+    gateProfileVersion: r.gate_profile_version as string,
+    toolModelPolicyHash: r.tool_model_policy_hash as string,
+    manifestHash: r.manifest_hash as string,
+  };
+}
+
+export interface RoleAssignmentRow {
+  id: string;
+  projectId: string;
+  actorType: string;
+  actorId: string;
+  role: string;
+}
+
+/** Find an active project role assignment matching (projectId, actorType=human, actorId, role). */
+export async function findRoleAssignment(
+  client: TransactionClient,
+  projectId: string,
+  actorType: string,
+  actorId: string,
+  role: string,
+): Promise<RoleAssignmentRow | null> {
+  const { rows } = await client.query(
+    `SELECT id, project_id, actor_type, actor_id, role
+       FROM role_assignment
+      WHERE project_id = $1 AND actor_type = $2 AND actor_id = $3 AND role = $4
+      LIMIT 1`,
+    [projectId, actorType, actorId, role],
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    id: r.id as string,
+    projectId: r.project_id as string,
+    actorType: r.actor_type as string,
+    actorId: r.actor_id as string,
+    role: r.role as string,
+  };
+}
+
+export interface IdempotencyRow {
+  status: string;
+  requestHash: string;
+  response: unknown;
+}
+
+/** Attempt to claim an idempotency scope. Returns whether this caller owns the slot. */
+export async function claimIdempotencySlot(
+  client: TransactionClient,
+  scope: { actorType: string; actorId: string; projectId: string; operation: string; key: string },
+  requestHash: string,
+): Promise<{ owned: boolean; existing: IdempotencyRow | null }> {
+  const insertResult = await client.query(
+    `INSERT INTO idempotency_records
+       (actor_type, actor_id, project_id, operation, idempotency_key, request_hash, status)
+     VALUES ($1,$2,$3,$4,$5,$6,'in_progress')
+     ON CONFLICT (actor_type, actor_id, project_id, operation, idempotency_key) DO NOTHING`,
+    [scope.actorType, scope.actorId, scope.projectId, scope.operation, scope.key, requestHash],
+  );
+  if ((insertResult.rowCount ?? 0) === 1) return { owned: true, existing: null };
+  const { rows } = await client.query(
+    `SELECT status, request_hash, response
+       FROM idempotency_records
+      WHERE actor_type = $1 AND actor_id = $2 AND project_id = $3 AND operation = $4 AND idempotency_key = $5
+      FOR UPDATE`,
+    [scope.actorType, scope.actorId, scope.projectId, scope.operation, scope.key],
+  );
+  if (rows.length === 0) return { owned: false, existing: null };
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    owned: false,
+    existing: {
+      status: r.status as string,
+      requestHash: r.request_hash as string,
+      response: r.response,
+    },
+  };
+}
+
+/** Mark a claimed idempotency slot completed with its response payload. */
+export async function completeIdempotencySlot(
+  client: TransactionClient,
+  scope: { actorType: string; actorId: string; projectId: string; operation: string; key: string },
+  requestHash: string,
+  response: unknown,
+): Promise<void> {
+  await client.query(
+    `UPDATE idempotency_records
+        SET status = 'completed', response = $7::jsonb, completed_at = now()
+      WHERE actor_type = $1 AND actor_id = $2 AND project_id = $3 AND operation = $4
+        AND idempotency_key = $5 AND request_hash = $6 AND status = 'in_progress'`,
+    [scope.actorType, scope.actorId, scope.projectId, scope.operation, scope.key, requestHash, JSON.stringify(response)],
+  );
 }
