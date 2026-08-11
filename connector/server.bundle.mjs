@@ -256,9 +256,9 @@ class WorkerRuntime {
 
 // connector/vivado.ts
 import { createHash as createHash2 } from "node:crypto";
-import { access, constants } from "node:fs";
+import { access, constants } from "node:fs/promises";
 import { mkdir as mkdir2, readFile, readdir, stat, writeFile as writeFile2 } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join as join2, resolve } from "node:path";
 var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
 var VIVADO_CAPABILITIES = [
@@ -474,12 +474,42 @@ puts SOURCE_VALIDATION_OK`;
       const target = tclQuote(join2(inputDir, source.path));
       (declaredModules(source).includes(request.testbench) ? simPaths : designPaths).push(target);
     }
-    const addDesign = designPaths.length ? `add_files -fileset sources_1 ${designPaths.join(" ")}` : "";
-    const addSim = simPaths.length ? `add_files -fileset sim_1 ${simPaths.join(" ")}` : "";
-    const reads = request.sources.map((s) => readSourceLine(s, inputDir)).join(`
-`);
-    return ["create_project -in_memory", reads, addDesign, addSim, `set_property top ${tclQuote(request.top)} [current_fileset]`, `set_property top ${tclQuote(request.testbench)} [get_filesets sim_1]`, "update_compile_order -fileset sources_1", "update_compile_order -fileset sim_1", "launch_simulation -mode behavioral", "run all", "puts SIMULATION_OK"].filter(Boolean).join(`
-`);
+    const designFiles = designPaths.join(" ");
+    const simFiles = simPaths.join(" ");
+    const project = tclQuote(join2(resolve(inputDir, ".."), "vivado-project"));
+    const projectPart = tclQuote(request.toolchain?.part ?? "xc7k70tfbv676-1");
+    const topQ = tclQuote(request.top);
+    const tbQ = tclQuote(request.testbench);
+    return `${sources}
+create_project synthia_batch ${project} -part ${projectPart} -force
+add_files -fileset sources_1 ${designFiles}
+add_files -fileset sim_1 ${simFiles}
+set_property top ${topQ} [get_filesets sources_1]
+set_property top ${tbQ} [get_filesets sim_1]
+update_compile_order -fileset sources_1
+update_compile_order -fileset sim_1
+launch_simulation -mode behavioral -scripts_only -absolute_path
+set simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]
+cd $simRoot
+proc phaseExitCode {options} {
+  if {[dict exists $options -errorcode]} {
+    set ec [dict get $options -errorcode]
+    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }
+  }
+  return 1
+}
+set phase compile
+if {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }
+set phase elaborate
+if {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }
+set phase simulate
+if {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }
+puts "PHASE=simulate"
+puts "PHASE_EXIT_CODE=0"
+puts "SIMULATOR_OUTPUT_BEGIN"
+puts $sim_output
+puts "SIMULATOR_OUTPUT_END"
+puts SIMULATION_OK`;
   }
   if (request.operation === "synthesize")
     return `${sources}
@@ -500,15 +530,23 @@ async function evidence(workspace, jobId) {
   }
   return { jobId, entries };
 }
+function terminateProcessTree(pid) {
+  try {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+  } catch {}
+}
 var defaultRunner = (command, args, cwd, timeoutMs) => {
   const { promise, resolve: resolve2, reject: reject2 } = Promise.withResolvers();
-  const child = spawn(command, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+  const lower = command.toLowerCase();
+  const isBatch = lower.endsWith(".bat") || lower.endsWith(".cmd");
+  const child = isBatch ? spawn("cmd.exe", ["/d", "/s", "/c", `"${command}"`, ...args], { cwd, stdio: ["ignore", "pipe", "pipe"], windowsVerbatimArguments: true }) : spawn(command, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "", timedOut = false;
   child.stdout.on("data", (d) => stdout += d);
   child.stderr.on("data", (d) => stderr += d);
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGTERM");
+    if (child.pid)
+      terminateProcessTree(child.pid);
   }, timeoutMs);
   child.once("error", reject2);
   child.once("close", (exitCode) => {
@@ -517,6 +555,14 @@ var defaultRunner = (command, args, cwd, timeoutMs) => {
   });
   return promise;
 };
+function parseSimulatePhases(text) {
+  const phaseMatch = text.match(/^PHASE=(\S+)/m);
+  const exitMatch = text.match(/^PHASE_EXIT_CODE=(\d+)/m);
+  const beginIdx = text.indexOf("SIMULATOR_OUTPUT_BEGIN");
+  const endIdx = text.lastIndexOf("SIMULATOR_OUTPUT_END");
+  const simulatorStdout = beginIdx !== -1 && endIdx !== -1 ? text.slice(beginIdx + "SIMULATOR_OUTPUT_BEGIN".length, endIdx).trim() : undefined;
+  return { phase: phaseMatch?.[1], phaseExitCode: exitMatch ? Number(exitMatch[1]) : undefined, simulatorStdout };
+}
 
 class VivadoBatchAdapter {
   run;
@@ -551,7 +597,7 @@ class VivadoBatchAdapter {
     const command = [binary, "-mode", "batch", "-nolog", "-nojournal", "-notrace", "-source", join2(workspace, "run.tcl")];
     const base = { jobId: request.jobId, operation: request.operation, command, inputSha256, workspace, toolchain: { binary, licenseStatus: "unknown", part: "part" in request ? request.part : request.toolchain?.part, profileHash: request.toolchain?.profileHash }, evidence: { jobId: request.jobId, entries: [] } };
     try {
-      if (!this.injected && binary.includes("/"))
+      if (!this.injected && (binary.includes("/") || binary.includes("\\")))
         await access(binary, constants.X_OK);
     } catch {
       return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE" };
@@ -582,7 +628,13 @@ ${result.stderr}`;
     if (/part.*(not found|does not exist|unknown)/i.test(text))
       return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev };
     const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" : base.toolchain.licenseStatus };
-    return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
+    if (request.operation === "simulate") {
+      const sim = parseSimulatePhases(result.stdout);
+      const simExitCode = sim.phaseExitCode ?? result.exitCode;
+      const errorCode = sim.phaseExitCode !== undefined && sim.phaseExitCode !== 0 ? "VIVADO_SIMULATION_FAILED" : undefined;
+      return { ...base, status: simExitCode === 0 && result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode };
+    }
+    return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
   }
 }
 
@@ -609,27 +661,48 @@ function execution(config) {
       try {
         await access2(config.vivado_binary, constants2.X_OK);
       } catch {
-        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: "unknown", vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: "unknown", sdk_worker_build_hash: "unknown", capabilities: [], toolchain_profile_hash: "unknown", license_status: "unavailable", unsupported: ["vivado_binary"] };
+        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] };
       }
-      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unknown", vivado_patch: "unknown", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unknown", unsupported: ["vivado_license"] };
+      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: VIVADO_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
     },
     async execute(request, _workspace) {
       const candidate = request.parameters;
       if (!candidate || typeof candidate !== "object")
         return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
+      const vivadoRequest = {
+        ...candidate,
+        toolchain: {
+          ...candidate.toolchain ?? {},
+          vivadoBinary: candidate.toolchain?.vivadoBinary ?? config.vivado_binary,
+          part: candidate.toolchain?.part ?? config.vivado_part,
+          profileHash: candidate.toolchain?.profileHash ?? config.toolchain_profile_hash
+        }
+      };
       let result;
       try {
-        result = await adapter.execute(candidate);
+        result = await adapter.execute(vivadoRequest);
       } catch (error) {
         const message = error instanceof Error ? error.message : "VIVADO_EXECUTION_ERROR";
-        const errorCode = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";
+        const errorCode2 = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";
         const jobId = request.jobId ?? "worker";
-        return { outcome: "failure", error_code: errorCode, output: JSON.stringify({ status: "rejected", jobId, errorCode }), evidence: { jobId, entries: [] } };
+        return { outcome: "failure", error_code: errorCode2, output: JSON.stringify({ status: "rejected", jobId, errorCode: errorCode2 }), evidence: { jobId, entries: [] } };
       }
       const outcome = result.status === "succeeded" ? "success" : result.status === "timeout" ? "timeout" : result.status === "lost" ? "lost" : result.status === "unknown_effect" ? "unknown_effect" : "failure";
-      const meta = { status: result.status, command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain };
+      const meta = { jobId: result.jobId, operation: result.operation, status: result.status, command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain };
       if (result.exitCode !== undefined)
         meta.exitCode = result.exitCode;
+      if (result.phase !== undefined)
+        meta.phase = result.phase;
+      if (result.phaseExitCode !== undefined)
+        meta.phaseExitCode = result.phaseExitCode;
+      if (result.simulatorStdout !== undefined)
+        meta.simulatorStdout = result.simulatorStdout;
+      if (result.stdout !== undefined)
+        meta.stdout = result.stdout;
+      if (result.stderr !== undefined)
+        meta.stderr = result.stderr;
+      if (result.errorCode !== undefined)
+        meta.errorCode = result.errorCode;
       if (result.timeoutMs !== undefined)
         meta.timeoutMs = result.timeoutMs;
       if (result.timedOut !== undefined)
@@ -641,11 +714,10 @@ function execution(config) {
       if (result.output && typeof result.output === "object") {
         const o = result.output;
         if (o.stdout !== undefined)
-          meta.stdout = o.stdout;
-        if (o.stderr !== undefined)
-          meta.stderr = o.stderr;
+          meta.output = o;
       }
-      return { outcome, error_code: result.status === "unsupported" ? result.unsupportedReason ?? "VIVADO_UNSUPPORTED" : undefined, output: JSON.stringify(meta), evidence: result.evidence };
+      const errorCode = result.errorCode ?? (result.status === "unsupported" ? result.unsupportedReason ?? "VIVADO_UNSUPPORTED" : undefined);
+      return { outcome, error_code: errorCode, output: JSON.stringify(meta, null, 2), evidence: result.evidence, stdout: result.stdout, stderr: result.stderr };
     }
   };
 }

@@ -51,12 +51,11 @@ describe("Vivado simulate contract", () => {
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
       const inputDir = join(result.workspace, "input");
       // Controlled binding of DUT top and testbench — never a bare default launch
-      expect(tcl).toContain("create_project -in_memory");
-      expect(tcl).toContain("set_property top {dut} [current_fileset]");
+      expect(tcl).toContain("create_project synthia_batch");
+      expect(tcl).toContain("set_property top {dut} [get_filesets sources_1]");
       expect(tcl).toContain("set_property top {tb} [get_filesets sim_1]");
       expect(tcl).toContain("update_compile_order -fileset sim_1");
       expect(tcl).toContain("launch_simulation -mode behavioral");
-      expect(tcl).toContain("run all");
       // Mixed sources: .v -> read_verilog, .sv -> read_verilog -sv (no free-form paths)
       expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/dut.v")}}`);
       expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "tb/tb.sv")}}`);
