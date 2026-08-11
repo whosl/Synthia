@@ -57,7 +57,7 @@ export class WorkerRuntime {
     const workspace = join(this.root, job.id);
     try {
       await mkdir(workspace, { recursive: true });
-      await writeFile(join(workspace, "input"), job.request.input, "utf8");
+      await writeFile(join(workspace, "request-input.txt"), job.request.input, "utf8");
       job.state = "preparing";
       job.state = "running";
       const result = await this.execution.execute(copy(job.request), workspace);

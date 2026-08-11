@@ -217,7 +217,7 @@ class WorkerRuntime {
     const workspace = join(this.root, job.id);
     try {
       await mkdir(workspace, { recursive: true });
-      await writeFile(join(workspace, "input"), job.request.input, "utf8");
+      await writeFile(join(workspace, "request-input.txt"), job.request.input, "utf8");
       job.state = "preparing";
       job.state = "running";
       const result = await this.execution.execute(copy(job.request), workspace);
@@ -621,8 +621,8 @@ class VivadoBatchAdapter {
     const text = `${result.stdout}
 ${result.stderr}`;
     const ev = await evidence(workspace, request.jobId);
-    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b/i.test(text);
-    const licenseFailure = !licenseSuccess && /\b(?:license|licence|checkout|feature)\b.*\b(?:not\s*(?:available|found|licensed)|fail\w*|denied|unable|could\s*not|error|missing)\b/i.test(text);
+    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
+    const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
     if (licenseFailure)
       return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev };
     if (/part.*(not found|does not exist|unknown)/i.test(text))

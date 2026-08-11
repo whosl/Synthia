@@ -190,8 +190,8 @@ export class VivadoBatchAdapter {
     }
     if (result.timedOut) { const ev = await evidence(workspace, request.jobId); return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev }; }
     const text = `${result.stdout}\n${result.stderr}`; const ev = await evidence(workspace, request.jobId);
-    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b/i.test(text);
-    const licenseFailure = !licenseSuccess && /\b(?:license|licence|checkout|feature)\b.*\b(?:not\s*(?:available|found|licensed)|fail\w*|denied|unable|could\s*not|error|missing)\b/i.test(text);
+    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
+    const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
     if (licenseFailure) return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev };
     if (/part.*(not found|does not exist|unknown)/i.test(text)) return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev };
     const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" as const : base.toolchain.licenseStatus };
