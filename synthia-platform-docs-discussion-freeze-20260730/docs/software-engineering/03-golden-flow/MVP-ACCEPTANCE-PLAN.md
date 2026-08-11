@@ -168,4 +168,4 @@ MVP 只有在 MVP-E2E-001～008 和 MVP-X-001～009 均通过、阻断问题关�
 
 ## 11. 当前状态
 
-当前仅有平台级文档草案和 RT-UART 参考文档；没有平台实现、Agent Runtime、结构化数据库、Vivado Worker、RTL、工具运行或板测证据。按验收状态应标记为 `scaffold/absent`，不能报告为 MVP 已实现。
+冻结时仅有平台级文档草案和 RT-UART 参考文档。截至 2026-08-11 的实现进展：Core 领域模型与 D1 批准切片已实现并在真实 PostgreSQL 上验证（migration 0000～0002）；Connector 9 项 vivado-batch-1 能力已在真实 66 节点（Vivado 2021.1 / xc7k70t）完成 validate_sources/simulate/synthesize/implement 端到端探索性验证；Agent Runtime 最小任务闭环开发中；Skill Pack 10 个候选已固化。尚没有正式 ToolRun、RTL 基线、板测证据或批准的 MVP-E2E/X 验收记录；按验收状态仍标记为 `scaffold/absent`，不能报告为 MVP 已实现。

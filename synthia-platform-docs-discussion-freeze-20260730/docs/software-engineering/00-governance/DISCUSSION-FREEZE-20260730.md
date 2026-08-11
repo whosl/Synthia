@@ -111,7 +111,7 @@ RT-UART 仅作为第一条黄金参考项目、模板来源、多 Agent 评测�
 
 ## 10. 当前状态与未决事项
 
-截至冻结日只有工程文档草案和 RT-UART 参考资料，没有新的 Synthia 平台实现、结构化数据库、Agent Runtime、Vivado Worker、正式 ToolRun、RTL 基线或板测证据。以下事项仍需项目负责人或责任角色决定：
+截至冻结日只有工程文档草案和 RT-UART 参考资料。冻结后实现进展（截至 2026-08-11）：Core 领域模型与 D1 批准切片已实现并在真实 PostgreSQL 上验证（migration 0000～0002）；Connector 9 项 vivado-batch-1 能力已在真实远程 Worker（66 节点，Vivado 2021.1，目标 part xc7k70t）完成 validate_sources/simulate/synthesize/implement 端到端探索性验证；Agent Runtime 最小任务闭环开发中；Skill Pack 10 个候选已固化。仍没有正式 ToolRun 批准记录、RTL 基线或板测证据。以下事项仍需项目负责人或责任角色决定：
 
 1. 2026-07-31、2026-08-15、2026-09-15 是否仍为有效承诺及各节点最小交付；
 2. 实际 Vivado Worker、版本、许可证、目标 part、板卡和实验设备；
