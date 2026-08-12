@@ -14,6 +14,7 @@
 
 import type { Pool } from "pg";
 import { authenticate } from "./auth.ts";
+import type { ConnectorPort } from "./connector-port.ts";
 import { errorEnvelope, resolveCorrelationId, successEnvelope } from "./envelope.ts";
 import {
   ApiError,
@@ -35,9 +36,12 @@ import {
   createTraceRelationHandler,
   getBaselines,
   getEvents,
+  getJobEvidenceHandler,
+  getJobStatusHandler,
   getProject,
   getRevision,
   getTraceRelations,
+  submitJobHandler,
 } from "./handlers.ts";
 
 const API_PREFIX = "/api/v1";
@@ -53,7 +57,7 @@ interface RouteMatch {
 }
 
 
-export async function routeApi(request: Request, pool: Pool): Promise<Response> {
+export async function routeApi(request: Request, pool: Pool, connector?: ConnectorPort): Promise<Response> {
   const url = new URL(request.url);
   const correlationId = resolveCorrelationId(request.headers.get("x-correlation-id"));
 
@@ -99,6 +103,7 @@ export async function routeApi(request: Request, pool: Pool): Promise<Response> 
     correlationId,
     idempotencyKey: request.headers.get("idempotency-key"),
     classification,
+    connector,
   };
 
   const match = matchRoute(ctx);
@@ -181,7 +186,20 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
         case "gate-submissions":
           if (method === "POST") return { handler: createGateSubmissionHandler, params, requiredScope: "core:write" };
           break;
+        case "jobs":
+          if (method === "POST") return { handler: submitJobHandler, params, requiredScope: "core:write" };
+          break;
       }
+    }
+
+    // GET /projects/:projectId/jobs/:jobId
+    if (segments.length === 4 && segments[2] === "jobs" && method === "GET") {
+      return { handler: getJobStatusHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // GET /projects/:projectId/jobs/:jobId/evidence
+    if (segments.length === 5 && segments[2] === "jobs" && segments[4] === "evidence" && method === "GET") {
+      return { handler: getJobEvidenceHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
     }
 
     // /projects/:projectId/artifacts/:artifactId/revisions[/:revId]

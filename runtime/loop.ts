@@ -159,18 +159,23 @@ export class LoopExecutor {
       }
 
       // ---- 5. XDC generation ----
-      const xdc = await this.callModel("generate_xdc", () => model.generateXdc(rtl.topModule, part, skillPrompts.xdc));
-      this.auditModel("generate_xdc", "xdc generated", xdc.constraints.map(c => c.path).join(","), "ok");
+      const xdc = await this.callModel("generate_xdc", () => model.generateXdc(rtl.topModule, part, skillPrompts.xdc, false));
 
       // ---- 6. synthesize ----
-      await this.runTool("synthesize", {
+      const synth = await this.runTool("synthesize", {
         ...baseSubmission, operation: "synthesize", sources: rtl.sources, top: rtl.topModule,
       });
+      if (synth.status !== "succeeded") {
+        return this.finish("fail_closed", `synthesize ended in non-success state ${synth.status}${synth.errorCode ? ` (${synth.errorCode})` : ""}`, { rtl, testbench: tb, xdc });
+      }
 
       // ---- 7. implement ----
-      await this.runTool("implement", {
+      const impl = await this.runTool("implement", {
         ...baseSubmission, operation: "implement", sources: rtl.sources, top: rtl.topModule, constraints: xdc.constraints,
       });
+      if (impl.status !== "succeeded") {
+        return this.finish("fail_closed", `implement ended in non-success state ${impl.status}${impl.errorCode ? ` (${impl.errorCode})` : ""}`, { rtl, testbench: tb, xdc });
+      }
 
       return this.finish("succeeded", "loop completed: rtl→validate→tb→simulate→xdc→synthesize→implement", { rtl, testbench: tb, xdc });
     } catch (e) {

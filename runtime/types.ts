@@ -67,7 +67,7 @@ export type LoopAction = RtlGeneration | TbGeneration | XdcGeneration | RepairGe
 export interface LoopModel {
   generateRtl(task: string, systemPrompt: string): Promise<RtlGeneration>;
   generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string): Promise<TbGeneration>;
-  generateXdc(topModule: string, part: string, systemPrompt: string): Promise<XdcGeneration>;
+  generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean): Promise<XdcGeneration>;
   repair(input: {
     sources: readonly ArtifactFile[];
     testbench?: ArtifactFile;

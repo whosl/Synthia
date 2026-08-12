@@ -30,16 +30,24 @@ import {
 import { canonicalRequestHash, computeManifestHash } from "../hashing.ts";
 import { approveGateSubmission, type ApproveGateSubmissionInput } from "../services/approval.ts";
 import { ConflictError, InvariantError } from "../memory-repository.ts";
-import type { DataClassification, GateId, TraceRelationState } from "../domain/enums.ts";
+import type { DataClassification, GateId, RunClass, TraceRelationState } from "../domain/enums.ts";
 import type { AuthenticatedIdentity } from "./auth.ts";
 import {
   ApiError,
+  capabilityUnavailableError,
   conflictApiError,
   forbiddenError,
   internalError,
   notFoundError,
   validationError,
 } from "./errors.ts";
+import {
+  CAPABILITY_UNAVAILABLE_CODES,
+  CONNECTOR_NOT_FOUND_CODES,
+  ConnectorError,
+  type ConnectorPort,
+  type SourceInput,
+} from "./connector-port.ts";
 
 // ─── shared request context ──────────────────────────────────────────────────
 
@@ -54,6 +62,8 @@ export interface RequestContext {
   readonly correlationId: string;
   readonly idempotencyKey: string | null;
   readonly classification: string;
+  /** Connector port for the run/Job slice; undefined when not configured (Job endpoints → 503). */
+  readonly connector?: ConnectorPort;
 }
 
 export interface HandlerResult {
@@ -659,4 +669,317 @@ export async function getEvents(ctx: RequestContext): Promise<HandlerResult> {
     [projectId, aggregateType, aggregateId, afterSequence],
   );
   return { status: 200, data: rows };
+}
+
+// ─── 7. Run / Job (IF-002 Connector slice) ──────────────────────────────────
+
+/** Operations Core proxies to the Connector (matches the 66 worker capabilities). */
+const JOB_OPERATION_VALUES: Record<string, true> = {
+  validate_sources: true,
+  simulate: true,
+  synthesize: true,
+  implement: true,
+};
+const RUN_CLASS_INTENT_VALUES: Record<string, true> = {
+  exploratory: true,
+  gate_check: true,
+  formal: true,
+};
+/** gate_submission states that count as "frozen / in_review" for a gate_check run.
+ *  The DB enum has no literal 'frozen'; a submission is frozen once it leaves the
+ *  'preparing' draft state and has not been withdrawn. */
+const GATE_CHECK_FROZEN_STATES: Record<string, true> = {
+  submitted: true,
+  checking: true,
+  in_review: true,
+};
+/** ToolRun states with no outgoing transition — evidence is only available once terminal. */
+const TOOL_RUN_TERMINAL_STATES: Record<string, true> = {
+  succeeded: true,
+  failed: true,
+  cancelled: true,
+  timeout: true,
+  lost: true,
+  unknown_effect: true,
+  rejected: true,
+};
+
+/** String field that may be absent (→ null) but must be a string when present. */
+function nullableString(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj[key];
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") throw validationError(`field '${key}' must be a string`);
+  return v;
+}
+
+/** Optional positive numeric field. */
+function optionalPositiveNumber(obj: Record<string, unknown>, key: string): number | undefined {
+  const v = obj[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+    throw validationError(`field '${key}' must be a positive number`);
+  }
+  return v;
+}
+
+/** Validate a `sources`/`constraints` array: each member has a non-empty path,
+ *  string content, and optional string mediaType. Absent → empty array. */
+function validateSourceList(obj: Record<string, unknown>, key: string): SourceInput[] {
+  const v = obj[key];
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw validationError(`field '${key}' must be an array`);
+  const out: SourceInput[] = [];
+  for (let i = 0; i < v.length; i++) {
+    const item = v[i];
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw validationError(`field '${key}[${i}]' must be an object`);
+    }
+    const o = item as Record<string, unknown>;
+    const path = o.path;
+    if (typeof path !== "string" || path.length === 0) {
+      throw validationError(`field '${key}[${i}].path' must be a non-empty string`);
+    }
+    const content = o.content;
+    if (typeof content !== "string") {
+      throw validationError(`field '${key}[${i}].content' must be a string`);
+    }
+    const entry: SourceInput = { path, content };
+    const mediaType = o.mediaType;
+    if (mediaType !== undefined && mediaType !== null) {
+      if (typeof mediaType !== "string") throw validationError(`field '${key}[${i}].mediaType' must be a string`);
+      entry.mediaType = mediaType;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** Resolve the Connector port or fail closed (503) when none is configured. */
+function requireConnector(ctx: RequestContext): ConnectorPort {
+  if (!ctx.connector) throw capabilityUnavailableError("connector not configured");
+  return ctx.connector;
+}
+
+/** Map a Connector failure to a stable API error: drift/lease/capability → 503,
+ *  not-found/evidence-missing → 404, anything else → 503 (retryable). */
+function mapConnectorError(err: unknown): ApiError {
+  if (err instanceof ApiError) return err;
+  if (err instanceof ConnectorError) {
+    if (err.code in CONNECTOR_NOT_FOUND_CODES) return notFoundError(`connector: ${err.code}`);
+    return capabilityUnavailableError(`connector: ${err.code}`, { code: err.code });
+  }
+  return internalError(err instanceof Error ? err.message : "connector error");
+}
+
+/**
+ * Adjudicate the run_class for a Job submission. The caller states an *intent*
+ * (`run_class_intent`, default exploratory); the server grants it only when the
+ * matching authorization context is present and valid — otherwise 403. This is
+ * fail-closed: an escalation request the caller cannot back is rejected, never
+ * silently downgraded. (SYNTHIA-IF-002 run_class adjudication.)
+ *
+ *   - exploratory: always granted.
+ *   - gate_check:  requires `gate_submission_id` referring to a frozen/in_review
+ *                  submission within the project.
+ *   - formal:      requires `approved_gate_result_id` or `baseline_id` referring
+ *                  to an existing governed artifact within the project.
+ */
+async function adjudicateRunClass(tx: TransactionClient, projectId: string, body: Record<string, unknown>): Promise<RunClass> {
+  const intent = requireEnum(optionalString(body, "run_class_intent", "exploratory"), "run_class_intent", RUN_CLASS_INTENT_VALUES) as RunClass;
+  if (intent === "exploratory") return "exploratory";
+
+  if (intent === "gate_check") {
+    const gateSubmissionId = nullableString(body, "gate_submission_id");
+    if (!gateSubmissionId) throw forbiddenError("RUN_CLASS_GATE_CHECK_REQUIRES_SUBMISSION");
+    const { rows } = await tx.query("SELECT state FROM gate_submission WHERE id = $1 AND project_id = $2", [gateSubmissionId, projectId]);
+    if (rows.length === 0) throw forbiddenError("RUN_CLASS_GATE_CHECK_SUBMISSION_NOT_FOUND");
+    const state = String((rows[0] as Record<string, unknown>).state);
+    if (!(state in GATE_CHECK_FROZEN_STATES)) throw forbiddenError("RUN_CLASS_GATE_CHECK_SUBMISSION_NOT_FROZEN");
+    return "gate_check";
+  }
+
+  // intent === "formal"
+  const approvedGateResultId = nullableString(body, "approved_gate_result_id");
+  const baselineId = nullableString(body, "baseline_id");
+  if (!approvedGateResultId && !baselineId) throw forbiddenError("RUN_CLASS_FORMAL_REQUIRES_APPROVAL");
+  if (approvedGateResultId) {
+    const { rows } = await tx.query("SELECT 1 FROM approved_gate_result WHERE id = $1 AND project_id = $2", [approvedGateResultId, projectId]);
+    if (rows.length === 0) throw forbiddenError("RUN_CLASS_FORMAL_APPROVED_GATE_RESULT_NOT_FOUND");
+  }
+  if (baselineId) {
+    const { rows } = await tx.query("SELECT 1 FROM baseline WHERE id = $1 AND project_id = $2", [baselineId, projectId]);
+    if (rows.length === 0) throw forbiddenError("RUN_CLASS_FORMAL_BASELINE_NOT_FOUND");
+  }
+  return "formal";
+}
+
+/** Build the persisted authorization_context from provided context fields. */
+function buildAuthorizationContext(body: Record<string, unknown>): Record<string, string> {
+  const ctx: Record<string, string> = {};
+  const gateSubmissionId = nullableString(body, "gate_submission_id");
+  if (gateSubmissionId) ctx.gateSubmissionId = gateSubmissionId;
+  const approvedGateResultId = nullableString(body, "approved_gate_result_id");
+  if (approvedGateResultId) ctx.approvedGateResultId = approvedGateResultId;
+  const baselineId = nullableString(body, "baseline_id");
+  if (baselineId) ctx.baselineId = baselineId;
+  return ctx;
+}
+
+/**
+ * POST /projects/:projectId/jobs — submit a Job through Core to the Connector.
+ *
+ * Creates a `tool_run` in state `submitted`, appends a `tool_run.submitted`
+ * outbox event, and submits to the Connector — all inside one idempotent
+ * transaction. A Connector drift/lease/capability rejection rolls the whole
+ * thing back (no row, no event, idempotency slot released) and surfaces as 503.
+ * Idempotent replay returns the original `jobId` without re-contacting the
+ * Connector. (SYNTHIA-IF-002 §jobs.)
+ */
+export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const body = asObject(ctx.body);
+  const operation = requireEnum(requireString(body, "operation"), "operation", JOB_OPERATION_VALUES);
+  const sources = validateSourceList(body, "sources");
+  const constraints = validateSourceList(body, "constraints");
+  const top = nullableString(body, "top");
+  const testbench = nullableString(body, "testbench");
+  const part = nullableString(body, "part");
+  const timeoutMs = optionalPositiveNumber(body, "timeout_ms");
+  const connector = requireConnector(ctx);
+
+  const { result } = await runIdempotent(ctx, "submit_job", projectId, async (tx) => {
+    await requireProject(tx, projectId);
+    const runClass = await adjudicateRunClass(tx, projectId, body);
+    const jobId = `job-${randomUUID()}`;
+    const inputManifestHash = canonicalRequestHash(ctx.body);
+    const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part, constraints, timeoutMs };
+    const authorizationContext = buildAuthorizationContext(body);
+
+    await tx.query(
+      `INSERT INTO tool_run (id, project_id, operation, capability_version, run_class, state,
+                              input_manifest_hash, authorization_context, parameters, connector_id, correlation_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)`,
+      [
+        jobId, projectId, operation, "v1", runClass, "submitted", inputManifestHash,
+        JSON.stringify(authorizationContext), JSON.stringify(parameters), connector.connectorId, ctx.correlationId,
+      ],
+    );
+    await outboxEvent(tx, ctx, { type: "tool_run", id: jobId }, "tool_run.submitted", {
+      jobId, projectId, operation, runClass, state: "submitted",
+    });
+
+    // Submit to the Connector inside the transaction: a rejection rolls back the
+    // row + event + idempotency slot so the caller can retry with the same key.
+    // `approval` carries the authorization context the remote client needs for
+    // gate_check/formal runs; exploratory omits it.
+    try {
+      await connector.submitJob({
+        jobId,
+        projectId,
+        operation,
+        runClass,
+        idempotencyKey: ctx.idempotencyKey!,
+        correlationId: ctx.correlationId,
+        actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
+        parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, timeoutMs },
+        approval: Object.keys(authorizationContext).length > 0 ? authorizationContext : undefined,
+      });
+    } catch (err) {
+      throw mapConnectorError(err);
+    }
+    return { jobId, runClass, state: "submitted" };
+  });
+
+  return { status: 201, data: result };
+}
+
+/**
+ * GET /projects/:projectId/jobs/:jobId — poll a Job's execution state.
+ *
+ * Core must already know the jobId (it minted it on submit); otherwise 404. The
+ * Connector is queried for the live state and the row is updated (state /
+ * error_code / output_sha256; end_time stamped on first terminal observation).
+ * The Connector is the authority for execution state, so the update is direct.
+ */
+export async function getJobStatusHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const jobId = ctx.params.jobId!;
+  const connector = requireConnector(ctx);
+
+  const found = await ctx.pool.query("SELECT 1 FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
+  if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
+
+  let snapshot;
+  try {
+    snapshot = await connector.queryStatus(projectId, jobId);
+  } catch (err) {
+    throw mapConnectorError(err);
+  }
+
+  const terminal = snapshot.state in TOOL_RUN_TERMINAL_STATES;
+  await ctx.pool.query(
+    `UPDATE tool_run
+        SET state = $1, error_code = $2, output_sha256 = $3,
+            end_time = CASE WHEN $4::boolean AND end_time IS NULL THEN now() ELSE end_time END
+      WHERE id = $5 AND project_id = $6`,
+    [snapshot.state, snapshot.errorCode ?? null, snapshot.outputSha256 ?? null, terminal, jobId, projectId],
+  );
+
+  const data: Record<string, unknown> = { jobId, state: snapshot.state };
+  if (snapshot.errorCode !== undefined) data.errorCode = snapshot.errorCode;
+  if (snapshot.outputSha256 !== undefined) data.outputSha256 = snapshot.outputSha256;
+  return { status: 200, data };
+}
+
+/**
+ * GET /projects/:projectId/jobs/:jobId/evidence — fetch the frozen evidence
+ * manifest for a terminal Job.
+ *
+ * Non-terminal: Core first refreshes status once; if still non-terminal → 404.
+ * Terminal: the Connector manifest is fetched, frozen onto `tool_run.evidence`
+ * (migration 0004), and returned. Connector "no evidence" → 404 not_found.
+ */
+export async function getJobEvidenceHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const jobId = ctx.params.jobId!;
+  const connector = requireConnector(ctx);
+
+  const found = await ctx.pool.query("SELECT state FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
+  if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
+  let state = String((found.rows[0] as Record<string, unknown>).state);
+
+  // Non-terminal: refresh status once before deciding evidence availability.
+  if (!(state in TOOL_RUN_TERMINAL_STATES)) {
+    let snapshot;
+    try {
+      snapshot = await connector.queryStatus(projectId, jobId);
+    } catch (err) {
+      throw mapConnectorError(err);
+    }
+    state = snapshot.state;
+    const terminal = state in TOOL_RUN_TERMINAL_STATES;
+    await ctx.pool.query(
+      `UPDATE tool_run
+          SET state = $1, error_code = $2, output_sha256 = $3,
+              end_time = CASE WHEN $4::boolean AND end_time IS NULL THEN now() ELSE end_time END
+        WHERE id = $5 AND project_id = $6`,
+      [state, snapshot.errorCode ?? null, snapshot.outputSha256 ?? null, terminal, jobId, projectId],
+    );
+    if (!terminal) throw notFoundError("evidence not available: job not terminal");
+  }
+
+  let manifest;
+  try {
+    manifest = await connector.fetchEvidence(projectId, jobId);
+  } catch (err) {
+    throw mapConnectorError(err);
+  }
+
+  // Freeze the manifest on the row (terminal-only persistence, migration 0004).
+  await ctx.pool.query(
+    "UPDATE tool_run SET evidence = $1::jsonb WHERE id = $2 AND project_id = $3",
+    [JSON.stringify({ jobId: manifest.jobId, entries: manifest.entries }), jobId, projectId],
+  );
+
+  return { status: 200, data: { jobId, entries: manifest.entries } };
 }

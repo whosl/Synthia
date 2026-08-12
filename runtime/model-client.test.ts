@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ModelClient,
+  makeXdcValidator,
   validateRtl,
   validateTb,
   validateXdc,
@@ -60,6 +61,37 @@ describe("action validators", () => {
     const withTb = validateRepair({ reasoning: "r", sources: [{ path: "c.v", content: "x" }], testbench: { path: "tb.v", content: "y" } }) as { testbench?: { path: string } };
     expect(withTb.testbench?.path).toBe("tb.v");
     expect(() => validateRepair({ reasoning: "r", sources: [] })).toThrow();
+  });
+  test("makeXdcValidator(false) rejects XDC containing PACKAGE_PIN", () => {
+    const v = makeXdcValidator(false);
+    expect(() => v({ reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property PACKAGE_PIN AH15 [get_ports clk]\n" }] })).toThrow(/PACKAGE_PIN/);
+  });
+  test("makeXdcValidator(false) rejects XDC containing IOSTANDARD", () => {
+    const v = makeXdcValidator(false);
+    expect(() => v({ reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property IOSTANDARD LVCMOS33 [get_ports clk]\n" }] })).toThrow(/IOSTANDARD/);
+  });
+  test("makeXdcValidator(false) accepts XDC with only clock + DRC downgrade (no pin assignments)", () => {
+    const v = makeXdcValidator(false);
+    const smoke = "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\ncreate_clock -period 10.0 [get_ports clk]\n";
+    const a = v({ reasoning: "smoke", constraints: [{ path: "top.xdc", content: smoke }] });
+    expect(a.phase).toBe("generate_xdc");
+  });
+  test("makeXdcValidator(true) allows PACKAGE_PIN (when verified pin data exists)", () => {
+    const v = makeXdcValidator(true);
+    const a = v({ reasoning: "verified", constraints: [{ path: "top.xdc", content: "set_property PACKAGE_PIN AH15 [get_ports clk]\n" }] });
+    expect(a.phase).toBe("generate_xdc");
+  });
+  test("makeXdcValidator(false) error message has no format pollution (no {{ or |)", () => {
+    const v = makeXdcValidator(false);
+    let msg = "";
+    try { v({ reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property PACKAGE_PIN AH15 [get_ports clk]\n" }] }); } catch (e) { msg = e instanceof Error ? e.message : String(e); }
+    expect(msg).toContain("PACKAGE_PIN");
+    expect(msg).not.toContain("{{");
+    expect(msg).not.toContain("|");
+    // Should mention the template elements in natural language
+    expect(msg).toContain("create_clock");
+    expect(msg).toContain("NSTD-1");
+    expect(msg).toContain("UCIO-1");
   });
 });
 
@@ -197,6 +229,42 @@ describe("ModelClient.emitAction", () => {
     // The feedback for XDC should say .xdc
     expect(out.validationFeedbacks![0]).toContain(".xdc");
     expect(count()).toBe(2);
+  });
+
+  test("XDC phase: PACKAGE_PIN in first response → feedback retry → corrected (no pin) → succeeds", async () => {
+    const xdcReq = { ...req, phase: "generate_xdc" as const, actionName: "generate_xdc" };
+    const { poster, count } = scriptedPoster([
+      // First: model hallucinates PACKAGE_PIN
+      () => ({ content: { reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property PACKAGE_PIN AH15 [get_ports clk]\n" }] } }),
+      // Second: model corrects to smoke-only XDC (no pins)
+      () => ({ content: { reasoning: "smoke", constraints: [{ path: "top.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\ncreate_clock -period 10 [get_ports clk]\n" }] } }),
+    ]);
+    const client = makeClient("json", poster, { maxParseRetries: 1 });
+    const out = await client.emitAction(xdcReq, makeXdcValidator(false));
+    expect(out.action.phase).toBe("generate_xdc");
+    expect(out.attempts).toBe(2);
+    expect(out.validationFeedbacks).toBeDefined();
+    expect(out.validationFeedbacks![0]).toContain("PACKAGE_PIN");
+    expect(count()).toBe(2);
+  });
+
+  test("generateXdc prompt (no pin table) contains verbatim template with no format pollution", async () => {
+    let capturedBody = "";
+    const poster: ChatPoster = async (input) => {
+      capturedBody = input.body;
+      return { status: 200, json: { choices: [{ message: { content: JSON.stringify({ reasoning: "smoke", constraints: [{ path: "top.xdc", content: "create_clock -name sys_clk -period 10.000 [get_ports clk]\nset_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\n" }] }) } }] }, text: "" };
+    };
+    const client = new ModelClient({ ...BASE_CFG, protocol: "json", post: poster, maxParseRetries: 0, networkRetries: 0, timeoutMs: 1000 });
+    await client.generateXdc("top", "xc7k70tfbv676-1", "sys", false);
+    // The body must contain the verbatim template
+    expect(capturedBody).toContain("create_clock -name sys_clk -period 10.000");
+    expect(capturedBody).toContain("set_property SEVERITY");
+    expect(capturedBody).toContain("NSTD-1");
+    expect(capturedBody).toContain("UCIO-1");
+    // No double-brace or pipe pollution
+    expect(capturedBody).not.toContain("{{");
+    // The instruction must be positive (template-first), not just a prohibition
+    expect(capturedBody).toContain("EXACTLY the following template");
   });
 
 });

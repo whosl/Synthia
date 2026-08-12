@@ -2,10 +2,12 @@
  * Synthia Runtime — CLI entry.
  *
  *   bun run runtime/cli.ts "<中文任务>" [--part <part>] [--project <id>]
- *        [--fake-connector] [--offline]
+ *        [--via-core] [--fake-connector] [--offline]
  *
  * Modes:
  *  - default         real model (SYNTHIA_MODEL_*) + real Cloudflare connector
+ *  - --via-core      real model + CoreApiConnector (submits jobs through Core
+ *                    API instead of hitting worker 66 directly)
  *  - --fake-connector real model + FakeVivadoConnector (no 66 traffic)
  *  - --offline        scripted model + FakeVivadoConnector (fully local smoke)
  *
@@ -13,6 +15,9 @@
  * CF service token are read from env only and never printed. Proxy env vars are
  * cleared so the internal model endpoint and the public connector are reached
  * directly (the dev-box proxy 127.0.0.1:65533 is dead).
+ *
+ * --via-core env: SYNTHIA_CORE_URL (default http://127.0.0.1:8787) and
+ * SYNTHIA_CORE_TOKEN (REQUIRED — Core service token with core:read/core:write).
  */
 
 // Bun snapshots proxy env at startup; JS deletion is best-effort. Warn if a
@@ -30,6 +35,7 @@ import { SkillLoader } from "./skill-loader.ts";
 import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
 import { LoopExecutor, FakeVivadoConnector, successBehavior, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import { RemoteVivadoConnector } from "./remote-connector.ts";
+import { CoreApiConnector, resolveCoreApiConfig } from "./core-api-connector.ts";
 import type { ArtifactFile, LoopModel, LoopResult, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration } from "./types.ts";
 
 const DEFAULT_PART = "xc7k70tfbv676-1";
@@ -40,6 +46,7 @@ interface CliArgs {
   task: string;
   part: string;
   project: string;
+  viaCore: boolean;
   fakeConnector: boolean;
   offline: boolean;
 }
@@ -47,7 +54,7 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const rest = argv.slice(2);
   if (rest.length === 0 || rest[0] === "--help" || rest[0] === "-h") {
-    console.error('usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--fake-connector] [--offline]');
+    console.error('usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--via-core] [--fake-connector] [--offline]');
     process.exit(rest.length === 0 ? 1 : 0);
   }
   const task = rest[0]!;
@@ -60,6 +67,7 @@ function parseArgs(argv: string[]): CliArgs {
     task,
     part: val("--part") ?? DEFAULT_PART,
     project: val("--project") ?? DEFAULT_PROJECT,
+    viaCore: flags.includes("--via-core"),
     fakeConnector: flags.includes("--fake-connector"),
     offline: flags.includes("--offline"),
   };
@@ -82,7 +90,7 @@ class CounterScriptedModel implements LoopModel {
       testbench: tbCounter(),
     };
   }
-  async generateXdc(_top: string, part: string): Promise<XdcGeneration> {
+  async generateXdc(_top: string, part: string, _sys: string, _allowPin: boolean): Promise<XdcGeneration> {
     return { phase: "generate_xdc", reasoning: `smoke constraints for ${part}`, constraints: [xdcSmoke()] };
   }
   async repair(): Promise<RepairGeneration> {
@@ -153,6 +161,14 @@ async function buildRemoteConnector(projectId: string): Promise<RemoteVivadoConn
   return new RemoteVivadoConnector({ clientFactory, connectorId: endpoint.connector_id, projectId, onLifecycle: (e) => process.stderr.write(`[runtime] lifecycle/${e.action} ${e.result} ${e.detail ?? ""}\n`) });
 }
 
+function buildCoreApiConnector(projectId: string): CoreApiConnector {
+  // Throws if SYNTHIA_CORE_TOKEN is missing → main().catch exits 2 with fatal.
+  const cfg = resolveCoreApiConfig(process.env);
+  return new CoreApiConnector({
+    baseUrl: cfg.baseUrl, token: cfg.token, projectId,
+  });
+}
+
 // ----- report rendering (no secrets) -----
 
 function renderReport(result: LoopResult): string {
@@ -184,7 +200,11 @@ async function main(): Promise<void> {
   const model: LoopModel = args.offline ? new CounterScriptedModel() : new ModelClient(modelConfigFromEnv());
 
   let connector;
-  if (args.offline || args.fakeConnector) {
+  if (args.offline) {
+    connector = new FakeVivadoConnector({ behavior: successBehavior() });
+  } else if (args.viaCore) {
+    connector = buildCoreApiConnector(args.project);
+  } else if (args.fakeConnector) {
     connector = new FakeVivadoConnector({ behavior: successBehavior() });
   } else {
     connector = await buildRemoteConnector(args.project);

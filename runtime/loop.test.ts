@@ -31,7 +31,7 @@ class RecordingModel implements LoopModel {
   }
   async generateRtl(): Promise<RtlGeneration> { return { phase: "generate_rtl", reasoning: "ok", topModule: "counter", sources: [RTL] }; }
   async generateTestbench(): Promise<TbGeneration> { return { phase: "generate_testbench", reasoning: "ok", testbenchModule: "tb_counter", testbench: TB }; }
-  async generateXdc(): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
+  async generateXdc(_top: string, _part: string, _sys: string, _allowPin: boolean): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
   async repair(input: { stderr: string; attempt: number }): Promise<RepairGeneration> {
     this.repairs.push({ stderr: input.stderr, attempt: input.attempt });
     return this.repairResponse;
@@ -201,6 +201,56 @@ describe("LoopExecutor", () => {
     const result = await loop.run("计数器");
     expect(result.status).toBe("fail_closed");
     expect(model.repairs).toHaveLength(0); // unknown_effect must NOT trigger repair
+  });
+
+  test("implement failed → loop fail_closed (NOT succeeded)", async () => {
+    const connector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req) => {
+          if (req.operation === "implement") {
+            return {
+              status: "failed" as const, jobId: `job-${req.operation}-impl-fail`,
+              operation: req.operation, inputSha256: "x",
+              stdout: "write_bitstream DRC error", stderr: "ERROR: [Drc 23-20] NSTD-1",
+              errorCode: "VIVADO_DRC_FAILED",
+              evidence: { jobId: "job-impl-fail", entries: [{ name: "synth.dcp", sha256: "a".repeat(64), sizeBytes: 100, mediaType: "application/octet-stream" }] },
+            };
+          }
+          return successBehavior().respond(req, 0);
+        },
+      },
+    });
+    const loop = makeLoop(new RecordingModel(), connector);
+    const result = await loop.run("计数器");
+    // CRITICAL: implement failed must NOT be treated as success
+    expect(result.status).toBe("fail_closed");
+    expect(result.endedReason).toContain("implement");
+    expect(result.endedReason).toContain("non-success");
+    expect(connector.callCount("implement")).toBe(1);
+  });
+
+  test("synthesize failed → loop fail_closed (implement not reached)", async () => {
+    const connector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req) => {
+          if (req.operation === "synthesize") {
+            return {
+              status: "failed" as const, jobId: `job-${req.operation}-synth-fail`,
+              operation: req.operation, inputSha256: "x",
+              stderr: "ERROR: synth_design failed", errorCode: "VIVADO_SYNTH_FAILED",
+              evidence: { jobId: "job-synth-fail", entries: [] },
+            };
+          }
+          return successBehavior().respond(req, 0);
+        },
+      },
+    });
+    const loop = makeLoop(new RecordingModel(), connector);
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("fail_closed");
+    expect(result.endedReason).toContain("synthesize");
+    expect(connector.callCount("synthesize")).toBe(1);
+    expect(connector.callCount("implement")).toBe(0); // implement not reached
   });
 
   test("model validation failure (illegal file) → ModelActionError → audit records feedback", async () => {

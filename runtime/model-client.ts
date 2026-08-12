@@ -259,15 +259,32 @@ export class ModelClient implements LoopModel {
     return outcome.action as TbGeneration;
   }
 
-  async generateXdc(topModule: string, part: string, systemPrompt: string): Promise<XdcGeneration> {
+  async generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean): Promise<XdcGeneration> {
+    const pinGuidance = allowPinAssignments
+      ? "You MAY include PACKAGE_PIN and IOSTANDARD assignments IF AND ONLY IF you have verified pin data from the hardware manual. Do not invent pin numbers."
+      : [
+          "No verified pin table is available for this target part.",
+          "Do NOT output any PACKAGE_PIN or IOSTANDARD assignment — those would be fabricated.",
+          "Instead, output EXACTLY the following template verbatim, changing only the clock port name if your design uses a different clock signal name:",
+          "",
+          "```",
+          "# Flow-validation smoke constraints (no verified pin table for this target)",
+          "create_clock -name sys_clk -period 10.000 [get_ports clk]",
+          "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]",
+          "set_property SEVERITY {Warning} [get_drc_checks UCIO-1]",
+          "```",
+          "",
+          "These constraints downgrade the two DRC checks that fail on unconstrained-pin designs so write_bitstream completes.",
+          "This is a flow-validation smoke design, not a hardware-deployment bitstream.",
+        ].join("\n");
     const outcome = await this.emitAction(
       {
         phase: "generate_xdc", systemPrompt,
-        userMessage: `Target part: ${part}\nRTL top module: ${topModule}\n\nProduce minimal XDC constraints with package_pin/IOSTANDARD assignments and a clock constraint. For a pure smoke design, downgrade NSTD-1/UCIO-1 so write_bitstream DRC passes.`,
+        userMessage: `Target part: ${part}\nRTL top module: ${topModule}\n\n${pinGuidance}`,
         actionName: "generate_xdc", actionDescription: "Produce XDC constraints for the target part.",
         schema: XDC_SCHEMA,
       },
-      validateXdc,
+      makeXdcValidator(allowPinAssignments),
     );
     return outcome.action as XdcGeneration;
   }
@@ -392,13 +409,30 @@ export const XDC_SCHEMA = {
   required: ["reasoning", "constraints"],
 } as const;
 
-export function validateXdc(raw: unknown): LoopAction {
-  if (!raw || typeof raw !== "object") err("xdc action must be an object");
-  const o = raw as Record<string, unknown>;
-  const reasoning = asString(o.reasoning, "reasoning");
-  const constraints = asFiles(o.constraints, "constraints", { kind: "constraint", extensions: XDC_EXTS });
-  return { phase: "generate_xdc", reasoning, constraints };
+/** Regex detecting PACKAGE_PIN / IOSTANDARD pin assignments in XDC content. */
+const XDC_PIN_RE = /\b(?:set_property\s+(?:PACKAGE_PIN|IOSTANDARD)|PACKAGE_PIN|IOSTANDARD)\b/i;
+
+export function makeXdcValidator(allowPinAssignments: boolean): ActionValidator {
+  return (raw: unknown): LoopAction => {
+    if (!raw || typeof raw !== "object") err("xdc action must be an object");
+    const o = raw as Record<string, unknown>;
+    const reasoning = asString(o.reasoning, "reasoning");
+    const constraints = asFiles(o.constraints, "constraints", { kind: "constraint", extensions: XDC_EXTS });
+    if (!allowPinAssignments) {
+      for (const c of constraints) {
+        if (XDC_PIN_RE.test(c.content)) {
+          err(`constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target. Use only a clock constraint and the two DRC severity downgrades. Output exactly this template, changing only the clock port name if needed: create_clock -name sys_clk -period 10.000 [get_ports clk] then set_property SEVERITY Warning for DRC checks NSTD-1 and UCIO-1.`);
+        }
+      }
+    }
+    return { phase: "generate_xdc", reasoning, constraints };
+  };
 }
+
+/** Backward-compatible validator: allows pin assignments (for tests that only
+ *  check structural validity). Production code uses makeXdcValidator(false). */
+export const validateXdc = makeXdcValidator(true);
+
 
 export const REPAIR_SCHEMA = {
   type: "object",

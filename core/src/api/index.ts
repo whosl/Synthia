@@ -19,3 +19,18 @@ export {
 export { routeApi } from "./router.ts";
 export { startSynthiaServer } from "./server.ts";
 export type { SynthiaServer } from "./server.ts";
+export type { SynthiaServerOptions } from "./server.ts";
+export type {
+  ConnectorPort,
+  ConnectorDiscovery,
+  ConnectorJobSnapshot,
+  EvidenceManifest,
+  EvidenceEntry,
+  SubmitJobParams,
+  JobParameters,
+  SourceInput,
+  DiscoveredCapability,
+} from "./connector-port.ts";
+export { ConnectorError, CAPABILITY_UNAVAILABLE_CODES, CONNECTOR_NOT_FOUND_CODES } from "./connector-port.ts";
+export { createConnectorFromEnv, RemoteConnectorAdapter, toConnectorError } from "./connector-adapter.ts";
+export type { ConnectorEnvOptions } from "./connector-adapter.ts";

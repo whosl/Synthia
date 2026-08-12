@@ -7,20 +7,37 @@
  */
 
 import type { Pool } from "pg";
+import type { ConnectorPort } from "./connector-port.ts";
 import { routeApi } from "./router.ts";
 
 export interface SynthiaServer {
   readonly port: number;
   readonly hostname: string;
   /** Stop the server, aborting in-flight connections. */
-  stop: () => void;
+  readonly stop: () => void;
 }
 
-export function startSynthiaServer(pool: Pool, opts: { port?: number; hostname?: string } = {}): SynthiaServer {
+export interface SynthiaServerOptions {
+  readonly port?: number;
+  readonly hostname?: string;
+  /**
+   * Connector port for the run/Job slice. Inject the production adapter built
+   * from env via `createConnectorFromEnv()` (connector-adapter.ts):
+   *
+   *   const connector = await createConnectorFromEnv();
+   *   startSynthiaServer(pool, { connector });
+   *
+   * When omitted, Job endpoints surface 503 capability_unavailable; every other
+   * endpoint works unchanged. Tests inject a fake ConnectorPort directly.
+   */
+  readonly connector?: ConnectorPort;
+}
+
+export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}): SynthiaServer {
   const server = Bun.serve({
     port: opts.port ?? 0,
     hostname: opts.hostname ?? "127.0.0.1",
-    fetch: (request: Request) => routeApi(request, pool),
+    fetch: (request: Request) => routeApi(request, pool, opts.connector),
   });
   return {
     port: server.port,

@@ -177,6 +177,9 @@ CREATE TABLE IF NOT EXISTS tool_run (
     return_code     integer,
     start_time      timestamptz,
     end_time        timestamptz,
+    error_code      text,                       -- 0004: connector-reported failure code (terminal)
+    output_sha256   text,                       -- 0004: SHA-256 of connector primary output (terminal)
+    evidence        jsonb,                       -- 0004: frozen terminal evidence manifest
     correlation_id  text NOT NULL,
     created_at      timestamptz NOT NULL DEFAULT now()
 );
