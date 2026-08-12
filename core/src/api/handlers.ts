@@ -24,13 +24,14 @@ import {
   createSnapshot,
   createSubmission,
   createTraceRelation,
+  findRoleAssignment,
   lockGateSubmission,
   transitionSubmissionState,
   withTransaction,
   type GateSubmissionLock,
   type TransactionClient,
 } from "../db/repository.ts";
-import { canonicalRequestHash, computeManifestHash } from "../hashing.ts";
+import { canonicalRequestHash, computeManifestHash, sha256Hex } from "../hashing.ts";
 import { approveGateSubmission, type ApproveGateSubmissionInput } from "../services/approval.ts";
 import { ConflictError, InvariantError } from "../memory-repository.ts";
 import { gateSubmissionMachine } from "../domain/state-machines.ts";
@@ -124,6 +125,9 @@ function optionalObject(obj: Record<string, unknown>, key: string): unknown {
 const CLASSIFICATION_VALUES: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
 const GATE_VALUES: Record<string, true> = { G0: true, G1: true, G2: true, G3: true, G4: true, G5: true, G6: true, G7: true, G8: true, G9: true };
 const TRACE_STATE_VALUES: Record<string, true> = { candidate: true, in_review: true, approved: true, rejected: true, review_required: true, superseded: true, invalidated: true };
+
+/** Maximum inline revision content (1 MiB, measured in UTF-8 bytes). */
+const MAX_CONTENT_BYTES = 1024 * 1024;
 
 function requireEnum(value: unknown, key: string, valid: Record<string, true>): string {
   if (typeof value !== "string" || !(value in valid)) {
@@ -305,6 +309,18 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
   };
 }
 
+/**
+ * GET /projects — list all projects (core:read). Returns the stable contract
+ * fields, ordered by created_at descending (newest first).
+ */
+export async function getProjects(ctx: RequestContext): Promise<HandlerResult> {
+  const { rows } = await ctx.pool.query(
+    `SELECT id, name, status, data_classification, created_at
+       FROM project ORDER BY created_at DESC`,
+  );
+  return { status: 200, data: rows };
+}
+
 export async function createProcessInstance(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const body = asObject(ctx.body);
@@ -361,8 +377,29 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
   if (typeof versionNum !== "number" || !Number.isInteger(versionNum) || versionNum < 1) {
     throw validationError("field 'version' must be a positive integer");
   }
-  const contentHash = requireString(body, "content_hash");
-  const contentLocation = requireString(body, "content_location");
+  // Content may be supplied inline. When present, the server computes content_hash
+  // (a client-supplied content_hash that disagrees is a 400) and content_location
+  // defaults to db://artifact_revision/<id>. When absent, content_hash is required
+  // and the client addresses out-of-band content via content_location.
+  let content: string | null = null;
+  let contentHash: string;
+  if (body.content !== undefined && body.content !== null) {
+    if (typeof body.content !== "string") throw validationError("field 'content' must be a string");
+    if (Buffer.byteLength(body.content, "utf8") > MAX_CONTENT_BYTES) {
+      throw validationError(`field 'content' must be at most ${MAX_CONTENT_BYTES} bytes`);
+    }
+    content = body.content;
+    contentHash = sha256Hex(content);
+    if (body.content_hash !== undefined && body.content_hash !== null) {
+      if (typeof body.content_hash !== "string") throw validationError("field 'content_hash' must be a string");
+      if (body.content_hash !== contentHash) {
+        throw validationError("content_hash does not match sha256(content)", { expected: contentHash });
+      }
+    }
+  } else {
+    contentHash = requireString(body, "content_hash");
+  }
+  const contentLocation = optionalString(body, "content_location", `db://artifact_revision/${id}`);
 
   requireEnum(optionalString(body, "data_classification", "D1"), "data_classification", CLASSIFICATION_VALUES);
 
@@ -406,6 +443,7 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
       parentRevisionId: (body.parent_revision_id ?? null) as string | null,
       contentHash,
       contentLocation,
+      content,
       schemaVersion: optionalString(body, "schema_version", "v1"),
       sourceIds: optionalStringArray(body, "source_ids"),
       dataClassification: optionalString(body, "data_classification", "D1") as DataClassification,
@@ -436,6 +474,62 @@ export async function getRevision(ctx: RequestContext): Promise<HandlerResult> {
   );
   if (rows.length === 0) throw notFoundError(`revision not found: ${revId}`);
   return { status: 200, data: rows[0] };
+}
+
+/**
+ * GET /projects/:projectId/artifacts — list artifact containers in a project
+ * (core:read). Returns the stable contract fields, ordered by created_at.
+ */
+export async function getArtifacts(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const { rows } = await ctx.pool.query(
+    `SELECT id, artifact_type, created_at
+       FROM artifact WHERE project_id = $1 ORDER BY created_at`,
+    [projectId],
+  );
+  return { status: 200, data: rows };
+}
+
+/**
+ * GET /projects/:projectId/artifacts/:artifactId/revisions — list revisions of
+ * an artifact (core:read). Returns the stable contract fields (including the
+ * artifact title) ordered by version descending. Empty list when the artifact
+ * has no revisions.
+ */
+export async function getRevisions(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const artifactId = ctx.params.artifactId!;
+  const { rows } = await ctx.pool.query(
+    `SELECT ar.id, ar.version, ar.state, ar.content_hash, ar.content_location,
+            a.title, ar.created_at
+       FROM artifact_revision ar
+       JOIN artifact a ON a.id = ar.artifact_id
+      WHERE ar.project_id = $1 AND ar.artifact_id = $2
+      ORDER BY ar.version DESC`,
+    [projectId, artifactId],
+  );
+  return { status: 200, data: rows };
+}
+
+/**
+ * GET /projects/:projectId/artifacts/:artifactId/revisions/:revId/content —
+ * return the inline content + its hash for a revision (core:read). 404 when the
+ * revision is absent or carries no inline content (content lives out-of-band,
+ * addressed by content_location).
+ */
+export async function getRevisionContent(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const artifactId = ctx.params.artifactId!;
+  const revId = ctx.params.revId!;
+  const { rows } = await ctx.pool.query(
+    `SELECT content, content_hash FROM artifact_revision
+      WHERE id = $1 AND project_id = $2 AND artifact_id = $3`,
+    [revId, projectId, artifactId],
+  );
+  if (rows.length === 0) throw notFoundError(`revision not found: ${revId}`);
+  const row = rows[0] as { content: string | null; content_hash: string };
+  if (row.content === null) throw notFoundError(`revision has no inline content: ${revId}`);
+  return { status: 200, data: { content: row.content, content_hash: row.content_hash } };
 }
 
 // ─── 3. Snapshot / Gate ──────────────────────────────────────────────────────
@@ -630,6 +724,25 @@ export async function getGateSubmissionHandler(ctx: RequestContext): Promise<Han
   return { status: 200, data: rows[0] };
 }
 
+/**
+ * GET /projects/:projectId/gate-submissions[?state=] — list gate submissions for
+ * a project (core:read). Optional `state` query filters by submission state
+ * (e.g. in_review); omitted returns all. Ordered by created_at. Returns the
+ * stable contract fields (no check_results / issues payloads).
+ */
+export async function getGateSubmissions(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const state = ctx.url.searchParams.get("state");
+  const { rows } = await ctx.pool.query(
+    `SELECT id, gate, state, snapshot_id, process_instance_id, submitter_id, submitted_at, created_at
+       FROM gate_submission
+      WHERE project_id = $1 AND ($2::text IS NULL OR state::text = $2)
+      ORDER BY created_at`,
+    [projectId, state],
+  );
+  return { status: 200, data: rows };
+}
+
 // ─── 4. Approval / Baseline ──────────────────────────────────────────────────
 
 export async function approveGateHandler(ctx: RequestContext): Promise<HandlerResult> {
@@ -692,6 +805,54 @@ export async function approveGateHandler(ctx: RequestContext): Promise<HandlerRe
   } finally {
     conn.release();
   }
+}
+
+/**
+ * POST /projects/:projectId/gate-submissions/:subId/reject — reject a gate
+ * submission (human + project role + core:approve). Mirrors approve's
+ * authorization path: a natural human with an active project role assignment may
+ * reject; service identities and role-less humans are denied (403). Only a
+ * submission in `in_review` may be rejected (anything else → 409). The reason is
+ * required and is carried in the gate_submission.rejected outbox event. Idempotent.
+ */
+export async function rejectGateSubmissionHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const submissionId = ctx.params.subId!;
+  const body = asObject(ctx.body);
+  const reason = requireString(body, "reason");
+  const approverRole = optionalString(body, "approver_role", "quality");
+
+  // P4 human-exclusive (same gate as approve): service identities cannot reject.
+  if (ctx.identity.actorType !== "human") {
+    throw forbiddenError("APPROVAL_AUTHORIZATION_DENIED", { actorType: ctx.identity.actorType });
+  }
+
+  const { result } = await runIdempotent(ctx, "reject_gate_submission", projectId, async (tx) => {
+    await requireProject(tx, projectId);
+    const lock = await requireSubmission(tx, projectId, submissionId);
+
+    // Reuse approve's authorization: an active project role assignment is required.
+    const role = await findRoleAssignment(tx, projectId, "human", ctx.identity.actorId, approverRole);
+    if (!role) {
+      throw forbiddenError("APPROVAL_AUTHORIZATION_DENIED", { actorType: ctx.identity.actorType });
+    }
+
+    const current = lock.state as GateSubmissionState;
+    if (current !== "in_review") {
+      throw conflictApiError("GATE_SUBMISSION_NOT_REJECTABLE", { state: current });
+    }
+    await transitionSubmissionState(asClient(tx), submissionId, "rejected");
+    await outboxEvent(tx, ctx, { type: "gate_submission", id: submissionId }, "gate_submission.rejected", {
+      id: submissionId,
+      projectId,
+      state: "rejected",
+      reason,
+      approver: ctx.identity.actorId,
+    });
+    return selectSubmission(tx, submissionId);
+  });
+
+  return { status: 200, data: result };
 }
 
 export async function getBaselines(ctx: RequestContext): Promise<HandlerResult> {

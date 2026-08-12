@@ -16,13 +16,14 @@ export async function createRevision(client: Client, rev: ArtifactRevision): Pro
   await client.query(
     `INSERT INTO artifact_revision
        (id, artifact_id, project_id, version, state, parent_revision_id,
-        content_hash, content_location, schema_version, source_ids,
+        content_hash, content_location, content, schema_version, source_ids,
         data_classification, tool_model_provenance, change_reason,
         created_by, created_by_type, review_ids)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
     [rev.id, rev.artifactId, rev.projectId, rev.version, rev.state,
-     rev.parentRevisionId, rev.contentHash, rev.contentLocation, rev.schemaVersion,
-     rev.sourceIds, rev.dataClassification, JSON.stringify(rev.toolModelProvenance),
+     rev.parentRevisionId, rev.contentHash, rev.contentLocation, rev.content,
+     rev.schemaVersion, rev.sourceIds, rev.dataClassification,
+     JSON.stringify(rev.toolModelProvenance),
      rev.changeReason, rev.createdBy, rev.createdByType, rev.reviewIds],
   );
 }

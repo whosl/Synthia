@@ -96,7 +96,7 @@ export class CoreGovernanceClient implements GovernanceClient {
       id: `rev_${randomUUID()}`,
       version: 1,
       content_hash: contentHash,
-      content_location: input.contentLocation,
+      content: input.content,
       artifact_type: input.artifactType,
       title: input.title,
       ...(input.changeReason ? { change_reason: input.changeReason } : {}),

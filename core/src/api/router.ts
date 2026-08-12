@@ -34,14 +34,20 @@ import {
   createRevisionHandler,
   createSnapshotHandler,
   createTraceRelationHandler,
+  getArtifacts,
   getBaselines,
   getEvents,
   getGateSubmissionHandler,
+  getGateSubmissions,
   getJobEvidenceHandler,
   getJobStatusHandler,
   getProject,
+  getProjects,
   getRevision,
+  getRevisionContent,
+  getRevisions,
   getTraceRelations,
+  rejectGateSubmissionHandler,
   submitGateSubmissionHandler,
   submitJobHandler,
   withdrawGateSubmissionHandler,
@@ -156,6 +162,9 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
   // POST /projects
   if (segments.length === 1 && method === "POST") return { handler: createProject, params: {}, requiredScope: "core:write" };
 
+  // GET /projects — list all projects (newest first)
+  if (segments.length === 1 && method === "GET") return { handler: getProjects, params: {}, requiredScope: "core:read" };
+
   if (segments.length >= 2) {
     const projectId = segments[1]!;
     const tail = segments[2];
@@ -188,6 +197,10 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
           break;
         case "gate-submissions":
           if (method === "POST") return { handler: createGateSubmissionHandler, params, requiredScope: "core:write" };
+          if (method === "GET") return { handler: getGateSubmissions, params, requiredScope: "core:read" };
+          break;
+        case "artifacts":
+          if (method === "GET") return { handler: getArtifacts, params, requiredScope: "core:read" };
           break;
         case "jobs":
           if (method === "POST") return { handler: submitJobHandler, params, requiredScope: "core:write" };
@@ -216,8 +229,16 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       if (segments.length === 5 && method === "POST") {
         return { handler: createRevisionHandler, params: { projectId, artifactId }, requiredScope: "core:write" };
       }
+      // GET .../revisions — list revisions of an artifact (version desc)
+      if (segments.length === 5 && method === "GET") {
+        return { handler: getRevisions, params: { projectId, artifactId }, requiredScope: "core:read" };
+      }
       if (segments.length === 6 && method === "GET") {
         return { handler: getRevision, params: { projectId, artifactId, revId: segments[5]! }, requiredScope: "core:read" };
+      }
+      // GET .../revisions/:revId/content — inline revision content
+      if (segments.length === 7 && segments[6] === "content" && method === "GET") {
+        return { handler: getRevisionContent, params: { projectId, artifactId, revId: segments[5]! }, requiredScope: "core:read" };
       }
     }
 
@@ -234,6 +255,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // /projects/:projectId/gate-submissions/:subId/withdraw
     if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "withdraw" && method === "POST") {
       return { handler: withdrawGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:write" };
+    }
+
+    // /projects/:projectId/gate-submissions/:subId/reject
+    if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "reject" && method === "POST") {
+      return { handler: rejectGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:approve" };
     }
   }
 

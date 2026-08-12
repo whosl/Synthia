@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS artifact_revision (
     parent_revision_id text REFERENCES artifact_revision(id),
     content_hash  text NOT NULL,
     content_location text NOT NULL,
+    content       text,
     schema_version text NOT NULL DEFAULT 'v1',
     source_ids    text[] NOT NULL DEFAULT '{}',
     data_classification data_classification NOT NULL DEFAULT 'D1',

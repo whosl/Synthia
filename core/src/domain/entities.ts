@@ -72,6 +72,7 @@ export interface ArtifactRevision {
   parentRevisionId: string | null;
   contentHash: string;           // SHA-256 of content (FLOW-002 §2)
   contentLocation: string;       // git ref, DB jsonb, or object storage URI
+  content: string | null;        // inline content when stored in DB; null when out-of-band
   schemaVersion: string;
   sourceIds: string[];           // source artifact/requirement/decision/run IDs
   dataClassification: DataClassification;

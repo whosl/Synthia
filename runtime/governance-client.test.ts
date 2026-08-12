@@ -136,7 +136,9 @@ describe("CoreGovernanceClient", () => {
     expect(capturedUrl).toBe("http://core:8787/api/v1/projects/p1/artifacts/art-x/revisions");
     expect(capturedBody.artifact_type).toBe("DEVELOPMENT_REQUIREMENTS");
     expect(capturedBody.content_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(capturedBody.content_location).toBe("doc/intake/summary.md");
+    // content is inlined; content_location is no longer sent (server defaults it)
+    expect(capturedBody.content).toBe("# doc");
+    expect(capturedBody.content_location).toBeUndefined();
     expect(capturedBody.version).toBe(1);
     expect(capturedHeaders.Authorization).toBe("Bearer tok");
     expect(capturedHeaders["Idempotency-Key"]).toBeTruthy();
@@ -287,6 +289,9 @@ describe("CoreGovernanceClient", () => {
       contentLocation: "doc/arch/module_partition.md",
     });
     expect(capturedBody.content_hash).toMatch(/^[0-9a-f]{64}$/);
+    // content is inlined verbatim; content_location omitted
+    expect(capturedBody.content).toBe("test content 123");
+    expect(capturedBody.content_location).toBeUndefined();
     // Verify it's actually the SHA-256 by re-computing
     const recomputed = createHash("sha256").update("test content 123").digest("hex");
     expect(capturedBody.content_hash).toBe(recomputed);
