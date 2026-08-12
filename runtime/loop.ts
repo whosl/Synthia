@@ -282,6 +282,10 @@ export class LoopExecutor {
         }
       }
 
+      // Persist chain context after every stage so a mid-tool-stage crash
+      // can resume with the actual RTL/TB/XDC content.
+      await this.syncChainContextToState({});
+
       // Check if a gate follows this stage.
       const gate = this.gateAfterStage(stage);
       if (gate) {
@@ -385,6 +389,7 @@ export class LoopExecutor {
    */
   private async resumeFromGate(): Promise<LoopResult> {
     if (!this.runState?.awaitingGate) {
+      this.restoreChainContext();
       return await this.executeChain(this.runState?.currentStage ?? "intake");
     }
     const gate = this.runState.awaitingGate;
@@ -517,12 +522,13 @@ export class LoopExecutor {
       docs,
       gateSubmissions: gateSubs,
       ...(this.chainCtx.rtlRevision ? { rtlRevision: this.chainCtx.rtlRevision } : {}),
+      ...(this.chainCtx.rtl ? { rtlArtifacts: { topModule: this.chainCtx.rtl.topModule, sources: this.chainCtx.rtl.sources } } : {}),
+      ...(this.chainCtx.tb ? { tbArtifacts: { testbenchModule: this.chainCtx.tb.testbenchModule, testbench: this.chainCtx.tb.testbench } } : {}),
+      ...(this.chainCtx.xdc ? { xdcArtifacts: { constraints: this.chainCtx.xdc.constraints } } : {}),
       updatedAt: new Date().toISOString(),
     };
     await this.deps.onStateChange(this.runState);
   }
-
-  /** Restore in-memory chain context from a loaded run-state. */
   private restoreChainContext(): void {
     if (!this.runState) return;
     if (this.runState.docs) {
@@ -532,6 +538,15 @@ export class LoopExecutor {
     }
     if (this.runState.rtlRevision) {
       this.chainCtx.rtlRevision = this.runState.rtlRevision;
+    }
+    if (this.runState.rtlArtifacts) {
+      this.chainCtx.rtl = { phase: "generate_rtl", reasoning: "restored from run-state", topModule: this.runState.rtlArtifacts.topModule, sources: this.runState.rtlArtifacts.sources };
+    }
+    if (this.runState.tbArtifacts) {
+      this.chainCtx.tb = { phase: "generate_testbench", reasoning: "restored from run-state", testbenchModule: this.runState.tbArtifacts.testbenchModule, testbench: this.runState.tbArtifacts.testbench };
+    }
+    if (this.runState.xdcArtifacts) {
+      this.chainCtx.xdc = { phase: "generate_xdc", reasoning: "restored from run-state", constraints: this.runState.xdcArtifacts.constraints };
     }
     if (this.runState.gateSubmissions) {
       for (const [gate, subId] of Object.entries(this.runState.gateSubmissions)) {

@@ -626,4 +626,83 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     // Should continue past G1 to G2 (behavior_wave registered, stops at G2).
     expect(r2.awaitingGate).toBe("G2");
   });
+
+  test("tool-stage resume: RTL generated → crash before validate → resume → validate uses persisted RTL (no model re-call)", async () => {
+    const gov = new MockGovernanceClient();
+    gov.setSubmitResult("approved"); // auto-approve all gates
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+
+    // Track model calls — RTL should NOT be called again on resume.
+    let rtlCallCount = 0;
+    const model = new FullChainModel();
+    const origGenRtl = model.generateRtl.bind(model);
+    model.generateRtl = async () => { rtlCallCount++; return origGenRtl(); };
+
+    let savedState: RunState | undefined;
+    const runId = "test-tool-resume";
+
+    // Phase 1: run through all gates (auto-approved), generate RTL,
+    // but crash at validate by using a connector that throws on validate_sources.
+    const crashConnector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req) => {
+          if (req.operation === "validate_sources") {
+            throw new Error("simulated 66 offline crash");
+          }
+          return successBehavior().respond(req, 0);
+        },
+      },
+    });
+
+    const loop1 = new LoopExecutor({
+      model, connector: crashConnector, governance: gov,
+      skillPrompts: {
+        rtl: "rtl-skill", tb: "tb-skill", xdc: "xdc-skill", repair: "repair-skill",
+        intake: "intake-skill", behaviorWave: "behavior-skill", architecture: "arch-skill", registerSpec: "reg-skill",
+      },
+      part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
+      toolModelPolicyHash: "policy-v1",
+      onStateChange: async (state) => { savedState = state; },
+    });
+
+    // Run — will crash at validate_sources after RTL is generated.
+    const r1 = await loop1.run("计数器", {
+      runId,
+      runState: {
+        runId, task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        currentStage: "intake", status: "running",
+        docs: {}, gateSubmissions: {}, gateDecisions: {},
+      },
+    });
+    // Should have failed (connector threw at validate → fail_closed).
+    expect(r1.status).toBe("fail_closed");
+    expect(rtlCallCount).toBe(1); // RTL was generated once
+
+    // CRITICAL: saved state must contain the RTL content.
+    expect(savedState).toBeDefined();
+    expect(savedState!.rtlArtifacts).toBeDefined();
+    expect(savedState!.rtlArtifacts!.topModule).toBe("counter");
+    expect(savedState!.rtlArtifacts!.sources.length).toBeGreaterThan(0);
+ expect(savedState!.rtlArtifacts!.sources[0]!.content).toContain("module counter");
+
+    // Phase 2: resume with a WORKING connector — validate should succeed
+    // WITHOUT calling the model again for RTL.
+    const workingConnector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const loop2 = new LoopExecutor({
+      model, connector: workingConnector, governance: gov,
+      skillPrompts: {
+        rtl: "rtl-skill", tb: "tb-skill", xdc: "xdc-skill", repair: "repair-skill",
+        intake: "intake-skill", behaviorWave: "behavior-skill", architecture: "arch-skill", registerSpec: "reg-skill",
+      },
+      part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
+      toolModelPolicyHash: "policy-v1",
+    });
+    const r2 = await loop2.resume(savedState!);
+    // Validate + remaining stages should succeed (or pause at G4).
+    // The key assertion: RTL was NOT regenerated.
+    expect(rtlCallCount).toBe(1); // still 1 — no re-call
+    // Validate ran on the working connector.
+    expect(workingConnector.callCount("validate_sources")).toBeGreaterThanOrEqual(1);
+  });
 });

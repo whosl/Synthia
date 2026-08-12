@@ -323,6 +323,12 @@ export interface RunState {
   readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
   /** Registered RTL revision (rtl_build stage). */
   readonly rtlRevision?: RegisteredRevision;
+  /** Persisted RTL sources so tool stages can resume without re-calling the model. */
+  readonly rtlArtifacts?: { readonly topModule: string; readonly sources: readonly ArtifactFile[] };
+  /** Persisted testbench so simulate stage can resume. */
+  readonly tbArtifacts?: { readonly testbenchModule: string; readonly testbench: ArtifactFile };
+  /** Persisted XDC constraints so implement stage can resume. */
+  readonly xdcArtifacts?: { readonly constraints: readonly ArtifactFile[] };
   /** Map of gate → submission id for polling on resume. */
   readonly gateSubmissions?: Readonly<Partial<Record<GateId, string>>>;
   /** Gate decisions: approved / rejected / withdrawn. */
