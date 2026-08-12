@@ -31,23 +31,31 @@ export interface SkillPack {
   readonly skills: readonly SkillPackEntry[];
 }
 
-/** The five skills the loop consults as method guidance. */
-export const LOOP_SKILLS = ["fpga-rtl-build", "fpga-tb-write", "fpga-xdc-gen", "fpga-compile-and-repair", "fpga-sim-run"] as const;
+/** All skills the loop consults as method guidance. */
+export const DOC_SKILLS = ["fpga-intake", "fpga-behavior-and-wave-plan", "fpga-architecture", "fpga-register-spec"] as const;
+export const TOOL_SKILLS = ["fpga-rtl-build", "fpga-tb-write", "fpga-xdc-gen", "fpga-compile-and-repair", "fpga-sim-run"] as const;
+export const LOOP_SKILLS = [...DOC_SKILLS, ...TOOL_SKILLS] as const;
 export type LoopSkillId = (typeof LOOP_SKILLS)[number];
+export type DocSkillId = (typeof DOC_SKILLS)[number];
+export type ToolSkillId = (typeof TOOL_SKILLS)[number];
 
 export interface LoadedSkill {
   readonly id: LoopSkillId;
   readonly version: string;
   readonly purpose: string;
   readonly evidence: readonly string[];
+  readonly failurePolicy: string;
   readonly method: string; // trimmed SKILL.md body
 }
-
 export interface SkillPrompts {
   readonly rtl: string;
   readonly tb: string;
   readonly xdc: string;
   readonly repair: string;
+  readonly intake: string;
+  readonly behaviorWave: string;
+  readonly architecture: string;
+  readonly registerSpec: string;
 }
 
 export class SkillLoader {
@@ -84,33 +92,48 @@ export class SkillLoader {
       version: entry.version,
       purpose: entry.purpose,
       evidence: entry.evidence,
+      failurePolicy: entry.failure_policy,
       method,
     };
     this.skillCache.set(id, loaded);
     return loaded;
   }
 
-  /** Build the four per-phase system prompts. */
+  /** Build all per-phase system prompts (4 doc + 4 tool). */
   async buildPrompts(): Promise<SkillPrompts> {
-    const [rtl, tb, xdc, repair, sim] = await Promise.all([
+    const [intake, behaviorWave, architecture, registerSpec, rtl, tb, xdc, repair] = await Promise.all([
+      this.loadSkill("fpga-intake"),
+      this.loadSkill("fpga-behavior-and-wave-plan"),
+      this.loadSkill("fpga-architecture"),
+      this.loadSkill("fpga-register-spec"),
       this.loadSkill("fpga-rtl-build"),
       this.loadSkill("fpga-tb-write"),
       this.loadSkill("fpga-xdc-gen"),
       this.loadSkill("fpga-compile-and-repair"),
-      this.loadSkill("fpga-sim-run"),
     ]);
-    const header = (s: LoadedSkill, role: string) =>
+    const toolHeader = (s: LoadedSkill, role: string) =>
       `You are the Synthia Runtime executing the ${role} step. Follow the ${s.id} (v${s.version}) method below. ` +
-      `Purpose: ${s.purpose} Failure policy: ${s.failure_policy}.\n` +
+      `Purpose: ${s.purpose} Failure policy: ${s.failurePolicy}.\n` +
       `HARD CONSTRAINTS:\n` +
       `- Output ONLY synthesizable Verilog/SystemVerilog or XDC. No raw Tcl, no shell commands, no toolchain invocations — the Runtime executes Vivado exclusively via versioned Connector capabilities.\n` +
       `- No stubs, TODO, FIXME, "// ...", placeholders, or empty always blocks. Complete implementations only.\n` +
       `- Every artifact must be real and complete; narrative claims without real content are failures.\n`;
+    const docHeader = (s: LoadedSkill, role: string) =>
+      `You are the Synthia Runtime executing the ${role} step. Follow the ${s.id} (v${s.version}) method below. ` +
+      `Purpose: ${s.purpose} Failure policy: ${s.failurePolicy}.\n` +
+      `HARD CONSTRAINTS:\n` +
+      `- Output ONE markdown document with real, complete content. No stubs, TODO, placeholders, or "..." omissions.\n` +
+      `- Do NOT fabricate hardware facts (pin numbers, clock frequencies, IOSTANDARD, register offsets, reset values). Mark unknowns as assumptions or missing information.\n` +
+      `- Every claim must be traceable to the task description or upstream artifacts.\n`;
     return {
-      rtl: `${header(rtl, "RTL generation")}\n${methodCore(rtl.method)}\n\n${evidenceBlock(rtl)}`,
-      tb: `${header(tb, "testbench generation")}\n${methodCore(tb.method)}\n\n${evidenceBlock(tb)}`,
-      xdc: `${header(xdc, "constraint generation")}\n${methodCore(xdc.method)}\n\n${evidenceBlock(xdc)}`,
-      repair: `${header(repair, "compile/simulation repair")}\n${methodCore(repair.method)}\n\n${evidenceBlock(repair)}\n` +
+      intake: `${docHeader(intake, "intake / requirements clarification")}\n${intake.method}\n\n${evidenceBlock(intake)}`,
+      behaviorWave: `${docHeader(behaviorWave, "behavior & wave-plan specification")}\n${behaviorWave.method}\n\n${evidenceBlock(behaviorWave)}`,
+      architecture: `${docHeader(architecture, "architecture design")}\n${architecture.method}\n\n${evidenceBlock(architecture)}`,
+      registerSpec: `${docHeader(registerSpec, "register specification")}\n${registerSpec.method}\n\n${evidenceBlock(registerSpec)}`,
+      rtl: `${toolHeader(rtl, "RTL generation")}\n${methodCore(rtl.method)}\n\n${evidenceBlock(rtl)}`,
+      tb: `${toolHeader(tb, "testbench generation")}\n${methodCore(tb.method)}\n\n${evidenceBlock(tb)}`,
+      xdc: `${toolHeader(xdc, "constraint generation")}\n${methodCore(xdc.method)}\n\n${evidenceBlock(xdc)}`,
+      repair: `${toolHeader(repair, "compile/simulation repair")}\n${methodCore(repair.method)}\n\n${evidenceBlock(repair)}\n` +
         `Note on simulation failures: route TB-structure issues back to a corrected TB and DUT-logic issues back to corrected RTL; you may correct both in one repair step when warranted.`,
     };
   }

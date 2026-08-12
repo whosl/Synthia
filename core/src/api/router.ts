@@ -36,12 +36,15 @@ import {
   createTraceRelationHandler,
   getBaselines,
   getEvents,
+  getGateSubmissionHandler,
   getJobEvidenceHandler,
   getJobStatusHandler,
   getProject,
   getRevision,
   getTraceRelations,
+  submitGateSubmissionHandler,
   submitJobHandler,
+  withdrawGateSubmissionHandler,
 } from "./handlers.ts";
 
 const API_PREFIX = "/api/v1";
@@ -192,6 +195,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       }
     }
 
+    // GET /projects/:projectId/gate-submissions/:subId
+    if (segments.length === 4 && segments[2] === "gate-submissions" && method === "GET") {
+      return { handler: getGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:read" };
+    }
+
     // GET /projects/:projectId/jobs/:jobId
     if (segments.length === 4 && segments[2] === "jobs" && method === "GET") {
       return { handler: getJobStatusHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
@@ -216,6 +224,16 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // /projects/:projectId/gate-submissions/:subId/approve
     if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "approve" && method === "POST") {
       return { handler: approveGateHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:approve" };
+    }
+
+    // /projects/:projectId/gate-submissions/:subId/submit
+    if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "submit" && method === "POST") {
+      return { handler: submitGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:write" };
+    }
+
+    // /projects/:projectId/gate-submissions/:subId/withdraw
+    if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "withdraw" && method === "POST") {
+      return { handler: withdrawGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:write" };
     }
   }
 

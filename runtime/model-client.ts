@@ -18,7 +18,7 @@
  */
 
 import { ModelActionError } from "./types.ts";
-import type { ArtifactFile, LoopModel, LoopPhase, LoopAction, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration } from "./types.ts";
+import type { ArtifactFile, LoopModel, LoopPhase, LoopAction, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration, DocGeneration } from "./types.ts";
 
 export type ActionProtocol = "tools" | "json";
 
@@ -35,6 +35,12 @@ export interface ModelClientConfig {
   readonly maxParseRetries?: number;
   /** Network/timeout retries. Default 2. */
   readonly networkRetries?: number;
+  /** Max output tokens for tool phases (RTL/TB/XDC/repair). Default 4096. */
+  readonly toolMaxTokens?: number;
+  /** Max output tokens for doc phases (intake/behavior/architecture/register). Default 8192. */
+  readonly docMaxTokens?: number;
+  /** When true, log raw response summaries to stderr (no secrets). */
+  readonly debug?: boolean;
   /** Injectable for tests. */
   readonly post?: ChatPoster;
 }
@@ -94,6 +100,9 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000,
     maxParseRetries: env.SYNTHIA_MODEL_PARSE_RETRIES ? Number(env.SYNTHIA_MODEL_PARSE_RETRIES) : 1,
     networkRetries: env.SYNTHIA_MODEL_NETWORK_RETRIES ? Number(env.SYNTHIA_MODEL_NETWORK_RETRIES) : 2,
+    toolMaxTokens: env.SYNTHIA_MODEL_TOOL_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_TOOL_MAX_TOKENS) : 4096,
+    docMaxTokens: env.SYNTHIA_MODEL_DOC_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_DOC_MAX_TOKENS) : 8192,
+    debug: env.SYNTHIA_MODEL_DEBUG === "1" || env.SYNTHIA_MODEL_DEBUG === "true",
   };
 }
 
@@ -132,6 +141,36 @@ function extractArguments(json: unknown, protocol: ActionProtocol): { ok: true; 
   const content = msg.content;
   if (typeof content !== "string" || !content.trim()) return { ok: false, reason: "empty content" };
   try { return { ok: true, value: JSON.parse(content) }; } catch { return { ok: false, reason: "content is not valid JSON" }; }
+}
+
+/** Default doc_path for each doc phase, used when the model puts raw markdown
+ *  in message.content without a structured tool call. */
+const DOC_DEFAULT_PATH: Record<string, string> = {
+  generate_intake: "doc/intake/summary.md",
+  generate_behavior_wave: "doc/spec/behavior_spec.md",
+  generate_architecture: "doc/arch/module_partition.md",
+  generate_register_spec: "doc/reg/register_map.md",
+};
+
+/**
+ * Salvage a doc-generation action from message.content when the model didn't
+ * use tool_calls. Tries: (1) JSON object in content, (2) raw markdown wrapped
+ * into the expected doc shape. Returns null if nothing usable.
+ * The result still goes through the strict validator, so validation semantics
+ * (.md path, heading structure, no bare path hallucination) are preserved.
+ */
+function salvageDocFromContent(json: unknown, phase: string): unknown | null {
+  const choices = (json as { choices?: Array<{ message?: { content?: string } }> } | undefined)?.choices;
+  const content = choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) return null;
+  // Try JSON parse first — model may have put the full object in content.
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch { /* not JSON, try raw markdown */ }
+  // Raw markdown fallback: wrap into the expected doc shape.
+  const docPath = DOC_DEFAULT_PATH[phase] ?? "doc/output.md";
+  return { reasoning: `salvaged from message.content`, doc_path: docPath, content };
 }
 
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
@@ -175,21 +214,46 @@ export class ModelClient implements LoopModel {
       }
       if (response.status < 200 || response.status >= 300) {
         lastReason = `HTTP ${response.status}`;
-        // Non-retryable client errors surface immediately.
         if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
           throw new Error(`model-client: upstream returned ${response.status}`);
         }
         continue;
       }
+
+      // Debug: log raw response summary (no secrets, no full content).
+      if (this.cfg.debug) this.debugResponse(req.phase, response.json, parseRound);
+
+      // Standard extraction: tool_calls (tools protocol) or JSON content (json protocol).
       const extracted = extractArguments(response.json, this.cfg.protocol);
-      if (!extracted.ok) { lastReason = extracted.reason; continue; }
-      try {
-        const action = validate(extracted.value);
-        return { action, attempts: attempt, protocol: this.cfg.protocol, ...(feedbacks.length ? { validationFeedbacks: [...feedbacks] } : {}) };
-      } catch (e) {
-        lastReason = e instanceof Error ? e.message : String(e);
-        feedbacks.push(lastReason);
+      if (extracted.ok) {
+        try {
+          const action = validate(extracted.value);
+          return { action, attempts: attempt, protocol: this.cfg.protocol, ...(feedbacks.length ? { validationFeedbacks: [...feedbacks] } : {}) };
+        } catch (e) {
+          lastReason = e instanceof Error ? e.message : String(e);
+          feedbacks.push(lastReason);
+          continue;
+        }
       }
+
+      // Fallback for doc phases: model may have put the document in message.content
+      // instead of tool_calls (common with large outputs). Try to salvage.
+      if (DOC_PHASES.has(req.phase)) {
+        const salvaged = salvageDocFromContent(response.json, req.phase);
+        if (salvaged) {
+          if (this.cfg.debug) process.stderr.write(`[model-debug] ${req.phase}: salvaged from message.content (attempt ${attempt})\n`);
+          try {
+            const action = validate(salvaged);
+            return { action, attempts: attempt, protocol: this.cfg.protocol, ...(feedbacks.length ? { validationFeedbacks: [...feedbacks] } : {}) };
+          } catch (e) {
+            lastReason = `content salvage failed validation: ${e instanceof Error ? e.message : String(e)}`;
+            feedbacks.push(lastReason);
+            continue;
+          }
+        }
+      }
+
+      lastReason = extracted.reason;
     }
     const e = new ModelActionError(
       `model produced no valid action for phase ${req.phase}: ${lastReason}`,
@@ -198,6 +262,27 @@ export class ModelClient implements LoopModel {
     );
     (e as ModelActionError & { validationFeedbacks?: readonly string[] }).validationFeedbacks = feedbacks.length ? [...feedbacks] : undefined;
     throw e;
+  }
+
+  /**
+   * Log a summary of the raw model response to stderr for debugging.
+   * Shows: finish_reason, has tool_calls, content length, usage tokens.
+   * Never logs full content or secrets.
+   */
+  private debugResponse(phase: LoopPhase, json: unknown, parseRound: number): void {
+    interface Choice { finish_reason?: string; message?: { content?: string; tool_calls?: unknown[] } }
+    interface Usage { completion_tokens?: number; prompt_tokens?: number; total_tokens?: number }
+    const choices = (json as { choices?: Choice[] } | undefined)?.choices;
+    const choice = choices?.[0];
+    const msg = choice?.message;
+    const usage = (json as { usage?: Usage } | undefined)?.usage;
+    const hasToolCalls = !!msg?.tool_calls?.length;
+    const contentLen = msg?.content?.length ?? 0;
+    process.stderr.write(
+      `[model-debug] ${phase} round=${parseRound} finish=${choice?.finish_reason ?? "?"} ` +
+      `tool_calls=${hasToolCalls} content_len=${contentLen} ` +
+      `tokens=${usage ? `prompt=${usage.prompt_tokens ?? "?"} completion=${usage.completion_tokens ?? "?"}` : "?"}\n`,
+    );
   }
 
   private buildMessages(req: ActionRequest, correction?: string): ChatMessage[] {
@@ -215,7 +300,11 @@ export class ModelClient implements LoopModel {
   }
 
   private buildRequest(req: ActionRequest, messages: ChatMessage[]): { url: string; headers: Record<string, string>; body: string; timeoutMs: number } {
-    const base: Record<string, unknown> = { model: this.cfg.model, temperature: 0, max_tokens: 4096, messages };
+    const isDocPhase = DOC_PHASES.has(req.phase);
+    const maxTokens = isDocPhase
+      ? (this.cfg.docMaxTokens ?? 8192)
+      : (this.cfg.toolMaxTokens ?? 4096);
+    const base: Record<string, unknown> = { model: this.cfg.model, temperature: 0, max_tokens: maxTokens, messages };
     if (this.cfg.protocol === "tools") {
       base.tools = [{ type: "function", function: { name: req.actionName, description: req.actionDescription, parameters: req.schema } }];
       base.tool_choice = { type: "function", function: { name: req.actionName } };
@@ -312,11 +401,70 @@ export class ModelClient implements LoopModel {
     );
     return outcome.action as RepairGeneration;
   }
+
+  // ----- Doc-generation phases -----
+
+  async generateIntake(task: string, systemPrompt: string): Promise<DocGeneration> {
+    const outcome = await this.emitAction(
+      {
+        phase: "generate_intake", systemPrompt,
+        userMessage: `User task:\n${task}\n\nProduce a requirements clarification summary (doc/intake/summary.md). Follow the method sections: Task Summary, Confirmed Facts, Hardware Dependency, Assumptions and Defaults, Missing Information, Evidence Needed, Acceptance Criteria, Handoff and Next Step.`,
+        actionName: "generate_intake", actionDescription: "Produce an intake requirements summary markdown document.",
+        schema: DOC_SCHEMA,
+      },
+      validateIntake,
+    );
+    return outcome.action as DocGeneration;
+  }
+
+  async generateBehaviorWave(context: string, systemPrompt: string): Promise<DocGeneration> {
+    const outcome = await this.emitAction(
+      {
+        phase: "generate_behavior_wave", systemPrompt,
+        userMessage: `Upstream artifacts:\n${context}\n\nProduce a behavior & wave-plan specification (doc/spec/behavior_spec.md) with rule IDs, observable signals, and PASS/FAIL conditions.`,
+        actionName: "generate_behavior_wave", actionDescription: "Produce a behavior & wave-plan spec markdown document.",
+        schema: DOC_SCHEMA,
+      },
+      validateBehaviorWave,
+    );
+    return outcome.action as DocGeneration;
+  }
+
+  async generateArchitecture(context: string, systemPrompt: string): Promise<DocGeneration> {
+    const outcome = await this.emitAction(
+      {
+        phase: "generate_architecture", systemPrompt,
+        userMessage: `Upstream artifacts:\n${context}\n\nProduce an architecture design document (doc/arch/module_partition.md) documenting module partition, interface contract, clock/reset/CDC strategy.`,
+        actionName: "generate_architecture", actionDescription: "Produce an architecture design markdown document.",
+        schema: DOC_SCHEMA,
+      },
+      validateArchitecture,
+    );
+    return outcome.action as DocGeneration;
+  }
+
+  async generateRegisterSpec(context: string, systemPrompt: string): Promise<DocGeneration> {
+    const outcome = await this.emitAction(
+      {
+        phase: "generate_register_spec", systemPrompt,
+        userMessage: `Upstream artifacts:\n${context}\n\nProduce a register specification document (doc/reg/register_map.md) documenting the register map, field semantics, access types, and side effects.`,
+        actionName: "generate_register_spec", actionDescription: "Produce a register specification markdown document.",
+        schema: DOC_SCHEMA,
+      },
+      validateRegisterSpec,
+    );
+    return outcome.action as DocGeneration;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // JSON Schemas + strict validators (fail loudly → triggers one retry)
 // ---------------------------------------------------------------------------
+
+/** Phases that produce markdown documents (larger output budget). */
+const DOC_PHASES: ReadonlySet<LoopPhase> = new Set([
+  "generate_intake", "generate_behavior_wave", "generate_architecture", "generate_register_spec",
+]);
 
 const MODULE_RE = /^[A-Za-z_][A-Za-z0-9_$]*$/;
 
@@ -328,6 +476,10 @@ const PHASE_CONSTRAINTS: Record<LoopPhase, string> = {
   generate_testbench: "FILE TYPE CONSTRAINT: testbench.path must be a .v, .sv, or .vh file. Do NOT output .md, .txt, .yaml, .json, or any documentation files.",
   generate_xdc: "FILE TYPE CONSTRAINT: constraints[] may ONLY contain .xdc files. Do NOT output .md, .txt, .yaml, .json, .v, .sv, or any documentation files.",
   repair: "FILE TYPE CONSTRAINT: sources[] may ONLY contain .v, .sv, or .vh files. testbench (if provided) must also be .v/.sv/.vh. Do NOT output documentation files.",
+  generate_intake: "OUTPUT CONSTRAINT: produce exactly ONE markdown document (.md). Output real content: sections with confirmed facts, assumptions, missing information, acceptance criteria. No file paths outside code fences. No fabrication of hardware facts.",
+  generate_behavior_wave: "OUTPUT CONSTRAINT: produce exactly ONE markdown document (.md) with behavior rules, observable signals, and PASS/FAIL conditions. No file paths outside code fences. No fabrication.",
+  generate_architecture: "OUTPUT CONSTRAINT: produce exactly ONE markdown document (.md) documenting module partition, interface contract, clock/reset/CDC strategy. No file paths outside code fences. No fabrication.",
+  generate_register_spec: "OUTPUT CONSTRAINT: produce exactly ONE markdown document (.md) documenting register map, field semantics, access types, side effects. No file paths outside code fences. No fabrication.",
 };
 
 function err(msg: string): never { throw new Error(msg); }
@@ -452,3 +604,64 @@ export function validateRepair(raw: unknown): LoopAction {
   const tb: ArtifactFile | undefined = o.testbench !== undefined && o.testbench !== null ? asFile(o.testbench, "testbench") : undefined;
   return { phase: "repair", reasoning, sources, ...(tb ? { testbench: tb } : {}) };
 }
+
+// ---------------------------------------------------------------------------
+// Doc generation (intake / behavior-wave / architecture / register-spec)
+// ---------------------------------------------------------------------------
+
+export const DOC_SCHEMA = {
+  type: "object",
+  properties: {
+    reasoning: { type: "string" },
+    doc_path: { type: "string" },
+    content: { type: "string" },
+  },
+  required: ["reasoning", "doc_path", "content"],
+} as const;
+
+/** Regex matching a markdown heading line. */
+const MD_HEADING_RE = /^#{1,6}\s+\S/;
+
+/** Regex matching a code-fence opening (``` or ~~~). */
+const CODE_FENCE_RE = /^(?:```|~~~)/;
+
+/**
+ * Validate a doc-generation action. Enforces:
+ * - doc_path ends with .md
+ * - content is non-empty markdown with at least one heading
+ * - no path-like strings outside code fences (detects hallucinated file refs)
+ */
+export function makeDocValidator(phase: "generate_intake" | "generate_behavior_wave" | "generate_architecture" | "generate_register_spec"): ActionValidator {
+  return (raw: unknown): LoopAction => {
+    if (!raw || typeof raw !== "object") err("doc action must be an object");
+    const o = raw as Record<string, unknown>;
+    const reasoning = asString(o.reasoning, "reasoning");
+    const docPath = asString(o.doc_path ?? o.docPath, "doc_path");
+    if (!docPath.toLowerCase().endsWith(".md")) {
+      err(`doc_path "${docPath}" must be a .md file (got: ${docPath}). Output exactly ONE markdown document.`);
+    }
+    const content = asString(o.content, "content");
+    if (!MD_HEADING_RE.test(content)) {
+      err(`content must contain at least one markdown heading (line starting with #). Output real structured markdown, not prose.`);
+    }
+    // Detect hallucinated file paths outside code fences.
+    const lines = content.split("\n");
+    let inFence = false;
+    for (const line of lines) {
+      if (CODE_FENCE_RE.test(line.trim())) { inFence = !inFence; continue; }
+      if (!inFence && /(?:^|\s)(?:doc\/|rtl\/|tb\/|prj\/|toolruns\/)[^\s`]+/m.test(line)) {
+        // Allow inline-code references like `doc/intake/summary.md` — the regex
+        // only fires on bare path tokens outside backticks.
+        if (!/`[^`]*doc\/|`[^`]*rtl\/|`[^`]*tb\/|`[^`]*prj\//.test(line)) {
+          err(`content must not contain bare file paths outside code fences or inline code. Found: "${line.trim()}". Wrap references in backticks or remove.`);
+        }
+      }
+    }
+    return { phase, reasoning, docPath, content };
+  };
+}
+
+export const validateIntake = makeDocValidator("generate_intake");
+export const validateBehaviorWave = makeDocValidator("generate_behavior_wave");
+export const validateArchitecture = makeDocValidator("generate_architecture");
+export const validateRegisterSpec = makeDocValidator("generate_register_spec");

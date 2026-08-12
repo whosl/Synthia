@@ -26,6 +26,8 @@ real-vivado-evidence/
 environment-probe.raw.txt
 logs/
 
+# Runtime run-state persistence
+runtime/.runs/
 # OS / editor
 .DS_Store
 Thumbs.db

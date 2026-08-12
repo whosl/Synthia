@@ -24,13 +24,17 @@ import {
   createSnapshot,
   createSubmission,
   createTraceRelation,
+  lockGateSubmission,
+  transitionSubmissionState,
   withTransaction,
+  type GateSubmissionLock,
   type TransactionClient,
 } from "../db/repository.ts";
 import { canonicalRequestHash, computeManifestHash } from "../hashing.ts";
 import { approveGateSubmission, type ApproveGateSubmissionInput } from "../services/approval.ts";
 import { ConflictError, InvariantError } from "../memory-repository.ts";
-import type { DataClassification, GateId, RunClass, TraceRelationState } from "../domain/enums.ts";
+import { gateSubmissionMachine } from "../domain/state-machines.ts";
+import type { DataClassification, GateId, GateSubmissionState, RunClass, TraceRelationState } from "../domain/enums.ts";
 import type { AuthenticatedIdentity } from "./auth.ts";
 import {
   ApiError,
@@ -511,6 +515,119 @@ export async function createGateSubmissionHandler(ctx: RequestContext): Promise<
   });
 
   return { status: 201, data: result };
+}
+
+// ─── 3b. Gate submission lifecycle: submit / withdraw / get (SYNTHIA-FLOW-001) ─
+
+/**
+ * Fixed forward pipeline a gate_submission traverses from draft to human review
+ * (ARC-002 §5.2): preparing → submitted → checking → in_review. `submit` drives
+ * the submission atomically along this pipeline to `in_review`; the intermediate
+ * `submitted`/`checking` states are the automated gate-check stages which this
+ * endpoint completes synchronously (preparing → in_review is not a single legal
+ * hop in the machine, so submit traverses the pipeline).
+ */
+const SUBMIT_PIPELINE: readonly GateSubmissionState[] = ["preparing", "submitted", "checking", "in_review"];
+
+/** Column set returned for a gate_submission (stable contract). */
+const SUBMISSION_SELECT_COLUMNS =
+  "id, project_id, process_instance_id, gate, snapshot_id, state, submitter_id, check_results, issues, submitted_at, created_at";
+
+/**
+ * Lock + load a submission scoped to a project. Throws 404 when the submission
+ * is absent OR belongs to a different project (fail-closed, no cross-project leak).
+ */
+async function requireSubmission(tx: TransactionClient, projectId: string, submissionId: string): Promise<GateSubmissionLock> {
+  const lock = await lockGateSubmission(tx, submissionId);
+  if (!lock || lock.projectId !== projectId) throw notFoundError(`gate_submission not found: ${submissionId}`);
+  return lock;
+}
+
+/** Re-read the submission row (post-transition) for an accurate response body. */
+async function selectSubmission(tx: TransactionClient, submissionId: string): Promise<Record<string, unknown>> {
+  const { rows } = await tx.query(`SELECT ${SUBMISSION_SELECT_COLUMNS} FROM gate_submission WHERE id = $1`, [submissionId]);
+  return rows[0] as Record<string, unknown>;
+}
+
+/**
+ * POST /projects/:projectId/gate-submissions/:subId/submit — submit a gate for
+ * human review. Drives the submission to `in_review` via the legal state-machine
+ * pipeline and records `submitted_at`. Idempotent: re-submitting an already
+ * `in_review` submission returns its current state (no transition, no event); a
+ * submission already in a terminal state (approved/rejected/withdrawn) yields
+ * 409 conflict.
+ */
+export async function submitGateSubmissionHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const submissionId = ctx.params.subId!;
+
+  const { result } = await runIdempotent(ctx, "submit_gate_submission", projectId, async (tx) => {
+    await requireProject(tx, projectId);
+    const lock = await requireSubmission(tx, projectId, submissionId);
+    const current = lock.state as GateSubmissionState;
+
+    const idx = SUBMIT_PIPELINE.indexOf(current);
+    if (idx === -1) {
+      // Terminal state (approved/rejected/withdrawn): a resolved gate cannot be (re-)submitted.
+      throw conflictApiError("GATE_SUBMISSION_NOT_SUBMITTABLE", { state: current });
+    }
+    const driven = idx < SUBMIT_PIPELINE.length - 1; // false only when already in_review
+    if (driven) {
+      for (let i = idx + 1; i < SUBMIT_PIPELINE.length; i++) {
+        await transitionSubmissionState(asClient(tx), submissionId, SUBMIT_PIPELINE[i]!);
+      }
+      await tx.query("UPDATE gate_submission SET submitted_at = now() WHERE id = $1", [submissionId]);
+      await outboxEvent(tx, ctx, { type: "gate_submission", id: submissionId }, "gate_submission.submitted_for_review", { id: submissionId, projectId, state: "in_review" });
+    }
+    return selectSubmission(tx, submissionId);
+  });
+
+  return { status: 200, data: result };
+}
+
+/**
+ * POST /projects/:projectId/gate-submissions/:subId/withdraw — withdraw a gate
+ * submission. A single direct state-machine edge to `withdrawn`, legal from
+ * preparing/submitted/in_review (not from checking or any terminal state).
+ * Idempotent: withdrawing an already `withdrawn` submission returns its current
+ * state; a submission in checking/approved/rejected yields 409 conflict.
+ */
+export async function withdrawGateSubmissionHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const submissionId = ctx.params.subId!;
+
+  const { result } = await runIdempotent(ctx, "withdraw_gate_submission", projectId, async (tx) => {
+    await requireProject(tx, projectId);
+    const lock = await requireSubmission(tx, projectId, submissionId);
+    const current = lock.state as GateSubmissionState;
+
+    if (current !== "withdrawn") {
+      if (!gateSubmissionMachine.canTransition(current, "withdrawn")) {
+        throw conflictApiError("GATE_SUBMISSION_NOT_WITHDRAWABLE", { state: current });
+      }
+      await transitionSubmissionState(asClient(tx), submissionId, "withdrawn");
+      await outboxEvent(tx, ctx, { type: "gate_submission", id: submissionId }, "gate_submission.withdrawn", { id: submissionId, projectId, state: "withdrawn" });
+    }
+    return selectSubmission(tx, submissionId);
+  });
+
+  return { status: 200, data: result };
+}
+
+/**
+ * GET /projects/:projectId/gate-submissions/:subId — return the submission's
+ * current state for approval-result polling. `state` reflects approved/rejected
+ * once the human approval service has run.
+ */
+export async function getGateSubmissionHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const submissionId = ctx.params.subId!;
+  const { rows } = await ctx.pool.query(
+    `SELECT ${SUBMISSION_SELECT_COLUMNS} FROM gate_submission WHERE id = $1 AND project_id = $2`,
+    [submissionId, projectId],
+  );
+  if (rows.length === 0) throw notFoundError(`gate_submission not found: ${submissionId}`);
+  return { status: 200, data: rows[0] };
 }
 
 // ─── 4. Approval / Baseline ──────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import {
 } from "./loop.ts";
 import type {
   ArtifactFile,
+  DocGeneration,
   LoopModel,
   RtlGeneration,
   TbGeneration,
@@ -18,6 +19,7 @@ import type {
   RepairGeneration,
   VivadoSubmission,
 } from "./types.ts";
+import { NoGovernanceClient } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // fetch mock — routes by (method, url), records every call verbatim.
@@ -348,6 +350,10 @@ const TB: ArtifactFile = { path: "tb_counter.v", content: "module tb_counter;reg
 const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\ncreate_clock -period 10 [get_ports clk]\n" };
 
 class ScriptedModel implements LoopModel {
+  async generateIntake(): Promise<DocGeneration> { return { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Intake\n## Task\n8-bit counter." }; }
+  async generateBehaviorWave(): Promise<DocGeneration> { return { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments." }; }
+  async generateArchitecture(): Promise<DocGeneration> { return { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: top." }; }
+  async generateRegisterSpec(): Promise<DocGeneration> { return { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers." }; }
   async generateRtl(): Promise<RtlGeneration> { return { phase: "generate_rtl", reasoning: "ok", topModule: "counter", sources: [RTL] }; }
   async generateTestbench(): Promise<TbGeneration> { return { phase: "generate_testbench", reasoning: "ok", testbenchModule: "tb_counter", testbench: TB }; }
   async generateXdc(_top: string, _part: string, _sys: string, _allowPin: boolean): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
@@ -378,8 +384,11 @@ describe("LoopExecutor over CoreApiConnector (via-core integration)", () => {
     const loop = new LoopExecutor({
       model: new ScriptedModel(),
       connector,
-      skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair" },
-      part: "xc7k70tfbv676-1", projectId: PROJECT, actorId: "synthia-runtime",
+      skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair", intake: "intake", behaviorWave: "behavior", architecture: "arch", registerSpec: "reg" },
+      part: "xc7k70tfbv676-1", projectId: PROJECT, processInstanceId: "pi-1",
+      governance: new NoGovernanceClient(),
+      toolModelPolicyHash: "policy-v1",
+      actorId: "synthia-runtime",
     });
 
     const result = await loop.run("8-bit counter");
@@ -408,8 +417,10 @@ describe("LoopExecutor over CoreApiConnector (via-core integration)", () => {
     const loop = new LoopExecutor({
       model: new ScriptedModel(),
       connector,
-      skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair" },
-      part: "xc7k70tfbv676-1", projectId: PROJECT,
+      skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair", intake: "intake", behaviorWave: "behavior", architecture: "arch", registerSpec: "reg" },
+      part: "xc7k70tfbv676-1", projectId: PROJECT, processInstanceId: "pi-1",
+      governance: new NoGovernanceClient(),
+      toolModelPolicyHash: "policy-v1",
     });
     const result = await loop.run("counter");
     expect(result.status).toBe("fail_closed");

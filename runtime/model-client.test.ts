@@ -2,10 +2,16 @@ import { describe, expect, test } from "bun:test";
 import {
   ModelClient,
   makeXdcValidator,
+  makeDocValidator,
   validateRtl,
   validateTb,
   validateXdc,
   validateRepair,
+  validateIntake,
+  validateBehaviorWave,
+  validateArchitecture,
+  validateRegisterSpec,
+  DOC_SCHEMA,
   type ChatPoster,
   type ActionProtocol,
 } from "./model-client.ts";
@@ -267,4 +273,217 @@ describe("ModelClient.emitAction", () => {
     expect(capturedBody).toContain("EXACTLY the following template");
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// Doc generation validators + protocol
+// ---------------------------------------------------------------------------
+
+describe("doc validators", () => {
+  test("validateIntake accepts well-formed markdown doc", () => {
+    const a = validateIntake({ reasoning: "r", doc_path: "doc/intake/summary.md", content: "# Counter 需求梳理摘要\n## Task Summary\n8-bit counter." });
+    expect(a.phase).toBe("generate_intake");
+  });
+  test("validateIntake rejects non-.md doc_path", () => {
+    expect(() => validateIntake({ reasoning: "r", doc_path: "doc/intake/summary.txt", content: "# heading" })).toThrow(/\.md/);
+  });
+  test("validateIntake rejects content without a heading", () => {
+    expect(() => validateIntake({ reasoning: "r", doc_path: "doc/intake/summary.md", content: "just prose, no heading" })).toThrow(/heading/);
+  });
+  test("validateArchitecture accepts valid doc", () => {
+    const a = validateArchitecture({ reasoning: "r", doc_path: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter." });
+    expect(a.phase).toBe("generate_architecture");
+  });
+  test("validateRegisterSpec accepts valid doc", () => {
+    const a = validateRegisterSpec({ reasoning: "r", doc_path: "doc/reg/register_map.md", content: "# Register Map\nNo registers." });
+    expect(a.phase).toBe("generate_register_spec");
+  });
+  test("validateBehaviorWave accepts valid doc", () => {
+    const a = validateBehaviorWave({ reasoning: "r", doc_path: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1." });
+    expect(a.phase).toBe("generate_behavior_wave");
+  });
+  test("makeDocValidator tolerates camelCase docPath", () => {
+    const v = makeDocValidator("generate_intake");
+    const a = v({ reasoning: "r", docPath: "doc/intake/summary.md", content: "# Title\nContent." });
+    expect((a as { docPath: string }).docPath).toBe("doc/intake/summary.md");
+  });
+  test("doc validator rejects bare file paths outside code fences", () => {
+    // A bare path reference outside fences/backticks should be rejected.
+    expect(() => validateIntake({
+      reasoning: "r", doc_path: "doc/intake/summary.md",
+      content: "# Summary\nSee doc/intake/summary.md for details.\nMore text with rtl/counter.v reference.",
+    })).toThrow(/bare file paths/);
+  });
+  test("doc validator allows file paths inside code fences", () => {
+    const a = validateIntake({
+      reasoning: "r", doc_path: "doc/intake/summary.md",
+      content: "# Summary\n```\ndoc/intake/summary.md\nrtl/counter.v\n```\nDone.",
+    });
+    expect(a.phase).toBe("generate_intake");
+  });
+  test("doc validator allows file paths in inline code backticks", () => {
+    const a = validateIntake({
+      reasoning: "r", doc_path: "doc/intake/summary.md",
+      content: "# Summary\nSee `doc/intake/summary.md` for details.\nAlso `rtl/counter.v`.",
+    });
+    expect(a.phase).toBe("generate_intake");
+  });
+});
+
+describe("ModelClient.generateIntake", () => {
+  test("generates intake doc via tools protocol", async () => {
+    const { poster, count } = scriptedPoster([
+      () => ({ toolArgs: { reasoning: "intake analysis", doc_path: "doc/intake/summary.md", content: "# Counter 需求梳理摘要\n## Task Summary\n8-bit counter.\n## Acceptance Criteria\nCounts up." } }),
+    ]);
+    const client = makeClient("tools", poster);
+    const doc = await client.generateIntake("实现一个8位计数器", "sys-prompt");
+    expect(doc.phase).toBe("generate_intake");
+    expect(doc.docPath).toBe("doc/intake/summary.md");
+    expect(doc.content).toContain("## Task Summary");
+    expect(count()).toBe(1);
+  });
+
+  test("doc validation failure → retry → corrected → succeeds", async () => {
+    const { poster, count } = scriptedPoster([
+      () => ({ toolArgs: { reasoning: "r", doc_path: "notes.txt", content: "# heading" } }), // wrong extension
+      () => ({ toolArgs: { reasoning: "r", doc_path: "doc/intake/summary.md", content: "# Fixed\n## Content" } }),
+    ]);
+    const client = makeClient("tools", poster, { maxParseRetries: 1 });
+    const doc = await client.generateIntake("task", "sys");
+    expect(doc.docPath).toBe("doc/intake/summary.md");
+    expect(count()).toBe(2);
+  });
+
+  test("generateArchitecture uses DOC_SCHEMA", async () => {
+    let capturedSchema: Record<string, unknown> = {};
+    const poster: ChatPoster = async (input) => {
+      const body = JSON.parse(input.body);
+      capturedSchema = body.tools?.[0]?.function?.parameters ?? {};
+      const args = JSON.stringify({ reasoning: "r", doc_path: "doc/arch/module_partition.md", content: "# Arch\n## Modules" });
+      return {
+        status: 200,
+        json: { choices: [{ message: { tool_calls: [{ function: { arguments: args } }] } }] },
+        text: "",
+      };
+    };
+    const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
+    await client.generateArchitecture("ctx", "sys");
+    expect(capturedSchema).toEqual(DOC_SCHEMA);
+  });
+});
+
+describe("doc-phase content salvage + debug + max_tokens", () => {
+  test("salvages doc from message.content when tool_calls absent (raw markdown)", async () => {
+    // Model puts the full markdown document in message.content, no tool_calls.
+    const poster: ChatPoster = async () => ({
+      status: 200,
+      json: { choices: [{ message: { content: "# Architecture Design\n## Module Partition\ncounter: top module." } }] },
+      text: "",
+    });
+    const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
+    const doc = await client.generateArchitecture("ctx", "sys");
+    expect(doc.phase).toBe("generate_architecture");
+    expect(doc.docPath).toBe("doc/arch/module_partition.md");
+    expect(doc.content).toContain("# Architecture Design");
+  });
+
+  test("salvages doc from message.content when content is JSON object", async () => {
+    const poster: ChatPoster = async () => ({
+      status: 200,
+      json: {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              reasoning: "from content",
+              doc_path: "doc/intake/summary.md",
+              content: "# Intake\n## Task Summary\n8-bit counter.",
+            }),
+          },
+        }],
+      },
+      text: "",
+    });
+    const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
+    const doc = await client.generateIntake("task", "sys");
+    expect(doc.phase).toBe("generate_intake");
+    expect(doc.docPath).toBe("doc/intake/summary.md");
+    expect(doc.content).toContain("## Task Summary");
+  });
+
+  test("salvaged content still goes through validator (rejects bare paths)", async () => {
+    // Salvaged markdown with bare file paths should fail validation.
+    const poster: ChatPoster = async () => ({
+      status: 200,
+      json: { choices: [{ message: { content: "# Bad\nSee doc/intake/summary.md bare path." } }] },
+      text: "",
+    });
+    const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 1, timeoutMs: 1000 });
+    await expect(client.generateIntake("task", "sys")).rejects.toBeInstanceOf(ModelActionError);
+  });
+
+  test("doc phases use higher max_tokens than tool phases", async () => {
+    let docTokens = 0;
+    let toolTokens = 0;
+    const makePoster = (capture: { val: number }): ChatPoster => async (input) => {
+      const body = JSON.parse(input.body);
+      capture.val = body.max_tokens;
+      const args = JSON.stringify({ reasoning: "r", doc_path: "doc/intake/summary.md", content: "# Title\n## S" });
+      return { status: 200, json: { choices: [{ message: { tool_calls: [{ function: { arguments: args } }] } }] }, text: "" };
+    };
+    const docCapture = { val: 0 };
+    const docClient = new ModelClient({ ...BASE_CFG, protocol: "tools", post: makePoster(docCapture), maxParseRetries: 0, timeoutMs: 1000, docMaxTokens: 9999, toolMaxTokens: 1111 });
+    await docClient.generateIntake("t", "s");
+    docTokens = docCapture.val;
+
+    const toolCapture = { val: 0 };
+    const rtlArgs = JSON.stringify({ reasoning: "r", top_module: "c", sources: [{ path: "c.v", content: "x" }] });
+    const toolPoster: ChatPoster = async (input) => {
+      const body = JSON.parse(input.body);
+      toolCapture.val = body.max_tokens;
+      return { status: 200, json: { choices: [{ message: { tool_calls: [{ function: { arguments: rtlArgs } }] } }] }, text: "" };
+    };
+    const toolClient = new ModelClient({ ...BASE_CFG, protocol: "tools", post: toolPoster, maxParseRetries: 0, timeoutMs: 1000, docMaxTokens: 9999, toolMaxTokens: 1111 });
+    await toolClient.generateRtl("t", "s");
+    toolTokens = toolCapture.val;
+
+    expect(docTokens).toBe(9999);
+    expect(toolTokens).toBe(1111);
+    expect(docTokens).toBeGreaterThan(toolTokens);
+  });
+
+  test("debug mode logs response summary to stderr", async () => {
+    const originalStderr = process.stderr.write.bind(process.stderr);
+    const debugLines: string[] = [];
+    process.stderr.write = (s: string) => { if (s.includes("[model-debug]")) debugLines.push(s); return true; };
+    try {
+      const poster: ChatPoster = async () => ({
+        status: 200,
+        json: {
+          choices: [{ finish_reason: "stop", message: { tool_calls: [{ function: { arguments: JSON.stringify({ reasoning: "r", doc_path: "doc/intake/summary.md", content: "# T\n## S" }) } }] } }],
+          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+        },
+        text: "",
+      });
+      const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000, debug: true });
+      await client.generateIntake("t", "s");
+      expect(debugLines.length).toBeGreaterThanOrEqual(1);
+      expect(debugLines[0]).toContain("generate_intake");
+      expect(debugLines[0]).toContain("finish=stop");
+      expect(debugLines[0]).toContain("tool_calls=true");
+      expect(debugLines[0]).toContain("tokens=");
+    } finally {
+      process.stderr.write = originalStderr;
+    }
+  });
+
+  test("doc salvage fallback not used for non-doc phases (RTL)", async () => {
+    // RTL phase should NOT salvage from content — it must use tool_calls.
+    const poster: ChatPoster = async () => ({
+      status: 200,
+      json: { choices: [{ message: { content: "module counter; endmodule" } }] },
+      text: "",
+    });
+    const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
+    await expect(client.generateRtl("t", "s")).rejects.toBeInstanceOf(ModelActionError);
+  });
 });

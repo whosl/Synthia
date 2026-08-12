@@ -11,7 +11,7 @@
 
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
-export type { ConnectorCapability, EvidenceManifest };
+import { sha256Hex } from "../core/src/hashing.ts";
 
 /** A generated source / constraint artifact (path + content + optional media type). */
 export interface ArtifactFile {
@@ -25,7 +25,15 @@ export interface ArtifactFile {
 // ---------------------------------------------------------------------------
 
 /** Phase tag for a single LLM action (also the JSON action discriminator). */
-export type LoopPhase = "generate_rtl" | "generate_testbench" | "generate_xdc" | "repair";
+export type LoopPhase =
+  | "generate_rtl"
+  | "generate_testbench"
+  | "generate_xdc"
+  | "repair"
+  | "generate_intake"
+  | "generate_behavior_wave"
+  | "generate_architecture"
+  | "generate_register_spec";
 
 export interface RtlGeneration {
   readonly phase: "generate_rtl";
@@ -47,6 +55,16 @@ export interface XdcGeneration {
   readonly constraints: readonly ArtifactFile[];
 }
 
+/** A specification/design document produced by a doc-generation phase. */
+export interface DocGeneration {
+  readonly phase: "generate_intake" | "generate_behavior_wave" | "generate_architecture" | "generate_register_spec";
+  readonly reasoning: string;
+  /** Output path, e.g. doc/intake/summary.md. */
+  readonly docPath: string;
+  /** Full markdown content. */
+  readonly content: string;
+}
+
 export interface RepairGeneration {
   readonly phase: "repair";
   readonly reasoning: string;
@@ -56,7 +74,7 @@ export interface RepairGeneration {
   readonly testbench?: ArtifactFile;
 }
 
-export type LoopAction = RtlGeneration | TbGeneration | XdcGeneration | RepairGeneration;
+export type LoopAction = RtlGeneration | TbGeneration | XdcGeneration | RepairGeneration | DocGeneration;
 
 /**
  * High-level model interface the loop depends on. Each method wraps one
@@ -78,6 +96,10 @@ export interface LoopModel {
     attempt: number;
     systemPrompt: string;
   }): Promise<RepairGeneration>;
+  generateIntake(task: string, systemPrompt: string): Promise<DocGeneration>;
+  generateBehaviorWave(context: string, systemPrompt: string): Promise<DocGeneration>;
+  generateArchitecture(context: string, systemPrompt: string): Promise<DocGeneration>;
+  generateRegisterSpec(context: string, systemPrompt: string): Promise<DocGeneration>;
 }
 
 /** Thrown when the model cannot produce a valid action within the retry budget. */
@@ -117,6 +139,7 @@ export interface VivadoResult {
   readonly inputSha256: string;
   readonly stdout?: string;
   readonly stderr?: string;
+  readonly errorCode?: string;
   readonly evidence?: EvidenceManifest;
 }
 
@@ -139,12 +162,13 @@ export interface LoopConnector {
 // Audit + results.
 // ---------------------------------------------------------------------------
 
-export type AuditCategory = "model" | "tool_call" | "gate" | "loop" | "lifecycle";
+export type AuditCategory = "model" | "tool_call" | "gate" | "loop" | "lifecycle" | "governance";
 
 export interface AuditEvent {
   readonly ts: string;
+  readonly seq: number;
   readonly category: AuditCategory;
-  readonly phase: LoopPhase | WhitelistedOperation | "loop";
+  readonly phase: LoopPhase | WhitelistedOperation | "loop" | "governance" | "gate_review";
   readonly action: string;
   readonly inputSha256?: string;
   readonly jobId?: string;
@@ -170,7 +194,138 @@ export interface LoopResult {
   readonly rtl?: RtlGeneration;
   readonly testbench?: TbGeneration;
   readonly xdc?: XdcGeneration;
+  readonly docs?: ReadonlyArray<DocGeneration>;
   readonly evidence: readonly EvidenceSummary[];
   readonly audit: readonly AuditEvent[];
+  readonly endedReason?: string;
+  /** Gate at which the loop paused awaiting human approval (awaiting_approval). */
+  readonly awaitingGate?: GateId;
+  /** Run ID when governance / persistence is active. */
+  readonly runId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Governance + GJB gate flow.
+// ---------------------------------------------------------------------------
+
+import type { ArtifactType, GateId, GateSubmissionState } from "../core/src/domain/enums.ts";
+export type { ArtifactType, GateId, GateSubmissionState };
+
+/** GJB gates in the runtime stage chain. */
+export const GJB_GATES = ["G1", "G2", "G3", "G4"] as const;
+export type GjbGate = (typeof GJB_GATES)[number];
+
+/** Stages of the runtime phase chain, in execution order. */
+export type StageId =
+  | "intake"
+  | "behavior_wave"
+  | "architecture"
+  | "register_spec"
+  | "rtl_build"
+  | "validate"
+  | "tb"
+  | "simulate"
+  | "xdc"
+  | "synthesize"
+  | "implement";
+
+/** Gate placement: which stages run before reaching each gate. */
+export const GATE_AFTER_STAGE: Readonly<Record<GjbGate, StageId>> = {
+  G1: "intake",
+  G2: "behavior_wave",
+  G3: "register_spec",
+  G4: "implement",
+};
+
+/** A registered candidate revision returned by Core. */
+export interface RegisteredRevision {
+  readonly revisionId: string;
+  readonly artifactId: string;
+  readonly version: number;
+  readonly contentHash: string;
+}
+
+/** A Core API governance client the loop calls to register artifacts and manage gates. */
+export interface GovernanceClient {
+  /** Register a candidate ArtifactRevision for the given artifact. */
+  registerCandidateArtifact(input: {
+    artifactId: string;
+    artifactType: ArtifactType;
+    title: string;
+    content: string;
+    contentLocation: string;
+    changeReason?: string;
+  }): Promise<RegisteredRevision>;
+  /** Create a ConfigurationSnapshot freezing the given revisions. */
+  createSnapshot(input: {
+    memberRevisionIds: readonly string[];
+    toolModelPolicyHash: string;
+  }): Promise<{ snapshotId: string }>;
+  /** Create a GateSubmission (state=preparing) and return its id. */
+  createGateSubmission(input: {
+    processInstanceId: string;
+    gate: GateId;
+    snapshotId: string;
+  }): Promise<{ submissionId: string }>;
+  /** Submit a gate submission for review (preparing→in_review). */
+  submitGate(submissionId: string): Promise<{ state: GateSubmissionState }>;
+  /** Get the current state of a gate submission (poll for approval). */
+  getGateSubmissionState(submissionId: string): Promise<{ state: GateSubmissionState }>;
+}
+
+/** A no-op governance client for --no-governance mode (dev/debug only). */
+export class NoGovernanceClient implements GovernanceClient {
+  private counter = 0;
+  private nextId(prefix: string): string {
+    return `${prefix}-nogov-${++this.counter}`;
+  }
+  async registerCandidateArtifact(input: { content: string }): Promise<RegisteredRevision> {
+    return {
+      revisionId: this.nextId("rev"),
+      artifactId: this.nextId("art"),
+      version: 1,
+      contentHash: sha256Hex(input.content),
+    };
+  }
+  async createSnapshot(): Promise<{ snapshotId: string }> {
+    return { snapshotId: this.nextId("snap") };
+  }
+  async createGateSubmission(): Promise<{ submissionId: string }> {
+    return { submissionId: this.nextId("sub") };
+  }
+  async submitGate(): Promise<{ state: GateSubmissionState }> {
+    return { state: "approved" as GateSubmissionState };
+  }
+  async getGateSubmissionState(): Promise<{ state: GateSubmissionState }> {
+    return { state: "approved" as GateSubmissionState };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Run-state persistence.
+// ---------------------------------------------------------------------------
+
+/** Persisted loop progress for --resume. */
+export interface RunState {
+  readonly runId: string;
+  readonly task: string;
+  readonly part: string;
+  readonly projectId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Current stage being executed or next to execute on resume. */
+  readonly currentStage: StageId;
+  /** Gate currently awaiting approval (when status is awaiting_approval). */
+  readonly awaitingGate?: GateId;
+  /** Loop status: running / paused awaiting approval / terminal. */
+  readonly status: "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed";
+  /** Registered doc artifacts keyed by stage. */
+  readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
+  /** Registered RTL revision (rtl_build stage). */
+  readonly rtlRevision?: RegisteredRevision;
+  /** Map of gate → submission id for polling on resume. */
+  readonly gateSubmissions?: Readonly<Partial<Record<GateId, string>>>;
+  /** Gate decisions: approved / rejected / withdrawn. */
+  readonly gateDecisions?: Readonly<Partial<Record<GateId, "approved" | "rejected" | "withdrawn">>>;
   readonly endedReason?: string;
 }
