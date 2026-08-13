@@ -31,10 +31,10 @@ export class CounterScriptedModel implements LoopModel {
     return { phase: "generate_behavior_wave", reasoning: "behavior", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments on positive clock edge." };
   }
   async generateArchitecture(): Promise<DocGeneration> {
-    return { phase: "generate_architecture", reasoning: "arch", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: single-module top." };
+    return { phase: "generate_architecture", reasoning: "arch", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: single-module top.\n## Ports\nclk, rst_n, count." };
   }
   async generateRegisterSpec(): Promise<DocGeneration> {
-    return { phase: "generate_register_spec", reasoning: "reg", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers for this design." };
+    return { phase: "generate_register_spec", reasoning: "reg", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers for counter." };
   }
   async generateRtl(): Promise<RtlGeneration> {
     return {

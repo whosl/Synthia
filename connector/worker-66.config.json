@@ -12,7 +12,9 @@
   "trusted_client_ca_path": "D:\\synthia-worker\\client-ca.cer",
   "project_scope": [
     "p1",
-    "p2"
+    "p2",
+    "p3",
+    "p4"
   ],
   "data_classification_scope": [
     "internal"

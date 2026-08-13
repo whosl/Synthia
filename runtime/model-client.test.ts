@@ -367,7 +367,7 @@ describe("ModelClient.generateIntake", () => {
       };
     };
     const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
-    await client.generateArchitecture("ctx", "sys");
+    await client.generateArchitecture("sys", [{ label: "up", content: "intake" }]);
     expect(capturedSchema).toEqual(DOC_SCHEMA);
   });
 });
@@ -381,7 +381,7 @@ describe("doc-phase content salvage + debug + max_tokens", () => {
       text: "",
     });
     const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
-    const doc = await client.generateArchitecture("ctx", "sys");
+    const doc = await client.generateArchitecture("sys");
     expect(doc.phase).toBe("generate_architecture");
     expect(doc.docPath).toBe("doc/arch/module_partition.md");
     expect(doc.content).toContain("# Architecture Design");
@@ -485,5 +485,84 @@ describe("doc-phase content salvage + debug + max_tokens", () => {
     });
     const client = new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
     await expect(client.generateRtl("t", "s")).rejects.toBeInstanceOf(ModelActionError);
+  });
+});
+// ---------------------------------------------------------------------------
+// Upstream artifact injection — every generate* method embeds the upstream section
+// ---------------------------------------------------------------------------
+
+describe("ModelClient upstream injection", () => {
+  const MARKER = "UNIQUE_UPSTREAM_MARKER_42";
+  const upstream = [{ label: "Intake 需求摘要", content: MARKER }];
+
+  /** Poster that captures the request body and returns a minimal valid action per phase. */
+  function capturingPoster(responseFor: (phase: string) => unknown): { poster: ChatPoster; body: () => string } {
+    let captured = "";
+    const poster: ChatPoster = async (input) => {
+      captured = input.body;
+      const parsed = JSON.parse(input.body);
+      const phase = parsed.tools?.[0]?.function?.name ?? "unknown";
+      return { status: 200, json: { choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(responseFor(phase)) } }] } }] }, text: "" };
+    };
+    return { poster, body: () => captured };
+  }
+
+  function client(poster: ChatPoster): ModelClient {
+    return new ModelClient({ ...BASE_CFG, protocol: "tools", post: poster, maxParseRetries: 0, timeoutMs: 1000 });
+  }
+
+  test("generateRtl embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", top_module: "counter", sources: [{ path: "counter.v", content: "module counter;endmodule\n" }] }));
+    await client(poster).generateRtl("t", "s", upstream);
+    expect(body()).toContain("上游产物 (Upstream Artifacts)");
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateTestbench embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", testbench_module: "tb", testbench: { path: "tb.v", content: "module tb;endmodule\n" } }));
+    await client(poster).generateTestbench([{ path: "c.v", content: "x" }], "counter", "s", upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateXdc embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports clk]\n" }] }));
+    await client(poster).generateXdc("top", "xc7k70tfbv676-1", "s", false, upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateIntake embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", doc_path: "doc/intake/summary.md", content: "# T\n## S" }));
+    await client(poster).generateIntake("t", "s", upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateBehaviorWave embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", doc_path: "doc/spec/behavior_spec.md", content: "# T\n## S" }));
+    await client(poster).generateBehaviorWave("s", upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateArchitecture embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", doc_path: "doc/arch/module_partition.md", content: "# T\n## S" }));
+    await client(poster).generateArchitecture("s", upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("generateRegisterSpec embeds upstream section + marker", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", doc_path: "doc/reg/register_map.md", content: "# T\n## S" }));
+    await client(poster).generateRegisterSpec("s", upstream);
+    expect(body()).toContain(MARKER);
+  });
+
+  test("no upstream → body has no upstream section header", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", top_module: "counter", sources: [{ path: "counter.v", content: "x" }] }));
+    await client(poster).generateRtl("t", "s");
+    expect(body()).not.toContain("上游产物 (Upstream Artifacts)");
+  });
+
+  test("upstream section carries consistency instructions", async () => {
+    const { poster, body } = capturingPoster(() => ({ reasoning: "r", top_module: "counter", sources: [{ path: "counter.v", content: "x" }] }));
+    await client(poster).generateRtl("t", "s", upstream);
+    expect(body()).toContain("不得偏离上游");
   });
 });

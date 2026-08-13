@@ -90,11 +90,12 @@ export class CoreGovernanceClient implements GovernanceClient {
     content: string;
     contentLocation: string;
     changeReason?: string;
+    version: number;
   }): Promise<RegisteredRevision> {
     const contentHash = sha256Hex(input.content);
     const body = {
       id: `rev_${randomUUID()}`,
-      version: 1,
+      version: input.version,
       content_hash: contentHash,
       content: input.content,
       artifact_type: input.artifactType,
@@ -273,6 +274,8 @@ export class MockGovernanceClient implements GovernanceClient {
   setGateState(submissionId: string, state: GateSubmissionState): void {
     this.gateStates.set(submissionId, state);
   }
+  /** Highest version registered per artifactId (monotonicity guard). */
+  private artifactVersions = new Map<string, number>();
 
   async registerCandidateArtifact(input: {
     artifactId: string;
@@ -280,13 +283,22 @@ export class MockGovernanceClient implements GovernanceClient {
     title: string;
     content: string;
     contentLocation: string;
+    version: number;
   }): Promise<RegisteredRevision> {
+    const prev = this.artifactVersions.get(input.artifactId) ?? 0;
+    if (input.version <= prev) {
+      throw new GovernanceError(
+        `RESOURCE_CONFLICT: artifact ${input.artifactId} is at version ${prev}, got ${input.version} (must be > ${prev})`,
+        "RESOURCE_CONFLICT", 409, false,
+      );
+    }
+    this.artifactVersions.set(input.artifactId, input.version);
     const contentHash = sha256Hex(input.content);
     const revisionId = this.nextId("rev");
     const result: RegisteredRevision = {
       revisionId,
       artifactId: input.artifactId,
-      version: 1,
+      version: input.version,
       contentHash,
     };
     this.registeredArtifacts.push({
@@ -296,7 +308,7 @@ export class MockGovernanceClient implements GovernanceClient {
       contentHash,
       contentLocation: input.contentLocation,
       revisionId,
-      version: 1,
+      version: input.version,
     });
     return result;
   }

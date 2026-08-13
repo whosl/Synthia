@@ -47,6 +47,24 @@ import {
   type RtlGeneration,
   type StageId,
   type TbGeneration,
+  type UpstreamArtifacts,
+  type UpstreamSection,
+  type XdcGeneration,
+  type EvidenceSummary,
+  type GovernanceClient,
+  type GjbGate,
+  type LoopAction,
+  type LoopConnector,
+  type LoopModel,
+  type LoopPhase,
+  type LoopResult,
+  type LoopStatus,
+  type TerminalCause,
+  type RegisteredRevision,
+  type RunState,
+  type RtlGeneration,
+  type StageId,
+  type TbGeneration,
   type XdcGeneration,
   type VivadoResult,
   type VivadoSubmission,
@@ -208,32 +226,28 @@ export class LoopExecutor {
           break;
         }
         case "behavior_wave": {
-          const ctx = this.docContext();
-          const doc = await this.callModel("generate_behavior_wave", () => model.generateBehaviorWave(ctx, skillPrompts.behaviorWave));
+          const doc = await this.callModel("generate_behavior_wave", () => model.generateBehaviorWave(skillPrompts.behaviorWave, this.upstreamFor("behavior_wave")));
           this.chainCtx.docs.push(doc);
           this.auditModel("generate_behavior_wave", `behavior/wave doc generated: ${doc.docPath}`, doc.docPath, "ok");
           await this.registerDocArtifact(stage, doc, "DETAILED_DESIGN");
           break;
         }
         case "architecture": {
-          const ctx = this.docContext();
-          const doc = await this.callModel("generate_architecture", () => model.generateArchitecture(ctx, skillPrompts.architecture));
+          const doc = await this.callModel("generate_architecture", () => model.generateArchitecture(skillPrompts.architecture, this.upstreamFor("architecture")));
           this.chainCtx.docs.push(doc);
           this.auditModel("generate_architecture", `architecture doc generated: ${doc.docPath}`, doc.docPath, "ok");
           await this.registerDocArtifact(stage, doc, "ARCHITECTURE_DESIGN");
           break;
         }
         case "register_spec": {
-          const ctx = this.docContext();
-          const doc = await this.callModel("generate_register_spec", () => model.generateRegisterSpec(ctx, skillPrompts.registerSpec));
+          const doc = await this.callModel("generate_register_spec", () => model.generateRegisterSpec(skillPrompts.registerSpec, this.upstreamFor("register_spec")));
           this.chainCtx.docs.push(doc);
           this.auditModel("generate_register_spec", `register spec doc generated: ${doc.docPath}`, doc.docPath, "ok");
           await this.registerDocArtifact(stage, doc, "DETAILED_DESIGN");
           break;
         }
         case "rtl_build": {
-          const ctx = this.docContext();
-          this.chainCtx.rtl = await this.callModel("generate_rtl", () => model.generateRtl(ctx, skillPrompts.rtl));
+          this.chainCtx.rtl = await this.callModel("generate_rtl", () => model.generateRtl(this.task, skillPrompts.rtl, this.upstreamFor("rtl_build")));
           this.auditModel("generate_rtl", "rtl generated", this.chainCtx.rtl.topModule, "ok");
           await this.registerRtlArtifact();
           break;
@@ -247,7 +261,7 @@ export class LoopExecutor {
         }
         case "tb": {
           if (!this.chainCtx.rtl) throw new FailClosedError("tb stage reached without RTL", "STATE_ERROR");
-          this.chainCtx.tb = await this.callModel("generate_testbench", () => model.generateTestbench(this.chainCtx.rtl!.sources, this.chainCtx.rtl!.topModule, skillPrompts.tb));
+          this.chainCtx.tb = await this.callModel("generate_testbench", () => model.generateTestbench(this.chainCtx.rtl!.sources, this.chainCtx.rtl!.topModule, skillPrompts.tb, this.upstreamFor("tb")));
           this.auditModel("generate_testbench", "testbench generated", this.chainCtx.tb.testbenchModule, "ok");
           break;
         }
@@ -258,7 +272,7 @@ export class LoopExecutor {
         }
         case "xdc": {
           if (!this.chainCtx.rtl) throw new FailClosedError("xdc stage reached without RTL", "STATE_ERROR");
-          this.chainCtx.xdc = await this.callModel("generate_xdc", () => model.generateXdc(this.chainCtx.rtl!.topModule, part, skillPrompts.xdc, false));
+          this.chainCtx.xdc = await this.callModel("generate_xdc", () => model.generateXdc(this.chainCtx.rtl!.topModule, part, skillPrompts.xdc, false, this.upstreamFor("xdc")));
           break;
         }
         case "synthesize": {
@@ -351,6 +365,11 @@ export class LoopExecutor {
    */
   private async handleGate(gate: GjbGate): Promise<LoopResult | undefined> {
     const gov = this.deps.governance;
+    // Content-conformity static gate (G3/G4): block submission of off-topic or
+    // name/port-inconsistent artifacts. Failures trigger a repair loop; over the
+    // budget the loop fails closed. Runs before governance snapshot creation.
+    const conformity = await this.runContentConformityGate(gate);
+    if (conformity) return conformity;
     // Collect revisions for this gate's snapshot.
     const memberRevs = this.revisionsForGate(gate);
     if (memberRevs.length === 0) return undefined; // nothing to review
@@ -463,7 +482,8 @@ export class LoopExecutor {
 
   private async registerDocArtifact(stage: StageId, doc: DocGeneration, artifactType: ArtifactType): Promise<void> {
     if (!this.deps.governance) return;
-    const artifactId = `art-${stage}-${sha256Hex(this.task).slice(0, 8)}`;
+    const artifactId = `art-${stage}-${sha256Hex(`${this.runId ?? ""}:${this.task}`).slice(0, 8)}`;
+    const version = (this.chainCtx.docRevisions[stage]?.version ?? 0) + 1;
     const raw = await this.deps.governance.registerCandidateArtifact({
       artifactId,
       artifactType,
@@ -471,6 +491,7 @@ export class LoopExecutor {
       content: doc.content,
       contentLocation: doc.docPath,
       changeReason: `Generated by ${doc.phase}`,
+      version,
     });
     const rev: RegisteredRevision = { ...raw, contentLocation: doc.docPath };
     this.chainCtx.docRevisions[stage] = rev;
@@ -480,8 +501,9 @@ export class LoopExecutor {
 
   private async registerRtlArtifact(): Promise<void> {
     if (!this.deps.governance || !this.chainCtx.rtl) return;
-    const artifactId = `art-rtl-${sha256Hex(this.task).slice(0, 8)}`;
+    const artifactId = `art-rtl-${sha256Hex(`${this.runId ?? ""}:${this.task}`).slice(0, 8)}`;
     const content = this.chainCtx.rtl.sources.map(s => s.content).join("\n");
+    const version = (this.chainCtx.rtlRevision?.version ?? 0) + 1;
     const raw = await this.deps.governance.registerCandidateArtifact({
       artifactId,
       artifactType: "RTL_SOURCE_SET",
@@ -489,6 +511,7 @@ export class LoopExecutor {
       content,
       contentLocation: `rtl/${this.chainCtx.rtl.sources[0]?.path ?? "top.v"}`,
       changeReason: "Generated by rtl_build stage",
+      version,
     });
     const rev: RegisteredRevision = { ...raw, contentLocation: `rtl/${this.chainCtx.rtl.sources[0]?.path ?? "top.v"}` };
     this.chainCtx.rtlRevision = rev;
@@ -558,15 +581,185 @@ export class LoopExecutor {
     }
   }
 
-  // ----- context builders -----
-
-  /** Build a context string from accumulated docs for downstream stages. */
-  private docContext(): string {
-    const parts: string[] = [];
-    for (const doc of this.chainCtx.docs) {
-      parts.push(`## ${doc.docPath}\n\n${doc.content}`);
+  /**
+   * Build the per-stage upstream artifact sections per the loop contract:
+   *   behavior_wave  ← intake
+   *   architecture   ← intake + behavior_wave
+   *   register_spec  ← intake + behavior_wave + architecture
+   *   rtl_build      ← all four docs (≥ architecture port contract + register table)
+   *   tb             ← behavior_wave scenario matrix (RTL is passed as the primary arg)
+   *   xdc            ← architecture clock/reset strategy
+   */
+  private upstreamFor(stage: StageId): UpstreamArtifacts | undefined {
+    const doc = (phase: LoopPhase) => this.chainCtx.docs.find(d => d.phase === phase);
+    const sections: UpstreamSection[] = [];
+    switch (stage) {
+      case "behavior_wave": {
+        const i = doc("generate_intake");
+        if (i) sections.push({ label: "Intake 需求摘要", content: i.content });
+        break;
+      }
+      case "architecture": {
+        const i = doc("generate_intake");
+        const b = doc("generate_behavior_wave");
+        if (i) sections.push({ label: "Intake 需求摘要", content: i.content });
+        if (b) sections.push({ label: "Behavior/Wave 场景矩阵", content: b.content });
+        break;
+      }
+      case "register_spec": {
+        const i = doc("generate_intake");
+        const b = doc("generate_behavior_wave");
+        const a = doc("generate_architecture");
+        if (i) sections.push({ label: "Intake 需求摘要", content: i.content });
+        if (b) sections.push({ label: "Behavior/Wave 场景矩阵", content: b.content });
+        if (a) sections.push({ label: "Architecture 端口契约 / 模块划分", content: a.content });
+        break;
+      }
+      case "rtl_build": {
+        for (const d of this.chainCtx.docs) sections.push({ label: d.docPath, content: d.content });
+        break;
+      }
+      case "tb": {
+        const b = doc("generate_behavior_wave");
+        if (b) sections.push({ label: "Behavior/Wave 场景矩阵（测试场景来源）", content: b.content });
+        break;
+      }
+      case "xdc": {
+        const a = doc("generate_architecture");
+        if (a) sections.push({ label: "Architecture 时钟 / 复位策略", content: a.content });
+        break;
+      }
+      default:
+        break;
     }
-    return parts.join("\n\n---\n\n") || "(no upstream artifacts yet)";
+    return sections.length > 0 ? sections : undefined;
+  }
+
+  // ----- content-conformity gate (G3/G4) -----
+
+  /**
+   * Static content-conformity gate run before G3/G4 submission. Checks topic,
+   * name, and port consistency. On failure, regenerates the offending artifact
+   * (doc at G3 / RTL at G4) with a feedback section and re-checks, up to the
+   * repair budget. Over the budget → fail-closed. Returns a terminal LoopResult
+   * on fail-closed, or undefined to proceed.
+   */
+  private async runContentConformityGate(gate: GjbGate): Promise<LoopResult | undefined> {
+    if (gate !== "G3" && gate !== "G4") return undefined;
+    const maxRounds = this.deps.maxRepairRounds ?? DEFAULT_MAX_REPAIR_ROUNDS;
+    for (let round = 0; round <= maxRounds; round++) {
+      const check = this.checkContentConformity(gate);
+      if (check.ok) {
+        if (round > 0) {
+          this.pushAudit({ category: "gate", phase: "gate_review", action: `content_conformity ${gate} passed after ${round} repair round(s)`, result: "ok" });
+        }
+        return undefined;
+      }
+      this.pushAudit({ category: "gate", phase: "gate_review", action: `content_conformity ${gate} failed (round ${round + 1})`, result: "failed", detail: check.problems.join("; ") });
+      if (round === maxRounds) {
+        return this.finish("fail_closed", `content conformity failed at ${gate} after ${maxRounds} repair round(s): ${check.problems.join("; ")}`, this.allArtifacts(), "execution_error");
+      }
+      await this.repairContentConformity(gate, check);
+    }
+    return undefined;
+  }
+
+  /** Run the static checks for the given gate. */
+  private checkContentConformity(gate: GjbGate): ConformityResult {
+    const problems: string[] = [];
+    const failingDocPhases: LoopPhase[] = [];
+    const intake = this.chainCtx.docs.find(d => d.phase === "generate_intake");
+    const keywords = extractTopicKeywords(this.task, intake?.content ?? "");
+
+    if (gate === "G3") {
+      // Topic consistency: every submitted downstream doc must mention ≥1 task keyword.
+      for (const phase of ["generate_architecture", "generate_register_spec"] as const) {
+        const d = this.chainCtx.docs.find(x => x.phase === phase);
+        if (!d) continue;
+        if (keywords.length > 0 && !keywords.some(k => d.content.toLowerCase().includes(k))) {
+          problems.push(`topic: ${phase} "${d.docPath}" mentions none of the task keywords [${keywords.join(", ")}] — likely off-topic`);
+          failingDocPhases.push(phase);
+        }
+      }
+    }
+
+    if (gate === "G4") {
+      const rtl = this.chainCtx.rtl;
+      if (rtl) {
+        const rtlText = rtl.sources.map(s => s.content).join("\n").toLowerCase();
+        // (a) Topic consistency in RTL.
+        if (keywords.length > 0 && !keywords.some(k => rtlText.includes(k))) {
+          problems.push(`topic: RTL mentions none of the task keywords [${keywords.join(", ")}] — likely off-topic (top=${rtl.topModule})`);
+        }
+        // (b) Name consistency: RTL top module must appear in architecture + register_spec docs.
+        const topLower = rtl.topModule.toLowerCase();
+        const arch = this.chainCtx.docs.find(d => d.phase === "generate_architecture");
+        const reg = this.chainCtx.docs.find(d => d.phase === "generate_register_spec");
+        if (arch && !arch.content.toLowerCase().includes(topLower)) {
+          problems.push(`name: RTL top module "${rtl.topModule}" not found in architecture doc "${arch.docPath}"`);
+        }
+        if (reg && !reg.content.toLowerCase().includes(topLower)) {
+          problems.push(`name: RTL top module "${rtl.topModule}" not found in register_spec doc "${reg.docPath}"`);
+        }
+        // (c) Port consistency: RTL top ports must appear in the architecture interface doc.
+        if (arch) {
+          const ports = extractModulePorts(rtl.sources.map(s => s.content).join("\n"), rtl.topModule).filter(p => p.length >= 2);
+          const archLower = arch.content.toLowerCase();
+          const missing = ports.filter(p => !archLower.includes(p.toLowerCase()));
+          if (missing.length > 0) {
+            problems.push(`port: RTL top "${rtl.topModule}" ports [${missing.join(", ")}] not found in architecture interface doc "${arch.docPath}"`);
+          }
+        }
+      }
+    }
+
+    return problems.length === 0 ? { ok: true, problems: [] } : { ok: false, problems, failingDocPhases };
+  }
+
+  /** Regenerate the offending artifact(s) carrying the conformity feedback. */
+  private async repairContentConformity(gate: GjbGate, check: ConformityResult): Promise<void> {
+    const feedback: UpstreamSection = {
+      label: "符合性修复反馈 (Conformity Feedback)",
+      content: `上一次输出未通过内容符合性门禁，必须修正后重新生成。具体问题：\n- ${check.problems.join("\n- ")}`,
+    };
+    if (gate === "G3") {
+      for (const phase of check.failingDocPhases) {
+        if (phase === "generate_architecture" || phase === "generate_register_spec" || phase === "generate_behavior_wave") {
+          await this.regenerateDoc(phase, feedback);
+        }
+      }
+    } else if (gate === "G4") {
+      await this.regenerateRtl(feedback);
+    }
+  }
+
+  /** Re-run a doc-generation phase with upstream + feedback and replace the doc. */
+  private async regenerateDoc(phase: "generate_behavior_wave" | "generate_architecture" | "generate_register_spec", feedback: UpstreamSection): Promise<void> {
+    const { model, skillPrompts } = this.deps;
+    const stage: StageId = phase === "generate_behavior_wave" ? "behavior_wave" : phase === "generate_architecture" ? "architecture" : "register_spec";
+    const base = this.upstreamFor(stage);
+    const upstream: UpstreamArtifacts = base && base.length > 0 ? [...base, feedback] : [feedback];
+    const doc = await this.callModel(phase, () => {
+      if (phase === "generate_behavior_wave") return model.generateBehaviorWave(skillPrompts.behaviorWave, upstream);
+      if (phase === "generate_architecture") return model.generateArchitecture(skillPrompts.architecture, upstream);
+      return model.generateRegisterSpec(skillPrompts.registerSpec, upstream);
+    });
+    const idx = this.chainCtx.docs.findIndex(d => d.phase === phase);
+    if (idx >= 0) this.chainCtx.docs[idx] = doc; else this.chainCtx.docs.push(doc);
+    this.auditModel(phase, `conformity repair: regenerated ${doc.docPath}`, doc.docPath, "ok");
+    const artifactType: ArtifactType = stage === "architecture" ? "ARCHITECTURE_DESIGN" : "DETAILED_DESIGN";
+    await this.registerDocArtifact(stage, doc, artifactType);
+  }
+
+  /** Re-run RTL generation with upstream + feedback and replace the RTL. */
+  private async regenerateRtl(feedback: UpstreamSection): Promise<void> {
+    const { model, skillPrompts } = this.deps;
+    const base = this.upstreamFor("rtl_build");
+    const upstream: UpstreamArtifacts = base && base.length > 0 ? [...base, feedback] : [feedback];
+    const rtl = await this.callModel("generate_rtl", () => model.generateRtl(this.task, skillPrompts.rtl, upstream));
+    this.chainCtx.rtl = rtl;
+    this.auditModel("generate_rtl", `conformity repair: regenerated RTL top=${rtl.topModule}`, rtl.topModule, "ok");
+    await this.registerRtlArtifact();
   }
 
   // ----- tool execution (unchanged mechanics) -----
@@ -687,6 +880,107 @@ interface ChainContext {
   tb?: TbGeneration;
   xdc?: XdcGeneration;
   rtlRevision?: RegisteredRevision;
+}
+/** Result of a content-conformity check. */
+interface ConformityResult {
+  readonly ok: boolean;
+  readonly problems: readonly string[];
+  /** Doc phases that failed the topic check (G3 repair target). */
+  readonly failingDocPhases: readonly LoopPhase[];
+}
+
+// ---------------------------------------------------------------------------
+// Content-conformity extraction helpers (module-level, exported for unit tests)
+// ---------------------------------------------------------------------------
+/** Generic English function words and HDL syntax keywords that are never
+ *  distinctive topic keywords. Domain words (uart, counter, fifo, …) are
+ *  intentionally NOT filtered so real topic drift is caught. */
+const KEYWORD_STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "not", "but", "all", "any",
+  "has", "had", "its", "our", "you", "her", "him", "she", "his", "their", "one", "two", "three", "put",
+  "get", "set", "use", "used", "using", "via", "per", "into", "onto", "over", "under", "new", "old",
+  "bit", "bits", "design", "module", "modules", "top", "system", "logic",
+  "input", "output", "inout", "wire", "reg", "signed", "unsigned", "port", "ports", "signal", "signals",
+  "fpga", "verilog", "systemverilog", "hdl", "rtl",
+]);
+
+/**
+ * Extract distinctive topic keywords (lowercased Latin identifiers ≥3 chars)
+ * from the task and intake summary. Generic HDL/English words are filtered.
+ * Returns [] when no Latin signal exists (e.g. a CJK-only task) — in which case
+ * the topic check is skipped (no false positive on a missing signal).
+ */
+export function extractTopicKeywords(...sources: string[]): string[] {
+  const words = new Set<string>();
+  const re = /[A-Za-z][A-Za-z0-9_]{2,}/g;
+  for (const src of sources) {
+    let m: RegExpExecArray | null;
+    re.lastIndex = 0;
+    while ((m = re.exec(src)) !== null) {
+      const w = m[0]!.toLowerCase();
+      if (!KEYWORD_STOPWORDS.has(w)) words.add(w);
+    }
+  }
+  return [...words];
+}
+
+/** Verilog/SystemVerilog type/direction words to exclude from port-name extraction. */
+const VERILOG_TYPE_WORDS: ReadonlySet<string> = new Set([
+  "wire", "reg", "logic", "signed", "unsigned", "input", "output", "inout", "tri",
+]);
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Best-effort extraction of the top-level module's port names from RTL source
+ * text. Handles ANSI-style port lists (`module top(input clk, output [7:0] data);`)
+ * and falls back to a bare-name list (`module top(clk, rst, data);`). Returns []
+ * when the module header or port list cannot be located (the port check is then
+ * skipped — leniency over a false alarm).
+ */
+export function extractModulePorts(content: string, topModule: string): string[] {
+  const headerRe = new RegExp(`\\bmodule\\s+${escapeRegex(topModule)}\\b([\\s\\S]*?);`, "m");
+  const m = content.match(headerRe);
+  if (!m) return [];
+  const header = m[1]!;
+  const openIdx = header.indexOf("(");
+  if (openIdx < 0) return [];
+  // Slice the outermost balanced parenthesised group (the port list).
+  let depth = 0;
+  let end = -1;
+  for (let i = openIdx; i < header.length; i++) {
+    const ch = header[i]!;
+    if (ch === "(") depth++;
+    else if (ch === ")") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return [];
+  const portList = header.slice(openIdx + 1, end);
+
+  const lastName = (frag: string): string | null => {
+    const ids = frag.match(/[A-Za-z_][A-Za-z0-9_$]*/g);
+    if (!ids || ids.length === 0) return null;
+    const name = ids[ids.length - 1]!.toLowerCase();
+    return VERILOG_TYPE_WORDS.has(name) ? null : ids[ids.length - 1]!;
+  };
+
+  const ports: string[] = [];
+  // ANSI-style: each port fragment begins with a direction keyword.
+  const dirRe = /\b(?:input|output|inout)\b([^,]*)/gi;
+  let pm: RegExpExecArray | null;
+  while ((pm = dirRe.exec(portList)) !== null) {
+    const name = lastName(pm[1]!);
+    if (name) ports.push(name);
+  }
+  // Fallback: non-ANSI bare-name list.
+  if (ports.length === 0) {
+    for (const raw of portList.split(",")) {
+      const name = lastName(raw);
+      if (name) ports.push(name);
+    }
+  }
+  return [...new Set(ports)];
 }
 
 /** Codes that mandate immediate fail-closed termination. */

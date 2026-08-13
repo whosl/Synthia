@@ -352,8 +352,8 @@ const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY
 class ScriptedModel implements LoopModel {
   async generateIntake(): Promise<DocGeneration> { return { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Intake\n## Task\n8-bit counter." }; }
   async generateBehaviorWave(): Promise<DocGeneration> { return { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments." }; }
-  async generateArchitecture(): Promise<DocGeneration> { return { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: top." }; }
-  async generateRegisterSpec(): Promise<DocGeneration> { return { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers." }; }
+  async generateArchitecture(): Promise<DocGeneration> { return { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: top.\n## Ports\nclk, rst_n, c." }; }
+  async generateRegisterSpec(): Promise<DocGeneration> { return { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers for counter." }; }
   async generateRtl(): Promise<RtlGeneration> { return { phase: "generate_rtl", reasoning: "ok", topModule: "counter", sources: [RTL] }; }
   async generateTestbench(): Promise<TbGeneration> { return { phase: "generate_testbench", reasoning: "ok", testbenchModule: "tb_counter", testbench: TB }; }
   async generateXdc(_top: string, _part: string, _sys: string, _allowPin: boolean): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }

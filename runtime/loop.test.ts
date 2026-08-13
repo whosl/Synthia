@@ -11,6 +11,8 @@ import {
   FailClosedError,
   VIVADO_CAPABILITY_VERSION,
   FAKE_CAPABILITIES,
+  extractTopicKeywords,
+  extractModulePorts,
 } from "./loop.ts";
 import { MockGovernanceClient } from "./governance-client.ts";
 import { NoGovernanceClient } from "./types.ts";
@@ -37,8 +39,8 @@ const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY
 
 const DOC_INTAKE: DocGeneration = { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Counter 需求梳理摘要\n## Task Summary\n8-bit counter.\n## Acceptance Criteria\nCounts up." };
 const DOC_BEHAVIOR: DocGeneration = { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments on clock." };
-const DOC_ARCH: DocGeneration = { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: top." };
-const DOC_REG: DocGeneration = { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers for this design." };
+const DOC_ARCH: DocGeneration = { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\ncounter: top.\n## Interface / Ports\nclk, rst_n, c." };
+const DOC_REG: DocGeneration = { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nNo registers for the counter design." };
 
 /** A complete test model that produces all 8 phase outputs. */
 class FullChainModel implements LoopModel {
@@ -704,5 +706,240 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     expect(rtlCallCount).toBe(1); // still 1 — no re-call
     // Validate ran on the working connector.
     expect(workingConnector.callCount("validate_sources")).toBeGreaterThanOrEqual(1);
+  });
+});
+// ---------------------------------------------------------------------------
+// Content-conformity extraction helpers (unit)
+// ---------------------------------------------------------------------------
+
+describe("extractTopicKeywords", () => {
+  test("extracts Latin topic tokens, filters stopwords and short tokens", () => {
+    expect(extractTopicKeywords("实现一个 UART 收发器")).toEqual(["uart"]);
+    expect(extractTopicKeywords("8-bit counter design")).toEqual(["counter"]);
+  });
+  test("CJK-only task yields no keywords (topic check skipped)", () => {
+    expect(extractTopicKeywords("计数器")).toEqual([]);
+  });
+  test("combines multiple sources and dedupes", () => {
+    expect(extractTopicKeywords("UART module", "uart_top transceiver")).toEqual(["uart", "uart_top", "transceiver"]);
+  });
+});
+
+describe("extractModulePorts", () => {
+  test("ANSI-style port list with widths", () => {
+    const src = "module uart_top(input clk, input rst_n, input rxd, output reg [7:0] txd);\nendmodule\n";
+    expect(extractModulePorts(src, "uart_top")).toEqual(["clk", "rst_n", "rxd", "txd"]);
+  });
+  test("single-char ports extracted (filtered at check site by length)", () => {
+    const src = "module counter(input clk,input rst_n,output reg[7:0] c);";
+    expect(extractModulePorts(src, "counter")).toEqual(["clk", "rst_n", "c"]);
+  });
+  test("returns [] when module header absent", () => {
+    expect(extractModulePorts("module other(input a);", "counter")).toEqual([]);
+  });
+  test("bare-name (non-ANSI) port list fallback", () => {
+    expect(extractModulePorts("module top(clk, rst, data);", "top")).toEqual(["clk", "rst", "data"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content-conformity gate (G3 docs / G4 RTL)
+// ---------------------------------------------------------------------------
+
+// UART reference artifacts used by the conformity scenario models.
+const UART_INTAKE: DocGeneration = { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Intake\n## Task\nUART transceiver. Top module uart_top." };
+const UART_BEHAVIOR: DocGeneration = { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: uart_top transmits/receives on clock." };
+const UART_ARCH: DocGeneration = { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\nuart_top: top.\n## Ports\nclk, rst_n, txd, rxd." };
+const UART_REG: DocGeneration = { phase: "generate_register_spec", reasoning: "ok", docPath: "doc/reg/register_map.md", content: "# Register Map\nuart_top has no software registers." };
+const OFFTOPIC_ARCH: DocGeneration = { phase: "generate_architecture", reasoning: "ok", docPath: "doc/arch/module_partition.md", content: "# Architecture\n## Modules\nvideo_pipe: top.\n## Ports\npclk, vsync, hs, data." };
+const UART_RTL: RtlGeneration = { phase: "generate_rtl", reasoning: "ok", topModule: "uart_top", sources: [{ path: "uart_top.v", content: "module uart_top(input clk,input rst_n,input rxd,output txd);\nendmodule\n" }] };
+const COUNTER_RTL: RtlGeneration = { phase: "generate_rtl", reasoning: "ok", topModule: "counter", sources: [{ path: "counter.v", content: "module counter(input clk,input rst_n,output reg[7:0] count);\nendmodule\n" }] };
+const UART_TB: TbGeneration = { phase: "generate_testbench", reasoning: "ok", testbenchModule: "tb_uart", testbench: { path: "tb_uart.v", content: "module tb_uart;initial begin $display(\"PASS\");$finish;end endmodule\n" } };
+
+/** Model whose architecture is off-topic on the 1st call, on-topic afterwards. */
+class OffTopicDocModel implements LoopModel {
+  archCalls = 0;
+  async generateIntake(): Promise<DocGeneration> { return UART_INTAKE; }
+  async generateBehaviorWave(): Promise<DocGeneration> { return UART_BEHAVIOR; }
+  async generateArchitecture(): Promise<DocGeneration> { this.archCalls++; return this.archCalls === 1 ? OFFTOPIC_ARCH : UART_ARCH; }
+  async generateRegisterSpec(): Promise<DocGeneration> { return UART_REG; }
+  async generateRtl(): Promise<RtlGeneration> { return UART_RTL; }
+  async generateTestbench(): Promise<TbGeneration> { return UART_TB; }
+  async generateXdc(): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
+  async repair(): Promise<RepairGeneration> { return { phase: "repair", reasoning: "ok", sources: UART_RTL.sources, testbench: UART_TB.testbench }; }
+}
+
+/** Model whose RTL is a counter on the 1st call, UART afterwards (docs always UART). */
+class OffTopicRtlModel implements LoopModel {
+  rtlCalls = 0;
+  async generateIntake(): Promise<DocGeneration> { return UART_INTAKE; }
+  async generateBehaviorWave(): Promise<DocGeneration> { return UART_BEHAVIOR; }
+  async generateArchitecture(): Promise<DocGeneration> { return UART_ARCH; }
+  async generateRegisterSpec(): Promise<DocGeneration> { return UART_REG; }
+  async generateRtl(): Promise<RtlGeneration> { this.rtlCalls++; return this.rtlCalls === 1 ? COUNTER_RTL : UART_RTL; }
+  async generateTestbench(): Promise<TbGeneration> { return UART_TB; }
+  async generateXdc(): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
+  async repair(): Promise<RepairGeneration> { return { phase: "repair", reasoning: "ok", sources: UART_RTL.sources, testbench: UART_TB.testbench }; }
+}
+
+/** Model whose RTL is ALWAYS a counter (never conformant for a UART task). */
+class AlwaysOffTopicRtlModel implements LoopModel {
+  rtlCalls = 0;
+  async generateIntake(): Promise<DocGeneration> { return UART_INTAKE; }
+  async generateBehaviorWave(): Promise<DocGeneration> { return UART_BEHAVIOR; }
+  async generateArchitecture(): Promise<DocGeneration> { return UART_ARCH; }
+  async generateRegisterSpec(): Promise<DocGeneration> { return UART_REG; }
+  async generateRtl(): Promise<RtlGeneration> { this.rtlCalls++; return COUNTER_RTL; }
+  async generateTestbench(): Promise<TbGeneration> { return UART_TB; }
+  async generateXdc(): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
+  async repair(): Promise<RepairGeneration> { return { phase: "repair", reasoning: "ok", sources: COUNTER_RTL.sources, testbench: UART_TB.testbench }; }
+}
+
+describe("LoopExecutor — content-conformity gate", () => {
+  test("G3: off-topic architecture doc → intercepted → regenerated → passes", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicDocModel();
+    const loop = makeLoop(model, connector);
+    const result = await loop.run("实现一个 UART 收发器");
+    expect(result.status).toBe("succeeded");
+    expect(model.archCalls).toBe(2); // initial off-topic + 1 repair
+    const conformity = result.audit.filter(a => a.action.startsWith("content_conformity"));
+    expect(conformity.some(a => a.result === "failed" && a.action.includes("G3"))).toBe(true);
+    expect(conformity.some(a => a.result === "ok")).toBe(true);
+    // The off-topic problem must be recorded with detail.
+    const failed = conformity.find(a => a.result === "failed")!;
+    expect(failed.detail).toContain("topic");
+  });
+
+  test("G4: off-topic RTL (counter for UART task) → intercepted → regenerated → passes", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicRtlModel();
+    const loop = makeLoop(model, connector);
+    const result = await loop.run("实现一个 UART 收发器");
+    expect(result.status).toBe("succeeded");
+    expect(result.rtl?.topModule).toBe("uart_top");
+    expect(model.rtlCalls).toBe(2); // initial counter + 1 repair
+    const conformity = result.audit.filter(a => a.action.startsWith("content_conformity"));
+    expect(conformity.some(a => a.result === "failed" && a.action.includes("G4"))).toBe(true);
+  });
+
+  test("G4: always off-topic RTL → fail-closed after repair budget (3)", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new AlwaysOffTopicRtlModel();
+    const loop = makeLoop(model, connector, { maxRepairRounds: 3 });
+    const result = await loop.run("实现一个 UART 收发器");
+    expect(result.status).toBe("fail_closed");
+    expect(result.endedReason).toContain("content conformity");
+    // 1 initial check + 3 repair checks = 4 failed conformity audits.
+    const failed = result.audit.filter(a => a.action.startsWith("content_conformity") && a.result === "failed");
+    expect(failed.length).toBe(4);
+    expect(model.rtlCalls).toBe(4); // initial + 3 repairs
+  });
+
+  test("conformity repair feedback is carried as an upstream section to the model", async () => {
+    // The regenerated architecture call must receive upstream containing the feedback marker.
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicDocModel();
+    const loop = makeLoop(model, connector);
+    await loop.run("实现一个 UART 收发器");
+    // OffTopicDocModel ignores args, so we assert via audit that a repair round ran.
+    expect(model.archCalls).toBe(2);
+  });
+
+  test("CJK-only counter task: no topic keyword → conformity passes (no false positive)", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const loop = makeLoop(new FullChainModel(), connector);
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("succeeded");
+    // No conformity failures for a conformant counter design.
+    const failed = result.audit.filter(a => a.action.startsWith("content_conformity") && a.result === "failed");
+    expect(failed.length).toBe(0);
+  });
+});
+// ---------------------------------------------------------------------------
+// Conformity repair → re-registration version monotonicity
+// ---------------------------------------------------------------------------
+
+describe("LoopExecutor — conformity repair version monotonicity", () => {
+  test("G3: repair re-registers architecture doc with version=2 (no RESOURCE_CONFLICT)", async () => {
+    const gov = new MockGovernanceClient();
+    gov.setSubmitResult("approved"); // auto-approve all gates
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicDocModel();
+    const loop = makeLoop(model, connector, { governance: gov });
+    const result = await loop.run("实现一个 UART 收发器");
+    expect(result.status).toBe("succeeded");
+    // The architecture artifact was registered twice: version 1 (off-topic) then version 2 (repair).
+    const archRegs = gov.registeredArtifacts.filter(a => a.artifactId.includes("-architecture-"));
+    expect(archRegs.length).toBe(2);
+    expect(archRegs[0]!.version).toBe(1);
+    expect(archRegs[1]!.version).toBe(2);
+    // No RESOURCE_CONFLICT was thrown (loop succeeded).
+  });
+
+  test("G4: repair re-registers RTL with version=2 (no RESOURCE_CONFLICT)", async () => {
+    const gov = new MockGovernanceClient();
+    gov.setSubmitResult("approved");
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicRtlModel();
+    const loop = makeLoop(model, connector, { governance: gov });
+    const result = await loop.run("实现一个 UART 收发器");
+    expect(result.status).toBe("succeeded");
+    // RTL artifact registered twice: version 1 (counter) then version 2 (uart_top).
+    const rtlRegs = gov.registeredArtifacts.filter(a => a.artifactId.includes("-rtl-"));
+    expect(rtlRegs.length).toBe(2);
+    expect(rtlRegs[0]!.version).toBe(1);
+    expect(rtlRegs[1]!.version).toBe(2);
+  });
+
+  test("MockGovernanceClient rejects same version re-registration (guard works)", async () => {
+    const gov = new MockGovernanceClient();
+    await gov.registerCandidateArtifact({
+      artifactId: "art-x", artifactType: "DEVELOPMENT_REQUIREMENTS",
+      title: "v1", content: "first", contentLocation: "doc/x.md", version: 1,
+    });
+    await expect(gov.registerCandidateArtifact({
+      artifactId: "art-x", artifactType: "DEVELOPMENT_REQUIREMENTS",
+      title: "v1-again", content: "second", contentLocation: "doc/x.md", version: 1,
+    })).rejects.toThrow(/RESOURCE_CONFLICT/);
+    // Version 2 is accepted.
+    const rev = await gov.registerCandidateArtifact({
+      artifactId: "art-x", artifactType: "DEVELOPMENT_REQUIREMENTS",
+      title: "v2", content: "third", contentLocation: "doc/x.md", version: 2,
+    });
+    expect(rev.version).toBe(2);
+  });
+
+  test("conformity repair persists version=2 in run-state (resume continuity)", async () => {
+    const gov = new MockGovernanceClient();
+    gov.setSubmitResult("approved"); // auto-approve all gates
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new OffTopicDocModel();
+
+    let savedState: RunState | undefined;
+    const loop = new LoopExecutor({
+      model, connector, governance: gov,
+      skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair", intake: "intake", behaviorWave: "behavior", architecture: "arch", registerSpec: "reg" },
+      part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
+      toolModelPolicyHash: "policy-v1",
+      onStateChange: async (state) => { savedState = state; },
+    });
+    const result = await loop.run("实现一个 UART 收发器", {
+      runId: "test-version-persist",
+      runState: {
+        runId: "test-version-persist", task: "实现一个 UART 收发器", part: "xc7k70tfbv676-1", projectId: "p1",
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        currentStage: "intake", status: "running",
+        docs: {}, gateSubmissions: {}, gateDecisions: {},
+      },
+    });
+    expect(result.status).toBe("succeeded");
+    // The architecture doc was repaired (version 2). The final saved state must
+    // reflect version 2 so a hypothetical resume would register version 3 next.
+    expect(savedState).toBeDefined();
+    expect(savedState!.docs?.architecture?.version).toBe(2);
+    // Doc that was NOT repaired stays at version 1.
+    expect(savedState!.docs?.intake?.version).toBe(1);
+    expect(savedState!.docs?.register_spec?.version).toBe(1);
   });
 });

@@ -16,6 +16,7 @@ describe("MockGovernanceClient", () => {
       title: "Intake Summary",
       content: "# Intake\n## Task\n8-bit counter.",
       contentLocation: "doc/intake/summary.md",
+      version: 1,
     });
     expect(rev.artifactId).toBe("art-1");
     expect(rev.version).toBe(1);
@@ -84,6 +85,7 @@ describe("NoGovernanceClient", () => {
       title: "RTL",
       content: "module counter; endmodule",
       contentLocation: "rtl/counter.v",
+      version: 1,
     });
     expect(rev.contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(rev.version).toBe(1);
@@ -130,6 +132,7 @@ describe("CoreGovernanceClient", () => {
     const rev = await gov.registerCandidateArtifact({
       artifactId: "art-x", artifactType: "DEVELOPMENT_REQUIREMENTS",
       title: "Intake", content: "# doc", contentLocation: "doc/intake/summary.md",
+      version: 1,
     });
     expect(rev.revisionId).toBe("rev-123");
     expect(rev.version).toBe(1);
@@ -287,6 +290,7 @@ describe("CoreGovernanceClient", () => {
       artifactId: "art-1", artifactType: "ARCHITECTURE_DESIGN",
       title: "Arch", content: "test content 123",
       contentLocation: "doc/arch/module_partition.md",
+      version: 1,
     });
     expect(capturedBody.content_hash).toMatch(/^[0-9a-f]{64}$/);
     // content is inlined verbatim; content_location omitted

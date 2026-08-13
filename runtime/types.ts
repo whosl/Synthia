@@ -55,6 +55,14 @@ export interface XdcGeneration {
   readonly constraints: readonly ArtifactFile[];
 }
 
+/** A named upstream artifact section injected into downstream stage prompts. */
+export interface UpstreamSection {
+  readonly label: string;
+  readonly content: string;
+}
+/** Ordered upstream artifacts rendered into a prompt as a dedicated section. */
+export type UpstreamArtifacts = readonly UpstreamSection[];
+
 /** A specification/design document produced by a doc-generation phase. */
 export interface DocGeneration {
   readonly phase: "generate_intake" | "generate_behavior_wave" | "generate_architecture" | "generate_register_spec";
@@ -74,18 +82,10 @@ export interface RepairGeneration {
   readonly testbench?: ArtifactFile;
 }
 
-export type LoopAction = RtlGeneration | TbGeneration | XdcGeneration | RepairGeneration | DocGeneration;
-
-/**
- * High-level model interface the loop depends on. Each method wraps one
- * structured LLM call guided by a skill method prompt. Implementations parse a
- * tool-call or strict-JSON response, validate it, and retry once on a malformed
- * response before surfacing a {@link ModelActionError}.
- */
 export interface LoopModel {
-  generateRtl(task: string, systemPrompt: string): Promise<RtlGeneration>;
-  generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string): Promise<TbGeneration>;
-  generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean): Promise<XdcGeneration>;
+  generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration>;
+  generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<TbGeneration>;
+  generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration>;
   repair(input: {
     sources: readonly ArtifactFile[];
     testbench?: ArtifactFile;
@@ -96,10 +96,10 @@ export interface LoopModel {
     attempt: number;
     systemPrompt: string;
   }): Promise<RepairGeneration>;
-  generateIntake(task: string, systemPrompt: string): Promise<DocGeneration>;
-  generateBehaviorWave(context: string, systemPrompt: string): Promise<DocGeneration>;
-  generateArchitecture(context: string, systemPrompt: string): Promise<DocGeneration>;
-  generateRegisterSpec(context: string, systemPrompt: string): Promise<DocGeneration>;
+  generateIntake(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration>;
+  generateBehaviorWave(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration>;
+  generateArchitecture(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration>;
+  generateRegisterSpec(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration>;
 }
 
 /** Thrown when the model cannot produce a valid action within the retry budget. */
@@ -251,7 +251,9 @@ export interface RegisteredRevision {
 
 /** A Core API governance client the loop calls to register artifacts and manage gates. */
 export interface GovernanceClient {
-  /** Register a candidate ArtifactRevision for the given artifact. */
+  /** Register a candidate ArtifactRevision for the given artifact.
+   *  `version` must be strictly greater than the artifact's current revision
+   *  version (1 for the first, 2+ for repairs/re-registrations). */
   registerCandidateArtifact(input: {
     artifactId: string;
     artifactType: ArtifactType;
@@ -259,6 +261,7 @@ export interface GovernanceClient {
     content: string;
     contentLocation: string;
     changeReason?: string;
+    version: number;
   }): Promise<RegisteredRevision>;
   /** Create a ConfigurationSnapshot freezing the given revisions. */
   createSnapshot(input: {
@@ -283,11 +286,11 @@ export class NoGovernanceClient implements GovernanceClient {
   private nextId(prefix: string): string {
     return `${prefix}-nogov-${++this.counter}`;
   }
-  async registerCandidateArtifact(input: { content: string }): Promise<RegisteredRevision> {
+  async registerCandidateArtifact(input: { content: string; version: number }): Promise<RegisteredRevision> {
     return {
       revisionId: this.nextId("rev"),
       artifactId: this.nextId("art"),
-      version: 1,
+      version: input.version,
       contentHash: sha256Hex(input.content),
     };
   }

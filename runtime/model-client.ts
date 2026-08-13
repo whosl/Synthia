@@ -18,7 +18,7 @@
  */
 
 import { ModelActionError } from "./types.ts";
-import type { ArtifactFile, LoopModel, LoopPhase, LoopAction, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration, DocGeneration } from "./types.ts";
+import type { ArtifactFile, LoopModel, LoopPhase, LoopAction, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration, DocGeneration, UpstreamArtifacts } from "./types.ts";
 
 export type ActionProtocol = "tools" | "json";
 
@@ -176,6 +176,28 @@ function salvageDocFromContent(json: unknown, phase: string): unknown | null {
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 function backoffMs(attempt: number): number { return Math.min(8000, 250 * 2 ** (attempt - 1)); }
 
+/**
+ * Render upstream artifacts into a dedicated, strongly-delimited prompt section
+ * with explicit consistency instructions. Returns "" when no upstream is given.
+ * The section is placed ahead of the task body so the model treats upstream
+ * facts as binding constraints, not optional context.
+ */
+export function renderUpstream(upstream?: UpstreamArtifacts): string {
+  if (!upstream || upstream.length === 0) return "";
+  const blocks = upstream.map(s => `### ${s.label}\n\n${s.content}`).join("\n\n");
+  return [
+    "===== 上游产物 (Upstream Artifacts) — 一致性约束（必须遵守）=====",
+    "以下上游产物已确认。本次输出必须与上游保持严格一致：",
+    "- 模块名、顶层端口名、参数名不得偏离上游定义；",
+    "- 需求/规则编号须可追溯到上游；",
+    "- 不得臆造与上游冲突的硬件事实（时钟、复位、寄存器偏移、引脚等）；",
+    "- 若上游缺失某信息，须显式标注为假设（assumption），不得静默编造。",
+    "",
+    blocks,
+    "===== 上游产物结束 =====",
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // ModelClient
 // ---------------------------------------------------------------------------
@@ -321,11 +343,17 @@ export class ModelClient implements LoopModel {
 
   // ----- LoopModel implementation -----
 
-  async generateRtl(task: string, systemPrompt: string): Promise<RtlGeneration> {
+  /** Prepend the rendered upstream section (if any) to a user message body. */
+  private withUpstream(userMessage: string, upstream?: UpstreamArtifacts): string {
+    const block = renderUpstream(upstream);
+    return block ? `${block}\n\n${userMessage}` : userMessage;
+  }
+
+  async generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration> {
     const outcome = await this.emitAction(
       {
         phase: "generate_rtl", systemPrompt,
-        userMessage: `User task:\n${task}\n\nProduce a synthesizable Verilog RTL module implementing this task. Output one module.`,
+        userMessage: this.withUpstream(`User task:\n${task}\n\nProduce a synthesizable Verilog RTL module implementing this task. The module name, ports, and parameters must match the upstream architecture/register contract. Output one module.`, upstream),
         actionName: "generate_rtl", actionDescription: "Produce an RTL source set for the requested task.",
         schema: RTL_SCHEMA,
       },
@@ -334,12 +362,12 @@ export class ModelClient implements LoopModel {
     return outcome.action as RtlGeneration;
   }
 
-  async generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string): Promise<TbGeneration> {
+  async generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<TbGeneration> {
     const rtlBlock = rtl.map(f => `# ${f.path}\n\`\`\`verilog\n${f.content}\n\`\`\``).join("\n\n");
     const outcome = await this.emitAction(
       {
         phase: "generate_testbench", systemPrompt,
-        userMessage: `RTL top module: ${topModule}\n\nRTL sources:\n${rtlBlock}\n\nProduce a self-checking testbench that drives the DUT and prints PASS/FAIL.`,
+        userMessage: this.withUpstream(`RTL top module: ${topModule}\n\nRTL sources:\n${rtlBlock}\n\nProduce a self-checking testbench that drives the DUT and prints PASS/FAIL. Cover the behavior rules from the upstream behavior/wave spec.`, upstream),
         actionName: "generate_testbench", actionDescription: "Produce a self-checking testbench for the given RTL.",
         schema: TB_SCHEMA,
       },
@@ -348,7 +376,7 @@ export class ModelClient implements LoopModel {
     return outcome.action as TbGeneration;
   }
 
-  async generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean): Promise<XdcGeneration> {
+  async generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration> {
     const pinGuidance = allowPinAssignments
       ? "You MAY include PACKAGE_PIN and IOSTANDARD assignments IF AND ONLY IF you have verified pin data from the hardware manual. Do not invent pin numbers."
       : [
@@ -369,7 +397,7 @@ export class ModelClient implements LoopModel {
     const outcome = await this.emitAction(
       {
         phase: "generate_xdc", systemPrompt,
-        userMessage: `Target part: ${part}\nRTL top module: ${topModule}\n\n${pinGuidance}`,
+        userMessage: this.withUpstream(`Target part: ${part}\nRTL top module: ${topModule}\n\n${pinGuidance}`, upstream),
         actionName: "generate_xdc", actionDescription: "Produce XDC constraints for the target part.",
         schema: XDC_SCHEMA,
       },
@@ -404,11 +432,11 @@ export class ModelClient implements LoopModel {
 
   // ----- Doc-generation phases -----
 
-  async generateIntake(task: string, systemPrompt: string): Promise<DocGeneration> {
+  async generateIntake(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     const outcome = await this.emitAction(
       {
         phase: "generate_intake", systemPrompt,
-        userMessage: `User task:\n${task}\n\nProduce a requirements clarification summary (doc/intake/summary.md). Follow the method sections: Task Summary, Confirmed Facts, Hardware Dependency, Assumptions and Defaults, Missing Information, Evidence Needed, Acceptance Criteria, Handoff and Next Step.`,
+        userMessage: this.withUpstream(`User task:\n${task}\n\nProduce a requirements clarification summary (doc/intake/summary.md). Follow the method sections: Task Summary, Confirmed Facts, Hardware Dependency, Assumptions and Defaults, Missing Information, Evidence Needed, Acceptance Criteria, Handoff and Next Step.`, upstream),
         actionName: "generate_intake", actionDescription: "Produce an intake requirements summary markdown document.",
         schema: DOC_SCHEMA,
       },
@@ -417,11 +445,11 @@ export class ModelClient implements LoopModel {
     return outcome.action as DocGeneration;
   }
 
-  async generateBehaviorWave(context: string, systemPrompt: string): Promise<DocGeneration> {
+  async generateBehaviorWave(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     const outcome = await this.emitAction(
       {
         phase: "generate_behavior_wave", systemPrompt,
-        userMessage: `Upstream artifacts:\n${context}\n\nProduce a behavior & wave-plan specification (doc/spec/behavior_spec.md) with rule IDs, observable signals, and PASS/FAIL conditions.`,
+        userMessage: this.withUpstream(`Produce a behavior & wave-plan specification (doc/spec/behavior_spec.md) with rule IDs, observable signals, and PASS/FAIL conditions. Rules must trace to the upstream intake requirements and use the upstream module/port names.`, upstream),
         actionName: "generate_behavior_wave", actionDescription: "Produce a behavior & wave-plan spec markdown document.",
         schema: DOC_SCHEMA,
       },
@@ -430,11 +458,11 @@ export class ModelClient implements LoopModel {
     return outcome.action as DocGeneration;
   }
 
-  async generateArchitecture(context: string, systemPrompt: string): Promise<DocGeneration> {
+  async generateArchitecture(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     const outcome = await this.emitAction(
       {
         phase: "generate_architecture", systemPrompt,
-        userMessage: `Upstream artifacts:\n${context}\n\nProduce an architecture design document (doc/arch/module_partition.md) documenting module partition, interface contract, clock/reset/CDC strategy.`,
+        userMessage: this.withUpstream(`Produce an architecture design document (doc/arch/module_partition.md) documenting module partition, interface contract (top-level port list with directions/widths), clock/reset/CDC strategy. Module names and ports must be consistent with the upstream artifacts.`, upstream),
         actionName: "generate_architecture", actionDescription: "Produce an architecture design markdown document.",
         schema: DOC_SCHEMA,
       },
@@ -443,11 +471,11 @@ export class ModelClient implements LoopModel {
     return outcome.action as DocGeneration;
   }
 
-  async generateRegisterSpec(context: string, systemPrompt: string): Promise<DocGeneration> {
+  async generateRegisterSpec(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     const outcome = await this.emitAction(
       {
         phase: "generate_register_spec", systemPrompt,
-        userMessage: `Upstream artifacts:\n${context}\n\nProduce a register specification document (doc/reg/register_map.md) documenting the register map, field semantics, access types, and side effects.`,
+        userMessage: this.withUpstream(`Produce a register specification document (doc/reg/register_map.md) documenting the register map, field semantics, access types, and side effects. Register/module names must be consistent with the upstream architecture.`, upstream),
         actionName: "generate_register_spec", actionDescription: "Produce a register specification markdown document.",
         schema: DOC_SCHEMA,
       },
