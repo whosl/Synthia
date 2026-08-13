@@ -32,11 +32,11 @@ export const GATE_TO_BASELINE: Readonly<Record<string, BaselineKind>> = {
 };
 
 export const BASELINE_NAMES: Readonly<Record<BaselineKind, string>> = {
-  B0: "系统需求基线",
-  B1: "设计输入基线",
-  B2: "RTL 基线",
-  B3: "验证基线",
-  B4: "产品基线",
+  B0: "需求里程碑",
+  B1: "设计里程碑",
+  B2: "RTL里程碑",
+  B3: "实现里程碑",
+  B4: "发布里程碑",
 };
 
 export const BASELINE_KINDS: readonly BaselineKind[] = ["B0", "B1", "B2", "B3", "B4"];

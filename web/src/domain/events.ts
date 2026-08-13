@@ -1,9 +1,8 @@
 /**
- * 项目事件流 / 产物类型的 UI 中文映射（spec ui-redesign-v1 §4.3 / §4.6）。
+ * 项目事件流的 UI 中文映射（spec ui-redesign-v1 §4.3）。
  *
- * - 事件流在主页面只显示人话叙述（「架构设计文档已提交审查」），
- *   event_type 原文、aggregate_id、sequence 一律不出现。
- * - 产物按「需求/行为/架构/寄存器/RTL/约束/…」中文分组，英文类型枚举不直接显示。
+ * 事件流在主页面只显示人话叙述（「架构设计文档已提交审查」），
+ * event_type 原文、aggregate_id、sequence 一律不出现。
  */
 
 import { GATE_REVIEW_NAMES, type GateId } from "./gates.ts";
@@ -41,36 +40,3 @@ export function eventNarration(event: OutboxEvent): string {
     default: return "项目有新的动态。";
   }
 }
-
-// ─── 产物中文分组 ──────────────────────────────────────────────────────
-
-/** 产物类型 → 中文分组（spec §4.6；未列出的治理/内部类型归「其他」）。 */
-const ARTIFACT_TYPE_GROUP: Readonly<Record<string, string>> = {
-  DEVELOPMENT_REQUIREMENTS: "需求",
-  SYSTEM_REQUIREMENTS: "需求",
-  OPEN_QUESTION_SET: "需求",
-  PLDS_SRS: "行为",
-  DERIVED_REQUIREMENT_SET: "行为",
-  REQUIREMENT_TRACE: "行为",
-  VERIFICATION_METHOD_MAP: "行为",
-  DETAILED_DESIGN: "行为",
-  ARCHITECTURE_DESIGN: "架构",
-  CONSTRAINT_DESIGN: "架构",
-  DESIGN_TRACE: "架构",
-  DESIGN_REVIEW: "架构",
-  RTL_SOURCE_SET: "RTL",
-  TB_SOURCE_SET: "RTL",
-  CODE_TRACE: "RTL",
-  CODE_REVIEW: "RTL",
-  XDC_CANDIDATE: "约束",
-};
-
-/** 产物类型 → 中文分组名（未知类型归「其他」，不显示英文枚举）。 */
-export function artifactGroupName(artifactType: string): string {
-  return ARTIFACT_TYPE_GROUP[artifactType] ?? "其他";
-}
-
-/** 分组显示顺序。 */
-export const ARTIFACT_GROUP_ORDER: readonly string[] = [
-  "需求", "行为", "架构", "RTL", "约束", "其他",
-];

@@ -15,7 +15,8 @@ import {
   REVISION_STATE_TEXT,
   SUBMISSION_STATE_TEXT,
 } from "../src/domain/gates.ts";
-import { ARTIFACT_GROUP_ORDER, artifactGroupName, eventNarration } from "../src/domain/events.ts";
+import { eventNarration } from "../src/domain/events.ts";
+import { ARTIFACT_GROUP_ORDER, artifactGroupName } from "../src/domain/artifacts.ts";
 import type { OutboxEvent, TaskAuditEvent } from "../src/api/types.ts";
 
 /**

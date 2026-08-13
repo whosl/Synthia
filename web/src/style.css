@@ -656,33 +656,170 @@ button.btn.danger {
   margin: 0;
 }
 
-/* ── 对话气泡（工作台左栏）──────────────────────────────── */
+/* ── 信息流（opencode 模式，v2 §4）────────────────────────── */
 
-.bubble {
-  border-radius: 8px;
+.msg-user {
+  margin: 0 0 14px 15%;
+  background: var(--c-accent);
+  color: #fff;
+  border-radius: 10px 10px 2px 10px;
   padding: 10px 12px;
-  margin-bottom: 10px;
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
 }
 
-.bubble-user {
-  background: var(--c-info-bg);
-  border: 1px solid var(--c-accent);
-}
-
-.bubble-agent {
-  background: #f7f9fb;
-  border: 1px solid var(--c-border);
-}
-
-.bubble-meta {
-  display: flex;
-  justify-content: space-between;
+.msg-user .msg-meta {
   margin-top: 6px;
   font-size: 11px;
+  opacity: 0.75;
+  text-align: right;
+}
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.feed-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 单行工具条（工具/门禁/证据共用骨架） */
+.tool-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: #f7f9fb;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.tool-bar .bar-icon {
   color: var(--c-text-dim);
+  flex-shrink: 0;
+}
+
+.tool-bar .bar-title {
+  flex: 1;
+}
+
+.tool-bar .bar-mark {
+  font-size: 12px;
+  color: var(--c-text-dim);
+}
+
+.tool-bar .bar-duration {
+  font-size: 11px;
+  color: var(--c-text-dim);
+  font-family: var(--font-mono);
+}
+
+.tool-bar .bar-detail {
+  flex-basis: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  padding-top: 4px;
+}
+
+/* 进行中：流光动画，不可展开 */
+.tool-bar.running {
+  border-color: var(--c-accent);
+  background: linear-gradient(90deg, var(--c-info-bg) 25%, #ffffff 50%, var(--c-info-bg) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  color: var(--c-accent);
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* 成功：弱化 */
+.tool-bar.ok {
+  opacity: 0.7;
+}
+
+.tool-bar.ok .bar-mark {
+  color: var(--c-ok);
+}
+
+/* 失败：红色可展开 */
+.tool-bar.failed {
+  border-color: var(--c-danger);
+  background: #faeceb;
+  color: var(--c-danger);
+}
+
+.tool-bar.expandable {
+  cursor: pointer;
+}
+
+/* 门禁条状态色 */
+.gate-bar.evaluating {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.gate-bar.passed .bar-mark {
+  color: var(--c-ok);
+}
+
+.gate-bar.awaiting {
+  border-color: var(--c-warn);
+  background: #faf3e3;
+  color: var(--c-warn);
+}
+
+/* 产物文件卡 */
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--c-text);
+  font-size: 13px;
+}
+
+.file-card:hover {
+  border-color: var(--c-accent);
+  background: var(--c-info-bg);
+}
+
+.file-card .bar-title {
+  flex: 1;
+}
+
+/* 终态卡 */
+.terminal-card {
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.terminal-card.succeeded {
+  border: 1px solid var(--c-ok);
+  border-left-width: 4px;
+  background: #eaf5ee;
+  color: var(--c-ok);
+}
+
+.terminal-card.failed {
+  border: 1px solid var(--c-danger);
+  border-left-width: 4px;
+  background: #faeceb;
+  color: var(--c-danger);
 }
 
 /* ── 我的待办 ─────────────────────────────────────────── */

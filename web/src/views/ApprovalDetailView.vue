@@ -72,7 +72,7 @@ const baselineName = computed(() => (baselineKind.value ? BASELINE_NAMES[baselin
 const inReview = computed(() => submission.value?.state === "in_review");
 const stateText = computed(() => (submission.value ? (SUBMISSION_STATE_TEXT[submission.value.state] ?? submission.value.state) : ""));
 
-/** 批准按钮文案：里程碑门明示后果（「批准并建立需求基线」）。 */
+/** 批准按钮文案：里程碑门明示后果（「批准并建立需求里程碑」）。 */
 const approveLabel = computed(() =>
   baselineName.value ? `批准并建立${baselineName.value}` : "批准",
 );
@@ -245,7 +245,7 @@ onMounted(load);
             {{ approving ? "提交中…" : approveLabel }}
           </button>
           <p v-if="baselineName" class="muted" style="margin: 8px 0 0; font-size: 12px">
-            批准后将自动建立{{ baselineName }}，作为后续阶段的输入基线。
+            批准后将自动建立{{ baselineName }}，作为后续阶段的输入里程碑。
           </p>
         </div>
 

@@ -7,15 +7,18 @@ import type { TaskDocRef, TaskRunDetail } from "../api/types.ts";
 import {
   STAGE_NODE_STATUS_TEXT,
   TASK_STATUS_TEXT,
+  buildFeed,
   createPoller,
   deriveStageChain,
+  formatDuration,
   humanizeReason,
   isTerminalStatus,
-  narrateAuditEvent,
+  type FeedPart,
   type Poller,
   type StageNodeStatus,
 } from "../domain/tasks.ts";
 import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
+import { phaseDocName } from "../domain/artifacts.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -94,36 +97,32 @@ const NODE_ICON: Readonly<Record<StageNodeStatus, string>> = {
   failed: "✗",
 };
 
-// ── 对话区：用户指令 + Agent 叙述（完整中文句子，audit 原文禁止出现）─────
-const dialogue = computed(() => {
-  if (!detail.value) return [];
-  return [...detail.value.audit]
-    .sort((a, b) => a.seq - b.seq)
-    .map((event) => {
-      const sentence = narrateAuditEvent(event);
-      return sentence ? { key: event.seq, ts: event.ts, text: sentence } : null;
-    })
-    .filter((item): item is { key: number; ts: string; text: string } => item !== null);
-});
+// ── 信息流（opencode 模式：用户气泡 + assistant 流，按时间序不重排）──────
+const feed = computed<FeedPart[]>(() => (detail.value ? buildFeed(detail.value) : []));
 
-// ── 产物预览（标题 + 候选标签；哈希/修订 ID 只在运行记录页）───────────────
-const CODE_EXTENSIONS = [".v", ".sv", ".vhd", ".vhdl", ".xdc", ".sdc", ".tcl", ".f"];
+/** 失败工具条/门禁条的展开状态。 */
+const expandedParts = ref<ReadonlySet<string>>(new Set());
 
-const DOC_PHASE_TEXT: Readonly<Record<string, string>> = {
-  intake: "需求规格",
-  behavior_wave: "行为与波形设计",
-  architecture: "架构设计",
-  register_spec: "寄存器规格",
-  rtl_build: "RTL 代码",
-  rtl: "RTL 代码",
-  tb: "仿真测试台",
-  xdc: "约束文件",
+function togglePart(key: string) {
+  const next = new Set(expandedParts.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedParts.value = next;
+}
+
+const GATE_BAR_TEXT: Readonly<Record<string, string>> = {
+  evaluating: "评估中…",
+  passed: "已通过",
+  failed: "未通过",
+  awaiting: "等待人工批准",
 };
 
+// ── 产物预览（《GJB 文档名》+ 候选标签；哈希/修订 ID 只在运行记录页）───────
+const CODE_EXTENSIONS = [".v", ".sv", ".vhd", ".vhdl", ".xdc", ".sdc", ".tcl", ".f"];
+
 function docTitle(doc: TaskDocRef): string {
-  const phase = DOC_PHASE_TEXT[doc.phase] ?? "产物文档";
   const file = doc.path.split("/").pop() ?? doc.path;
-  return `${phase} · ${file}`;
+  return `《${phaseDocName(doc.phase)}》 · ${file}`;
 }
 
 const selectedDoc = ref<TaskDocRef | null>(null);
@@ -203,19 +202,84 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
     </div>
 
     <div class="workbench">
-      <!-- 左栏：对话区（用户指令 + Agent 进展叙述） -->
+      <!-- 左栏：信息流（用户指令气泡 + assistant 流，按时间序不重排） -->
       <div class="panel workbench-left">
-        <h2>对话</h2>
-        <div v-if="detail.task" class="bubble bubble-user">{{ detail.task }}</div>
-        <div v-else class="bubble bubble-user muted">（指令文本未随任务详情返回）</div>
+        <h2>任务进展</h2>
 
-        <div v-if="dialogue.length === 0" class="muted" style="margin-top: 12px">正在启动，暂无进展。</div>
-        <div v-for="item in dialogue" :key="item.key" class="bubble bubble-agent">
-          <div>{{ item.text }}</div>
-          <div class="bubble-meta">
-            <span>{{ new Date(item.ts).toLocaleTimeString("zh-CN") }}</span>
-            <router-link :to="runsPageUrl">查看详情</router-link>
-          </div>
+        <!-- user 消息：右侧蓝色气泡 -->
+        <div class="msg-user">
+          <div>{{ detail.task || "（指令文本未随任务详情返回）" }}</div>
+          <div class="msg-meta">{{ new Date(detail.created_at).toLocaleString("zh-CN") }}</div>
+        </div>
+
+        <div v-if="feed.length === 0" class="muted">正在启动，暂无进展。</div>
+
+        <!-- assistant 信息流：贴左，无气泡 -->
+        <div class="feed">
+          <template v-for="part in feed" :key="part.key">
+            <!-- 文本叙述 -->
+            <p v-if="part.kind === 'text'" class="feed-text">{{ part.text }}</p>
+
+            <!-- 工具调用条：进行中流光 / 成功弱化 / 失败红色可展开 -->
+            <div
+              v-else-if="part.kind === 'tool'"
+              class="tool-bar"
+              :class="[part.state, { expandable: part.state === 'failed' }]"
+              @click="part.state === 'failed' && togglePart(part.key)"
+            >
+              <span class="bar-icon">◆</span>
+              <span class="bar-title">{{ part.title }}</span>
+              <span v-if="part.state === 'ok'" class="bar-mark">✓</span>
+              <span v-else-if="part.state === 'failed'" class="bar-mark">✗ {{ expandedParts.has(part.key) ? "收起" : "详情" }}</span>
+              <span v-if="part.durationMs !== null" class="bar-duration">{{ formatDuration(part.durationMs) }}</span>
+              <div v-if="part.state === 'failed' && expandedParts.has(part.key) && part.reason" class="bar-detail">
+                {{ part.reason }}
+                <router-link :to="runsPageUrl">查看运行记录 →</router-link>
+              </div>
+            </div>
+
+            <!-- 门禁条 -->
+            <div
+              v-else-if="part.kind === 'gate'"
+              class="tool-bar gate-bar"
+              :class="[part.state, { expandable: part.state === 'failed' }]"
+              @click="part.state === 'failed' && togglePart(part.key)"
+            >
+              <span class="bar-icon">▲</span>
+              <span class="bar-title">{{ part.review }}</span>
+              <span class="bar-mark">{{ GATE_BAR_TEXT[part.state] }}</span>
+              <div v-if="part.state === 'failed' && expandedParts.has(part.key)" class="bar-detail">
+                「{{ part.review }}」未通过，任务已安全停止。技术原因见运行记录。
+                <router-link :to="runsPageUrl">查看运行记录 →</router-link>
+              </div>
+            </div>
+
+            <!-- 产物文件卡：点击在右栏预览 -->
+            <a
+              v-else-if="part.kind === 'file'"
+              href="#"
+              class="file-card"
+              @click.prevent="viewDoc(part.doc)"
+            >
+              <span class="bar-icon">▤</span>
+              <span class="bar-title">《{{ part.title }}》</span>
+              <StatusBadge text="候选" kind="accent" />
+            </a>
+
+            <!-- 证据摘要：不内联全文 -->
+            <div v-else-if="part.kind === 'evidence'" class="tool-bar evidence-bar">
+              <span class="bar-icon">▦</span>
+              <span class="bar-title">已收集证据 · {{ part.count }} 项</span>
+              <router-link :to="runsPageUrl" class="bar-mark">查看详情 →</router-link>
+            </div>
+
+            <!-- 终态卡 -->
+            <div v-else-if="part.kind === 'terminal'" class="terminal-card" :class="part.state">
+              {{ part.text }}
+              <router-link v-if="part.state === 'failed'" :to="runsPageUrl">查看运行记录 →</router-link>
+              <router-link v-else :to="runsPageUrl">取证据 →</router-link>
+            </div>
+          </template>
         </div>
       </div>
 

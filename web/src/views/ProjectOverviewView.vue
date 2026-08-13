@@ -102,7 +102,7 @@ async function submitTask() {
 <template>
   <h1 class="page-title">项目总览 <span class="mono muted">{{ projectId }}</span></h1>
   <p class="page-sub">
-    阶段泳道 · 基线 · 最近动态
+    阶段泳道 · 里程碑 · 最近动态
     <span class="row-actions" style="float: right">
       <router-link class="btn secondary btn-link" :to="`/projects/${projectId}/tasks`">任务列表</router-link>
       <button class="btn" @click="openTaskDialog">新任务</button>
@@ -135,7 +135,7 @@ async function submitTask() {
     </div>
 
     <div class="panel">
-      <h2>基线</h2>
+      <h2>里程碑</h2>
       <div class="baseline-strip">
         <div
           v-for="kind in BASELINE_KINDS"

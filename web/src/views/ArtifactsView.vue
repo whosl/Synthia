@@ -5,7 +5,7 @@ import { api } from "../main.ts";
 import { getRevisionContent, listArtifacts, listRevisions } from "../api/index.ts";
 import type { Artifact, ArtifactRevision, RevisionContent } from "../api/types.ts";
 import { REVISION_STATE_TEXT } from "../domain/gates.ts";
-import { ARTIFACT_GROUP_ORDER, artifactGroupName } from "../domain/events.ts";
+import { ARTIFACT_GROUP_ORDER, artifactDocName, artifactGroupName } from "../domain/artifacts.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -85,6 +85,16 @@ async function viewContent(rev: ArtifactRevision) {
   }
 }
 
+/** 当前展开的产物（预览头部取 GJB 文档名用）。 */
+const expandedArtifact = computed(() => {
+  if (!expandedId.value) return null;
+  for (const group of groups.value) {
+    const found = group.artifacts.find((a) => a.id === expandedId.value);
+    if (found) return found;
+  }
+  return null;
+});
+
 const selectedGroupCount = computed(() => groups.value.reduce((n, g) => n + g.artifacts.length, 0));
 
 onMounted(async () => {
@@ -124,6 +134,7 @@ onMounted(async () => {
       <table class="data">
         <thead>
           <tr>
+            <th>文档</th>
             <th>创建时间</th>
             <th></th>
           </tr>
@@ -131,6 +142,7 @@ onMounted(async () => {
         <tbody>
           <template v-for="artifact in group.artifacts" :key="artifact.id">
             <tr>
+              <td>《{{ artifactDocName(artifact.artifact_type) }}》</td>
               <td class="muted">{{ new Date(artifact.created_at).toLocaleString("zh-CN") }}</td>
               <td>
                 <a href="#" @click.prevent="toggle(artifact)">
@@ -139,7 +151,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="expandedId === artifact.id">
-              <td colspan="2" style="background: #fbfcfd">
+              <td colspan="3" style="background: #fbfcfd">
                 <ErrorNotice v-if="revisionsError" :error="revisionsError" />
                 <div v-if="revisionsLoading" class="muted">版本加载中…</div>
                 <template v-else>
@@ -176,7 +188,10 @@ onMounted(async () => {
 
                   <div v-if="selectedRev" class="panel" style="margin: 12px 0 0; background: #fff">
                     <h2>
-                      内容 · v{{ selectedRev.version }}
+                      《{{ expandedArtifact ? artifactDocName(expandedArtifact.artifact_type) : "工程文档" }}》
+                      <span class="muted" style="font-weight: 400; font-size: 13px">
+                        v{{ selectedRev.version }} · {{ new Date(selectedRev.created_at).toLocaleString("zh-CN") }}
+                      </span>
                       <StatusBadge
                         :text="REVISION_STATE_TEXT[selectedRev.state] ?? selectedRev.state"
                         :kind="stateBadgeKind(selectedRev.state)"
