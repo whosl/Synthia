@@ -15,14 +15,17 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { GateId, StageId, RunState, RegisteredRevision } from "./types.ts";
 
-const RUNS_DIR = join(import.meta.dirname ?? new URL(".runs", import.meta.url).pathname, ".runs");
+function runsDir(): string {
+  const override = process.env.SYNTHIA_RUNS_DIR;
+  if (override) return override;
+  return join(import.meta.dirname ?? new URL(".runs", import.meta.url).pathname, ".runs");
+}
 
 export function newRunId(): string {
   return `run-${randomUUID()}`;
 }
-
 export function runStatePath(runId: string): string {
-  return join(RUNS_DIR, `${runId}.json`);
+  return join(runsDir(), `${runId}.json`);
 }
 
 /** The ordered stage chain. */
@@ -50,6 +53,7 @@ export function createRunState(opts: {
   task: string;
   part: string;
   projectId: string;
+  processInstanceId?: string;
 }): RunState {
   const now = new Date().toISOString();
   return {
@@ -57,6 +61,7 @@ export function createRunState(opts: {
     task: opts.task,
     part: opts.part,
     projectId: opts.projectId,
+    ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     createdAt: now,
     updatedAt: now,
     currentStage: "intake",
@@ -74,7 +79,7 @@ export async function loadRunState(runId: string): Promise<RunState> {
 
 export async function saveRunState(state: RunState): Promise<void> {
   const updated: RunState = { ...state, updatedAt: new Date().toISOString() };
-  await mkdir(RUNS_DIR, { recursive: true });
+  await mkdir(runsDir(), { recursive: true });
   await writeFile(runStatePath(state.runId), JSON.stringify(updated, null, 2) + "\n", "utf8");
 }
 
@@ -82,7 +87,7 @@ export async function saveRunState(state: RunState): Promise<void> {
 export async function listRuns(): Promise<string[]> {
   let entries: string[];
   try {
-    entries = await readdir(RUNS_DIR);
+    entries = await readdir(runsDir());
   } catch {
     return [];
   }

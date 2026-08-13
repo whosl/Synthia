@@ -7,7 +7,11 @@ const route = useRoute();
 const auth = useAuthStore();
 
 const isLogin = computed(() => route.name === "login");
-const projectId = computed(() => (route.name === "project-overview" || route.name === "project-artifacts" ? String(route.params.id) : null));
+const projectId = computed(() =>
+  route.name === "project-overview" || route.name === "project-artifacts" || route.name === "project-tasks" || route.name === "task-workbench"
+    ? String(route.params.id)
+    : null,
+);
 </script>
 
 <template>
@@ -28,6 +32,9 @@ const projectId = computed(() => (route.name === "project-overview" || route.nam
         </router-link>
         <router-link v-if="projectId" :to="`/projects/${projectId}/artifacts`" :class="{ active: route.name === 'project-artifacts' }">
           产物库
+        </router-link>
+        <router-link v-if="projectId" :to="`/projects/${projectId}/tasks`" :class="{ active: route.name === 'project-tasks' || route.name === 'task-workbench' }">
+          任务工作台
         </router-link>
         <router-link to="/approvals" :class="{ active: route.name === 'approvals' || route.name === 'approval-detail' }">
           审批中心

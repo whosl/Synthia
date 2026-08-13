@@ -468,3 +468,195 @@ button.btn.danger {
   align-items: flex-end;
   flex-wrap: wrap;
 }
+
+/* ── 对话框 ───────────────────────────────────────────── */
+
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 30, 40, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  z-index: 100;
+}
+
+.dialog {
+  width: 560px;
+  max-width: calc(100vw - 48px);
+  margin-bottom: 0;
+}
+
+.btn-link {
+  display: inline-block;
+  padding: 8px 18px;
+  border: 1px solid var(--c-accent);
+  border-radius: 4px;
+}
+
+/* ── 任务工作台（UI-2）─────────────────────────────────── */
+
+.task-banner-waiting {
+  border-color: var(--c-warn);
+  background: #faf3e3;
+  color: var(--c-warn);
+  font-size: 14px;
+}
+
+.task-banner-done {
+  border-color: var(--c-ok);
+  background: #eaf5ee;
+  color: var(--c-ok);
+}
+
+.workbench {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(240px, 300px) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.workbench .panel {
+  margin-bottom: 0;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+
+/* 左栏：进展叙述 */
+.narration {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.narration li {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--c-border);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.narration li:last-child {
+  border-bottom: none;
+}
+
+/* 中栏：阶段链 */
+.stage-chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.stage-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.stage-node .stage-icon {
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.stage-node .stage-name {
+  flex: 1;
+}
+
+.stage-node .stage-status {
+  font-size: 12px;
+}
+
+.stage-node.done {
+  color: var(--c-ok);
+}
+
+.stage-node.running {
+  border-left-color: var(--c-accent);
+  background: var(--c-info-bg);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.stage-node.waiting {
+  border-left-color: var(--c-warn);
+  background: #faf3e3;
+  color: var(--c-warn);
+  font-weight: 600;
+}
+
+.stage-node.failed {
+  border-left-color: var(--c-danger);
+  background: #faeceb;
+  color: var(--c-danger);
+  font-weight: 600;
+}
+
+.stage-node.pending {
+  opacity: 0.55;
+}
+
+/* 门节点特殊样式：虚线框 + 字重 */
+.stage-node.gate {
+  margin: 4px 0;
+  border: 1px dashed var(--c-border);
+  border-left-width: 3px;
+}
+
+.stage-node.gate .stage-name {
+  font-weight: 700;
+}
+
+.stage-node.gate.done {
+  border-color: var(--c-ok);
+}
+
+.stage-node.gate.waiting {
+  border-color: var(--c-warn);
+}
+
+/* 右栏：产物列表与内容 */
+.doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.doc-list a {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-text);
+}
+
+.doc-list a:hover {
+  background: #f7fafc;
+}
+
+.doc-list a.active {
+  border-color: var(--c-accent);
+  background: var(--c-info-bg);
+}
+
+.code-view {
+  background: #f7f9fb;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  margin: 0;
+}

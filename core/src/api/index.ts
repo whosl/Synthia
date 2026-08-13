@@ -18,6 +18,26 @@ export {
 } from "./errors.ts";
 export { routeApi } from "./router.ts";
 export { startSynthiaServer } from "./server.ts";
+export {
+  createTaskHandler,
+  getTaskHandler,
+  listTasksHandler,
+  HttpRuntimeClient,
+  createRuntimeClientFromEnv,
+  RuntimeClientError,
+} from "./task-proxy.ts";
+export type {
+  RuntimeClient,
+  RuntimeDocRef,
+  RuntimeRunSummary,
+  RuntimeRunDetail,
+  RuntimeListResponse,
+  RuntimeCreateResponse,
+  RuntimeTaskStatus,
+  RuntimeAuditEntry,
+  RuntimeEvidenceEntry,
+  RuntimeEnvOptions,
+} from "./task-proxy.ts";
 export type { SynthiaServer } from "./server.ts";
 export type { SynthiaServerOptions } from "./server.ts";
 export type {

@@ -53,6 +53,7 @@ import {
   type ConnectorPort,
   type SourceInput,
 } from "./connector-port.ts";
+import type { RuntimeClient } from "./task-proxy.ts";
 
 // ─── shared request context ──────────────────────────────────────────────────
 
@@ -69,6 +70,8 @@ export interface RequestContext {
   readonly classification: string;
   /** Connector port for the run/Job slice; undefined when not configured (Job endpoints → 503). */
   readonly connector?: ConnectorPort;
+  /** Runtime client for the task-workbench slice; undefined when not configured (task endpoints → 503). */
+  readonly runtimeClient?: RuntimeClient;
 }
 
 export interface HandlerResult {

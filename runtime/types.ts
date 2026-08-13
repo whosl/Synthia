@@ -187,6 +187,9 @@ export interface EvidenceSummary {
 
 export type LoopStatus = "succeeded" | "failed" | "fail_closed";
 
+/** Structured cause for terminal failure (drives resume eligibility). */
+export type TerminalCause = "governance_rejected" | "execution_error";
+
 export interface LoopResult {
   readonly status: LoopStatus;
   readonly task: string;
@@ -198,10 +201,9 @@ export interface LoopResult {
   readonly evidence: readonly EvidenceSummary[];
   readonly audit: readonly AuditEvent[];
   readonly endedReason?: string;
-  /** Gate at which the loop paused awaiting human approval (awaiting_approval). */
-  readonly awaitingGate?: GateId;
-  /** Run ID when governance / persistence is active. */
   readonly runId?: string;
+  /** Structured cause when status is failed/fail_closed (drives resume). */
+  readonly terminalCause?: TerminalCause;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +245,8 @@ export interface RegisteredRevision {
   readonly artifactId: string;
   readonly version: number;
   readonly contentHash: string;
+  /** Doc path or artifact location (populated by the loop for display). */
+  readonly contentLocation?: string;
 }
 
 /** A Core API governance client the loop calls to register artifacts and manage gates. */
@@ -304,13 +308,13 @@ export class NoGovernanceClient implements GovernanceClient {
 // ---------------------------------------------------------------------------
 // Run-state persistence.
 // ---------------------------------------------------------------------------
-
-/** Persisted loop progress for --resume. */
 export interface RunState {
   readonly runId: string;
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
+  /** Process instance id for gate-submission governance (server-injected). */
+  readonly processInstanceId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   /** Current stage being executed or next to execute on resume. */
@@ -334,4 +338,6 @@ export interface RunState {
   /** Gate decisions: approved / rejected / withdrawn. */
   readonly gateDecisions?: Readonly<Partial<Record<GateId, "approved" | "rejected" | "withdrawn">>>;
   readonly endedReason?: string;
+  /** Structured cause for terminal failure (drives resume eligibility). */
+  readonly terminalCause?: TerminalCause;
 }

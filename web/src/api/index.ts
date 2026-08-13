@@ -7,11 +7,15 @@ import type {
   Artifact,
   ArtifactRevision,
   Baseline,
+  CreateTaskRequest,
+  CreateTaskResult,
   GateSubmission,
   GateSubmissionDetail,
   OutboxEvent,
   Project,
   RevisionContent,
+  TaskRunDetail,
+  TaskRunList,
 } from "./types.ts";
 
 const V1 = "/api/v1";
@@ -86,4 +90,25 @@ export function rejectGateSubmission(client: ApiClient, projectId: string, subId
     body: { reason },
     headers: { "idempotency-key": idempotencyKey },
   });
+}
+
+// ─── 任务工作台（UI-2：Core 代理 → Runtime，UI 不直连 Runtime）─────────────────
+
+/** 创建任务（body 只需 {task, part?}；process_instance_id 由 Core 懒加载默认流程实例）。 */
+export function createTask(client: ApiClient, projectId: string, body: CreateTaskRequest, idempotencyKey: string): Promise<CreateTaskResult> {
+  return client<CreateTaskResult>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+/** 项目任务列表（Core 已按 project 过滤）。 */
+export function listTasks(client: ApiClient, projectId: string): Promise<TaskRunList> {
+  return client<TaskRunList>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`);
+}
+
+/** 任务详情（Core 校验 project 归属，不匹配 404）。 */
+export function getTask(client: ApiClient, projectId: string, runId: string): Promise<TaskRunDetail> {
+  return client<TaskRunDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}`);
 }

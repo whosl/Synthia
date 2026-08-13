@@ -79,3 +79,77 @@ export interface SnapshotCreatedPayload {
   readonly manifestHash: string;
   readonly memberRevisionIds: readonly string[];
 }
+
+// ─── 任务工作台（UI-2：Core 代理转发 Runtime，字段与 Contract 一致）─────────────
+
+/** POST /projects/:id/tasks 请求体（process_instance_id 由 Core 懒加载默认流程实例）。 */
+export interface CreateTaskRequest {
+  readonly task: string;
+  readonly part?: string;
+}
+
+/** POST /projects/:id/tasks 成功响应 data。 */
+export interface CreateTaskResult {
+  readonly runId: string;
+}
+
+/** GET /projects/:id/tasks 列表项。 */
+export interface TaskRunSummary {
+  readonly run_id: string;
+  readonly project_id: string;
+  readonly status: string;
+  readonly current_stage: string | null;
+  readonly awaiting_gate: string | null;
+  readonly created_at: string;
+}
+
+/** GET /projects/:id/tasks 响应 data。 */
+export interface TaskRunList {
+  readonly runs: readonly TaskRunSummary[];
+}
+
+/** 任务产物引用（Runtime 登记产物时透传 artifact_id / revision_id）。 */
+export interface TaskDocRef {
+  readonly phase: string;
+  readonly path: string;
+  readonly artifact_id: string;
+  readonly revision_id: string;
+}
+
+/** Runtime audit 事件（runtime/types.ts AuditEvent 镜像）。 */
+export interface TaskAuditEvent {
+  readonly ts: string;
+  readonly seq: number;
+  readonly category: string;
+  readonly phase: string;
+  readonly action: string;
+  readonly inputSha256?: string;
+  readonly jobId?: string;
+  readonly result?: string;
+  readonly errorCode?: string;
+  readonly detail?: string;
+}
+
+/** 证据清单条目（runtime/types.ts EvidenceSummary 镜像）。 */
+export interface TaskEvidenceSummary {
+  readonly jobId: string;
+  readonly operation: string;
+  readonly status: string;
+  readonly inputSha256: string;
+  readonly entries: ReadonlyArray<{
+    readonly name: string;
+    readonly sha256: string;
+    readonly sizeBytes: number;
+    readonly mediaType: string;
+  }>;
+}
+
+/** GET /projects/:id/tasks/:runId 响应 data。 */
+export interface TaskRunDetail extends TaskRunSummary {
+  /** 任务指令（Runtime 透传 run-state.task）。 */
+  readonly task?: string;
+  readonly docs: readonly TaskDocRef[];
+  readonly audit: readonly TaskAuditEvent[];
+  readonly evidence: readonly TaskEvidenceSummary[];
+  readonly reason?: string | null;
+}

@@ -15,6 +15,7 @@
 import type { Pool } from "pg";
 import { authenticate } from "./auth.ts";
 import type { ConnectorPort } from "./connector-port.ts";
+import type { RuntimeClient } from "./task-proxy.ts";
 import { errorEnvelope, resolveCorrelationId, successEnvelope } from "./envelope.ts";
 import {
   ApiError,
@@ -52,6 +53,11 @@ import {
   submitJobHandler,
   withdrawGateSubmissionHandler,
 } from "./handlers.ts";
+import {
+  createTaskHandler,
+  getTaskHandler,
+  listTasksHandler,
+} from "./task-proxy.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
@@ -66,7 +72,7 @@ interface RouteMatch {
 }
 
 
-export async function routeApi(request: Request, pool: Pool, connector?: ConnectorPort): Promise<Response> {
+export async function routeApi(request: Request, pool: Pool, connector?: ConnectorPort, runtimeClient?: RuntimeClient): Promise<Response> {
   const url = new URL(request.url);
   const correlationId = resolveCorrelationId(request.headers.get("x-correlation-id"));
 
@@ -113,6 +119,7 @@ export async function routeApi(request: Request, pool: Pool, connector?: Connect
     idempotencyKey: request.headers.get("idempotency-key"),
     classification,
     connector,
+    runtimeClient,
   };
 
   const match = matchRoute(ctx);
@@ -205,6 +212,10 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
         case "jobs":
           if (method === "POST") return { handler: submitJobHandler, params, requiredScope: "core:write" };
           break;
+        case "tasks":
+          if (method === "POST") return { handler: createTaskHandler, params, requiredScope: "core:write" };
+          if (method === "GET") return { handler: listTasksHandler, params, requiredScope: "core:read" };
+          break;
       }
     }
 
@@ -216,6 +227,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // GET /projects/:projectId/jobs/:jobId
     if (segments.length === 4 && segments[2] === "jobs" && method === "GET") {
       return { handler: getJobStatusHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // GET /projects/:projectId/tasks/:runId
+    if (segments.length === 4 && segments[2] === "tasks" && method === "GET") {
+      return { handler: getTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:read" };
     }
 
     // GET /projects/:projectId/jobs/:jobId/evidence

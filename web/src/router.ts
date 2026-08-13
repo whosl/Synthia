@@ -7,6 +7,8 @@ const ProjectOverviewView = () => import("./views/ProjectOverviewView.vue");
 const ApprovalsView = () => import("./views/ApprovalsView.vue");
 const ApprovalDetailView = () => import("./views/ApprovalDetailView.vue");
 const ArtifactsView = () => import("./views/ArtifactsView.vue");
+const TaskListView = () => import("./views/TaskListView.vue");
+const TaskWorkbenchView = () => import("./views/TaskWorkbenchView.vue");
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -16,6 +18,8 @@ export const router = createRouter({
     { path: "/projects", name: "projects", component: ProjectListView },
     { path: "/projects/:id", name: "project-overview", component: ProjectOverviewView },
     { path: "/projects/:id/artifacts", name: "project-artifacts", component: ArtifactsView },
+    { path: "/projects/:id/tasks", name: "project-tasks", component: TaskListView },
+    { path: "/projects/:id/tasks/:runId", name: "task-workbench", component: TaskWorkbenchView },
     { path: "/approvals", name: "approvals", component: ApprovalsView },
     { path: "/approvals/:projectId/:subId", name: "approval-detail", component: ApprovalDetailView },
     { path: "/:pathMatch(.*)*", redirect: "/projects" },
