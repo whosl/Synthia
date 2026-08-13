@@ -311,11 +311,6 @@ button.btn.danger {
   position: relative;
 }
 
-.lane .gate-id {
-  font-weight: 700;
-  font-size: 15px;
-}
-
 .lane .gate-name {
   font-size: 12px;
   color: var(--c-text-dim);
@@ -659,4 +654,74 @@ button.btn.danger {
   line-height: 1.55;
   white-space: pre;
   margin: 0;
+}
+
+/* ── 对话气泡（工作台左栏）──────────────────────────────── */
+
+.bubble {
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.bubble-user {
+  background: var(--c-info-bg);
+  border: 1px solid var(--c-accent);
+}
+
+.bubble-agent {
+  background: #f7f9fb;
+  border: 1px solid var(--c-border);
+}
+
+.bubble-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--c-text-dim);
+}
+
+/* ── 我的待办 ─────────────────────────────────────────── */
+
+.todo-panel {
+  border-left: 3px solid var(--c-warn);
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.todo-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--c-border);
+}
+
+.todo-list li:last-child {
+  border-bottom: none;
+}
+
+/* ── 审批详情：文档主视觉 2/3 + 操作区 1/3 ────────────────── */
+
+.approval-layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* ── 最近动态折叠 ─────────────────────────────────────── */
+
+.recent-activity > summary {
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
 }

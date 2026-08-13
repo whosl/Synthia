@@ -8,7 +8,7 @@ const auth = useAuthStore();
 
 const isLogin = computed(() => route.name === "login");
 const projectId = computed(() =>
-  route.name === "project-overview" || route.name === "project-artifacts" || route.name === "project-tasks" || route.name === "task-workbench"
+  route.name === "project-overview" || route.name === "project-artifacts" || route.name === "project-tasks" || route.name === "task-workbench" || route.name === "project-runs"
     ? String(route.params.id)
     : null,
 );
@@ -35,6 +35,9 @@ const projectId = computed(() =>
         </router-link>
         <router-link v-if="projectId" :to="`/projects/${projectId}/tasks`" :class="{ active: route.name === 'project-tasks' || route.name === 'task-workbench' }">
           任务工作台
+        </router-link>
+        <router-link v-if="projectId" :to="`/projects/${projectId}/runs`" :class="{ active: route.name === 'project-runs' }">
+          运行记录
         </router-link>
         <router-link to="/approvals" :class="{ active: route.name === 'approvals' || route.name === 'approval-detail' }">
           审批中心

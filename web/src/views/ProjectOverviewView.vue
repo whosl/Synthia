@@ -8,10 +8,13 @@ import {
   BASELINE_KINDS,
   BASELINE_NAMES,
   BASELINE_STATE_TEXT,
+  GATE_REVIEW_NAMES,
+  currentGate,
   deriveGateLanes,
   type GateId,
   type GateLaneState,
 } from "../domain/gates.ts";
+import { eventNarration } from "../domain/events.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import GateSwimlane from "../components/GateSwimlane.vue";
 
@@ -35,9 +38,19 @@ const latestBaselines = computed(() => {
   return byKind;
 });
 
-/** 事件流按发生时间倒序，取最近 30 条。 */
+/** 事件流按发生时间倒序，取最近 30 条，翻译为人话。 */
 const recentEvents = computed(() =>
-  [...events.value].sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1)).slice(0, 30),
+  [...events.value]
+    .sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1))
+    .slice(0, 30)
+    .map((evt) => ({ key: evt.event_id, ts: evt.occurred_at, text: eventNarration(evt) })),
+);
+
+/** 当前门与「等你做什么」摘要。 */
+const current = computed(() => (lanes.value ? currentGate(lanes.value) : null));
+const currentReviewName = computed(() => (current.value ? GATE_REVIEW_NAMES[current.value] : null));
+const waitingApproval = computed(() =>
+  current.value !== null && lanes.value?.[current.value] === "in_review",
 );
 
 onMounted(async () => {
@@ -89,7 +102,7 @@ async function submitTask() {
 <template>
   <h1 class="page-title">项目总览 <span class="mono muted">{{ projectId }}</span></h1>
   <p class="page-sub">
-    G0~G9 门禁泳道 · 基线徽章 · 最近事件流
+    阶段泳道 · 基线 · 最近动态
     <span class="row-actions" style="float: right">
       <router-link class="btn secondary btn-link" :to="`/projects/${projectId}/tasks`">任务列表</router-link>
       <button class="btn" @click="openTaskDialog">新任务</button>
@@ -100,31 +113,44 @@ async function submitTask() {
   <div v-if="loading" class="muted">加载中…</div>
 
   <template v-else-if="lanes">
+    <!-- 当前等你做什么 -->
+    <div v-if="waitingApproval && currentReviewName" class="notice task-banner-waiting">
+      ⏸ 「{{ currentReviewName }}」正在等待批准
+      <router-link to="/approvals">→ 去审批中心</router-link>
+    </div>
+    <div v-else-if="current && lanes[current] === 'rejected' && currentReviewName" class="notice error">
+      「{{ currentReviewName }}」被驳回，请处理驳回意见后等待 Agent 重新提交。
+    </div>
+    <div v-else-if="currentReviewName" class="notice">
+      当前阶段：{{ currentReviewName }}（未开始），可由「新任务」发起推进。
+    </div>
+    <div v-else class="notice task-banner-done">✓ 全部审查已通过，项目已交付。</div>
+
     <div class="panel">
-      <h2>门禁泳道</h2>
+      <h2>阶段泳道</h2>
       <GateSwimlane :lanes="lanes" />
       <p class="muted" style="margin: 10px 0 0; font-size: 12px">
-        状态由门禁提交（gate_submissions）推导：无提交=未开始，in_review=审批中，approved=已批准，rejected=被驳回。
+        阶段状态：未开始 / 等待批准 / 已通过 / 被驳回。悬停阶段名可查看流程编号（G0~G9）。
       </p>
     </div>
 
     <div class="panel">
-      <h2>基线（B0~B4）</h2>
+      <h2>基线</h2>
       <div class="baseline-strip">
         <div
           v-for="kind in BASELINE_KINDS"
           :key="kind"
           class="baseline-chip"
           :class="latestBaselines.get(kind)?.state === 'active' ? 'active' : 'inactive'"
+          :title="kind"
         >
           <div>
-            <span class="kind">{{ kind }}</span>
-            <span class="name"> · {{ BASELINE_NAMES[kind] }}</span>
+            <span class="kind">{{ BASELINE_NAMES[kind] }}</span>
           </div>
           <div class="muted" style="font-size: 12px; margin-top: 2px">
             <template v-if="latestBaselines.get(kind)">
-              {{ BASELINE_STATE_TEXT[latestBaselines.get(kind)!.state] ?? latestBaselines.get(kind)!.state }}
-              · <span class="mono">{{ latestBaselines.get(kind)!.id }}</span>
+              {{ BASELINE_STATE_TEXT[latestBaselines.get(kind)!.state] ?? "生效" }}
+              · 建立于 {{ new Date(latestBaselines.get(kind)!.created_at).toLocaleString("zh-CN") }}
             </template>
             <template v-else>未建立</template>
           </div>
@@ -132,28 +158,16 @@ async function submitTask() {
       </div>
     </div>
 
-    <div class="panel">
-      <h2>最近事件</h2>
-      <table class="data" v-if="recentEvents.length > 0">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>事件类型</th>
-            <th>聚合</th>
-            <th>序号</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="evt in recentEvents" :key="evt.event_id">
-            <td class="muted" style="white-space: nowrap">{{ new Date(evt.occurred_at).toLocaleString("zh-CN") }}</td>
-            <td class="mono">{{ evt.event_type }}</td>
-            <td class="mono muted">{{ evt.aggregate_type }}/{{ evt.aggregate_id }}</td>
-            <td>{{ evt.sequence }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-else class="muted">暂无事件。</div>
-    </div>
+    <details class="panel recent-activity">
+      <summary>最近动态 <span class="muted" style="font-size: 12px">（{{ recentEvents.length }} 条，点击展开）</span></summary>
+      <ul v-if="recentEvents.length > 0" class="narration" style="margin-top: 12px">
+        <li v-for="evt in recentEvents" :key="evt.key">
+          <span class="muted" style="font-size: 11px; white-space: nowrap">{{ new Date(evt.ts).toLocaleString("zh-CN") }}</span>
+          <span>{{ evt.text }}</span>
+        </li>
+      </ul>
+      <div v-else class="muted" style="margin-top: 12px">暂无动态。</div>
+    </details>
   </template>
 
   <!-- 新任务对话框 -->

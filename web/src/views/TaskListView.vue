@@ -5,6 +5,7 @@ import { api } from "../main.ts";
 import { listTasks } from "../api/index.ts";
 import type { TaskRunSummary } from "../api/types.ts";
 import { STAGE_NAME_TEXT, TASK_STATUS_TEXT, normalizeStageId, shortRunId } from "../domain/tasks.ts";
+import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 
@@ -78,7 +79,9 @@ onMounted(async () => {
             </td>
             <td>{{ stageText(run.current_stage) }}</td>
             <td>
-              <span v-if="run.awaiting_gate" class="mono">{{ run.awaiting_gate }}</span>
+              <span v-if="run.awaiting_gate" :title="run.awaiting_gate">
+                {{ GATE_REVIEW_NAMES[run.awaiting_gate as GateId] ?? run.awaiting_gate }}
+              </span>
               <span v-else class="muted">—</span>
             </td>
             <td class="muted" style="white-space: nowrap">{{ new Date(run.created_at).toLocaleString("zh-CN") }}</td>

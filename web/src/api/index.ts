@@ -24,6 +24,22 @@ export function listProjects(client: ApiClient): Promise<Project[]> {
   return client<Project[]>(`${V1}/projects`);
 }
 
+export interface CreateProjectRequest {
+  readonly id: string;
+  readonly name: string;
+  readonly data_classification?: string;
+  readonly target_part?: string;
+}
+
+/** 新建项目（服务端缺省：分类 D1、标准 GB/T 33781-2017；写操作带 Idempotency-Key）。 */
+export function createProject(client: ApiClient, body: CreateProjectRequest, idempotencyKey: string): Promise<Project> {
+  return client<Project>(`${V1}/projects`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
 export function listGateSubmissions(client: ApiClient, projectId: string, state?: string): Promise<GateSubmission[]> {
   const query = state ? `?state=${encodeURIComponent(state)}` : "";
   return client<GateSubmission[]>(`${V1}/projects/${encodeURIComponent(projectId)}/gate-submissions${query}`);

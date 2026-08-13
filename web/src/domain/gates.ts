@@ -16,19 +16,6 @@ export const GATES: readonly GateId[] = [
   "G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
 ];
 
-export const GATE_NAMES: Readonly<Record<GateId, string>> = {
-  G0: "项目启动",
-  G1: "系统需求",
-  G2: "PLDS 需求",
-  G3: "结构与详细设计",
-  G4: "RTL 实现",
-  G5: "综合",
-  G6: "布局布线与实现",
-  G7: "确认测试",
-  G8: "码流与板测",
-  G9: "验收交付",
-};
-
 export const MILESTONE_GATES: readonly GateId[] = ["G1", "G3", "G4", "G7", "G9"];
 
 export function isMilestoneGate(gate: string): gate is GateId {
@@ -65,9 +52,43 @@ export type GateLaneState = "not_started" | "in_review" | "approved" | "rejected
 
 export const GATE_LANE_STATE_TEXT: Readonly<Record<GateLaneState, string>> = {
   not_started: "未开始",
-  in_review: "审批中",
-  approved: "已批准",
+  in_review: "等待批准",
+  approved: "已通过",
   rejected: "被驳回",
+};
+
+// ─── UI 术语表（spec ui-redesign-v1 §5）───────────────────────────────────────
+
+/** 门审查中文名：主页面默认显示中文，G 编号仅 hover 可见。 */
+export const GATE_REVIEW_NAMES: Readonly<Record<GateId, string>> = {
+  G0: "项目启动",
+  G1: "需求审查",
+  G2: "行为审查",
+  G3: "设计审查",
+  G4: "RTL审查",
+  G5: "综合审查",
+  G6: "实现审查",
+  G7: "测试审查",
+  G8: "码流审查",
+  G9: "验收审查",
+};
+
+/** 审查提交状态 → 中文（英文枚举不得出现在主页面）。 */
+export const SUBMISSION_STATE_TEXT: Readonly<Record<string, string>> = {
+  preparing: "准备中",
+  submitted: "已提交",
+  checking: "检查中",
+  in_review: "等待批准",
+  approved: "已通过",
+  rejected: "被驳回",
+  withdrawn: "已撤回",
+};
+
+/** 项目状态 → 中文。 */
+export const PROJECT_STATUS_TEXT: Readonly<Record<string, string>> = {
+  active: "进行中",
+  archived: "已归档",
+  closed: "已关闭",
 };
 
 export type GateSubmissionState =

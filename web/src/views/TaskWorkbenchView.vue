@@ -2,19 +2,20 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../main.ts";
-import { getRevisionContent, getTask } from "../api/index.ts";
+import { getRevisionContent, getTask, listGateSubmissions } from "../api/index.ts";
 import type { TaskDocRef, TaskRunDetail } from "../api/types.ts";
 import {
   STAGE_NODE_STATUS_TEXT,
   TASK_STATUS_TEXT,
   createPoller,
   deriveStageChain,
-  describeAuditEvent,
+  humanizeReason,
   isTerminalStatus,
-  shortRunId,
+  narrateAuditEvent,
   type Poller,
   type StageNodeStatus,
 } from "../domain/tasks.ts";
+import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -22,6 +23,7 @@ import StatusBadge from "../components/StatusBadge.vue";
 const route = useRoute();
 const projectId = String(route.params.id);
 const runId = String(route.params.runId);
+const runsPageUrl = `/projects/${projectId}/runs?run=${encodeURIComponent(runId)}`;
 
 const detail = ref<TaskRunDetail | null>(null);
 const loading = ref(true);
@@ -59,10 +61,30 @@ onBeforeUnmount(() => {
   poller = null;
 });
 
-// ── 阶段链 ───────────────────────────────────────────────────────────
-const chain = computed(() =>
-  detail.value ? deriveStageChain(detail.value) : [],
+// ── 等待批准 → 直达对应审批详情（≤2 次点击验收）─────────────────────────
+const approvalUrl = ref<string>("/approvals");
+
+watch(
+  () => [detail.value?.status, detail.value?.awaiting_gate] as const,
+  async ([status, gate]) => {
+    if (status !== "awaiting_approval" || !gate) return;
+    try {
+      const subs = await listGateSubmissions(api, projectId, "in_review");
+      const match = subs.find((s) => s.gate === gate);
+      approvalUrl.value = match ? `/approvals/${projectId}/${match.id}` : "/approvals";
+    } catch {
+      approvalUrl.value = "/approvals";
+    }
+  },
+  { immediate: true },
 );
+
+const awaitingReviewName = computed(() =>
+  detail.value?.awaiting_gate ? (GATE_REVIEW_NAMES[detail.value.awaiting_gate as GateId] ?? null) : null,
+);
+
+// ── 阶段链 ───────────────────────────────────────────────────────────
+const chain = computed(() => (detail.value ? deriveStageChain(detail.value) : []));
 
 const NODE_ICON: Readonly<Record<StageNodeStatus, string>> = {
   done: "✓",
@@ -72,16 +94,37 @@ const NODE_ICON: Readonly<Record<StageNodeStatus, string>> = {
   failed: "✗",
 };
 
-// ── 进展叙述（audit 末尾在前）─────────────────────────────────────────
-const narration = computed(() => {
+// ── 对话区：用户指令 + Agent 叙述（完整中文句子，audit 原文禁止出现）─────
+const dialogue = computed(() => {
   if (!detail.value) return [];
   return [...detail.value.audit]
-    .sort((a, b) => b.seq - a.seq)
-    .map((event) => ({ key: event.seq, ts: event.ts, text: describeAuditEvent(event) }));
+    .sort((a, b) => a.seq - b.seq)
+    .map((event) => {
+      const sentence = narrateAuditEvent(event);
+      return sentence ? { key: event.seq, ts: event.ts, text: sentence } : null;
+    })
+    .filter((item): item is { key: number; ts: string; text: string } => item !== null);
 });
 
-// ── 产物预览 ─────────────────────────────────────────────────────────
+// ── 产物预览（标题 + 候选标签；哈希/修订 ID 只在运行记录页）───────────────
 const CODE_EXTENSIONS = [".v", ".sv", ".vhd", ".vhdl", ".xdc", ".sdc", ".tcl", ".f"];
+
+const DOC_PHASE_TEXT: Readonly<Record<string, string>> = {
+  intake: "需求规格",
+  behavior_wave: "行为与波形设计",
+  architecture: "架构设计",
+  register_spec: "寄存器规格",
+  rtl_build: "RTL 代码",
+  rtl: "RTL 代码",
+  tb: "仿真测试台",
+  xdc: "约束文件",
+};
+
+function docTitle(doc: TaskDocRef): string {
+  const phase = DOC_PHASE_TEXT[doc.phase] ?? "产物文档";
+  const file = doc.path.split("/").pop() ?? doc.path;
+  return `${phase} · ${file}`;
+}
 
 const selectedDoc = ref<TaskDocRef | null>(null);
 const contentHtml = ref<string | null>(null);
@@ -129,59 +172,54 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
 
 <template>
   <h1 class="page-title">
-    任务工作台 <span class="mono muted" :title="runId">{{ shortRunId(runId) }}</span>
+    任务工作台
     <StatusBadge v-if="detail" :kind="statusBadgeKind" :text="TASK_STATUS_TEXT[detail.status] ?? detail.status" style="margin-left: 10px; vertical-align: middle" />
   </h1>
   <p class="page-sub">
     <router-link :to="`/projects/${projectId}/tasks`">← 返回任务列表</router-link>
-    <span class="muted"> · 每 3s 自动刷新{{ detail && isTerminalStatus(detail.status) ? "（已终态，停止刷新）" : "" }}</span>
+    <span class="muted"> · 每 3s 自动刷新{{ detail && isTerminalStatus(detail.status) ? "（已结束，停止刷新）" : "" }}</span>
   </p>
 
   <ErrorNotice v-if="error" :error="error" />
   <div v-if="loading" class="muted">加载中…</div>
 
   <template v-else-if="detail">
-    <!-- 等待批准横幅 -->
+    <!-- 等待批准横幅：一键直达对应审批详情 -->
     <div v-if="detail.status === 'awaiting_approval'" class="notice task-banner-waiting" role="alert">
-      ⏸ 等待 <strong class="mono">{{ detail.awaiting_gate }}</strong> 人工批准 —— 批准后 Runtime 将自动续跑。
-      <router-link to="/approvals">前往审批中心 →</router-link>
+      ⏸ {{ awaitingReviewName ? `「${awaitingReviewName}」正在等待批准` : "正在等待批准" }}，批准后任务自动继续。
+      <router-link :to="approvalUrl"><strong>去审批 →</strong></router-link>
     </div>
 
-    <!-- 终态：失败 -->
+    <!-- 失败横幅：人话原因 + 运行记录入口 -->
     <div v-else-if="detail.status === 'failed' || detail.status === 'fail_closed'" class="notice error" role="alert">
-      任务{{ TASK_STATUS_TEXT[detail.status] }}<template v-if="detail.reason">：{{ detail.reason }}</template>
+      {{ humanizeReason(detail.reason) }}
+      <router-link :to="runsPageUrl">查看运行记录 →</router-link>
     </div>
 
-    <!-- 终态：完成 + 证据清单 -->
+    <!-- 完成横幅 -->
     <div v-else-if="detail.status === 'succeeded'" class="notice task-banner-done">
-      ✓ 任务已完成。证据清单：
-      <ul style="margin: 8px 0 0; padding-left: 20px">
-        <li v-for="ev in detail.evidence" :key="ev.jobId" class="mono" style="font-size: 12px">
-          {{ ev.operation }} · job {{ ev.jobId }} · 输入 sha256 {{ ev.inputSha256.slice(0, 16) }}… ·
-          {{ ev.entries.length }} 个证据文件
-        </li>
-        <li v-if="detail.evidence.length === 0" class="muted">无证据记录。</li>
-      </ul>
+      ✓ 全流程完成，码流已生成。
+      <router-link :to="runsPageUrl">去运行记录页取证据 →</router-link>
     </div>
 
     <div class="workbench">
-      <!-- 左栏：任务指令 + 进展叙述 -->
+      <!-- 左栏：对话区（用户指令 + Agent 进展叙述） -->
       <div class="panel workbench-left">
-        <h2>任务指令</h2>
-        <p v-if="detail.task" style="white-space: pre-wrap; margin: 0 0 16px">{{ detail.task }}</p>
-        <p v-else class="muted" style="margin: 0 0 16px">（指令文本未随 run 详情返回）</p>
+        <h2>对话</h2>
+        <div v-if="detail.task" class="bubble bubble-user">{{ detail.task }}</div>
+        <div v-else class="bubble bubble-user muted">（指令文本未随任务详情返回）</div>
 
-        <h2>Agent 进展</h2>
-        <div v-if="narration.length === 0" class="muted">暂无进展事件。</div>
-        <ul v-else class="narration">
-          <li v-for="item in narration" :key="item.key">
-            <span class="muted" style="font-size: 11px; white-space: nowrap">{{ new Date(item.ts).toLocaleTimeString("zh-CN") }}</span>
-            <span>{{ item.text }}</span>
-          </li>
-        </ul>
+        <div v-if="dialogue.length === 0" class="muted" style="margin-top: 12px">正在启动，暂无进展。</div>
+        <div v-for="item in dialogue" :key="item.key" class="bubble bubble-agent">
+          <div>{{ item.text }}</div>
+          <div class="bubble-meta">
+            <span>{{ new Date(item.ts).toLocaleTimeString("zh-CN") }}</span>
+            <router-link :to="runsPageUrl">查看详情</router-link>
+          </div>
+        </div>
       </div>
 
-      <!-- 中栏：阶段链 -->
+      <!-- 中栏：阶段链（门节点中文名，编号 hover 可见） -->
       <div class="panel workbench-mid">
         <h2>阶段链</h2>
         <ol class="stage-chain">
@@ -190,6 +228,7 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
             :key="node.id"
             class="stage-node"
             :class="[node.kind, status]"
+            :title="node.kind === 'gate' ? node.id : undefined"
           >
             <span class="stage-icon">{{ NODE_ICON[status] }}</span>
             <span class="stage-name">{{ node.name }}</span>
@@ -201,7 +240,7 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
       <!-- 右栏：产物预览 -->
       <div class="panel workbench-right">
         <h2>产物预览</h2>
-        <div v-if="detail.docs.length === 0" class="muted">暂无已登记的产物。</div>
+        <div v-if="detail.docs.length === 0" class="muted">暂无生成的产物。</div>
         <div v-else class="doc-list">
           <a
             v-for="doc in detail.docs"
@@ -210,8 +249,8 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
             :class="{ active: selectedDoc?.revision_id === doc.revision_id }"
             @click.prevent="viewDoc(doc)"
           >
-            <span class="badge accent">{{ doc.phase }}</span>
-            <span class="mono" style="font-size: 12px">{{ doc.path }}</span>
+            <span>{{ docTitle(doc) }}</span>
+            <StatusBadge text="候选" kind="accent" />
           </a>
         </div>
 

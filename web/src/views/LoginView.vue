@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../main.ts";
 import { listProjects } from "../api/index.ts";
+import { ApiError } from "../api/client.ts";
 import { useAuthStore } from "../stores/auth.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 
@@ -30,7 +31,10 @@ async function submit() {
     await router.push(redirect);
   } catch (err) {
     auth.logout();
-    error.value = err;
+    // 登录失败不显示错误码原文（spec §4.1）
+    error.value = err instanceof ApiError
+      ? new Error("Token 无效或已过期，请核对后重试")
+      : err;
   } finally {
     pending.value = false;
   }
@@ -55,7 +59,7 @@ async function submit() {
       </button>
     </form>
     <p class="muted" style="margin-top: 16px; font-size: 12px">
-      Token 仅保存在当前会话（sessionStorage），关闭浏览器标签即失效。
+      Token 仅保存在当前会话（sessionStorage），关闭浏览器标签即失效。没有 Token？请找管理员索取。
     </p>
   </div>
 </template>

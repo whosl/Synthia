@@ -5,6 +5,7 @@ import { api } from "../main.ts";
 import { getRevisionContent, listArtifacts, listRevisions } from "../api/index.ts";
 import type { Artifact, ArtifactRevision, RevisionContent } from "../api/types.ts";
 import { REVISION_STATE_TEXT } from "../domain/gates.ts";
+import { ARTIFACT_GROUP_ORDER, artifactGroupName } from "../domain/events.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -89,18 +90,17 @@ const selectedGroupCount = computed(() => groups.value.reduce((n, g) => n + g.ar
 onMounted(async () => {
   try {
     const artifacts = await listArtifacts(api, projectId);
-    const byType = new Map<string, Artifact[]>();
+    const byGroup = new Map<string, Artifact[]>();
     for (const artifact of artifacts) {
-      const list = byType.get(artifact.artifact_type) ?? [];
+      const group = artifactGroupName(artifact.artifact_type);
+      const list = byGroup.get(group) ?? [];
       list.push(artifact);
-      byType.set(artifact.artifact_type, list);
+      byGroup.set(group, list);
     }
-    groups.value = [...byType.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([type, list]) => ({
-        type,
-        artifacts: [...list].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
-      }));
+    groups.value = ARTIFACT_GROUP_ORDER.filter((name) => byGroup.has(name)).map((name) => ({
+      type: name,
+      artifacts: [...byGroup.get(name)!].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
+    }));
   } catch (err) {
     error.value = err;
   } finally {
@@ -124,7 +124,6 @@ onMounted(async () => {
       <table class="data">
         <thead>
           <tr>
-            <th>产物 ID</th>
             <th>创建时间</th>
             <th></th>
           </tr>
@@ -132,7 +131,6 @@ onMounted(async () => {
         <tbody>
           <template v-for="artifact in group.artifacts" :key="artifact.id">
             <tr>
-              <td class="mono">{{ artifact.id }}</td>
               <td class="muted">{{ new Date(artifact.created_at).toLocaleString("zh-CN") }}</td>
               <td>
                 <a href="#" @click.prevent="toggle(artifact)">
@@ -141,7 +139,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="expandedId === artifact.id">
-              <td colspan="3" style="background: #fbfcfd">
+              <td colspan="2" style="background: #fbfcfd">
                 <ErrorNotice v-if="revisionsError" :error="revisionsError" />
                 <div v-if="revisionsLoading" class="muted">版本加载中…</div>
                 <template v-else>
@@ -151,7 +149,6 @@ onMounted(async () => {
                         <th>版本</th>
                         <th>状态</th>
                         <th>标题</th>
-                        <th>内容哈希</th>
                         <th>创建时间</th>
                         <th></th>
                       </tr>
@@ -166,7 +163,6 @@ onMounted(async () => {
                           />
                         </td>
                         <td>{{ rev.title || "—" }}</td>
-                        <td class="mono muted">{{ rev.content_hash.slice(0, 16) }}…</td>
                         <td class="muted">{{ new Date(rev.created_at).toLocaleString("zh-CN") }}</td>
                         <td>
                           <a href="#" @click.prevent="viewContent(rev)">

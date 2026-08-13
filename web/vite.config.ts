@@ -7,6 +7,7 @@ export default defineConfig({
     host: "127.0.0.1",
     // 5173 常被本机其他项目占用；5180 冲突时 vite 自动顺延
     port: 5180,
+    allowedHosts: ["synthia.wenzhuolin.xyz"],
     proxy: {
       // Core API (dev): http://127.0.0.1:8787
       "/api": {
