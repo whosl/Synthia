@@ -19,6 +19,7 @@
 
 import { ModelActionError } from "./types.ts";
 import type { ArtifactFile, LoopModel, LoopPhase, LoopAction, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration, DocGeneration, UpstreamArtifacts } from "./types.ts";
+import type { ConversationalModel, ChatTurn, AgentMessage, AgentTool, AgentToolCall } from "./agent-types.ts";
 
 export type ActionProtocol = "tools" | "json";
 
@@ -177,6 +178,67 @@ function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r
 function backoffMs(attempt: number): number { return Math.min(8000, 250 * 2 ** (attempt - 1)); }
 
 /**
+ * Convert an {@link AgentMessage} to the OpenAI wire format. The tool role
+ * carries toolCallId/name; the assistant role may carry toolCalls; system/user
+ * pass straight through. Roles other than "tool"/"assistant" default to their
+ * declared role.
+ */
+function toWireMessage(m: AgentMessage): Record<string, unknown> {
+  if (m.role === "assistant") {
+    const out: Record<string, unknown> = { role: "assistant", content: m.content ?? null };
+    if (m.toolCalls && m.toolCalls.length > 0) {
+      out.tool_calls = m.toolCalls.map(c => ({
+        id: c.toolCallId,
+        type: "function",
+        function: { name: c.name, arguments: typeof c.args === "string" ? c.args : JSON.stringify(c.args ?? {}) },
+      }));
+    }
+    return out;
+  }
+  if (m.role === "tool") {
+    return { role: "tool", tool_call_id: m.toolCallId, name: m.name, content: m.content };
+  }
+  return { role: m.role, content: m.content };
+}
+
+/**
+ * Parse a chat-completion response into a {@link ChatTurn}. Fault-tolerant:
+ * a tool_call whose `arguments` is not valid JSON is still surfaced (args set
+ * to the raw string so the loop can feed an error back to the model) rather
+ * than throwing. Returns a text turn when there are no usable tool_calls.
+ */
+function parseChatTurn(json: unknown): ChatTurn {
+  interface WireToolCall { id?: string; function?: { name?: string; arguments?: unknown } }
+  interface WireMessage { content?: string | null; tool_calls?: WireToolCall[] }
+  const choices = (json as { choices?: Array<{ message?: WireMessage }> } | undefined)?.choices;
+  const msg = choices?.[0]?.message;
+  const content = msg?.content ?? null;
+  const wireCalls = msg?.tool_calls;
+  if (wireCalls && wireCalls.length > 0) {
+    const calls: AgentToolCall[] = wireCalls.map((c, i) => {
+      const rawArgs = c.function?.arguments;
+      let args: unknown;
+      if (typeof rawArgs === "string") {
+        try { args = JSON.parse(rawArgs); } catch { args = rawArgs; }
+      } else if (rawArgs === undefined || rawArgs === null) {
+        args = {};
+      } else {
+        args = rawArgs;
+      }
+      return {
+        toolCallId: c.id ?? `call_${i}`,
+        name: c.function?.name ?? "",
+        args,
+      };
+    });
+    return { kind: "tool_calls", calls, content };
+  }
+  // No tool calls → treat as a text turn. Fall back to empty string if both
+  // content and tool_calls are absent (malformed but non-throwing).
+  return { kind: "text", content: typeof content === "string" ? content : "" };
+}
+
+/**
  * Render upstream artifacts into a dedicated, strongly-delimited prompt section
  * with explicit consistency instructions. Returns "" when no upstream is given.
  * The section is placed ahead of the task body so the model treats upstream
@@ -202,7 +264,7 @@ export function renderUpstream(upstream?: UpstreamArtifacts): string {
 // ModelClient
 // ---------------------------------------------------------------------------
 
-export class ModelClient implements LoopModel {
+export class ModelClient implements LoopModel, ConversationalModel {
   private readonly cfg: ModelClientConfig;
   private readonly post: ChatPoster;
 
@@ -284,6 +346,75 @@ export class ModelClient implements LoopModel {
     );
     (e as ModelActionError & { validationFeedbacks?: readonly string[] }).validationFeedbacks = feedbacks.length ? [...feedbacks] : undefined;
     throw e;
+  }
+
+  // ----- ConversationalModel implementation (free agent mode) -----
+
+  /**
+   * Free-form multi-turn tool-calling primitive (spec 001-agent-freedom).
+   *
+   * Sends the full conversation + the tool catalog to the model in OpenAI
+   * "tools" format and returns one chat turn: either a plain-text reply or a
+   * batch of tool calls. Unlike {@link emitAction} this performs NO phase
+   * validation and NO single-tool coercion — the model picks freely. Argument
+   * parsing is fault-tolerant: a tool_call whose `arguments` is missing or not
+   * valid JSON is surfaced to the model as an error-shaped result by the loop,
+   * not retried here.
+   *
+   * Network/timeout errors are retried with the same backoff as emitAction;
+   * non-retryable 4xx surface immediately.
+   */
+  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
+    const maxNetwork = Math.max(0, this.cfg.networkRetries ?? 2);
+    const timeoutMs = this.cfg.timeoutMs ?? 120_000;
+
+    // Convert AgentMessage[] → OpenAI wire messages.
+    const wireMessages = messages.map(toWireMessage);
+
+    // Convert AgentTool[] → OpenAI tools array. Always sent as function tools;
+    // tool_choice is "auto" so the model decides whether to call or reply.
+    const wireTools = tools.length === 0
+      ? []
+      : tools.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+
+    const body: Record<string, unknown> = {
+      model: this.cfg.model,
+      temperature: 0,
+      max_tokens: this.cfg.toolMaxTokens ?? 4096,
+      messages: wireMessages,
+    };
+    if (wireTools.length > 0) {
+      body.tools = wireTools;
+      body.tool_choice = "auto";
+    }
+
+    const req = {
+      url: `${this.cfg.baseUrl}/chat/completions`,
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey}` },
+      body: JSON.stringify(body),
+      timeoutMs,
+    };
+
+    let netAttempt = 0;
+    let response: ChatCompletionResponse;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        response = await this.post(req);
+        break;
+      } catch (e) {
+        netAttempt++;
+        if (netAttempt > maxNetwork) throw e;
+        await sleep(backoffMs(netAttempt));
+      }
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`model-client.chat: upstream returned ${response.status}`);
+    }
+
+    if (this.cfg.debug) process.stderr.write(`[model-debug] chat: status=${response.status} len=${response.text.length}\n`);
+
+    return parseChatTurn(response.json);
   }
 
   /**

@@ -25,11 +25,20 @@
 import { randomUUID } from "node:crypto";
 import { sha256Hex } from "../core/src/hashing.ts";
 import type {
+  ArtifactRevisionState,
   ArtifactType,
   GateId,
   GateSubmissionState,
 } from "../core/src/domain/enums.ts";
-import type { GovernanceClient, RegisteredRevision } from "./types.ts";
+import type {
+  ArtifactRevisionSummary,
+  ArtifactSummary,
+  GateSubmissionSummary,
+  GovernanceClient,
+  ProjectEventSummary,
+  ProjectInfo,
+  RegisteredRevision,
+} from "./types.ts";
 
 export interface CoreGovernanceConfig {
   readonly baseUrl: string;
@@ -172,6 +181,136 @@ export class CoreGovernanceClient implements GovernanceClient {
       `/api/v1/projects/${this.projectId}/gate-submissions/${submissionId}`,
     ) as { state: GateSubmissionState };
     return { state: data.state };
+  }
+
+  // ----- read-only queries (project status snapshot) -----
+
+  async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+    const data = await this.request("GET", `/api/v1/projects/${projectId}`) as {
+      id: string;
+      name: string;
+      scope: string;
+      status: string;
+      data_classification: string;
+      standard_version: string;
+      target_part: string;
+      process_instances?: readonly {
+        id: string;
+        current_gate: string;
+        gate_profile_version: string;
+      }[];
+    };
+    return {
+      id: data.id,
+      name: data.name,
+      status: data.status,
+      scope: data.scope,
+      dataClassification: data.data_classification,
+      targetPart: data.target_part,
+      standardVersion: data.standard_version,
+      processInstances: (data.process_instances ?? []).map((pi) => ({
+        id: pi.id,
+        currentGate: pi.current_gate,
+        gateProfileVersion: pi.gate_profile_version,
+      })),
+    };
+  }
+
+  async listGateSubmissions(
+    projectId: string,
+    state?: GateSubmissionState,
+  ): Promise<readonly GateSubmissionSummary[]> {
+    const query = state ? `?state=${encodeURIComponent(state)}` : "";
+    const rows = await this.request(
+      "GET",
+      `/api/v1/projects/${projectId}/gate-submissions${query}`,
+    ) as readonly {
+      id: string;
+      gate: GateId;
+      state: GateSubmissionState;
+      snapshot_id: string;
+      process_instance_id: string;
+      submitted_at: string | null;
+      created_at: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      gate: r.gate,
+      state: r.state,
+      snapshotId: r.snapshot_id,
+      processInstanceId: r.process_instance_id,
+      submittedAt: r.submitted_at,
+      createdAt: r.created_at,
+    }));
+  }
+
+  async listArtifacts(projectId: string): Promise<readonly ArtifactSummary[]> {
+    const rows = await this.request(
+      "GET",
+      `/api/v1/projects/${projectId}/artifacts`,
+    ) as readonly { id: string; artifact_type: ArtifactType; created_at: string }[];
+    return rows.map((r) => ({
+      id: r.id,
+      artifactType: r.artifact_type,
+      createdAt: r.created_at,
+    }));
+  }
+
+  async listRevisions(
+    projectId: string,
+    artifactId: string,
+  ): Promise<readonly ArtifactRevisionSummary[]> {
+    const rows = await this.request(
+      "GET",
+      `/api/v1/projects/${projectId}/artifacts/${artifactId}/revisions`,
+    ) as readonly {
+      id: string;
+      version: number;
+      state: ArtifactRevisionState;
+      content_hash: string;
+      content_location: string;
+      title: string;
+      created_at: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      version: r.version,
+      state: r.state,
+      contentHash: r.content_hash,
+      contentLocation: r.content_location,
+      title: r.title,
+      createdAt: r.created_at,
+    }));
+  }
+
+  async listEvents(
+    projectId: string,
+    limit?: number,
+  ): Promise<readonly ProjectEventSummary[]> {
+    const rows = await this.request(
+      "GET",
+      `/api/v1/projects/${projectId}/events`,
+    ) as readonly {
+      event_id: string;
+      aggregate_type: string;
+      aggregate_id: string;
+      sequence: number;
+      event_type: string;
+      occurred_at: string;
+    }[];
+    const mapped = rows.map((r) => ({
+      eventId: r.event_id,
+      aggregateType: r.aggregate_type,
+      aggregateId: r.aggregate_id,
+      sequence: r.sequence,
+      eventType: r.event_type,
+      occurredAt: r.occurred_at,
+    }));
+    // Core exposes no LIMIT param; bound client-side, most recent occurred_at first.
+    mapped.sort((a, b) =>
+      a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : b.sequence - a.sequence,
+    );
+    return limit && limit > 0 ? mapped.slice(0, limit) : mapped;
   }
 
   // ----- internals -----
@@ -341,5 +480,63 @@ export class MockGovernanceClient implements GovernanceClient {
     this.polledGates.push(submissionId);
     const state = this.gateStates.get(submissionId) ?? "approved";
     return { state };
+  }
+
+  // ----- read-only queries (derived from recorded state) -----
+
+  async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+    const piIds = new Set(this.submissions.map((s) => s.processInstanceId));
+    return {
+      id: projectId,
+      name: projectId,
+      status: "active",
+      scope: "",
+      dataClassification: "D1",
+      targetPart: "",
+      standardVersion: "",
+      processInstances: [...piIds].map((id) => ({ id, currentGate: "", gateProfileVersion: "" })),
+    };
+  }
+
+  async listGateSubmissions(): Promise<readonly GateSubmissionSummary[]> {
+    return this.submissions.map((s) => {
+      const submitted = this.submittedGates.includes(s.submissionId);
+      const state: GateSubmissionState =
+        this.gateStates.get(s.submissionId) ?? (submitted ? "in_review" : "preparing");
+      return {
+        id: s.submissionId,
+        gate: s.gate,
+        state,
+        snapshotId: s.snapshotId,
+        processInstanceId: s.processInstanceId,
+        submittedAt: null,
+        createdAt: "",
+      };
+    });
+  }
+
+  async listArtifacts(): Promise<readonly ArtifactSummary[]> {
+    const seen = new Map<string, ArtifactType>();
+    for (const a of this.registeredArtifacts) seen.set(a.artifactId, a.artifactType);
+    return [...seen.entries()].map(([id, artifactType]) => ({ id, artifactType, createdAt: "" }));
+  }
+
+  async listRevisions(_projectId: string, artifactId: string): Promise<readonly ArtifactRevisionSummary[]> {
+    return this.registeredArtifacts
+      .filter((a) => a.artifactId === artifactId)
+      .sort((a, b) => b.version - a.version)
+      .map((a) => ({
+        id: a.revisionId,
+        version: a.version,
+        state: "candidate" as ArtifactRevisionState,
+        contentHash: a.contentHash,
+        contentLocation: a.contentLocation,
+        title: a.title,
+        createdAt: "",
+      }));
+  }
+
+  async listEvents(): Promise<readonly ProjectEventSummary[]> {
+    return [];
   }
 }

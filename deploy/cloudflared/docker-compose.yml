@@ -1,0 +1,18 @@
+# Synthia — Cloudflare Tunnel (cloudflared) in Docker
+#
+# Token-based, remotely-managed tunnel.
+# Ingress (hostname → origin) is configured in the Cloudflare dashboard,
+# NOT in a local config.yml. The container only needs the TUNNEL_TOKEN.
+#
+# network_mode: host so cloudflared can reach origins on this box's
+# localhost / LAN (e.g. http://localhost:3000).
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: synthia-cloudflared
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    env_file:
+      - .env

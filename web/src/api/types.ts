@@ -153,3 +153,21 @@ export interface TaskRunDetail extends TaskRunSummary {
   readonly evidence: readonly TaskEvidenceSummary[];
   readonly reason?: string | null;
 }
+
+/** POST .../message 响应 data（idle/终态 → prompt 返回 reply；running → steer 返回 steered）。 */
+export interface SendMessageResult {
+  /** prompt 返回的 agent 文本（steer 路径无）。 */
+  readonly reply?: string;
+  /** running 会话走 steer 时为 true。 */
+  readonly steered?: boolean;
+  /** free-agent 会话状态（idle/running/awaiting_approval/completed/cancelled/failed）。 */
+  readonly status: string;
+}
+
+/** POST .../abort 响应 data。 */
+export interface AbortRunResult {
+  readonly aborted: boolean;
+  /** 无活动会话时为 null。 */
+  readonly status?: string | null;
+  readonly reason?: string;
+}

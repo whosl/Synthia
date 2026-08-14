@@ -210,8 +210,8 @@ export interface LoopResult {
 // Governance + GJB gate flow.
 // ---------------------------------------------------------------------------
 
-import type { ArtifactType, GateId, GateSubmissionState } from "../core/src/domain/enums.ts";
-export type { ArtifactType, GateId, GateSubmissionState };
+import type { ArtifactRevisionState, ArtifactType, GateId, GateSubmissionState } from "../core/src/domain/enums.ts";
+export type { ArtifactRevisionState, ArtifactType, GateId, GateSubmissionState };
 
 /** GJB gates in the runtime stage chain. */
 export const GJB_GATES = ["G1", "G2", "G3", "G4"] as const;
@@ -249,6 +249,62 @@ export interface RegisteredRevision {
   readonly contentLocation?: string;
 }
 
+/** Read-only project overview (GET /api/v1/projects/:projectId). */
+export interface ProjectInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
+  readonly scope: string;
+  readonly dataClassification: string;
+  readonly targetPart: string;
+  readonly standardVersion: string;
+  /** Process instances on this project (current_gate hints the milestone). */
+  readonly processInstances: readonly {
+    readonly id: string;
+    readonly currentGate: string;
+    readonly gateProfileVersion: string;
+  }[];
+}
+
+/** A gate submission row (GET /projects/:projectId/gate-submissions[?state=]). */
+export interface GateSubmissionSummary {
+  readonly id: string;
+  readonly gate: GateId;
+  readonly state: GateSubmissionState;
+  readonly snapshotId: string;
+  readonly processInstanceId: string;
+  readonly submittedAt: string | null;
+  readonly createdAt: string;
+}
+
+/** An artifact container row (GET /projects/:projectId/artifacts). */
+export interface ArtifactSummary {
+  readonly id: string;
+  readonly artifactType: ArtifactType;
+  readonly createdAt: string;
+}
+
+/** An artifact revision row (GET .../artifacts/:artifactId/revisions; version desc). */
+export interface ArtifactRevisionSummary {
+  readonly id: string;
+  readonly version: number;
+  readonly state: ArtifactRevisionState;
+  readonly contentHash: string;
+  readonly contentLocation: string;
+  readonly title: string;
+  readonly createdAt: string;
+}
+
+/** An outbox event row (GET /projects/:projectId/events); payload intentionally omitted. */
+export interface ProjectEventSummary {
+  readonly eventId: string;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly sequence: number;
+  readonly eventType: string;
+  readonly occurredAt: string;
+}
+
 /** A Core API governance client the loop calls to register artifacts and manage gates. */
 export interface GovernanceClient {
   /** Register a candidate ArtifactRevision for the given artifact.
@@ -278,6 +334,16 @@ export interface GovernanceClient {
   submitGate(submissionId: string): Promise<{ state: GateSubmissionState }>;
   /** Get the current state of a gate submission (poll for approval). */
   getGateSubmissionState(submissionId: string): Promise<{ state: GateSubmissionState }>;
+  /** Read-only project overview (meta + process instances). */
+  getProjectInfo(projectId: string): Promise<ProjectInfo>;
+  /** List gate submissions for a project; optional state filter. */
+  listGateSubmissions(projectId: string, state?: GateSubmissionState): Promise<readonly GateSubmissionSummary[]>;
+  /** List artifact containers in a project. */
+  listArtifacts(projectId: string): Promise<readonly ArtifactSummary[]>;
+  /** List revisions of an artifact (version descending). */
+  listRevisions(projectId: string, artifactId: string): Promise<readonly ArtifactRevisionSummary[]>;
+  /** List recent outbox events for a project (most recent first, bounded by limit). */
+  listEvents(projectId: string, limit?: number): Promise<readonly ProjectEventSummary[]>;
 }
 
 /** A no-op governance client for --no-governance mode (dev/debug only). */
@@ -305,6 +371,30 @@ export class NoGovernanceClient implements GovernanceClient {
   }
   async getGateSubmissionState(): Promise<{ state: GateSubmissionState }> {
     return { state: "approved" as GateSubmissionState };
+  }
+  async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+    return {
+      id: projectId,
+      name: projectId,
+      status: "active",
+      scope: "",
+      dataClassification: "UNCLASSIFIED",
+      targetPart: "",
+      standardVersion: "",
+      processInstances: [],
+    };
+  }
+  async listGateSubmissions(): Promise<readonly GateSubmissionSummary[]> {
+    return [];
+  }
+  async listArtifacts(): Promise<readonly ArtifactSummary[]> {
+    return [];
+  }
+  async listRevisions(): Promise<readonly ArtifactRevisionSummary[]> {
+    return [];
+  }
+  async listEvents(): Promise<readonly ProjectEventSummary[]> {
+    return [];
   }
 }
 

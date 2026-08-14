@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../main.ts";
-import { getRevisionContent, getTask, listGateSubmissions } from "../api/index.ts";
+import { getRevisionContent, getTask, listGateSubmissions, sendMessage } from "../api/index.ts";
 import type { TaskDocRef, TaskRunDetail } from "../api/types.ts";
 import {
   STAGE_NODE_STATUS_TEXT,
@@ -31,6 +31,10 @@ const runsPageUrl = `/projects/${projectId}/runs?run=${encodeURIComponent(runId)
 const detail = ref<TaskRunDetail | null>(null);
 const loading = ref(true);
 const error = ref<unknown>(null);
+const sending = ref(false);
+const sendError = ref<unknown>(null);
+const messageDraft = ref("");
+
 
 // ── 轮询（3s；终态自动停止；页面卸载清理）──────────────────────────────
 let poller: Poller | null = null;
@@ -157,6 +161,30 @@ watch(detail, (value) => {
   void viewDoc(value.docs[value.docs.length - 1]!);
 });
 
+// ── 对话输入（自由 Agent：发消息/纠偏）──────────────────────────────────
+async function handleSend(): Promise<void> {
+  const text = messageDraft.value.trim();
+  if (!text || sending.value) return;
+  sending.value = true;
+  sendError.value = null;
+  try {
+    await sendMessage(api, projectId, runId, text);
+    messageDraft.value = "";
+    // prompt 路径已改 audit；立即刷新以拉取 agent 回复。steer 路径靠 3s 轮询。
+    void refresh();
+  } catch (err) {
+    sendError.value = err;
+  } finally {
+    sending.value = false;
+  }
+}
+
+function onMessageEnter(e: KeyboardEvent): void {
+  if (e.shiftKey) return; // Shift+Enter 换行
+  e.preventDefault();
+  void handleSend();
+}
+
 const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(() => {
   switch (detail.value?.status) {
     case "running": return "accent";
@@ -281,6 +309,21 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
             </div>
           </template>
         </div>
+        <!-- 对话输入（自由 Agent：回车发送，Shift+Enter 换行；运行中=纠偏 steer） -->
+        <div class="composer">
+          <textarea
+            v-model="messageDraft"
+            class="composer-input"
+            rows="2"
+            :placeholder="detail?.status === 'running' ? '给 Agent 发消息纠偏…（运行中将注入上下文）' : '给 Agent 发消息…'"
+            :disabled="sending"
+            @keydown.enter="onMessageEnter"
+          />
+          <button class="composer-send" type="button" :disabled="sending || !messageDraft.trim()" @click="handleSend">
+            {{ sending ? "发送中…" : "发送" }}
+          </button>
+        </div>
+        <ErrorNotice v-if="sendError" :error="sendError" />
       </div>
 
       <!-- 中栏：阶段链（门节点中文名，编号 hover 可见） -->

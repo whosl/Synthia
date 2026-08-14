@@ -52,6 +52,12 @@ import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
 import { SkillLoader } from "./skill-loader.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 
+// ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
+import { createFreeAgentSession } from "./free-agent.ts";
+import { assembleSkillTools } from "./skill-tools.ts";
+import { buildContextSnapshot } from "./context-snapshot.ts";
+import type { FreeAgentDeps, FreeAgentSession, ConversationalModel } from "./agent-types.ts";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -133,6 +139,7 @@ function errorResponse(status: number, code: string, message: string): Response 
 
 export class RuntimeServer {
   private readonly registry = new Map<string, RunHandle>();
+  private readonly sessions = new Map<string, FreeAgentSession>();
   private server?: Server;
   private monitorTimer?: ReturnType<typeof setInterval>;
 
@@ -168,6 +175,7 @@ export class RuntimeServer {
     this.server?.stop(true);
     this.server = undefined;
     this.registry.clear();
+    this.sessions.clear();
   }
 
   // ----- HTTP routing -----
@@ -186,6 +194,14 @@ export class RuntimeServer {
       const resumeMatch = path.match(/^\/tasks\/([^/]+)\/resume$/);
       if (method === "POST" && resumeMatch)
         return this.handleResume(resumeMatch[1]!);
+
+      const messageMatch = path.match(/^\/tasks\/([^/]+)\/message$/);
+      if (method === "POST" && messageMatch)
+        return await this.handleSendMessage(messageMatch[1]!, req);
+
+      const abortMatch = path.match(/^\/tasks\/([^/]+)\/abort$/);
+      if (method === "POST" && abortMatch)
+        return await this.handleAbort(abortMatch[1]!);
 
       const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
       if (method === "GET" && taskMatch)
@@ -329,6 +345,182 @@ export class RuntimeServer {
     }
 
     return json({ resumed: true });
+  }
+
+  // ----- free-agent conversation (spec 001-agent-freedom) -----
+
+  /** run 是否存在于 registry 或磁盘。 */
+  private async runExists(runId: string): Promise<boolean> {
+    if (this.registry.has(runId)) return true;
+    try {
+      return !!(await loadRunState(runId));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * POST /tasks/:runId/message — 给自由 Agent 发消息。
+   * idle/终态 → session.prompt（新指令/闲聊）；running → session.steer（接管/纠偏）。
+   * 会话不存在时按 FreeAgentDeps 懒装配（model 用 env SYNTHIA_MODEL_* 构造）。
+   */
+  private async handleSendMessage(runId: string, req: Request): Promise<Response> {
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return errorResponse(400, "bad_request", "invalid JSON body");
+    }
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return errorResponse(400, "bad_request", "text is required");
+
+    if (!(await this.runExists(runId))) {
+      return errorResponse(404, "not_found", `run ${runId} not found`);
+    }
+
+    const session = await this.getOrCreateSession(runId);
+    if (!session) {
+      return errorResponse(503, "capability_unavailable", "failed to assemble free-agent session (model/governance/snapshot)");
+    }
+
+    this.recordConversationAudit(runId, "user_message", text);
+
+    if (session.status() === "running") {
+      // 运行中：注入纠偏上下文（下一工具结束后生效），不开新 prompt。
+      session.steer(text);
+      this.recordConversationAudit(runId, "free_agent_steer");
+      return json({ steered: true, status: session.status() });
+    }
+
+    try {
+      const reply = await session.prompt(text);
+      this.recordConversationAudit(runId, "free_agent_reply", reply);
+      return json({ reply, status: session.status() });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      this.recordConversationAudit(runId, "free_agent_reply_error", reason);
+      return errorResponse(500, "agent_error", `free-agent prompt failed: ${reason}`);
+    }
+  }
+
+  /** POST /tasks/:runId/abort — 终止自由 Agent 会话。 */
+  private async handleAbort(runId: string): Promise<Response> {
+    const session = this.sessions.get(runId);
+    if (!session) {
+      if (!(await this.runExists(runId))) {
+        return errorResponse(404, "not_found", `run ${runId} not found`);
+      }
+      return json({ aborted: false, status: null, reason: "no active free-agent session" });
+    }
+    session.abort("aborted via web");
+    this.recordConversationAudit(runId, "free_agent_abort");
+    return json({ aborted: true, status: session.status() });
+  }
+
+  /**
+   * 取或懒装配 FreeAgentSession。run 已确认存在（调用方先 runExists）；
+   * 装配失败（deps/model/snapshot）→ 返回 null（调用方返 503）。
+   */
+  private async getOrCreateSession(runId: string): Promise<FreeAgentSession | null> {
+    const existing = this.sessions.get(runId);
+    if (existing) return existing;
+
+    // 解析 projectId/part/governance/connector：优先 registry，回退磁盘。
+    let projectId: string | undefined;
+    let part: string | undefined;
+    let governance: GovernanceClient | undefined;
+    let connector: LoopConnector | null = null;
+
+    const handle = this.registry.get(runId);
+    if (handle) {
+      projectId = handle.projectId;
+      part = handle.part;
+      governance = handle.governance;
+      connector = handle.connector;
+    } else {
+      let state: RunState | undefined;
+      try {
+        state = await loadRunState(runId);
+      } catch {
+        state = undefined;
+      }
+      if (!state) return null;
+      const processInstanceId = state.processInstanceId ?? "pi-default";
+      try {
+        const deps = await this.depsFactory({ projectId: state.projectId, processInstanceId });
+        projectId = state.projectId;
+        part = state.part;
+        governance = deps.governance;
+        connector = deps.connector;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(
+          `[runtime-server] free-agent deps build failed for ${runId}: ${msg}\n`,
+        );
+        return null;
+      }
+    }
+
+    if (!projectId || !part || !governance) return null;
+
+    // model：ConversationalModel，用 env SYNTHIA_MODEL_* 构造（依赖 Slice A 使 ModelClient 实现 chat()）。
+    let model: ConversationalModel;
+    try {
+      model = new ModelClient(modelConfigFromEnv(process.env));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(
+        `[runtime-server] free-agent model unavailable for ${runId}: ${msg}\n`,
+      );
+      return null;
+    }
+
+    let systemPrompt: string;
+    try {
+      systemPrompt = await buildContextSnapshot(governance, projectId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(
+        `[runtime-server] context snapshot failed for ${runId}: ${msg}\n`,
+      );
+      return null;
+    }
+
+    const deps: FreeAgentDeps = {
+      model,
+      tools: await assembleSkillTools(),
+      systemPrompt,
+      projectId,
+      part,
+      classification: process.env.SYNTHIA_CLASSIFICATION ?? "internal",
+      governance,
+      connector,
+      ...(process.env.SYNTHIA_RUNS_DIR ? { runsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
+    };
+
+    const session = createFreeAgentSession(runId, deps);
+    this.sessions.set(runId, session);
+    return session;
+  }
+
+  /**
+   * 记录对话/接管/终止审计事件，进入 handle.audit（带单调 seq），
+   * 供 GET /tasks/:runId 的 audit 序列返回（web 信息流据此渲染）。
+   * run 无 in-memory handle 时静默跳过（磁盘恢复竞态，罕见）。
+   */
+  private recordConversationAudit(runId: string, action: string, detail?: string): void {
+    const handle = this.registry.get(runId);
+    if (!handle) return;
+    const seq = handle.audit.reduce((max, e) => (e.seq > max ? e.seq : max), -1) + 1;
+    const event: AuditEvent = {
+      ts: new Date().toISOString(),
+      seq,
+      category: "model",
+      phase: "loop",
+      action,
+      ...(detail !== undefined ? { detail } : {}),
+    };
+    handle.audit.push(event);
   }
 
   // ----- core execution -----

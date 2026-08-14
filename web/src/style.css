@@ -682,6 +682,53 @@ button.btn.danger {
   gap: 8px;
 }
 
+/* ── 对话输入区（自由 Agent）────────────────────────────────── */
+
+.composer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.composer-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
+.composer-input:focus {
+  outline: none;
+  border-color: var(--c-accent);
+}
+
+.composer-input:disabled {
+  background: #f3f4f6;
+  cursor: not-allowed;
+}
+
+.composer-send {
+  align-self: flex-end;
+  padding: 8px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--c-accent);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .feed-text {
   margin: 0;
   font-size: 13px;

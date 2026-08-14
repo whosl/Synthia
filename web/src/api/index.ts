@@ -4,6 +4,7 @@
 
 import type { ApiClient } from "./client.ts";
 import type {
+  AbortRunResult,
   Artifact,
   ArtifactRevision,
   Baseline,
@@ -14,6 +15,7 @@ import type {
   OutboxEvent,
   Project,
   RevisionContent,
+  SendMessageResult,
   TaskRunDetail,
   TaskRunList,
 } from "./types.ts";
@@ -127,4 +129,34 @@ export function listTasks(client: ApiClient, projectId: string): Promise<TaskRun
 /** 任务详情（Core 校验 project 归属，不匹配 404）。 */
 export function getTask(client: ApiClient, projectId: string, runId: string): Promise<TaskRunDetail> {
   return client<TaskRunDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}`);
+}
+
+// ─── 自由 Agent 对话（spec 001-agent-freedom：发消息/纠偏/终止）────────────────
+
+/**
+ * POST /tasks/:runId/message — 给运行中的自由 Agent 发消息。
+ * idle/终态会话走 prompt（新指令/闲聊，返回 reply）；running 会话走 steer（接管/纠偏）。
+ */
+export function sendMessage(
+  client: ApiClient,
+  projectId: string,
+  runId: string,
+  text: string,
+): Promise<SendMessageResult> {
+  return client<SendMessageResult>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/message`,
+    { method: "POST", body: { text } },
+  );
+}
+
+/** POST /tasks/:runId/abort — 终止自由 Agent 会话。 */
+export function abortRun(
+  client: ApiClient,
+  projectId: string,
+  runId: string,
+): Promise<AbortRunResult> {
+  return client<AbortRunResult>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/abort`,
+    { method: "POST" },
+  );
 }
