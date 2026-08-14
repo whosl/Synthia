@@ -79,6 +79,16 @@ export interface EvidenceManifest {
   readonly entries: readonly EvidenceEntry[];
 }
 
+/** Decoded content payload of a single evidence artifact for a terminal Job. */
+export interface EvidenceContent {
+  readonly name: string;
+  /** UTF-8 decoded content (may be truncated for large artifacts). */
+  readonly content: string;
+  readonly sha256: string;
+  readonly truncated: boolean;
+  readonly mediaType: string;
+}
+
 export interface DiscoveredCapability {
   readonly operation: string;
   readonly version: string;
@@ -107,6 +117,8 @@ export interface ConnectorPort {
   queryStatus(projectId: string, jobId: string): Promise<ConnectorJobSnapshot>;
   /** Fetch the frozen evidence manifest for a terminal Job. */
   fetchEvidence(projectId: string, jobId: string): Promise<EvidenceManifest>;
+  /** Fetch the decoded content of a single evidence artifact for a terminal Job. */
+  fetchEvidenceContent(projectId: string, jobId: string, name: string): Promise<EvidenceContent>;
 }
 
 // ─── error model ─────────────────────────────────────────────────────────────

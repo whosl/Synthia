@@ -143,6 +143,14 @@ export interface VivadoResult {
   readonly evidence?: EvidenceManifest;
 }
 
+/** Decoded content of a single evidence artifact (from Core evidence/content endpoint). */
+export interface EvidenceContent {
+  readonly content: string;
+  readonly sha256: string;
+  readonly truncated: boolean;
+  readonly mediaType: string;
+}
+
 /**
  * Loop-facing connector abstraction. Both the fake (tests) and the Cloudflare
  * remote adapter (production) satisfy this. The loop never sends raw Tcl; it
@@ -156,6 +164,8 @@ export interface LoopConnector {
   discover(): Promise<readonly ConnectorCapability[]>;
   /** Submit a vivado operation and resolve to a terminal result + evidence. */
   submit(request: VivadoSubmission): Promise<VivadoResult>;
+  /** Fetch the decoded content of a named evidence artifact for a terminal job. */
+  fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent>;
 }
 
 // ---------------------------------------------------------------------------

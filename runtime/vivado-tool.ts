@@ -24,6 +24,7 @@ import {
   FAIL_CLOSED_CODES,
   PermissionDeniedError,
   FailClosedError,
+  WORKER_RESULT_NAME,
 } from "./loop.ts";
 
 const WHITELIST_SET: Readonly<Record<string, true>> = Object.fromEntries(
@@ -210,6 +211,33 @@ export function assembleVivadoTool(): AgentTool {
         ...(result.stdout ? { stdout: capDiagnostic(result.stdout) } : {}),
         evidence: evidenceEntries.map((e) => ({ name: e.name, uri: e.uri, mediaType: e.mediaType, sizeBytes: e.sizeBytes })),
       };
+
+      // On a normal simulation/compile failure (not fail-closed), pull the
+      // structured worker-result.json so the model gets exitCode/phase + stdout/
+      // stderr tails rather than blind repair. Degrades to the manifest-only
+      // summary above on any fetch/parse error (existing behavior).
+      if (result.status === "failed" && !failClosed) {
+        const hasResult = evidenceEntries.some((e) => e.name === WORKER_RESULT_NAME);
+        let diagnosticsFetched = false;
+        if (hasResult) {
+          try {
+            const c = await connector.fetchEvidenceContent(result.jobId, WORKER_RESULT_NAME);
+            const parsed = JSON.parse(c.content) as { exitCode?: number; phase?: string; stdout?: string; stderr?: string };
+            const headerParts: string[] = [];
+            if (parsed.phase) headerParts.push(`phase=${parsed.phase}`);
+            if (parsed.exitCode !== undefined) headerParts.push(`exitCode=${parsed.exitCode}`);
+            summary.failureDiagnostics = {
+              ...(headerParts.length > 0 ? { summary: headerParts.join(", ") } : {}),
+              stdout: capDiagnostic(parsed.stdout ?? ""),
+              stderr: capDiagnostic(parsed.stderr ?? ""),
+            };
+            diagnosticsFetched = true;
+          } catch {
+            diagnosticsFetched = false;
+          }
+        }
+        summary.diagnosticsFetched = diagnosticsFetched;
+      }
 
       if (failClosed) {
         summary.failClosed = true;

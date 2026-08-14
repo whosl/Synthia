@@ -34,6 +34,7 @@ import {
   type ConnectorDiscovery,
   type ConnectorJobSnapshot,
   type ConnectorPort,
+  type EvidenceContent,
   type EvidenceManifest,
   type SubmitJobParams,
 } from "../src/api/connector-port.ts";
@@ -68,6 +69,8 @@ class FakeConnector implements ConnectorPort {
   statusOverride: ((jobId: string) => ConnectorJobSnapshot) | null = null;
   /** When set, fetchEvidence defers to this; return null to mean "no evidence". */
   evidenceOverride: ((jobId: string) => EvidenceManifest | null) | null = null;
+  /** When set, fetchEvidenceContent defers to this; return null → EVIDENCE_NOT_AVAILABLE. */
+  contentOverride: ((jobId: string, name: string) => EvidenceContent | null) | null = null;
   /** Captures the last submit parameters (for assertion). */
   lastSubmit: SubmitJobParams | null = null;
   submitCount = 0;
@@ -81,8 +84,8 @@ class FakeConnector implements ConnectorPort {
   reset(): void {
     this.jobs.clear();
     this.submitError = null;
-    this.statusOverride = null;
     this.evidenceOverride = null;
+    this.contentOverride = null;
     this.lastSubmit = null;
     this.submitCount = 0;
     this.validateParameters = true;
@@ -136,6 +139,16 @@ class FakeConnector implements ConnectorPort {
       jobId,
       entries: [{ name: "result.txt", sha256: "a".repeat(64), sizeBytes: 42, mediaType: "text/plain" }],
     };
+  }
+
+  async fetchEvidenceContent(_projectId: string, jobId: string, name: string): Promise<EvidenceContent> {
+    if (this.contentOverride) {
+      const c = this.contentOverride(jobId, name);
+      if (!c) throw new ConnectorError("EVIDENCE_NOT_AVAILABLE", "evidence content not available");
+      return c;
+    }
+    const body = `content:${name}`;
+    return { name, content: body, sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" };
   }
 
   /** Drive a job to a terminal state with optional output/error (test helper). */
@@ -623,6 +636,75 @@ describe.skipIf(!DATABASE_URL)("run/job API — real PostgreSQL + fake Connector
     });
   });
 
+  // ══ GET /jobs/:jobId/evidence/content — evidence content ════════════════════
+
+  describe("GET /projects/:id/jobs/:jobId/evidence/content", () => {
+    async function submitJob(pid: string): Promise<string> {
+      const res = await callApi(`/api/v1/projects/${pid}/jobs`, {
+        method: "POST", token: ids.humanToken, headers: { "idempotency-key": `k_${randomUUID()}` }, body: validBody(),
+      });
+      return envelopeData(res.json).jobId as string;
+    }
+
+    test("missing ?name query → 400 validation", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      fake.setJob(jobId, { state: "succeeded" });
+      const res = await callApi(`/api/v1/projects/${pid}/jobs/${jobId}/evidence/content`, { token: ids.humanToken });
+      expect(res.status).toBe(400);
+      expect(envelopeError(res.json).code).toBe("validation");
+    });
+
+    test("non-terminal job → 404 not_found", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      // Connector still reports queued → content unavailable.
+      const res = await callApi(`/api/v1/projects/${pid}/jobs/${jobId}/evidence/content?name=result.txt`, { token: ids.humanToken });
+      expect(res.status).toBe(404);
+      expect(envelopeError(res.json).code).toBe("not_found");
+    });
+
+    test("terminal job → 200 content envelope with name/content/sha256/truncated/mediaType", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      fake.setJob(jobId, { state: "succeeded" });
+      const body = "Vivado Simulator\nPASS\n";
+      fake.contentOverride = (_jid, name) => ({
+        name, content: body, sha256: "b".repeat(64), truncated: false, mediaType: "text/plain",
+      });
+
+      const res = await callApi(`/api/v1/projects/${pid}/jobs/${jobId}/evidence/content?name=result.txt`, { token: ids.humanToken });
+      expect(res.status).toBe(200);
+      const data = envelopeData(res.json);
+      expect(data.name).toBe("result.txt");
+      expect(data.content).toBe(body);
+      expect(data.sha256).toBe("b".repeat(64));
+      expect(data.truncated).toBe(false);
+      expect(data.mediaType).toBe("text/plain");
+    });
+
+    test("ownership: job belonging to another project → 404 not_found", async () => {
+      const pidA = await createProject();
+      const pidB = await createProject();
+      const jobId = await submitJob(pidA);
+      fake.setJob(jobId, { state: "succeeded" });
+      // Ask for the same jobId under project B — no tool_run row matches.
+      const res = await callApi(`/api/v1/projects/${pidB}/jobs/${jobId}/evidence/content?name=result.txt`, { token: ids.humanToken });
+      expect(res.status).toBe(404);
+      expect(envelopeError(res.json).code).toBe("not_found");
+    });
+
+    test("Connector reports no evidence content → 404 not_found", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      fake.setJob(jobId, { state: "failed", errorCode: "HARD_ERROR" });
+      fake.contentOverride = () => null; // Connector has no content for this artifact.
+      const res = await callApi(`/api/v1/projects/${pid}/jobs/${jobId}/evidence/content?name=missing.log`, { token: ids.humanToken });
+      expect(res.status).toBe(404);
+      expect(envelopeError(res.json).code).toBe("not_found");
+    });
+  });
+
   // ─── connector contract ─────────────────────────────────────────────────────
 
   test("fake connector discover() advertises the 4 run operations", async () => {
@@ -663,6 +745,7 @@ class MockRemoteClient {
   }
   async status(id: string) { return { id, state: "queued" as ToolRunState }; }
   async evidence(id: string) { return { jobId: id, entries: [{ name: "r.txt", sha256: "a".repeat(64), sizeBytes: 1, mediaType: "text/plain" }] }; }
+  async fetchEvidenceContent(id: string, name: string) { return { content: `body:${name}`, sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" }; }
 }
 
 /** Build a MockRemoteError with a `code` property (mimics RemoteConnectorError). */

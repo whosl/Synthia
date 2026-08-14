@@ -40,6 +40,7 @@ import {
   getEvents,
   getGateSubmissionHandler,
   getGateSubmissions,
+  getJobEvidenceContentHandler,
   getJobEvidenceHandler,
   getJobStatusHandler,
   getProject,
@@ -247,6 +248,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // GET /projects/:projectId/jobs/:jobId/evidence
     if (segments.length === 5 && segments[2] === "jobs" && segments[4] === "evidence" && method === "GET") {
       return { handler: getJobEvidenceHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // GET /projects/:projectId/jobs/:jobId/evidence/content?name=<name>
+    if (segments.length === 6 && segments[2] === "jobs" && segments[4] === "evidence" && segments[5] === "content" && method === "GET") {
+      return { handler: getJobEvidenceContentHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
     }
 
     // /projects/:projectId/artifacts/:artifactId/revisions[/:revId]

@@ -23,6 +23,7 @@ import {
   type ConnectorDiscovery,
   type ConnectorJobSnapshot,
   type ConnectorPort,
+  type EvidenceContent,
   type EvidenceManifest,
   type SubmitJobParams,
 } from "./connector-port.ts";
@@ -79,6 +80,15 @@ interface RemoteEvidenceManifest {
   entries: RemoteEvidenceEntry[];
 }
 
+/** remote.ts EvidenceContent shape — the decoded content of one artifact
+ *  (POST /jobs/evidence/content response). Does not echo `name` back. */
+interface RemoteEvidenceContent {
+  content: string;
+  sha256: string;
+  truncated: boolean;
+  mediaType: string;
+}
+
 interface RemoteCapability {
   operation: string;
   version: string;
@@ -101,6 +111,7 @@ interface RemoteClientLike {
   submit(req: RemoteJobRequest, approval?: RemoteApproval): Promise<RemoteJob>;
   status(id: string): Promise<RemoteJob>;
   evidence(id: string): Promise<RemoteEvidenceManifest>;
+  fetchEvidenceContent(id: string, name: string): Promise<RemoteEvidenceContent>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
 }
@@ -358,6 +369,13 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     return this.withClient(projectId, async (client) => {
       const manifest = await client.evidence(jobId);
       return { jobId: manifest.jobId, entries: manifest.entries };
+    });
+  }
+
+  async fetchEvidenceContent(projectId: string, jobId: string, name: string): Promise<EvidenceContent> {
+    return this.withClient(projectId, async (client) => {
+      const c = await client.fetchEvidenceContent(jobId, name);
+      return { name, content: c.content, sha256: c.sha256, truncated: c.truncated, mediaType: c.mediaType };
     });
   }
 }

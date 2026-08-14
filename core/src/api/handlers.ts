@@ -1264,3 +1264,64 @@ export async function getJobEvidenceHandler(ctx: RequestContext): Promise<Handle
 
   return { status: 200, data: { jobId, entries: manifest.entries } };
 }
+
+/**
+ * GET /projects/:projectId/jobs/:jobId/evidence/content?name=<name> — fetch the
+ * decoded content of a single evidence artifact for a terminal Job.
+ *
+ * Mirrors the evidence-manifest handler's terminal precondition: non-terminal
+ * jobs get one status refresh, still non-terminal → 404. Ownership is verified
+ * by the `tool_run` row's `project_id`. The Connector is the authority for the
+ * content; Connector EVIDENCE_NOT_AVAILABLE / EVIDENCE_CORRUPT → 404. A missing
+ * `name` query parameter → 400 validation.
+ */
+export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const jobId = ctx.params.jobId!;
+  const connector = requireConnector(ctx);
+
+  const name = ctx.url.searchParams.get("name");
+  if (!name) throw validationError("query parameter 'name' is required");
+
+  const found = await ctx.pool.query("SELECT state FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
+  if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
+  let state = String((found.rows[0] as Record<string, unknown>).state);
+
+  // Non-terminal: refresh status once before deciding content availability.
+  if (!(state in TOOL_RUN_TERMINAL_STATES)) {
+    let snapshot;
+    try {
+      snapshot = await connector.queryStatus(projectId, jobId);
+    } catch (err) {
+      throw mapConnectorError(err);
+    }
+    state = snapshot.state;
+    const terminal = state in TOOL_RUN_TERMINAL_STATES;
+    await ctx.pool.query(
+      `UPDATE tool_run
+          SET state = $1, error_code = $2, output_sha256 = $3,
+              end_time = CASE WHEN $4::boolean AND end_time IS NULL THEN now() ELSE end_time END
+        WHERE id = $5 AND project_id = $6`,
+      [state, snapshot.errorCode ?? null, snapshot.outputSha256 ?? null, terminal, jobId, projectId],
+    );
+    if (!terminal) throw notFoundError("evidence content not available: job not terminal");
+  }
+
+  let content;
+  try {
+    content = await connector.fetchEvidenceContent(projectId, jobId, name);
+  } catch (err) {
+    throw mapConnectorError(err);
+  }
+
+  return {
+    status: 200,
+    data: {
+      name: content.name,
+      content: content.content,
+      sha256: content.sha256,
+      truncated: content.truncated,
+      mediaType: content.mediaType,
+    },
+  };
+}

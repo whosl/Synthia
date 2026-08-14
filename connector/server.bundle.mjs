@@ -3,11 +3,11 @@ var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // connector/server.ts
 import { createServer } from "node:https";
-import { readFile as readFile2 } from "node:fs/promises";
+import { readFile as readFile3 } from "node:fs/promises";
 import { access as access2, constants as constants2 } from "node:fs/promises";
 
 // connector/worker.ts
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // core/src/hashing.ts
@@ -30,6 +30,9 @@ var REMOTE_SCHEMA_VERSION = "connector.remote.v1";
 var terminal = new Set(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
 var idRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 var classes = ["public", "internal", "confidential", "restricted"];
+var MAX_CONTENT_BYTES = 256 * 1024;
+var CONTENT_WINDOW_BYTES = 128 * 1024;
+var evidenceNameRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 var unavailableExecution = {
   async discover() {
     return { connector_id: "unavailable", connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: "none", vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: "unavailable", sdk_worker_build_hash: "unavailable", capabilities: [], toolchain_profile_hash: "unavailable", license_status: "unknown", unsupported: ["vivado_discovery", "vivado_execution"] };
@@ -99,7 +102,7 @@ class WorkerRuntime {
       return this.ok(out.body, out.status);
     } catch (cause) {
       const code = cause instanceof Error ? cause.message : "WORKER_ERROR";
-      const status = code === "JOB_NOT_FOUND" ? 404 : code === "UNSUPPORTED_VIVADO" ? 501 : code === "IDEMPOTENCY_CONFLICT" ? 409 : code === "NOT_FOUND" ? 404 : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
+      const status = code === "JOB_NOT_FOUND" || code === "EVIDENCE_NOT_AVAILABLE" || code === "NOT_FOUND" ? 404 : code === "EVIDENCE_CORRUPT" ? 422 : code === "UNSUPPORTED_VIVADO" ? 501 : code === "IDEMPOTENCY_CONFLICT" ? 409 : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
       return responseError(code, code, status);
     }
   }
@@ -167,6 +170,12 @@ class WorkerRuntime {
       if (!job.evidence)
         throw new Error("EVIDENCE_NOT_AVAILABLE");
       return { status: 200, body: this.envelope(e, copy(job.evidence)) };
+    }
+    if (path === "/jobs/evidence/content") {
+      const name = p.name;
+      if (typeof name !== "string" || !evidenceNameRe.test(name))
+        throw new Error("EVIDENCE_NOT_AVAILABLE");
+      return this.evidenceContent(e, job, name);
     }
     throw new Error("NOT_FOUND");
   }
@@ -243,6 +252,32 @@ class WorkerRuntime {
         job.errorCode = "WORKER_EXECUTION_ERROR";
     }
   }
+  async evidenceContent(e, job, name) {
+    if (!job.evidence)
+      throw new Error("EVIDENCE_NOT_AVAILABLE");
+    const entry = job.evidence.entries.find((x) => x.name === name);
+    if (!entry)
+      throw new Error("EVIDENCE_NOT_AVAILABLE");
+    const filePath = join(this.root, job.id, "output", name);
+    let buf;
+    try {
+      buf = await readFile(filePath);
+    } catch {
+      throw new Error("EVIDENCE_CORRUPT");
+    }
+    if (sha256(buf) !== entry.sha256)
+      throw new Error("EVIDENCE_CORRUPT");
+    let contentBytes = buf;
+    let truncated = false;
+    if (buf.byteLength > MAX_CONTENT_BYTES) {
+      truncated = true;
+      const omitted = buf.byteLength - CONTENT_WINDOW_BYTES * 2;
+      contentBytes = Buffer.concat([buf.subarray(0, CONTENT_WINDOW_BYTES), Buffer.from(`
+…[${omitted} bytes omitted]…
+`, "utf8"), buf.subarray(buf.byteLength - CONTENT_WINDOW_BYTES)]);
+    }
+    return { status: 200, body: this.envelope(e, { name: entry.name, sha256: entry.sha256, sizeBytes: buf.byteLength, mediaType: entry.mediaType, content_base64: Buffer.from(contentBytes).toString("base64"), truncated }) };
+  }
   envelope(e, payload) {
     return { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: e.correlation_id, causation_id: e.correlation_id, idempotency_key: e.idempotency_key, actor: e.actor, project_id: e.project_id, classification: e.classification, capability_version: e.capability_version, payload };
   }
@@ -257,7 +292,7 @@ class WorkerRuntime {
 // connector/vivado.ts
 import { createHash as createHash2 } from "node:crypto";
 import { access, constants } from "node:fs/promises";
-import { mkdir as mkdir2, readFile, readdir, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join as join2, resolve } from "node:path";
 var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
@@ -555,7 +590,7 @@ async function evidence(workspace, jobId) {
   const entries = [];
   for (const name of await readdir(output)) {
     safePath(name);
-    const bytes = await readFile(join2(output, name));
+    const bytes = await readFile2(join2(output, name));
     entries.push({ name, uri: `workspace://${jobId}/output/${name}`, sha256: hash(bytes), sizeBytes: (await stat(join2(output, name))).size, mediaType: name.endsWith(".rpt") ? "text/plain" : "application/octet-stream" });
   }
   return { jobId, entries };
@@ -682,7 +717,7 @@ function required(value, name) {
   return value;
 }
 async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json") {
-  const config = JSON.parse(await readFile2(path, "utf8"));
+  const config = JSON.parse(await readFile3(path, "utf8"));
   for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "vivado_part", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"])
     required(config[name], name);
   if (config.protocol_version !== REMOTE_SCHEMA_VERSION || config.transport_mode !== "direct_https" || config.auth_mode !== "mtls")
@@ -761,7 +796,7 @@ function execution(config) {
 async function startWorker(configPath) {
   const config = await loadConfig(configPath);
   const privateKey = config.server_private_key_path.toLowerCase().endsWith(".pfx") || config.server_private_key_path.toLowerCase().endsWith(".p12");
-  const tls = privateKey ? { pfx: await readFile2(config.server_private_key_path), passphrase: required(process.env.SYNTHIA_WORKER_PFX_PASSWORD, "SYNTHIA_WORKER_PFX_PASSWORD"), ca: await readFile2(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true } : { cert: await readFile2(config.server_certificate_path), key: await readFile2(config.server_private_key_path), ca: await readFile2(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true };
+  const tls = privateKey ? { pfx: await readFile3(config.server_private_key_path), passphrase: required(process.env.SYNTHIA_WORKER_PFX_PASSWORD, "SYNTHIA_WORKER_PFX_PASSWORD"), ca: await readFile3(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true } : { cert: await readFile3(config.server_certificate_path), key: await readFile3(config.server_private_key_path), ca: await readFile3(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true };
   const options = { endpoint: config, workspaceRoot: config.workspace_root, execution: execution(config) };
   const runtime = new WorkerRuntime(options);
   const handler = runtime.handle.bind(runtime);

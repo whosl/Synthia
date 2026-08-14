@@ -21,7 +21,7 @@
 import { RemoteConnectorError, type RemoteConnectorClient } from "../connector/remote.ts";
 import { sha256Hex, stableId } from "../core/src/hashing.ts";
 import { FailClosedError, VIVADO_CAPABILITY_VERSION, submissionSha } from "./loop.ts";
-import type { ConnectorCapability, EvidenceManifest, LoopConnector, VivadoResult, VivadoSubmission } from "./types.ts";
+import type { ConnectorCapability, EvidenceContent, EvidenceManifest, LoopConnector, VivadoResult, VivadoSubmission } from "./types.ts";
 
 export interface ConnectorLifecycleEvent {
   readonly action: string;
@@ -100,6 +100,19 @@ export class RemoteVivadoConnector implements LoopConnector {
     }
   }
 
+  async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+    await this.ensureReady();
+    try {
+      return await this.doFetchEvidenceContent(jobId, name);
+    } catch (e) {
+      if (isLeaseExpired(e)) {
+        await this.reconnect("lease expired during fetchEvidenceContent");
+        return await this.doFetchEvidenceContent(jobId, name);
+      }
+      throw e;
+    }
+  }
+
   // ----- internals -----
 
   private async doSubmit(submission: VivadoSubmission): Promise<VivadoResult> {
@@ -127,6 +140,16 @@ export class RemoteVivadoConnector implements LoopConnector {
       inputSha256: input,
       errorCode: job.errorCode,
       evidence,
+    };
+  }
+
+  private async doFetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+    const c = await this.client.fetchEvidenceContent(jobId, name);
+    return {
+      content: c.content,
+      sha256: c.sha256,
+      truncated: c.truncated,
+      mediaType: c.mediaType,
     };
   }
 

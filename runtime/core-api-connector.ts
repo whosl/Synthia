@@ -36,6 +36,7 @@ import { submissionSha, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import {
   WHITELISTED_OPERATIONS,
   type ConnectorCapability,
+  type EvidenceContent,
   type EvidenceManifest,
   type LoopConnector,
   type VivadoResult,
@@ -176,6 +177,19 @@ export class CoreApiConnector implements LoopConnector {
       inputSha256: inputSha,
       ...(terminal.errorCode ? { errorCode: terminal.errorCode } : {}),
       ...(evidence ? { evidence } : {}),
+    };
+  }
+
+  async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+    const data = (await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/jobs/${jobId}/evidence/content?name=${encodeURIComponent(name)}`,
+    )) as { name: string; content: string; sha256: string; truncated: boolean; mediaType: string };
+    return {
+      content: data.content,
+      sha256: data.sha256,
+      truncated: data.truncated,
+      mediaType: data.mediaType,
     };
   }
 

@@ -11,6 +11,8 @@ import {
   FailClosedError,
   VIVADO_CAPABILITY_VERSION,
   FAKE_CAPABILITIES,
+  WORKER_RESULT_NAME,
+  renderFailureDiagnostics,
   extractTopicKeywords,
   extractModulePorts,
 } from "./loop.ts";
@@ -44,7 +46,7 @@ const DOC_REG: DocGeneration = { phase: "generate_register_spec", reasoning: "ok
 
 /** A complete test model that produces all 8 phase outputs. */
 class FullChainModel implements LoopModel {
-  readonly repairs: Array<{ stderr: string; attempt: number }> = [];
+  readonly repairs: Array<{ stderr: string; stdout: string; attempt: number }> = [];
   private repairResponse: RepairGeneration;
 
   constructor(opts: { repairResponse?: RepairGeneration } = {}) {
@@ -58,8 +60,8 @@ class FullChainModel implements LoopModel {
   async generateRtl(): Promise<RtlGeneration> { return { phase: "generate_rtl", reasoning: "ok", topModule: "counter", sources: [RTL] }; }
   async generateTestbench(): Promise<TbGeneration> { return { phase: "generate_testbench", reasoning: "ok", testbenchModule: "tb_counter", testbench: TB }; }
   async generateXdc(_top: string, _part: string, _sys: string, _allowPin: boolean): Promise<XdcGeneration> { return { phase: "generate_xdc", reasoning: "ok", constraints: [XDC] }; }
-  async repair(input: { stderr: string; attempt: number }): Promise<RepairGeneration> {
-    this.repairs.push({ stderr: input.stderr, attempt: input.attempt });
+  async repair(input: { stderr: string; stdout?: string; attempt: number }): Promise<RepairGeneration> {
+    this.repairs.push({ stderr: input.stderr, stdout: input.stdout ?? "", attempt: input.attempt });
     return this.repairResponse;
   }
 }
@@ -105,6 +107,37 @@ describe("permissionGate", () => {
   });
   test("fail-closed when capability is not exposed", () => {
     expect(() => permissionGate("implement", false, caps.filter(c => c.operation !== "implement"))).toThrow(FailClosedError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderFailureDiagnostics (unit)
+// ---------------------------------------------------------------------------
+
+describe("renderFailureDiagnostics", () => {
+  test("renders exitCode/phase header + stdout/stderr tails into model-facing fields", () => {
+    const out = renderFailureDiagnostics({ exitCode: 1, phase: "simulate", stdout: "sim stdout", stderr: "sim stderr" });
+    expect(out.stdout).toBe("sim stdout");
+    expect(out.stderr).toContain("[失败诊断 phase=simulate, exitCode=1]");
+    expect(out.stderr).toContain("sim stderr");
+  });
+  test("omits header when exitCode/phase absent", () => {
+    const out = renderFailureDiagnostics({ stdout: "o", stderr: "e" });
+    expect(out.stdout).toBe("o");
+    expect(out.stderr).toBe("e");
+    expect(out.stderr).not.toContain("[失败诊断");
+  });
+  test("truncates long stdout/stderr to a tail window", () => {
+    const long = "x".repeat(3000);
+    const out = renderFailureDiagnostics({ stdout: long, stderr: long });
+    expect(out.stdout.length).toBeLessThan(long.length);
+    expect(out.stdout).toContain("truncated");
+    expect(out.stderr).toContain("truncated");
+  });
+  test("handles empty/undefined gracefully", () => {
+    const out = renderFailureDiagnostics({});
+    expect(out.stdout).toBe("");
+    expect(out.stderr).toBe("");
   });
 });
 
@@ -155,6 +188,83 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
     expect(result.endedReason).toContain("repair budget");
     expect(connector.callCount("synthesize")).toBe(0);
     expect(connector.callCount("implement")).toBe(0);
+  });
+
+  // ══ Failure diagnostics — worker-result.json content injection ═════════════
+
+  /** Behavior: simulate fails once with a worker-result.json evidence entry,
+   *  then succeeds. The failure carries a bare stderr the diagnostics should
+   *  OVERRIDE with the richer worker-result.json content. */
+  function failOnceWithWorkerResultBehavior() {
+    let failed = false;
+    return {
+      respond: (req: { operation: string }, _idx: number) => {
+        if (req.operation === "simulate" && !failed) {
+          failed = true;
+          return {
+            status: "failed" as const,
+            jobId: `fake-job-${req.operation}-wr`,
+            operation: req.operation as never,
+            inputSha256: "wr-sha",
+            stdout: "bare stdout (should be overridden)",
+            stderr: "bare stderr (should be overridden)",
+            errorCode: "VIVADO_SIMULATION_FAILED",
+            evidence: {
+              jobId: "fake-job-simulate-wr",
+              entries: [
+                { name: WORKER_RESULT_NAME, sha256: "w".repeat(64), sizeBytes: 99, mediaType: "application/json" },
+                { name: "simulate.log", sha256: "l".repeat(64), sizeBytes: 10, mediaType: "text/plain" },
+              ],
+            },
+          };
+        }
+        return {
+          status: "succeeded" as const,
+          jobId: `fake-job-${req.operation}-ok`,
+          operation: req.operation as never,
+          inputSha256: "wr-sha",
+          stdout: "PASS",
+          evidence: { jobId: "fake-job-ok", entries: [{ name: "result.txt", sha256: "r".repeat(64), sizeBytes: 4, mediaType: "text/plain" }] },
+        };
+      },
+    };
+  }
+
+  test("repair receives worker-result.json diagnostics (exitCode/phase/stderr) when evidence entry exists", async () => {
+    const connector = new FakeVivadoConnector({ behavior: failOnceWithWorkerResultBehavior() as never });
+    const model = new FullChainModel();
+    const loop = makeLoop(model, connector);
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("succeeded");
+    expect(model.repairs).toHaveLength(1);
+    // The worker-result.json content (from FakeVivadoConnector.fetchEvidenceContent)
+    // overrides the bare VivadoResult fields.
+    expect(model.repairs[0]!.stderr).toContain("phase=simulate");
+    expect(model.repairs[0]!.stderr).toContain("exitCode=1");
+    expect(model.repairs[0]!.stderr).toContain("[USF-XSim 62]");
+    expect(model.repairs[0]!.stderr).not.toContain("bare stderr");
+    expect(model.repairs[0]!.stdout).toContain("Vivado Simulator run");
+    expect(model.repairs[0]!.stdout).not.toContain("bare stdout");
+    // Audit recorded the successful fetch.
+    const diagAudit = result.audit.find((a) => a.action.startsWith("diagnostics_fetched"));
+    expect(diagAudit).toBeDefined();
+    expect(diagAudit!.action).toContain("true");
+  });
+
+  test("repair degrades to bare result fields when no worker-result.json entry (existing behavior)", async () => {
+    // failOnceThenSucceedBehavior evidence has simulate.log, NOT worker-result.json.
+    const connector = new FakeVivadoConnector({ behavior: failOnceThenSucceedBehavior("simulate", 1) });
+    const model = new FullChainModel();
+    const loop = makeLoop(model, connector);
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("succeeded");
+    expect(model.repairs).toHaveLength(1);
+    // Falls back to the bare VivadoResult.stderr.
+    expect(model.repairs[0]!.stderr).toContain("undefined signal");
+    expect(model.repairs[0]!.stderr).not.toContain("[失败诊断");
+    const diagAudit = result.audit.find((a) => a.action.startsWith("diagnostics_fetched"));
+    expect(diagAudit).toBeDefined();
+    expect(diagAudit!.action).toContain("false");
   });
 
   test("capability drift detected → immediate fail-closed, no further tool calls", async () => {

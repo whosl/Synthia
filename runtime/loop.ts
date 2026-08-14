@@ -32,6 +32,7 @@ import {
   GATE_AFTER_STAGE,
   type AuditEvent,
   type DocGeneration,
+  type EvidenceContent,
   type EvidenceSummary,
   type GovernanceClient,
   type GjbGate,
@@ -334,9 +335,11 @@ export class LoopExecutor {
       if (round === maxRounds) {
         throw new FailClosedError(`simulate failed and repair budget (${maxRounds}) exhausted`, "REPAIR_BUDGET_EXHAUSTED");
       }
+      const diag = await this.fetchFailureDiagnostics(sim);
+      this.pushAudit({ category: "tool_call", phase: "repair", action: `diagnostics_fetched=${diag.diagnosticsFetched}`, jobId: sim.jobId, result: "ok", detail: diag.diagnosticsFetched ? "worker-result.json content injected into repair prompt" : "degraded: bare result fields only" });
       const repaired = await this.callModel("repair", () => model.repair({
         sources: simSources, testbench: simTb, topModule: rtl.topModule, testbenchModule: tb.testbenchModule,
-        stderr: sim?.stderr ?? "", stdout: sim?.stdout, attempt: round + 1, systemPrompt: skillPrompts.repair,
+        stderr: diag.stderr, stdout: diag.stdout, attempt: round + 1, systemPrompt: skillPrompts.repair,
       }));
       simSources = repaired.sources;
       if (repaired.testbench) simTb = repaired.testbench;
@@ -803,6 +806,33 @@ export class LoopExecutor {
     });
   }
 
+  /**
+   * Fetch the worker-result.json evidence content for a failed job and extract
+   * its diagnostic fields (exitCode/phase/stdout/stderr) to feed the repair
+   * model a richer "失败诊断" section than the bare VivadoResult. Degrades
+   * gracefully: no matching evidence entry, fetch error, or parse error →
+   * returns the bare result fields with diagnosticsFetched=false (existing
+   * behavior). The `diagnostics_fetched` flag is surfaced via the returned
+   * tuple so the caller can audit it.
+   */
+  private async fetchFailureDiagnostics(
+    result: VivadoResult,
+  ): Promise<{ stdout: string; stderr: string; diagnosticsFetched: boolean }> {
+    const fallback = { stdout: result.stdout ?? "", stderr: result.stderr ?? "", diagnosticsFetched: false };
+    const entry = result.evidence?.entries.find((e) => e.name === WORKER_RESULT_NAME);
+    if (!entry) return fallback;
+    try {
+      const content = await this.deps.connector.fetchEvidenceContent(result.jobId, WORKER_RESULT_NAME);
+      const parsed = JSON.parse(content.content) as Partial<WorkerResultPayload>;
+      return {
+        ...renderFailureDiagnostics(parsed),
+        diagnosticsFetched: true,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
   private async callModel<T extends LoopAction>(phase: LoopPhase, fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
@@ -1000,6 +1030,46 @@ export function submissionSha(submission: VivadoSubmission): string {
   return sha256Hex(JSON.stringify(payload));
 }
 
+// ---------------------------------------------------------------------------
+// Failure diagnostics — worker-result.json content extraction (IF evidence fetch)
+// ---------------------------------------------------------------------------
+
+/** Evidence entry name carrying the structured worker outcome (stdout/stderr/exitCode/phase). */
+export const WORKER_RESULT_NAME = "worker-result.json";
+
+/** Shape of the worker-result.json content the Worker writes to output/. */
+export interface WorkerResultPayload {
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly exitCode?: number;
+  readonly phase?: string;
+}
+
+/** Max chars of stdout/stderr tail kept when rendering the diagnostics block. */
+const DIAG_TAIL_CHARS = 2000;
+
+function tail(s: string | undefined, max: number): string {
+  if (!s) return "";
+  return s.length <= max ? s : `…(head truncated, ${s.length - max} chars)\n` + s.slice(-max);
+}
+
+/**
+ * Render a parsed worker-result.json into the {stdout, stderr} pair the repair
+ * model consumes. exitCode/phase are emitted as a header line at the top of the
+ * stderr fence (the failure channel); stdout/stderr tails follow. Module-level
+ * so it is unit-testable without a LoopExecutor.
+ */
+export function renderFailureDiagnostics(parsed: Partial<WorkerResultPayload>): { stdout: string; stderr: string } {
+  const headerParts: string[] = [];
+  if (parsed.phase) headerParts.push(`phase=${parsed.phase}`);
+  if (parsed.exitCode !== undefined) headerParts.push(`exitCode=${parsed.exitCode}`);
+  const header = headerParts.length > 0 ? `[失败诊断 ${headerParts.join(", ")}]\n` : "";
+  return {
+    stdout: tail(parsed.stdout, DIAG_TAIL_CHARS),
+    stderr: header + tail(parsed.stderr, DIAG_TAIL_CHARS),
+  };
+}
+
 
 // ---------------------------------------------------------------------------
 // FakeVivadoConnector — programmable test double (also a reference impl of LoopConnector)
@@ -1041,6 +1111,21 @@ export class FakeVivadoConnector implements LoopConnector {
     };
     const res = await this.behavior.respond(req, idx);
     return { ...base, ...res, operation: req.operation, inputSha256: submissionSha(req) };
+  }
+
+  async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+    const fakeBody = JSON.stringify({
+      jobId, name, phase: "simulate",
+      exitCode: 1,
+      stdout: "Vivado Simulator run",
+      stderr: "Error: [USF-XSim 62] parse error",
+    });
+    return {
+      content: fakeBody,
+      sha256: sha256Hex(fakeBody),
+      truncated: false,
+      mediaType: "application/json",
+    };
   }
 
   callCount(operation: WhitelistedOperation): number { return this.counts.get(operation) ?? 0; }

@@ -231,6 +231,53 @@ describe("CoreApiConnector.submit happy path", () => {
 });
 
 // ---------------------------------------------------------------------------
+// fetchEvidenceContent
+// ---------------------------------------------------------------------------
+
+describe("CoreApiConnector.fetchEvidenceContent", () => {
+  test("GET evidence/content?name= maps to EvidenceContent", async () => {
+    const { fetchImpl, calls } = mockFetch((url, init) => {
+      const method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.includes("/evidence/content")) {
+        return {
+          status: 200,
+          body: { data: { name: "worker-result.json", content: '{"exitCode":1}', sha256: "b".repeat(64), truncated: false, mediaType: "application/json" } },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const conn = makeConnector({ fetchImpl });
+    const c = await conn.fetchEvidenceContent("job-abc", "worker-result.json");
+
+    expect(c.content).toBe('{"exitCode":1}');
+    expect(c.sha256).toBe("b".repeat(64));
+    expect(c.truncated).toBe(false);
+    expect(c.mediaType).toBe("application/json");
+    // URL has the name query param encoded.
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/projects/${PROJECT}/jobs/job-abc/evidence/content?name=worker-result.json`);
+  });
+
+  test("truncated content passes through", async () => {
+    const { fetchImpl } = mockFetch(() => ({
+      status: 200,
+      body: { data: { name: "big.log", content: "...head...…...", sha256: "c".repeat(64), truncated: true, mediaType: "text/plain" } },
+    }));
+    const conn = makeConnector({ fetchImpl });
+    const c = await conn.fetchEvidenceContent("job-big", "big.log");
+    expect(c.truncated).toBe(true);
+    expect(c.content).toContain("head");
+  });
+
+  test("404 not_found surfaces as RemoteConnectorError", async () => {
+    const { fetchImpl } = mockFetch(() => ({ status: 404, body: { error: { code: "not_found", message: "no evidence" } } }));
+    const conn = makeConnector({ fetchImpl });
+    await expect(conn.fetchEvidenceContent("job-x", "missing.log")).rejects.toMatchObject({
+      name: "RemoteConnectorError", code: "not_found",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // envelope error destructure
 // ---------------------------------------------------------------------------
 
