@@ -119,11 +119,17 @@ export interface RuntimeClient {
     process_instance_id: string;
     task: string;
     part?: string;
+    /** "agent" = free-agent session only (do not start the pipeline loop). */
+    mode?: "agent";
   }): Promise<RuntimeCreateResponse>;
   /** GET /tasks — list runs filtered by project. */
   listTasks(projectId: string): Promise<RuntimeListResponse>;
   /** GET /tasks/:runId — fetch a single run's detail. */
   getTask(runId: string): Promise<RuntimeRunDetail>;
+  /** POST /tasks/:runId/message — free-agent conversation (prompt/steer). */
+  sendMessage(runId: string, text: string): Promise<unknown>;
+  /** POST /tasks/:runId/abort — abort the free-agent session. */
+  abortTask(runId: string): Promise<unknown>;
 }
 
 /**
@@ -236,6 +242,14 @@ export class HttpRuntimeClient implements RuntimeClient {
 
   async getTask(runId: string): Promise<RuntimeRunDetail> {
     return this.request<RuntimeRunDetail>("GET", `/tasks/${encodeURIComponent(runId)}`);
+  }
+
+  async sendMessage(runId: string, text: string): Promise<unknown> {
+    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/message`, { text });
+  }
+
+  async abortTask(runId: string): Promise<unknown> {
+    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/abort`);
   }
 }
 
@@ -424,6 +438,7 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
   const body = asObject(ctx.body);
   const task = requireString(body, "task");
   const part = nullableString(body, "part");
+  const mode = nullableString(body, "mode");
   const explicitPi = nullableString(body, "process_instance_id");
 
   const result = await runIdempotent<{ runId: string }>(ctx, "create_task", projectId, async (tx) => {
@@ -436,6 +451,7 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
         process_instance_id: processInstanceId,
         task,
         part: part ?? undefined,
+        ...(mode === "agent" ? { mode: "agent" } : {}),
       });
     } catch (err) {
       throw mapRuntimeError(err);
@@ -498,4 +514,54 @@ export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult
   }
   if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
   return { status: 200, data: detail };
+}
+
+/**
+ * POST /projects/:projectId/tasks/:runId/message — forward a free-agent
+ * conversation message (prompt when idle, steer when running). Ownership of
+ * the run is verified before forwarding; the Runtime reply is passed through.
+ */
+export async function sendTaskMessageHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const runId = ctx.params.runId!;
+  const runtime = requireRuntime(ctx);
+  const body = asObject(ctx.body);
+  const text = requireString(body, "text");
+
+  let detail: RuntimeRunDetail;
+  try {
+    detail = await runtime.getTask(runId);
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+
+  try {
+    const reply = await runtime.sendMessage(runId, text);
+    return { status: 200, data: reply };
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+}
+
+/** POST /projects/:projectId/tasks/:runId/abort — abort the free-agent session. */
+export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const runId = ctx.params.runId!;
+  const runtime = requireRuntime(ctx);
+
+  let detail: RuntimeRunDetail;
+  try {
+    detail = await runtime.getTask(runId);
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+
+  try {
+    const result = await runtime.abortTask(runId);
+    return { status: 200, data: result };
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
 }

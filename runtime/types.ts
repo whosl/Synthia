@@ -433,4 +433,9 @@ export interface RunState {
   readonly endedReason?: string;
   /** Structured cause for terminal failure (drives resume eligibility). */
   readonly terminalCause?: TerminalCause;
+  /**
+   * 自由 Agent 门禁锁定：core_submit_gate 成功后置位，core_check_gate approved
+   * 或 unlockGate 清除。持久化进 run-state，重启后仍锁定（会话恢复时据此置位）。
+   */
+  readonly freeAgentLock?: { readonly gate: GateId; readonly submissionId: string };
 }

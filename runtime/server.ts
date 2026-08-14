@@ -55,6 +55,8 @@ import type { SkillPrompts } from "./skill-loader.ts";
 // ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
 import { createFreeAgentSession } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
+import { assembleGateTools } from "./gate-tools.ts";
+import { assembleVivadoTool } from "./vivado-tool.ts";
 import { buildContextSnapshot } from "./context-snapshot.ts";
 import type { FreeAgentDeps, FreeAgentSession, ConversationalModel } from "./agent-types.ts";
 
@@ -63,7 +65,7 @@ import type { FreeAgentDeps, FreeAgentSession, ConversationalModel } from "./age
 // ---------------------------------------------------------------------------
 
 export type ServerStatus =
-  | "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed"
+  | "idle" | "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed"
   | "interrupted";
 
 export interface RunHandle {
@@ -266,6 +268,13 @@ export class RuntimeServer {
     };
     this.registry.set(runId, handle);
 
+    // mode="agent": free-agent conversation only — do NOT start the GJB
+    // pipeline loop. The run stays idle until /message drives it.
+    if (body.mode === "agent") {
+      handle.status = "idle";
+      return json({ run_id: runId }, 201);
+    }
+
     // Async start — don't await.
     this.executeRun(runId, "initial").catch((e) => {
       process.stderr.write(`[runtime-server] executeRun error for ${runId}: ${e}\n`);
@@ -424,12 +433,12 @@ export class RuntimeServer {
   private async getOrCreateSession(runId: string): Promise<FreeAgentSession | null> {
     const existing = this.sessions.get(runId);
     if (existing) return existing;
-
-    // 解析 projectId/part/governance/connector：优先 registry，回退磁盘。
     let projectId: string | undefined;
     let part: string | undefined;
     let governance: GovernanceClient | undefined;
     let connector: LoopConnector | null = null;
+    let processInstanceId = "pi-default";
+    let initialGateLock: { gate: GateId; submissionId: string } | undefined;
 
     const handle = this.registry.get(runId);
     if (handle) {
@@ -437,6 +446,8 @@ export class RuntimeServer {
       part = handle.part;
       governance = handle.governance;
       connector = handle.connector;
+      processInstanceId = handle.processInstanceId ?? "pi-default";
+      initialGateLock = handle.currentState?.freeAgentLock;
     } else {
       let state: RunState | undefined;
       try {
@@ -445,7 +456,8 @@ export class RuntimeServer {
         state = undefined;
       }
       if (!state) return null;
-      const processInstanceId = state.processInstanceId ?? "pi-default";
+      processInstanceId = state.processInstanceId ?? "pi-default";
+      initialGateLock = state.freeAgentLock;
       try {
         const deps = await this.depsFactory({ projectId: state.projectId, processInstanceId });
         projectId = state.projectId;
@@ -488,13 +500,15 @@ export class RuntimeServer {
 
     const deps: FreeAgentDeps = {
       model,
-      tools: await assembleSkillTools(),
+      tools: [...await assembleSkillTools(), ...assembleGateTools(), assembleVivadoTool()],
       systemPrompt,
       projectId,
       part,
       classification: process.env.SYNTHIA_CLASSIFICATION ?? "internal",
       governance,
       connector,
+      processInstanceId,
+      ...(initialGateLock ? { initialGateLock } : {}),
       ...(process.env.SYNTHIA_RUNS_DIR ? { runsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
     };
 

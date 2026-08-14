@@ -334,11 +334,11 @@ function buildTool(config: SkillToolConfig): AgentTool {
       let rev;
       try {
         rev = await ctx.governance.registerCandidateArtifact({
-          // artifactId becomes a URL path segment on the Core route
-          // (/projects/:id/artifacts/<artifactId>/revisions) — slashes from
-          // doc paths (doc/intake/summary.md) and colons must be normalized
-          // or route matching fails with a misleading 404.
-          artifactId: `fpga:${config.skillId}:${filename}`.replace(/[^A-Za-z0-9._-]/g, "-"),
+          // artifactId becomes a URL path segment on the Core route and is a
+          // GLOBAL primary key — include the project id so identical skill
+          // outputs across projects/runs do not collide, and normalize
+          // slashes/colons from doc paths for URL safety.
+          artifactId: `fpga-${ctx.projectId}-${config.skillId}-${filename}`.replace(/[^A-Za-z0-9._-]/g, "-"),
           artifactType: config.registerType,
           title: `${config.skillId}: ${filename}`,
           content,
@@ -361,6 +361,17 @@ function buildTool(config: SkillToolConfig): AgentTool {
           isError: true,
         };
       }
+
+      // (c2) Record the candidate in the session registry so the gate tool can
+      //      run content-conformity on it before submission. No-op outside a
+      //      free-agent session (pipeline loop does not set ctx.freeAgent).
+      ctx.freeAgent?.recordArtifact({
+        revisionId: rev.revisionId,
+        artifactType: config.registerType,
+        content,
+        contentLocation: filename,
+        title: `${config.skillId}: ${filename}`,
+      });
 
       // (c) Result: candidate summary (visibly candidate, never approved).
       const lines: string[] = [

@@ -9,7 +9,7 @@
  * 在现有自带 ModelClient 上自建自由 tool-calling 循环，GJB 三层钩子自控。
  */
 
-import type { GovernanceClient, LoopConnector } from "./types.ts";
+import type { ArtifactType, GateId, GovernanceClient, LoopConnector } from "./types.ts";
 
 /** JSON Schema 子集（OpenAI tool `parameters` 格式）。 */
 export type ToolParameters = Record<string, unknown>;
@@ -25,6 +25,53 @@ export interface ToolExecContext {
   readonly part: string;
   /** 当前任务分类/数据域标签（beforeToolCall 数据域判定用）。 */
   readonly classification: string;
+  /**
+   * 自由 Agent 会话控制器（门禁锁定 + 制品/快照登记簿）。仅在自由 Agent 会话内注入；
+   * pipeline loop 不设置。门禁工具据此锁定/解锁会话、在提交前运行符合性校验。
+   */
+  readonly freeAgent?: FreeAgentController;
+}
+
+/** 已登记制品的内存登记项（符合性校验用；制品全文存内存，仅当前会话生命周期）。 */
+export interface RegisteredArtifactInfo {
+  readonly revisionId: string;
+  readonly artifactType: ArtifactType;
+  readonly content: string;
+  readonly contentLocation: string;
+  readonly title: string;
+}
+
+/**
+ * 自由 Agent 会话级控制器：门禁锁定状态机 + 制品/快照登记簿。
+ *
+ * - **门禁锁定**：`core_submit_gate` 成功后调用 {@link lockForGate} 进入「等待批准」状态；
+ *   在该状态下会话在**工具执行层硬拦**除 `core_check_gate` 外的一切 skill/vivado 工具调用。
+ *   {@link core_check_gate} 返回 `approved` 时 {@link unlockGate} 解除；`rejected`/`withdrawn`
+ *   保持锁定。锁定状态持久化进 run-state（重启后仍锁定）。
+ * - **登记簿**：skill 工具登记候选时调用 {@link recordArtifact}，`core_create_snapshot`
+ *   记录快照成员；`core_submit_gate` 据此在提交前运行主题/名称/端口符合性校验。
+ */
+export interface FreeAgentController {
+  /** 会话是否处于「等待批准」锁定态（skill/vivado 工具被硬拦）。 */
+  isGateLocked(): boolean;
+  /** 当前锁定信息（门禁 + 提交 id），用于拦截提示。未锁定时为 undefined。 */
+  readonly lockedGate: { readonly gate: GateId; readonly submissionId: string } | undefined;
+  /** 进入「等待批准」锁定态并持久化。 */
+  lockForGate(gate: GateId, submissionId: string): void;
+  /** 解除锁定（批准到达）并持久化。 */
+  unlockGate(): void;
+  /** 流程实例 id（createGateSubmission 入参；来自 run-state）。 */
+  readonly processInstanceId: string;
+  /** 记录已登记候选制品（符合性校验用）。 */
+  recordArtifact(info: RegisteredArtifactInfo): void;
+  /** 记录快照成员修订（core_create_snapshot 调用）。 */
+  recordSnapshot(snapshotId: string, memberRevisionIds: readonly string[]): void;
+  /** 查询快照的成员修订 id（core_submit_gate 符合性校验用）。 */
+  getSnapshotMembers(snapshotId: string): readonly string[] | undefined;
+  /** 查询修订对应的制品信息（符合性校验用）。 */
+  getArtifact(revisionId: string): RegisteredArtifactInfo | undefined;
+  /** 全部已登记制品（关键词源推导用）。 */
+  readonly artifacts: readonly RegisteredArtifactInfo[];
 }
 
 /** 工具执行结果（回填给模型）。content 必须为可序列化文本/JSON 字符串。 */

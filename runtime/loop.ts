@@ -984,7 +984,7 @@ export function extractModulePorts(content: string, topModule: string): string[]
 }
 
 /** Codes that mandate immediate fail-closed termination. */
-const FAIL_CLOSED_CODES: ReadonlySet<string> = new Set([
+export const FAIL_CLOSED_CODES: ReadonlySet<string> = new Set([
   "LEASE_EXPIRED", "CAPABILITY_DRIFT", "CAPABILITY_UNAVAILABLE", "ENDPOINT_NOT_APPROVED",
   "ENDPOINT_REVOKED", "BINARY_UNAVAILABLE", "LICENSE_UNAVAILABLE", "PART_UNAVAILABLE",
   "PROJECT_SCOPE_MISMATCH", "RUNCLASS_DENIED",

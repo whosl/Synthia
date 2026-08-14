@@ -54,9 +54,11 @@ import {
   withdrawGateSubmissionHandler,
 } from "./handlers.ts";
 import {
+  abortTaskHandler,
   createTaskHandler,
   getTaskHandler,
   listTasksHandler,
+  sendTaskMessageHandler,
 } from "./task-proxy.ts";
 
 const API_PREFIX = "/api/v1";
@@ -232,6 +234,14 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // GET /projects/:projectId/tasks/:runId
     if (segments.length === 4 && segments[2] === "tasks" && method === "GET") {
       return { handler: getTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // POST /projects/:projectId/tasks/:runId/message | /abort (free-agent conversation)
+    if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "message" && method === "POST") {
+      return { handler: sendTaskMessageHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:write" };
+    }
+    if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "abort" && method === "POST") {
+      return { handler: abortTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:write" };
     }
 
     // GET /projects/:projectId/jobs/:jobId/evidence

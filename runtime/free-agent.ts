@@ -21,7 +21,7 @@ import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 import { saveRunState, createRunState, runStatePath } from "./run-state.ts";
-import type { RunState, GovernanceClient, LoopConnector } from "./types.ts";
+import type { RunState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
 import type {
   AgentMessage,
   AgentTool,
@@ -32,8 +32,10 @@ import type {
   BeforeModelCallHook,
   ChatTurn,
   ConversationalModel,
+  FreeAgentController,
   FreeAgentSession,
   FreeAgentStatus,
+  RegisteredArtifactInfo,
   ToolExecContext,
 } from "./agent-types.ts";
 
@@ -50,6 +52,10 @@ export interface FreeAgentDeps {
   classification: string;
   governance: GovernanceClient;
   connector: LoopConnector | null;
+  /** 流程实例 id（createGateSubmission 入参）；默认 "pi-default"。 */
+  readonly processInstanceId?: string;
+  /** 会话恢复时的初始门禁锁定（重启后仍锁定）；来自 run-state.freeAgentLock。 */
+  readonly initialGateLock?: { readonly gate: GateId; readonly submissionId: string };
   /** Override for the .runs/ directory (defaults to SYNTHIA_RUNS_DIR or built-in). */
   runsDir?: string;
 }
@@ -154,7 +160,7 @@ export class FreeAgentAbortedError extends Error {
 /** Safety bound: a single prompt() may not spin more tool rounds than this. */
 const MAX_TOOL_ROUNDS = 50;
 
-class FreeAgentSessionImpl implements FreeAgentSession {
+class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   readonly runId: string;
   readonly projectId: string;
 
@@ -175,6 +181,15 @@ class FreeAgentSessionImpl implements FreeAgentSession {
   /** Managed RunState for .runs/ persistence. */
   private runState: RunState;
 
+  /** Gate-lock state (awaiting human approval). Persisted into run-state. */
+  private lockGate: GateId | undefined;
+  private lockSubmissionId: string | undefined;
+  /** Artifact registry: revisionId → info (for content-conformity pre-check). */
+  private readonly artifactsById = new Map<string, RegisteredArtifactInfo>();
+  private readonly artifactList: RegisteredArtifactInfo[] = [];
+  /** Snapshot registry: snapshotId → member revision ids (for conformity). */
+  private readonly snapshotsById = new Map<string, readonly string[]>();
+
   constructor(runId: string, deps: FreeAgentDeps) {
     this.runId = runId;
     this.projectId = deps.projectId;
@@ -194,7 +209,15 @@ class FreeAgentSessionImpl implements FreeAgentSession {
       task: "free-agent session",
       part: deps.part,
       projectId: deps.projectId,
+      ...(deps.processInstanceId ? { processInstanceId: deps.processInstanceId } : {}),
     });
+
+    // Restore an awaiting-approval lock from a prior (crashed/restarted) session.
+    if (deps.initialGateLock) {
+      this.lockGate = deps.initialGateLock.gate;
+      this.lockSubmissionId = deps.initialGateLock.submissionId;
+      this._status = "awaiting_approval";
+    }
   }
 
   status(): FreeAgentStatus {
@@ -220,7 +243,9 @@ class FreeAgentSessionImpl implements FreeAgentSession {
 
     try {
       const reply = await this.runLoop();
-      this._status = "idle";
+      // Preserve the awaiting-approval lock: a locked session stays locked
+      // across prompt boundaries (only core_check_gate approved unlocks it).
+      this._status = this.isGateLocked() ? "awaiting_approval" : "idle";
       await this.persist();
       return reply;
     } catch (e) {
@@ -327,7 +352,27 @@ class FreeAgentSessionImpl implements FreeAgentSession {
       connector: this.deps.connector,
       part: this.deps.part,
       classification: this.deps.classification,
+      freeAgent: this,
     };
+
+    // Layer 0 — gate-lock hard block (system-level, NOT a prompt request).
+    // While awaiting human approval, every tool except core_check_gate is
+    // rejected at the execution layer. core_check_gate is the only escape:
+    // approved → unlockGate; rejected/withdrawn → stays locked.
+    if (this.isGateLocked() && call.name !== "core_check_gate") {
+      return {
+        content: JSON.stringify({
+          error: "gate_locked",
+          gate: this.lockGate,
+          submissionId: this.lockSubmissionId,
+          reason:
+            `会话处于「等待批准」状态（门禁 ${this.lockGate ?? "?"}，提交 ${this.lockSubmissionId ?? "?"}）。` +
+            `在人工批准前，除 core_check_gate 轮询与纯对话外，一切 skill/vivado 工具调用被系统硬拦。` +
+            `请调用 core_check_gate(submission_id="${this.lockSubmissionId ?? ""}") 查询状态；approved 后自动解锁。`,
+        }),
+        isError: true,
+      };
+    }
 
     // Layer 1: beforeToolCall — permission / whitelist / data-domain.
     const block = this.beforeToolCallHook(call, ctx);
@@ -365,6 +410,62 @@ class FreeAgentSessionImpl implements FreeAgentSession {
     return result;
   }
 
+  // ----- FreeAgentController: gate lock + registries -----
+
+  isGateLocked(): boolean {
+    return this.lockGate !== undefined;
+  }
+
+  get lockedGate(): { readonly gate: GateId; readonly submissionId: string } | undefined {
+    return this.lockGate !== undefined && this.lockSubmissionId !== undefined
+      ? { gate: this.lockGate, submissionId: this.lockSubmissionId }
+      : undefined;
+  }
+
+  get processInstanceId(): string {
+    return this.deps.processInstanceId ?? "pi-default";
+  }
+
+  get artifacts(): readonly RegisteredArtifactInfo[] {
+    return this.artifactList;
+  }
+
+  lockForGate(gate: GateId, submissionId: string): void {
+    this.lockGate = gate;
+    this.lockSubmissionId = submissionId;
+    // Reflect into session status immediately; persistence happens on next persist().
+    if (this._status === "idle" || this._status === "running") {
+      this._status = "awaiting_approval";
+    }
+  }
+
+  unlockGate(): void {
+    this.lockGate = undefined;
+    this.lockSubmissionId = undefined;
+    if (this._status === "awaiting_approval") {
+      this._status = "idle";
+    }
+  }
+
+  recordArtifact(info: RegisteredArtifactInfo): void {
+    if (!this.artifactsById.has(info.revisionId)) {
+      this.artifactList.push(info);
+    }
+    this.artifactsById.set(info.revisionId, info);
+  }
+
+  recordSnapshot(snapshotId: string, memberRevisionIds: readonly string[]): void {
+    this.snapshotsById.set(snapshotId, [...memberRevisionIds]);
+  }
+
+  getSnapshotMembers(snapshotId: string): readonly string[] | undefined {
+    return this.snapshotsById.get(snapshotId);
+  }
+
+  getArtifact(revisionId: string): RegisteredArtifactInfo | undefined {
+    return this.artifactsById.get(revisionId);
+  }
+
   // ----- abort -----
 
   private checkAbort(): void {
@@ -388,7 +489,12 @@ class FreeAgentSessionImpl implements FreeAgentSession {
       updatedAt: new Date().toISOString(),
       status,
       ...(endedReason ? { endedReason } : {}),
+      ...(this.lockGate !== undefined && this.lockSubmissionId !== undefined
+        ? { freeAgentLock: { gate: this.lockGate, submissionId: this.lockSubmissionId } }
+        : { freeAgentLock: undefined }),
     };
+    // saveRunState serializes with JSON.stringify; an explicit undefined field
+    // is dropped, clearing any previously-persisted lock on unlock.
     await saveRunState(this.runState);
 
     // Conversation sidecar: full message history for crash recovery.
