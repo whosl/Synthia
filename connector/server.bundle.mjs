@@ -309,6 +309,7 @@ var VIVADO_CAPABILITIES = [
 ].map(([operation, inputKind, outputKind]) => ({ operation, version: VIVADO_CAPABILITY_VERSION, runClasses: ["exploratory", "gate_check", "formal"], inputKind, outputKind, execution: "vivado_batch" }));
 var VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 var VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+var XSIM_RUNTIME_CAP = "100ms";
 var idRe2 = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 var hash = (data) => createHash2("sha256").update(data).digest("hex");
 function reject(code) {
@@ -544,6 +545,7 @@ add_files -fileset sources_1 ${designFiles}
 add_files -fileset sim_1 ${simFiles}
 set_property top ${topQ} [get_filesets sources_1]
 set_property top ${tbQ} [get_filesets sim_1]
+set_property xsim.simulate.runtime {${XSIM_RUNTIME_CAP}} [get_filesets sim_1]
 update_compile_order -fileset sources_1
 update_compile_order -fileset sim_1
 launch_simulation -mode behavioral -scripts_only -absolute_path

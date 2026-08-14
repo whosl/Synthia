@@ -104,6 +104,9 @@ describe("Vivado simulate contract", () => {
       expect(tcl).toContain("set_property top {dut} [get_filesets sources_1]");
       expect(tcl).toContain("set_property top {tb} [get_filesets sim_1]");
       expect(tcl).toContain("update_compile_order -fileset sim_1");
+      // XSim runtime cap overrides the project default (1000ns) so long TBs
+      // run to their $finish instead of stopping prematurely.
+      expect(tcl).toContain("set_property xsim.simulate.runtime {100ms} [get_filesets sim_1]");
       expect(tcl).toContain("launch_simulation -mode behavioral");
       // Mixed sources: .v -> read_verilog, .sv -> read_verilog -sv (no free-form paths)
       expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/dut.v")}}`);
@@ -274,6 +277,24 @@ describe("Vivado simulation judgment (fail-closed on exit-code-0 failures)", () 
     const r = await run(simWith("Fatal: earlier assertion\nPASS"));
     expect(r.status).toBe("failed");
     expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+  });
+});
+describe("Vivado simulation runtime cap (run-to-finish, not 1000ns)", () => {
+  const request: SimulateRequest = { operation: "simulate", jobId: "sim-rt", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }], top: "dut", testbench: "tb" };
+
+  test("sets xsim.simulate.runtime before launch_simulation so scripts bake 100ms, not the 1000ns default", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-rt-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n", stderr: "" }) });
+      await adapter.execute(request);
+      const tcl = await readFile(join(root, "sim-rt", "run.tcl"), "utf8");
+      const rtIdx = tcl.indexOf("set_property xsim.simulate.runtime {100ms} [get_filesets sim_1]");
+      const launchIdx = tcl.indexOf("launch_simulation -mode behavioral");
+      expect(rtIdx).toBeGreaterThan(-1);
+      // The runtime property MUST precede launch_simulation -scripts_only,
+      // because the generated simulate.bat bakes the value at script-gen time.
+      expect(rtIdx).toBeLessThan(launchIdx);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
 
