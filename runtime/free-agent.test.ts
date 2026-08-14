@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { createFreeAgentSession, loadFreeAgentConversation } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
-import { assembleVivadoTool } from "./vivado-tool.ts";
+import { assembleVivadoTool, inferTopAndTestbench } from "./vivado-tool.ts";
 import { checkGateConformity, extractTopModule } from "./conformity.ts";
 import { MockGovernanceClient } from "./governance-client.ts";
 import {
@@ -35,7 +35,7 @@ import type {
   ChatTurn,
   ConversationalModel,
 } from "./agent-types.ts";
-import type { GovernanceClient, LoopConnector } from "./types.ts";
+import type { ArtifactFile, GovernanceClient, LoopConnector, VivadoSubmission } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -572,5 +572,258 @@ describe("free-agent: conformity module unit checks", () => {
   test("checkGateConformity skips non-G3/G4 gates", () => {
     const result = checkGateConformity("G1", [], []);
     expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 防呆 1：vivado_run top/testbench 自动推断与校验
+// ---------------------------------------------------------------------------
+
+describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
+  const RTL: ArtifactFile = {
+    path: "rtl/counter.v",
+    content: "module counter(input clk, output [7:0] q);\nassign q = 8'd0;\nendmodule\n",
+  };
+  const TB: ArtifactFile = {
+    path: "tb/tb_counter.v",
+    content: "module tb_counter;\nreg clk;\nwire [7:0] q;\ncounter dut(.clk(clk), .q(q));\ninitial begin #10 $finish; end\nendmodule\n",
+  };
+
+  test("纯函数：RTL+TB 推断出 top 与 testbench", () => {
+    const inf = inferTopAndTestbench([RTL, TB], true);
+    expect(inf.top?.name).toBe("counter");
+    expect(inf.top?.file).toBe("rtl/counter.v");
+    expect(inf.testbench?.name).toBe("tb_counter");
+    expect(inf.testbench?.file).toBe("tb/tb_counter.v");
+  });
+
+  test("纯函数：层级 RTL（top 例化 sub）推断出 top", () => {
+    const top = { path: "rtl/top.v", content: "module top(input clk);\nsub u(.clk(clk));\nendmodule\n" };
+    const sub = { path: "rtl/sub.v", content: "module sub(input clk);\nendmodule\n" };
+    const inf = inferTopAndTestbench([top, sub], false);
+    expect(inf.top?.name).toBe("top");
+    expect(inf.topCandidates).toEqual(["top"]);
+  });
+
+  test("纯函数：两个独立顶层 → 多候选，不推断", () => {
+    const a = { path: "rtl/a.v", content: "module a;\nendmodule\n" };
+    const b = { path: "rtl/b.v", content: "module b;\nendmodule\n" };
+    const inf = inferTopAndTestbench([a, b], false);
+    expect(inf.top).toBeUndefined();
+    expect([...inf.topCandidates].sort()).toEqual(["a", "b"]);
+  });
+
+  test("纯函数：仅 tb 路径文件 → 零候选", () => {
+    const only = { path: "tb/tb_x.v", content: "module tb_x;\nx dut();\nendmodule\n" };
+    const inf = inferTopAndTestbench([only], false);
+    expect(inf.topCandidates).toEqual([]);
+  });
+
+  test("会话级：省略 top/testbench → 推断值提交到 connector", async () => {
+    const submitted: VivadoSubmission[] = [];
+    const ok = successBehavior();
+    const connector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req, idx) => {
+          submitted.push(req);
+          return ok.respond(req, idx);
+        },
+      },
+    });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", { operation: "simulate", sources: [RTL, TB] }),
+      txt("仿真已运行，汇报结果。"),
+    ]);
+    const { session } = makeSession({ model, connector });
+    await session.prompt("请仿真验证 counter");
+
+    expect(connector.callCount("simulate")).toBe(1);
+    expect(submitted[0]!.top).toBe("counter");
+    expect(submitted[0]!.testbench).toBe("tb_counter");
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.state).toBe("succeeded");
+  });
+
+  test("会话级：把 testbench 名填进 top → top_mismatch 拒绝并给出正确值指引", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      // p7 实证场景：top/testbench 都填成 TB 模块名（原本会被 Core 以 SAME_TOP_TESTBENCH 拒绝）。
+      call("tc1", "vivado_run", {
+        operation: "simulate",
+        sources: [RTL, TB],
+        top: "tb_counter",
+        testbench: "tb_counter",
+      }),
+      txt("参数有误，修正后重试。"),
+    ]);
+    const { session } = makeSession({ model, connector });
+    await session.prompt("请仿真验证 counter");
+
+    expect(connector.callCount("simulate")).toBe(0);
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.error).toBe("top_mismatch");
+    expect(result!.reason).toContain('top 应为 "counter"');
+    expect(result!.reason).toContain("rtl/counter.v");
+    expect(result!.reason).toContain('testbench 应为 "tb_counter"');
+  });
+
+  test("会话级：top 与 testbench 填成同名（均为正确 top）→ same_top_testbench 拒绝", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "simulate",
+        sources: [RTL, TB],
+        top: "counter",
+        testbench: "counter",
+      }),
+      txt("参数有误，修正后重试。"),
+    ]);
+    const { session } = makeSession({ model, connector });
+    await session.prompt("请仿真验证 counter");
+
+    expect(connector.callCount("simulate")).toBe(0);
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.error).toBe("same_top_testbench");
+  });
+
+  test("会话级：多候选未填 top → ambiguous_top 要求显式填写", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "validate_sources",
+        sources: [
+          { path: "rtl/a.v", content: "module a;\nendmodule\n" },
+          { path: "rtl/b.v", content: "module b;\nendmodule\n" },
+        ],
+      }),
+      txt("需显式指定 top。"),
+    ]);
+    const { session } = makeSession({ model, connector });
+    await session.prompt("校验源文件");
+
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.error).toBe("ambiguous_top");
+    expect([...(result!.candidates as string[])].sort()).toEqual(["a", "b"]);
+  });
+
+  test("会话级：多候选时显式填写 top → 放行（逃生通道）", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "validate_sources",
+        sources: [
+          { path: "rtl/a.v", content: "module a;\nendmodule\n" },
+          { path: "rtl/b.v", content: "module b;\nendmodule\n" },
+        ],
+        top: "a",
+      }),
+      txt("校验完成。"),
+    ]);
+    const { session } = makeSession({ model, connector });
+    await session.prompt("校验源文件");
+
+    expect(connector.callCount("validate_sources")).toBe(1);
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.state).toBe("succeeded");
+    expect(result!.top).toBe("a");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 防呆 2：声称-记录一致性拦截重写（claim-check）
+// ---------------------------------------------------------------------------
+
+describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
+  test("无记录声称仿真通过 → 拦截回灌，模型改口后放行", async () => {
+    const claimed = "仿真已通过，全部功能验证完成。";
+    const corrected = "抱歉，我尚未实际运行仿真。现在调用 vivado_run 运行仿真后再汇报。";
+    const model = new ScriptedModel([txt(claimed), txt(corrected)]);
+    const { session, runId } = makeSession({ model });
+
+    const reply = await session.prompt("仿真跑完了吗？");
+
+    // 返回的是改口后的回复，不是被拦截的声称。
+    expect(reply).toBe(corrected);
+    expect(model.calls.length).toBe(2);
+    // 第二次模型调用看到了 claim_check 工具结果（回灌）。
+    const feedback = model.calls[1]!.messages.find(
+      (m) => m.role === "tool" && m.name === "claim_check",
+    );
+    expect(feedback).toBeDefined();
+    expect(feedback!.content).toContain("没有 succeeded 的 simulate 记录");
+    // 被拦截的声称文本不出现在持久化会话里（绝不并排展示给用户）。
+    const convo = await loadFreeAgentConversation(runId);
+    expect(JSON.stringify(convo!.messages)).not.toContain(claimed);
+    // audit：一条 intercepted_retry 记录。
+    expect(convo!.claimChecks).toHaveLength(1);
+    expect(convo!.claimChecks![0]!.disposition).toBe("intercepted_retry");
+    expect(convo!.claimChecks![0]!.supported).toBe(false);
+  });
+
+  test("有 succeeded simulate 记录 → 声称仿真通过直接放行", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const claimed = "仿真通过，波形符合预期。";
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "simulate",
+        sources: [
+          { path: "rtl/c.v", content: "module c(input clk, output q);\nassign q = clk;\nendmodule\n" },
+          { path: "tb/tb_c.v", content: "module tb_c;\nreg clk;\nwire q;\nc dut(.clk(clk), .q(q));\ninitial begin #10 $finish; end\nendmodule\n" },
+        ],
+      }),
+      txt(claimed),
+    ]);
+    const { session, runId } = makeSession({ model, connector });
+
+    const reply = await session.prompt("请仿真并汇报");
+
+    expect(reply).toBe(claimed);
+    expect(model.calls.length).toBe(2); // 无额外回灌轮次
+    const convo = await loadFreeAgentConversation(runId);
+    expect(JSON.stringify(convo!.messages)).toContain(claimed);
+    expect(convo!.claimChecks).toHaveLength(1);
+    expect(convo!.claimChecks![0]!.disposition).toBe("passed");
+    expect(convo!.claimChecks![0]!.supported).toBe(true);
+  });
+
+  test("重试超限 → 返回系统兜底文案，audit 记录 fallback", async () => {
+    const model = new ScriptedModel([
+      txt("仿真通过。"),
+      txt("仿真确实通过了。"),
+      txt("我确认仿真通过。"),
+    ]);
+    const { session, runId } = makeSession({ model });
+
+    const reply = await session.prompt("仿真跑完了吗？");
+
+    expect(reply).toBe("[系统] 上述完成声明未经工具记录支撑，已拦截。请要求 Agent 实际运行仿真。");
+    expect(model.calls.length).toBe(3); // 3 次文本尝试（1 + 2 次重试）
+    const convo = await loadFreeAgentConversation(runId);
+    // 三次声称的具体文本都不入会话历史（回灌消息里的「声称仿真通过」是系统核查文案，非模型原文）。
+    expect(JSON.stringify(convo!.messages)).not.toContain("仿真通过。");
+    expect(JSON.stringify(convo!.messages)).not.toContain("仿真确实通过了");
+    expect(JSON.stringify(convo!.messages)).not.toContain("我确认仿真通过");
+    const dispositions = convo!.claimChecks!.map((c) => c.disposition);
+    expect(dispositions).toEqual(["intercepted_retry", "intercepted_retry", "intercepted_fallback"]);
+  });
+
+  test("非完成性表述不误拦（否定/过程性）", async () => {
+    const negated = "仿真尚未通过，需要先修复计数器逻辑。";
+    const modelA = new ScriptedModel([txt(negated)]);
+    const { session: sessionA, runId: runIdA } = makeSession({ model: modelA });
+    const replyA = await sessionA.prompt("进展如何？");
+    expect(replyA).toBe(negated);
+    expect(modelA.calls.length).toBe(1);
+    const convoA = await loadFreeAgentConversation(runIdA);
+    expect(convoA!.claimChecks).toBeUndefined(); // 无命中，sidecar 不含该字段
+
+    const planned = "I will run the simulation next and report back.";
+    const modelB = new ScriptedModel([txt(planned)]);
+    const { session: sessionB, runId: runIdB } = makeSession({ model: modelB });
+    const replyB = await sessionB.prompt("status?");
+    expect(replyB).toBe(planned);
+    expect(modelB.calls.length).toBe(1);
+    const convoB = await loadFreeAgentConversation(runIdB);
+    expect(convoB!.claimChecks).toBeUndefined();
   });
 });
