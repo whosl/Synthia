@@ -334,7 +334,11 @@ function buildTool(config: SkillToolConfig): AgentTool {
       let rev;
       try {
         rev = await ctx.governance.registerCandidateArtifact({
-          artifactId: `fpga:${config.skillId}:${filename}`,
+          // artifactId becomes a URL path segment on the Core route
+          // (/projects/:id/artifacts/<artifactId>/revisions) — slashes from
+          // doc paths (doc/intake/summary.md) and colons must be normalized
+          // or route matching fails with a misleading 404.
+          artifactId: `fpga:${config.skillId}:${filename}`.replace(/[^A-Za-z0-9._-]/g, "-"),
           artifactType: config.registerType,
           title: `${config.skillId}: ${filename}`,
           content,
