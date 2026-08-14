@@ -25,7 +25,10 @@ export function newRunId(): string {
   return `run-${randomUUID()}`;
 }
 export function runStatePath(runId: string): string {
-  return join(runsDir(), `${runId}.json`);
+  // Defensive: callers may pass a run id derived from a directory listing that
+  // includes the conversation sidecar suffix — always address the main file.
+  const id = runId.endsWith(".conversation") ? runId.slice(0, -".conversation".length) : runId;
+  return join(runsDir(), `${id}.json`);
 }
 
 /** The ordered stage chain. */
@@ -92,7 +95,7 @@ export async function listRuns(): Promise<string[]> {
     return [];
   }
   return entries
-    .filter(f => f.endsWith(".json"))
+    .filter(f => f.endsWith(".json") && !f.endsWith(".conversation.json"))
     .map(f => f.replace(/\.json$/, ""));
 }
 
