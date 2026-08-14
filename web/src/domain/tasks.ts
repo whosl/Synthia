@@ -10,6 +10,7 @@
 
 import { GATE_REVIEW_NAMES, type GateId } from "./gates.ts";
 import { phaseDocName } from "./artifacts.ts";
+import { segmentAgentReply, type ReplySegment } from "./reply-segments.ts";
 import type { TaskAuditEvent, TaskDocRef, TaskRunDetail } from "../api/types.ts";
 
 // ─── 阶段链 ──────────────────────────────────────────────────────────
@@ -289,6 +290,10 @@ export type GateBarState = "evaluating" | "passed" | "failed" | "awaiting";
 
 export type FeedPart =
   | { readonly kind: "text"; readonly key: string; readonly ts: string; readonly text: string }
+  /** free-agent 用户消息（右侧气泡；首轮指令由 detail.task 气泡覆盖）。 */
+  | { readonly kind: "user"; readonly key: string; readonly ts: string; readonly text: string }
+  /** free-agent 回复（左侧 assistant 叙述；已分段，长代码块折叠为代码卡）。 */
+  | { readonly kind: "reply"; readonly key: string; readonly ts: string; readonly segments: readonly ReplySegment[] }
   | { readonly kind: "tool"; readonly key: string; readonly ts: string | null; readonly op: string; readonly title: string; readonly state: ToolBarState; readonly durationMs: number | null; readonly reason: string | null }
   | { readonly kind: "gate"; readonly key: string; readonly ts: string; readonly review: string; readonly state: GateBarState }
   | { readonly kind: "file"; readonly key: string; readonly ts: string | null; readonly doc: TaskDocRef; readonly title: string }
@@ -335,6 +340,18 @@ export function buildFeed(detail: TaskRunDetail): FeedPart[] {
         break; // 心跳/重连一律隐藏（HIDDEN 集合）
 
       case "model": {
+        // free-agent 对话事件：用户消息 → 右侧气泡；回复 → assistant 分段叙述。
+        // （free_agent_steer 无内容、free_agent_reply_error 已由输入区 ErrorNotice 覆盖，均不进流。）
+        if (event.action === "user_message") {
+          const text = event.detail?.trim();
+          if (text) parts.push({ kind: "user", key: `u${event.seq}`, ts: event.ts, text });
+          break;
+        }
+        if (event.action === "free_agent_reply") {
+          const text = event.detail?.trim();
+          if (text) parts.push({ kind: "reply", key: `r${event.seq}`, ts: event.ts, segments: segmentAgentReply(text) });
+          break;
+        }
         const text = narrateAuditEvent(event);
         if (!text) break;
         const prev = parts[parts.length - 1];

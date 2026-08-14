@@ -20,7 +20,9 @@ import {
 import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
 import { phaseDocName } from "../domain/artifacts.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
+import { makeTextSegment, toggleSetKey } from "../domain/reply-segments.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
+import ReplySegments from "../components/ReplySegments.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 
 const route = useRoute();
@@ -108,10 +110,7 @@ const feed = computed<FeedPart[]>(() => (detail.value ? buildFeed(detail.value) 
 const expandedParts = ref<ReadonlySet<string>>(new Set());
 
 function togglePart(key: string) {
-  const next = new Set(expandedParts.value);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
-  expandedParts.value = next;
+  expandedParts.value = toggleSetKey(expandedParts.value, key);
 }
 
 const GATE_BAR_TEXT: Readonly<Record<string, string>> = {
@@ -248,6 +247,17 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
             <!-- 文本叙述 -->
             <p v-if="part.kind === 'text'" class="feed-text">{{ part.text }}</p>
 
+            <!-- free-agent 用户消息：右侧蓝色气泡（首轮指令见顶部气泡） -->
+            <div v-else-if="part.kind === 'user'" class="msg-user feed-msg-user">
+              <div>{{ part.text }}</div>
+              <div class="msg-meta">{{ new Date(part.ts).toLocaleString("zh-CN") }}</div>
+            </div>
+
+            <!-- free-agent 回复：分段渲染，长代码块折叠为代码卡 -->
+            <div v-else-if="part.kind === 'reply'" class="feed-reply">
+              <ReplySegments :segments="part.segments" :part-key="part.key" />
+            </div>
+
             <!-- 工具调用条：进行中流光 / 成功弱化 / 失败红色可展开 -->
             <div
               v-else-if="part.kind === 'tool'"
@@ -261,7 +271,7 @@ const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(
               <span v-else-if="part.state === 'failed'" class="bar-mark">✗ {{ expandedParts.has(part.key) ? "收起" : "详情" }}</span>
               <span v-if="part.durationMs !== null" class="bar-duration">{{ formatDuration(part.durationMs) }}</span>
               <div v-if="part.state === 'failed' && expandedParts.has(part.key) && part.reason" class="bar-detail">
-                {{ part.reason }}
+                <ReplySegments :segments="[makeTextSegment(`${part.key}-reason`, part.reason)]" :part-key="`${part.key}-reason`" />
                 <router-link :to="runsPageUrl">查看运行记录 →</router-link>
               </div>
             </div>

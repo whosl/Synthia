@@ -735,6 +735,137 @@ button.btn.danger {
   line-height: 1.6;
 }
 
+/* free-agent 对话：用户气泡（流内）+ 回复分段 */
+.feed-msg-user {
+  margin: 0 0 0 15%;
+}
+
+.feed-reply {
+  font-size: 13px;
+}
+
+.reply-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reply-text {
+  font-size: 13px;
+}
+
+.reply-text > :first-child {
+  margin-top: 0;
+}
+
+.reply-text > :last-child {
+  margin-bottom: 0;
+}
+
+/* 长文本折叠：前几行预览 + 渐隐 + 展开按钮 */
+.reply-preview {
+  position: relative;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+  max-height: calc(1.6em * 3 + 4px);
+  overflow: hidden;
+}
+
+.reply-preview::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1.6em;
+  background: linear-gradient(transparent, #fff);
+}
+
+.reply-toggle {
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--c-accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reply-toggle:hover {
+  text-decoration: underline;
+}
+
+/* 代码段：短块内联 */
+.reply-code {
+  margin: 0;
+}
+
+/* 代码卡：长代码块折叠态（文件名/语言 + 行数 + 点击展开） */
+.code-card {
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: #f7f9fb;
+  overflow: hidden;
+}
+
+.code-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  color: var(--c-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.code-card-head:hover {
+  background: var(--c-info-bg);
+}
+
+.code-card-icon {
+  color: var(--c-text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.code-card-name {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-card-meta {
+  font-size: 11px;
+  color: var(--c-text-dim);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+
+.code-card-toggle {
+  font-size: 12px;
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+
+.code-card-body {
+  margin: 0;
+  border: none;
+  border-top: 1px solid var(--c-border);
+  border-radius: 0;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
 /* 单行工具条（工具/门禁/证据共用骨架） */
 .tool-bar {
   display: flex;
