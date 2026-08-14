@@ -88,12 +88,13 @@ describe("Vivado implement contract", () => {
 
 describe("Vivado simulate contract", () => {
   const simulateRequest = (overrides: Partial<SimulateRequest> = {}): SimulateRequest => ({ operation: "simulate", jobId: "sim-1", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }], top: "dut", testbench: "tb", ...overrides });
-  const countingAdapter = (root: string) => { let calls = 0; const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => { calls++; return { exitCode: 0, stdout: "Vivado v2025.1\n", stderr: "" }; } }); return { adapter, calls: () => calls }; };
+  const passSimStdout = "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n";
+  const countingAdapter = (root: string) => { let calls = 0; const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => { calls++; return { exitCode: 0, stdout: passSimStdout, stderr: "" }; } }); return { adapter, calls: () => calls }; };
 
   test("run.tcl binds the controlled DUT top and testbench and reads mixed .v/.sv sources", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
-      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "Vivado v2025.1\n", stderr: "" }) });
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: passSimStdout, stderr: "" }) });
       const result = await adapter.execute(simulateRequest({ sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }, { path: "rtl/sv_as_v.v", content: "module sv_as_v; endmodule\n", mediaType: "text/systemverilog" }] }));
       expect(result.status).toBe("succeeded");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
@@ -138,7 +139,7 @@ describe("Vivado simulate contract", () => {
   test("controlled fileset binding routes design and sim sources into the right filesets", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
-      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "Vivado v2025.1\n", stderr: "" }) });
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: passSimStdout, stderr: "" }) });
       const result = await adapter.execute(simulateRequest());
       const inputDir = join(result.workspace, "input");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
@@ -212,6 +213,67 @@ describe("Vivado simulate contract", () => {
       const result = await adapter.execute(simulateRequest({ sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }] }));
       expect(result.status).toBe("succeeded");
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+describe("Vivado simulation judgment (fail-closed on exit-code-0 failures)", () => {
+  const request: SimulateRequest = { operation: "simulate", jobId: "sim-j", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }], top: "dut", testbench: "tb" };
+  const simWith = (region: string, phaseExitCode = 0) => `Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\n${region}\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=${phaseExitCode}\n`;
+  const run = async (stdout: string, exitCode = 0): Promise<{ status: string; errorCode?: string }> => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-judge-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode, stdout, stderr: "" }) });
+      const result = await adapter.execute(request);
+      return { status: result.status, errorCode: result.errorCode };
+    } finally { await rm(root, { recursive: true, force: true }); }
+  };
+
+  test("XSim Fatal with exit code 0 is judged failed (the 66 regression)", async () => {
+    const r = await run(simWith("Fatal: DELIBERATE: expected AND=0 got y=1"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+  });
+
+  test("$fatal construct in simulator output with exit code 0 is judged failed", async () => {
+    const r = await run(simWith("executing $fatal(1) from testbench"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+  });
+
+  test("FAIL banner at line start with exit code 0 is judged failed", async () => {
+    const r = await run(simWith("FAIL: assertion violated at time 100"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+  });
+
+  test("exit code 0 with no PASS and no Fatal marker is inconclusive failed", async () => {
+    const r = await run(simWith("simulation ran to completion"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_INCONCLUSIVE");
+  });
+
+  test("PASS inside the simulator output region with exit code 0 succeeds", async () => {
+    const r = await run(simWith("checks complete\nPASS"));
+    expect(r.status).toBe("succeeded");
+    expect(r.errorCode).toBeUndefined();
+  });
+
+  test("PASS outside the simulator output region does not count as proof", async () => {
+    // PASS appears only in the compile-log preamble, NOT inside the region.
+    const r = await run("Vivado v2025.1\n// PASS mentioned in source compile log\nSIMULATOR_OUTPUT_BEGIN\nsimulation ran\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n");
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_INCONCLUSIVE");
+  });
+
+  test("nonzero exit code is failed even without explicit markers", async () => {
+    const r = await run(simWith("simulation crashed"), 1);
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+  });
+
+  test("Fatal marker takes precedence over a PASS token in the same region", async () => {
+    const r = await run(simWith("Fatal: earlier assertion\nPASS"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
   });
 });
 

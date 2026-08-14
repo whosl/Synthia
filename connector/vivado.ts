@@ -191,6 +191,17 @@ function parseSimulatePhases(text: string): { phase?: string; phaseExitCode?: nu
   const simulatorStdout = beginIdx !== -1 && endIdx !== -1 ? text.slice(beginIdx + "SIMULATOR_OUTPUT_BEGIN".length, endIdx).trim() : undefined;
   return { phase: phaseMatch?.[1], phaseExitCode: exitMatch ? Number(exitMatch[1]) : undefined, simulatorStdout };
 }
+/** Judge a behavioral simulation result from its controlled output region.
+ *  XSim can print `Fatal:` (from a TB `$fatal`) yet still exit 0, so the exit
+ *  code alone is unsafe. All markers are scoped to the SIMULATOR_OUTPUT region
+ *  to avoid false matches from log lines or echoed source elsewhere. */
+function judgeSimulation(simulatorStdout: string | undefined, phaseExitCode: number | undefined, exitCode: number): { status: VivadoResultStatus; errorCode?: string } {
+  const region = simulatorStdout ?? "";
+  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region)) return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
+  if ((phaseExitCode ?? exitCode) !== 0 || exitCode !== 0) return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
+  if (/\bPASS\b/.test(region)) return { status: "succeeded" };
+  return { status: "failed", errorCode: "VIVADO_SIMULATION_INCONCLUSIVE" };
+}
 export class VivadoBatchAdapter {
   private readonly run: CommandRunner; private readonly root: string; private readonly defaultBinary: string; private readonly injected: boolean;
   constructor(options: VivadoAdapterOptions) { this.root = resolve(options.workspaceRoot); this.defaultBinary = options.binary ?? "vivado"; this.injected = options.commandRunner !== undefined; this.run = options.commandRunner ?? defaultRunner; }
@@ -221,9 +232,8 @@ export class VivadoBatchAdapter {
     const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" as const : base.toolchain.licenseStatus };
     if (request.operation === "simulate") {
       const sim = parseSimulatePhases(result.stdout);
-      const simExitCode = sim.phaseExitCode ?? result.exitCode;
-      const errorCode = sim.phaseExitCode !== undefined && sim.phaseExitCode !== 0 ? "VIVADO_SIMULATION_FAILED" : undefined;
-      return { ...base, status: simExitCode === 0 && result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode };
+      const verdict = judgeSimulation(sim.simulatorStdout, sim.phaseExitCode, result.exitCode);
+      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode };
     }
     return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
   }
