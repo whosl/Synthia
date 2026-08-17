@@ -9,9 +9,9 @@ export default defineConfig({
     port: 5180,
     allowedHosts: ["synthia.wenzhuolin.xyz"],
     proxy: {
-      // Core API (dev): http://127.0.0.1:8787
+      // Core API (dev): http://127.0.0.1:5130
       "/api": {
-        target: "http://127.0.0.1:8787",
+        target: "http://127.0.0.1:5130",
         changeOrigin: true,
       },
     },
