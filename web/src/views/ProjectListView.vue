@@ -180,7 +180,7 @@ async function submitCreate() {
         </li>
         <li v-for="item in activeTasks" :key="item.run.run_id">
           <StatusBadge :text="item.run.status === 'awaiting_approval' ? '等待批准' : '进行中'" kind="accent" />
-          <router-link :to="`/projects/${item.project.id}/tasks/${item.run.run_id}`">
+          <router-link :to="`/projects/${item.project.id}?run=${item.run.run_id}`">
             {{ item.project.name }} · 任务执行中
           </router-link>
           <span class="muted" style="font-size: 12px">
@@ -214,9 +214,7 @@ async function submitCreate() {
               {{ lastActivity(p.id) ? new Date(lastActivity(p.id)!).toLocaleString("zh-CN") : "—" }}
             </td>
             <td>
-              <router-link :to="`/projects/${p.id}`">总览</router-link>
-              ·
-              <router-link :to="`/projects/${p.id}/tasks`">任务</router-link>
+              <router-link :to="`/projects/${p.id}`">进入项目</router-link>
             </td>
           </tr>
         </tbody>

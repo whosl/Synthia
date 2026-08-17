@@ -1175,6 +1175,55 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
 }
 
 /**
+ * GET /projects/:projectId/jobs[?limit=n] — list a project's tool runs
+ * (core:read), newest first, for the UI run-history view.
+ *
+ * Pure database read: unlike GET /jobs/:jobId it does NOT refresh each row
+ * from the Connector (that would fan out one Connector call per run); live
+ * per-run state stays on the status endpoint. Rows are ordered by effective
+ * start descending — `start_time` when one was recorded, else `created_at`
+ * (POST /jobs rows are created with a NULL start_time) — with the id as a
+ * deterministic tiebreaker. `limit` defaults to 100 and must be a positive
+ * integer. A missing project → 404.
+ */
+export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+
+  const limitRaw = ctx.url.searchParams.get("limit");
+  let limit = 100;
+  if (limitRaw !== null) {
+    limit = Number(limitRaw);
+    if (!Number.isInteger(limit) || limit <= 0) throw validationError("limit must be a positive integer");
+  }
+
+  const projectRow = await ctx.pool.query("SELECT 1 FROM project WHERE id = $1", [projectId]);
+  if (projectRow.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+
+  const { rows } = await ctx.pool.query(
+    `SELECT id, operation, run_class, state, error_code, start_time, end_time
+       FROM tool_run
+      WHERE project_id = $1
+      ORDER BY COALESCE(start_time, created_at) DESC, id
+      LIMIT $2`,
+    [projectId, limit],
+  );
+
+  const data = rows.map((row: Record<string, unknown>) => {
+    const item: Record<string, unknown> = {
+      id: row.id,
+      operation: row.operation,
+      runClass: row.run_class,
+      state: row.state,
+      startTime: row.start_time,
+      endTime: row.end_time,
+    };
+    if (row.error_code !== null && row.error_code !== undefined) item.errorCode = row.error_code;
+    return item;
+  });
+  return { status: 200, data };
+}
+
+/**
  * GET /projects/:projectId/jobs/:jobId — poll a Job's execution state.
  *
  * Core must already know the jobId (it minted it on submit); otherwise 404. The

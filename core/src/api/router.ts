@@ -49,6 +49,7 @@ import {
   getRevisionContent,
   getRevisions,
   getTraceRelations,
+  listJobsHandler,
   rejectGateSubmissionHandler,
   submitGateSubmissionHandler,
   submitJobHandler,
@@ -214,6 +215,7 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
           break;
         case "jobs":
           if (method === "POST") return { handler: submitJobHandler, params, requiredScope: "core:write" };
+          if (method === "GET") return { handler: listJobsHandler, params, requiredScope: "core:read" };
           break;
         case "tasks":
           if (method === "POST") return { handler: createTaskHandler, params, requiredScope: "core:write" };

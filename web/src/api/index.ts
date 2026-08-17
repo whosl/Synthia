@@ -12,8 +12,12 @@ import type {
   CreateTaskResult,
   GateSubmission,
   GateSubmissionDetail,
+  JobEvidenceContent,
+  JobEvidenceManifest,
+  JobRunSummary,
   OutboxEvent,
   Project,
+  ProjectDetail,
   RevisionContent,
   SendMessageResult,
   TaskRunDetail,
@@ -158,5 +162,37 @@ export function abortRun(
   return client<AbortRunResult>(
     `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/abort`,
     { method: "POST" },
+  );
+}
+
+// ─── 统一项目页（UI-3：项目详情 + 工具运行记录）────────────────────────────
+
+/** GET /projects/:id — 项目详情（名称等稳定字段）。 */
+export function getProject(client: ApiClient, projectId: string): Promise<ProjectDetail> {
+  return client<ProjectDetail>(`${V1}/projects/${encodeURIComponent(projectId)}`);
+}
+
+/** GET /projects/:id/jobs — 项目工具运行列表（新到旧；记录标签页）。 */
+export function listJobs(client: ApiClient, projectId: string, limit?: number): Promise<JobRunSummary[]> {
+  const query = limit !== undefined ? `?limit=${encodeURIComponent(String(limit))}` : "";
+  return client<JobRunSummary[]>(`${V1}/projects/${encodeURIComponent(projectId)}/jobs${query}`);
+}
+
+/** GET /projects/:id/jobs/:jobId/evidence — 终态任务的冻结证据清单（非终态 404）。 */
+export function getJobEvidence(client: ApiClient, projectId: string, jobId: string): Promise<JobEvidenceManifest> {
+  return client<JobEvidenceManifest>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/evidence`,
+  );
+}
+
+/** GET /projects/:id/jobs/:jobId/evidence/content?name= — 单条证据解码内容。 */
+export function getJobEvidenceContent(
+  client: ApiClient,
+  projectId: string,
+  jobId: string,
+  name: string,
+): Promise<JobEvidenceContent> {
+  return client<JobEvidenceContent>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/evidence/content?name=${encodeURIComponent(name)}`,
   );
 }

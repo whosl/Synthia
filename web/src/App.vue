@@ -7,11 +7,7 @@ const route = useRoute();
 const auth = useAuthStore();
 
 const isLogin = computed(() => route.name === "login");
-const projectId = computed(() =>
-  route.name === "project-overview" || route.name === "project-artifacts" || route.name === "project-tasks" || route.name === "task-workbench" || route.name === "project-runs"
-    ? String(route.params.id)
-    : null,
-);
+const projectId = computed(() => (route.name === "project-unified" ? String(route.params.id) : null));
 </script>
 
 <template>
@@ -23,21 +19,12 @@ const projectId = computed(() =>
     <aside class="sidebar">
       <div class="brand">
         Synthia
-        <small>工程治理平台 · UI-1</small>
+        <small>工程治理平台</small>
       </div>
       <nav>
         <router-link to="/projects" :class="{ active: route.name === 'projects' }">项目列表</router-link>
-        <router-link v-if="projectId" :to="`/projects/${projectId}`" :class="{ active: route.name === 'project-overview' }">
-          项目总览
-        </router-link>
-        <router-link v-if="projectId" :to="`/projects/${projectId}/artifacts`" :class="{ active: route.name === 'project-artifacts' }">
-          产物库
-        </router-link>
-        <router-link v-if="projectId" :to="`/projects/${projectId}/tasks`" :class="{ active: route.name === 'project-tasks' || route.name === 'task-workbench' }">
-          任务工作台
-        </router-link>
-        <router-link v-if="projectId" :to="`/projects/${projectId}/runs`" :class="{ active: route.name === 'project-runs' }">
-          运行记录
+        <router-link v-if="projectId" :to="`/projects/${projectId}`" :class="{ active: route.name === 'project-unified' }">
+          项目
         </router-link>
         <router-link to="/approvals" :class="{ active: route.name === 'approvals' || route.name === 'approval-detail' }">
           审批中心

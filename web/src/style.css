@@ -1040,3 +1040,269 @@ button.btn.danger {
   font-size: 15px;
   font-weight: 600;
 }
+
+/* ── 统一项目页（UI-3 方案 B：左 60% 对话 + 右 40% 三标签）────────── */
+
+.unified {
+  display: grid;
+  grid-template-columns: 3fr 2fr; /* 60% / 40% */
+  height: calc(100vh - 24px - 48px);
+  min-height: 480px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.unified-left,
+.unified-right {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.unified-left-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.unified-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.unified-left > .composer,
+.unified-left > .notice {
+  margin: 0 16px 12px;
+}
+
+/* 右栏标签 */
+.unified-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.unified-tabs button {
+  flex: 1;
+  padding: 10px 0;
+  border: none;
+  background: transparent;
+  color: var(--c-text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.unified-tabs button.on {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+  font-weight: 600;
+}
+
+.unified-tab-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+
+.unified-pane-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-text-dim);
+  margin-bottom: 8px;
+}
+
+/* 新任务引导（无任务时） */
+.onboarding {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  max-width: 560px;
+}
+
+.onboarding-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* 就地审批卡 */
+.approval-card {
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-panel);
+  padding: 12px;
+  max-width: 95%;
+  font-size: 13px;
+}
+
+.approval-card.pending {
+  border-color: var(--c-warn);
+}
+
+.approval-card.approved {
+  border-color: var(--c-ok);
+}
+
+.approval-card.rejected {
+  border-color: var(--c-danger);
+}
+
+.approval-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.approval-card.pending .approval-card-title {
+  color: var(--c-warn);
+}
+
+.approval-card.approved .approval-card-title {
+  color: var(--c-ok);
+}
+
+.approval-card.rejected .approval-card-title {
+  color: var(--c-danger);
+}
+
+.approval-card-sub {
+  font-size: 11px;
+}
+
+.approval-card-milestone {
+  color: var(--c-accent);
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.approval-card-section {
+  font-size: 12px;
+  color: var(--c-text-dim);
+  margin: 8px 0 6px;
+}
+
+.approval-doc {
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+
+.approval-doc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approval-doc-toggle {
+  margin-left: auto;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.approval-doc-body {
+  margin-top: 8px;
+  border-top: 1px dashed var(--c-border);
+  padding-top: 8px;
+}
+
+.approval-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-approve-btn {
+  width: fit-content;
+}
+
+.approval-reject-row {
+  display: flex;
+  gap: 8px;
+}
+
+.approval-reject-input {
+  flex: 1;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-size: 13px;
+}
+
+/* 产物标签 */
+.artifact-group {
+  margin-bottom: 16px;
+}
+
+.artifact-row {
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+
+.artifact-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.artifact-row-head a {
+  margin-left: auto;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.artifact-preview {
+  margin-top: 8px;
+  border-top: 1px dashed var(--c-border);
+  padding-top: 8px;
+}
+
+/* 记录标签（L3 技术页） */
+.job-row {
+  border-bottom: 1px solid var(--c-border);
+  padding: 6px 0;
+}
+
+.job-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.job-op {
+  font-size: 13px;
+  min-width: 110px;
+}
+
+.job-error {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--c-danger);
+}
+
+.job-detail {
+  padding: 8px 0 10px;
+}
+
+.job-detail table.data {
+  margin-top: 6px;
+}
+

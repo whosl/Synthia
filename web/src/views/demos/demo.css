@@ -1,0 +1,57 @@
+/* 布局预览 demo 专用样式（只作用于 .demo-* 容器，不影响正式页面） */
+.demo-root { display: flex; flex-direction: column; height: 100vh; background: var(--c-bg); color: var(--c-text); font-size: 14px; }
+.demo-banner { padding: 8px 16px; font-size: 12px; color: var(--c-text-dim); border-bottom: 1px solid var(--c-border); display: flex; gap: 12px; align-items: center; }
+.demo-banner b { color: var(--c-accent); }
+
+/* 通用件 */
+.d-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--c-border); }
+.d-chip.done { color: var(--c-ok); border-color: var(--c-ok); }
+.d-chip.current { color: var(--c-warn); border-color: var(--c-warn); }
+.d-chip.todo { color: var(--c-text-dim); }
+.d-chip.mile { color: var(--c-accent); border-color: var(--c-accent); }
+.d-chip.mile.off { color: var(--c-text-dim); border-color: var(--c-border); }
+
+.d-feed { display: flex; flex-direction: column; gap: 8px; }
+.d-msg-user { align-self: flex-end; max-width: 85%; background: var(--c-accent); color: #fff; border-radius: 10px 10px 2px 10px; padding: 8px 12px; font-size: 13px; }
+.d-msg-text { align-self: flex-start; max-width: 90%; padding: 2px 0; line-height: 1.6; }
+.d-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.d-doc { border: 1px solid var(--c-border); border-radius: 8px; padding: 6px 10px; background: var(--c-panel); }
+.d-doc .meta { font-size: 11px; color: var(--c-text-dim); margin-left: 6px; }
+.d-tool { display: flex; align-items: center; gap: 8px; border: 1px solid var(--c-border); border-radius: 8px; padding: 4px 10px; background: var(--c-panel); width: fit-content; }
+.d-tool .dur { margin-left: auto; font-size: 11px; color: var(--c-text-dim); }
+.d-tool.ok { border-left: 3px solid var(--c-ok); }
+.d-tool.fail { border-left: 3px solid var(--c-danger); color: var(--c-danger); }
+.d-tool.run { border-left: 3px solid var(--c-accent); }
+.d-tool.run .spin { animation: dspin 1s linear infinite; display: inline-block; }
+@keyframes dspin { to { transform: rotate(360deg); } }
+.d-gate-ok { color: var(--c-ok); }
+.d-note-wait { border: 1px dashed var(--c-warn); color: var(--c-warn); border-radius: 8px; padding: 6px 10px; width: fit-content; }
+
+.d-banner-wait { background: var(--c-info-bg); border-top: 1px solid var(--c-warn); padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+.d-btn { background: var(--c-accent); color: #fff; border: none; border-radius: 6px; padding: 5px 12px; cursor: default; font-size: 13px; }
+.d-btn.ghost { background: transparent; color: var(--c-accent); border: 1px solid var(--c-accent); }
+
+.d-pane-title { font-size: 12px; color: var(--c-text-dim); margin-bottom: 8px; letter-spacing: 1px; }
+.d-stage { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.d-stage .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-border); flex: none; }
+.d-stage.done .dot { background: var(--c-ok); }
+.d-stage.current .dot { background: var(--c-warn); }
+.d-stage.gate-node { border: 1px dashed var(--c-border); border-radius: 6px; padding: 3px 8px; margin-left: -8px; }
+
+.d-art { border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--c-panel); }
+.d-art .head { display: flex; gap: 8px; align-items: baseline; }
+.d-art .body { margin-top: 6px; font-size: 12.5px; color: var(--c-text-dim); line-height: 1.55; }
+
+.d-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.d-table th, .d-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--c-border); }
+.d-table th { color: var(--c-text-dim); font-weight: normal; font-size: 12px; }
+.d-ok { color: var(--c-ok); } .d-fail { color: var(--c-danger); } .d-run { color: var(--c-accent); }
+
+.d-input { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--c-border); }
+.d-input .box { flex: 1; border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 10px; color: var(--c-text-dim); background: var(--c-panel); }
+
+.d-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--c-border); padding: 0 12px; }
+.d-tabs span { padding: 8px 12px; font-size: 13px; color: var(--c-text-dim); border-bottom: 2px solid transparent; }
+.d-tabs span.on { color: var(--c-accent); border-bottom-color: var(--c-accent); }
+
+.d-scroll { overflow-y: auto; min-height: 0; }

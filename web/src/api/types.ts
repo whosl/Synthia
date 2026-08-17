@@ -86,6 +86,8 @@ export interface SnapshotCreatedPayload {
 export interface CreateTaskRequest {
   readonly task: string;
   readonly part?: string;
+  /** "agent" = 自由 Agent 会话（不启动流程循环）；统一项目页「新任务」引导使用。 */
+  readonly mode?: "agent";
 }
 
 /** POST /projects/:id/tasks 成功响应 data。 */
@@ -170,4 +172,52 @@ export interface AbortRunResult {
   /** 无活动会话时为 null。 */
   readonly status?: string | null;
   readonly reason?: string;
+}
+
+// ─── 统一项目页（UI-3：项目详情 + 工具运行记录）────────────────────────────
+
+/** GET /projects/:id 响应 data（getProject：Project 字段 + 流程实例列表）。 */
+export interface ProjectDetail extends Project {
+  readonly scope: string;
+  readonly standard_version: string;
+  readonly target_part: string;
+  readonly toolchain_profile_ref: string | null;
+  readonly process_instances: ReadonlyArray<{
+    readonly id: string;
+    readonly gate_profile_version: string;
+    readonly current_gate: string;
+    readonly created_at: string;
+  }>;
+}
+
+/** GET /projects/:id/jobs 列表项（tool_run 行镜像；startTime/endTime 可为 null）。 */
+export interface JobRunSummary {
+  readonly id: string;
+  readonly operation: string;
+  readonly runClass: string;
+  readonly state: string;
+  readonly startTime: string | null;
+  readonly endTime: string | null;
+  readonly errorCode?: string;
+}
+
+/** GET /projects/:id/jobs/:jobId/evidence 响应 data（终态任务的冻结证据清单）。 */
+export interface JobEvidenceManifest {
+  readonly jobId: string;
+  readonly entries: ReadonlyArray<{
+    readonly name: string;
+    readonly uri?: string;
+    readonly sha256: string;
+    readonly sizeBytes: number;
+    readonly mediaType: string;
+  }>;
+}
+
+/** GET /projects/:id/jobs/:jobId/evidence/content?name= 响应 data。 */
+export interface JobEvidenceContent {
+  readonly name: string;
+  readonly content: string;
+  readonly sha256: string;
+  readonly truncated: boolean;
+  readonly mediaType: string;
 }
