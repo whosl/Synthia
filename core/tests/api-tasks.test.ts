@@ -140,6 +140,20 @@ class FakeRuntimeClient implements RuntimeClient {
     run.detail = { ...run.detail, ...patch };
     if (patch.status) run.status = patch.status;
   }
+
+  /** Canned SSE body served by streamTask (per-test). */
+  streamBody: string | null = null;
+  /** When set, streamTask rejects (→ mapped error). */
+  streamError: RuntimeClientError | null = null;
+
+  async streamTask(_runId: string): Promise<Response> {
+    if (this.streamError) throw this.streamError;
+    if (this.streamBody === null) throw new RuntimeClientError(503, "runtime unreachable", { retryable: true });
+    return new Response(this.streamBody, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
 }
 
 // ─── harness ─────────────────────────────────────────────────────────────────
@@ -570,5 +584,54 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     });
     expect(status).toBe(401);
     expect(envelopeError(json).code).toBe("authorization");
+  });
+
+  // ─── SSE stream pass-through ────────────────────────────────────────────────
+
+  test("GET .../tasks/:runId/stream passes Runtime SSE through verbatim (no envelope)", async () => {
+    const projectId = await createProject();
+    const { run_id: runId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
+    fake.streamBody = [
+      `event: status\nid: 1\ndata: {"status":"running","ts":"t1"}\n\n`,
+      `event: part\nid: 2\ndata: {"part":{"kind":"text","id":"sp-1","state":"streaming","text":"","ts":"t2"}}\n\n`,
+      `event: delta\nid: 3\ndata: {"partId":"sp-1","text":"你好"}\n\n`,
+      `event: done\nid: 4\ndata: {"reply":"你好","status":"idle","ts":"t4"}\n\n`,
+    ].join("");
+
+    const res = await fetch(`${baseUrl}/api/v1/projects/${projectId}/tasks/${runId}/stream`, {
+      headers: { authorization: `Bearer ${ids.humanToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const body = await res.text();
+    // Verbatim upstream bytes: no JSON envelope wrapping.
+    expect(body).toBe(fake.streamBody);
+  });
+
+  test("stream cross-project run → 404 (ownership enforced before piping)", async () => {
+    const projectIdA = await createProject();
+    const projectIdB = await createProject();
+    const { run_id: runId } = await fake.createTask({ project_id: projectIdA, process_instance_id: "pi-x", task: "sse" });
+    fake.streamBody = "event: status\nid: 1\ndata: {}\n\n";
+    const { status, json } = await callApi(`/api/v1/projects/${projectIdB}/tasks/${runId}/stream`, { token: ids.humanToken });
+    expect(status).toBe(404);
+    expect(envelopeError(json).code).toBe("not_found");
+  });
+
+  test("stream Runtime unreachable → 503 capability_unavailable", async () => {
+    const projectId = await createProject();
+    const { run_id: runId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
+    fake.streamError = new RuntimeClientError(503, "runtime unreachable", { retryable: true });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${runId}/stream`, { token: ids.humanToken });
+    expect(status).toBe(503);
+    expect(envelopeError(json).code).toBe("capability_unavailable");
+    expect(envelopeError(json).retryable).toBe(true);
+  });
+
+  test("stream unknown run → 404 passthrough", async () => {
+    const projectId = await createProject();
+    fake.streamBody = "";
+    const { status } = await callApi(`/api/v1/projects/${projectId}/tasks/run-nope/stream`, { token: ids.humanToken });
+    expect(status).toBe(404);
   });
 });

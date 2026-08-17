@@ -130,6 +130,12 @@ export interface RuntimeClient {
   sendMessage(runId: string, text: string): Promise<unknown>;
   /** POST /tasks/:runId/abort — abort the free-agent session. */
   abortTask(runId: string): Promise<unknown>;
+  /**
+   * GET /tasks/:runId/stream — open the SSE event stream and return the raw
+   * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
+   * RuntimeClientError when the Runtime is unreachable (→ 503).
+   */
+  streamTask(runId: string, init?: { signal?: AbortSignal }): Promise<Response>;
 }
 
 /**
@@ -175,9 +181,9 @@ export class HttpRuntimeClient implements RuntimeClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUNTIME_TIMEOUT_MS;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, opts?: { timeoutMs?: number }): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? this.timeoutMs);
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl.replace(/\/+$/, "")}${path}`, {
@@ -245,11 +251,38 @@ export class HttpRuntimeClient implements RuntimeClient {
   }
 
   async sendMessage(runId: string, text: string): Promise<unknown> {
-    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/message`, { text });
+    // A free-agent turn (context + tool calls + generation) takes minutes,
+    // not seconds — never the 15s control-path timeout.
+    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/message`, { text }, { timeoutMs: 10 * 60_000 });
   }
 
   async abortTask(runId: string): Promise<unknown> {
     return this.request("POST", `/tasks/${encodeURIComponent(runId)}/abort`);
+  }
+
+  async streamTask(runId: string, init?: { signal?: AbortSignal }): Promise<Response> {
+    // SSE pass-through must NOT go through request(): no buffering, no
+    // read-then-parse, no timeout — the body is handed to the caller as-is.
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.baseUrl.replace(/\/+$/, "")}/tasks/${encodeURIComponent(runId)}/stream`,
+        { method: "GET", signal: init?.signal, headers: { accept: "text/event-stream" } },
+      );
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === "AbortError";
+      throw new RuntimeClientError(503, aborted ? "runtime stream closed" : "runtime unreachable", {
+        retryable: !aborted,
+      });
+    }
+    if (!response.ok) {
+      // Drain so the socket can be reused, then map like request() would.
+      await response.text().catch(() => "");
+      throw new RuntimeClientError(response.status, `runtime stream error: ${response.status}`, {
+        retryable: response.status >= 500,
+      });
+    }
+    return response;
   }
 }
 
@@ -564,4 +597,49 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
   } catch (err) {
     throw mapRuntimeError(err);
   }
+}
+
+/**
+ * GET /projects/:projectId/tasks/:runId/stream — SSE pass-through.
+ *
+ * Ownership is verified against the Runtime run detail (same as the other
+ * task routes), then the Runtime SSE response is forwarded VERBATIM: the
+ * body stream is never buffered and content-type stays text/event-stream.
+ * The response bypasses the JSON envelope by design (EventSource clients
+ * consume the raw SSE bytes); errors before the stream opens still surface
+ * through the standard envelope (404/503).
+ *
+ * Returns the raw Response; the router serves it directly.
+ */
+export async function streamTaskHandler(ctx: RequestContext): Promise<Response> {
+  const projectId = ctx.params.projectId!;
+  const runId = ctx.params.runId!;
+  const runtime = requireRuntime(ctx);
+
+  let detail: RuntimeRunDetail;
+  try {
+    detail = await runtime.getTask(runId);
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+
+  let upstream: Response;
+  try {
+    upstream = await runtime.streamTask(runId);
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+
+  // Pipe the body through unchanged. Explicit headers (not upstream.headers)
+  // so no hop-by-hop headers leak through.
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

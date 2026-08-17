@@ -59,6 +59,7 @@ import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { buildContextSnapshot } from "./context-snapshot.ts";
 import type { FreeAgentDeps, FreeAgentSession, ConversationalModel } from "./agent-types.ts";
+import { StreamHub, type StreamEvent } from "./stream-hub.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -200,6 +201,10 @@ export class RuntimeServer {
       const messageMatch = path.match(/^\/tasks\/([^/]+)\/message$/);
       if (method === "POST" && messageMatch)
         return await this.handleSendMessage(messageMatch[1]!, req);
+
+      const streamMatch = path.match(/^\/tasks\/([^/]+)\/stream$/);
+      if (method === "GET" && streamMatch)
+        return await this.handleStream(streamMatch[1]!, req);
 
       const abortMatch = path.match(/^\/tasks\/([^/]+)\/abort$/);
       if (method === "POST" && abortMatch)
@@ -369,9 +374,14 @@ export class RuntimeServer {
   }
 
   /**
-   * POST /tasks/:runId/message — 给自由 Agent 发消息。
-   * idle/终态 → session.prompt（新指令/闲聊）；running → session.steer（接管/纠偏）。
-   * 会话不存在时按 FreeAgentDeps 懒装配（model 用 env SYNTHIA_MODEL_* 构造）。
+   * POST /tasks/:runId/message — 给自由 Agent 发消息（立即 accepted）。
+   *
+   * 语义（SSE 切片）：不再阻塞等整轮完成。idle/终态 → 后台启动
+   * session.prompt（流式回调 → StreamHub → SSE 推送），立即返回
+   * `{accepted:true, status}`；running → session.steer（照旧同步语义）。
+   * 轮次结果（reply/错误）经 stream 的 `done`/`status` 事件与 GET 详情
+   * 的 audit（free_agent_reply/free_agent_reply_error）可查，旧行为的
+   * `{reply}` 字段不再返回（前端已改为流式/轮询渲染，轮询路径不受影响）。
    */
   private async handleSendMessage(runId: string, req: Request): Promise<Response> {
     let body: Record<string, unknown>;
@@ -401,15 +411,134 @@ export class RuntimeServer {
       return json({ steered: true, status: session.status() });
     }
 
-    try {
-      const reply = await session.prompt(text);
-      this.recordConversationAudit(runId, "free_agent_reply", reply);
-      return json({ reply, status: session.status() });
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      this.recordConversationAudit(runId, "free_agent_reply_error", reason);
-      return errorResponse(500, "agent_error", `free-agent prompt failed: ${reason}`);
+    // idle/终态：后台启动整轮，立即返回 accepted。同一 run 同时只允许
+    // 一个 prompt（session.prompt 自身对 running 抛错，这里是双保险）。
+    const hub = StreamHub.for(runId);
+    hub.emit({ type: "status", status: "running", ts: new Date().toISOString() });
+    const opts = this.streamOptions(runId);
+    void session.prompt(text, opts)
+      .then((reply) => {
+        this.recordConversationAudit(runId, "free_agent_reply", reply);
+        opts.finalize();
+        const status = session.status();
+        hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
+        hub.emit({ type: "status", status, ts: new Date().toISOString() });
+      })
+      .catch((e: unknown) => {
+        const reason = e instanceof Error ? e.message : String(e);
+        this.recordConversationAudit(runId, "free_agent_reply_error", reason);
+        opts.finalize();
+        const status = session.status();
+        hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
+        hub.emit({ type: "status", status, ts: new Date().toISOString() });
+      });
+    return json({ accepted: true, status: session.status() });
+  }
+
+  /**
+   * GET /tasks/:runId/stream — SSE 事件流（part/delta/status/done + 心跳）。
+   *
+   * - 事件按 hub 的单调 seq 有序推送，id=seq（EventSource 重连带回
+   *   Last-Event-ID 即续传）；
+   * - 心跳为 SSE 注释行（`: hb\n\n`），15s 一次防中间层超时；
+   * - 会话 idle 时连接保持（等待下一轮），客户端断开即清理订阅；
+   * - run 不存在 → 404（同步 JSON 错误，不进入流）。
+   */
+  private async handleStream(runId: string, req: Request): Promise<Response> {
+    if (!(await this.runExists(runId))) {
+      return errorResponse(404, "not_found", `run ${runId} not found`);
     }
+    const hub = StreamHub.for(runId);
+    const lastEventId = Number(req.headers.get("last-event-id") ?? "");
+    const after = Number.isFinite(lastEventId) && lastEventId > 0 ? lastEventId : undefined;
+    const cursor = hub.subscribe(after);
+    const encoder = new TextEncoder();
+    const HEARTBEAT_MS = 15_000;
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const close = (): void => {
+          if (closed) return;
+          closed = true;
+          cursor.stop();
+          try { controller.close(); } catch { /* already closed */ }
+        };
+        req.signal.addEventListener("abort", close);
+        const writeEvent = (e: StreamEvent): void => {
+          if (closed) return;
+          const payload = e.type === "part"
+            ? { part: e.part }
+            : e.type === "delta"
+              ? { partId: e.partId, text: e.text }
+              : e.type === "done"
+                ? { reply: e.reply, status: e.status, ts: e.ts }
+                : e.type === "reset"
+                  ? { reason: e.reason }
+                  : { status: e.status, ts: e.ts };
+          controller.enqueue(encoder.encode(`event: ${e.type}\nid: ${e.seq}\ndata: ${JSON.stringify(payload)}\n\n`));
+        };
+        // Initial comment so proxies see a body immediately.
+        controller.enqueue(encoder.encode(": stream open\n\n"));
+        const heartbeat = setInterval(() => {
+          if (closed) return;
+          try { controller.enqueue(encoder.encode(": hb\n\n")); } catch { close(); }
+        }, HEARTBEAT_MS);
+        try {
+          while (!closed) {
+            const batch = await cursor.next();
+            if (cursor.stopped) break;
+            for (const e of batch) writeEvent(e);
+          }
+        } catch {
+          // stream write failure — fall through to close
+        } finally {
+          clearInterval(heartbeat);
+          close();
+        }
+      },
+      cancel() {
+        cursor.stop();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
+
+  /** 流式 prompt 回调 → hub 事件（part 定位用 Map 累计文本）。 */
+  private streamOptions(runId: string): {
+    onTextStart: (partId: string) => void;
+    onDelta: (partId: string, text: string) => void;
+    /** 轮次结束：所有未定稿 part 补发 state=done 定稿事件。 */
+    finalize: () => void;
+  } {
+    const hub = StreamHub.for(runId);
+    const parts = new Map<string, string>();
+    return {
+      onTextStart: (partId) => {
+        parts.set(partId, "");
+        hub.emit({ type: "part", part: { kind: "text", id: partId, state: "streaming", text: "", ts: new Date().toISOString() } });
+      },
+      onDelta: (partId, text) => {
+        const acc = (parts.get(partId) ?? "") + text;
+        parts.set(partId, acc);
+        hub.emit({ type: "delta", partId, text });
+      },
+      finalize: () => {
+        const ts = new Date().toISOString();
+        for (const [id, text] of parts) {
+          hub.emit({ type: "part", part: { kind: "text", id, state: "done", text, ts } });
+        }
+        parts.clear();
+      },
+    };
   }
 
   /** POST /tasks/:runId/abort — 终止自由 Agent 会话。 */

@@ -8,6 +8,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../main.ts";
+import { readToken } from "../stores/auth.ts";
 import {
   approveGateSubmission,
   createTask,
@@ -53,8 +54,16 @@ import {
   normalizeStageId,
   type Poller,
 } from "../domain/tasks.ts";
-import { auditToParts, toolDurationLabel, type SynthiaPart } from "../domain/parts.ts";
 import { currentAction, actionStartedAt, waitText } from "../domain/band.ts";
+import { auditToParts, toolDurationLabel, type SynthiaPart, type SynthiaTextPart } from "../domain/parts.ts";
+import { project as projectMarkdown, type Projection } from "../domain/markdown-stream.ts";
+import {
+  applyStreamEvent,
+  subscribeTaskStream,
+  type StreamFeedPart,
+  type StreamHandle,
+  type StreamPhase,
+} from "../domain/task-stream.ts";
 import {
   EXAMPLE_TASKS,
   approvalButtonLabel,
@@ -165,9 +174,44 @@ function isWatchStatus(status: string): boolean {
 onBeforeUnmount(() => {
   poller?.stop();
   poller = null;
+  streamHandle?.close();
+  streamHandle = null;
   if (nowTimer) clearInterval(nowTimer);
   nowTimer = null;
 });
+
+// ── SSE 订阅生命周期：跟随 currentRunId（fetch 流带 Bearer 头；断线退避重连，3 次失败降级轮询）──
+
+let streamHandle: StreamHandle | null = null;
+
+function openStream(runId: string): void {
+  streamHandle?.close();
+  streamHandle = null;
+  streamFeed.value = [];
+  projections.clear();
+  streamPhase.value = "connecting";
+  streamHandle = subscribeTaskStream(
+    `${(import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ""}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/stream`,
+    readToken(),
+    0,
+    {
+      onEvent: (ev) => {
+        streamFeed.value = applyStreamEvent(streamFeed.value, ev);
+        if (ev.type === "done" || ev.type === "status" || ev.type === "reset") void refresh();
+      },
+      onPhase: (phase) => { streamPhase.value = phase; },
+    },
+  );
+}
+
+watch(currentRunId, (runId) => {
+  if (runId) openStream(runId);
+}, { immediate: true });
+
+/** 实时连接中断提示（降级纯轮询时显示）。 */
+const streamDegradedNotice = computed(() =>
+  streamPhase.value === "degraded" ? "实时连接中断，已切换定时刷新" : null,
+);
 
 // ── 状态带：门序列 / 里程碑 / 当前动作 ───────────────────────────────
 
@@ -219,8 +263,7 @@ const action = computed(() => {
 
 const runStatusLabel = computed(() => (detail.value ? (TASK_STATUS_TEXT[detail.value.status] ?? detail.value.status) : ""));
 
-// ── 任务切换器（多任务并存；切换只换对话流，后台继续跑）──────────────
-
+/** 切换任务：只换对话流与 SSE 订阅，后台任务继续跑。 */
 function switchRun(runId: string): void {
   if (runId === currentRunId.value) return;
   currentRunId.value = runId;
@@ -228,16 +271,47 @@ function switchRun(runId: string): void {
   void refresh().then(() => scrollToBottom(true));
 }
 
+// ── 对话流（auditToParts + 底部锚定滚动）────────────────────────────
 
+const auditParts = computed<readonly SynthiaPart[]>(() => (detail.value ? auditToParts(detail.value) : []));
+
+// ── 实时流（SSE）：streaming feed 与轮询 parts 共存（SSE 优先即时渲染，轮询兜底）──
+
+const streamFeed = ref<readonly StreamFeedPart[]>([]);
+const streamPhase = ref<StreamPhase>("connecting");
+/** 流式 part 投影缓存（id → Projection），代码围栏增量续写不重排。 */
+const projections = new Map<string, Projection>();
+
+/** SSE 打开的 text part：渲染为流式 markdown 投影（streaming 时 live 尾块）。 */
+const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
+  streamFeed.value.map((p) => {
+    const prev = projections.get(p.id);
+    const next = projectMarkdown(prev, p.text, p.state === "streaming");
+    projections.set(p.id, next);
+    return { kind: "text" as const, id: p.id, role: "agent" as const, state: p.state, text: p.text, segments: null };
+  }),
+);
+
+/**
+ * 合成对话流：轮询 parts（audit 物化）+ 追加流式 text parts。
+ * 同 id 冲突时（定稿事件与 audit 的 free_agent_reply 同时到达）以 audit 为准。
+ */
+const parts = computed<readonly SynthiaPart[]>(() => {
+  const base = auditParts.value.filter((p) => !(p.kind === "text" && streamFeed.value.some((s) => s.id === p.id)));
+  return [...base, ...streamingTextParts.value];
+});
+
+/** 任务切换器短标签（优先显示任务文案前 18 字）。 */
 function taskShortLabel(run: TaskRunSummary): string {
   const d = detail.value;
   const text = run.run_id === d?.run_id && d.task ? d.task : run.run_id;
   return text.length > 18 ? `${text.slice(0, 18)}…` : text;
 }
 
-// ── 对话流（auditToParts + 底部锚定滚动）────────────────────────────
-
-const parts = computed<readonly SynthiaPart[]>(() => (detail.value ? auditToParts(detail.value) : []));
+/** SSE 流式 part 的块投影（非流式 part 返回 null 走原渲染）。 */
+function streamProjection(part: SynthiaTextPart): Projection | null {
+  return streamFeed.value.some((s) => s.id === part.id) ? projections.get(part.id) ?? null : null;
+}
 
 /** 展开的工具/门禁卡（error 可展开）。 */
 const expandedParts = ref<ReadonlySet<string>>(new Set());
@@ -702,6 +776,7 @@ function exportSummary(): void {
 
       <!-- 有任务：对话流 + 底部输入 -->
       <template v-else>
+        <div v-if="streamDegradedNotice" class="notice v3-loaderr" style="background:#fdf6ec;border-color:#e6d3b3">{{ streamDegradedNotice }}</div>
         <div v-if="loadErrorBanner" class="notice error v3-loaderr">{{ loadErrorBanner }}</div>
 
         <div ref="feedEl" class="feed v3-feed" @scroll.passive="onFeedScroll">
@@ -712,7 +787,14 @@ function exportSummary(): void {
             </div>
 
             <div v-else-if="part.kind === 'text'" class="feed-reply" :data-state="part.state">
-              <ReplySegments v-if="part.segments" :segments="part.segments" :part-key="part.id" />
+              <!-- SSE 流式 part：markdown-stream 投影（稳定块 + live 尾块，代码围栏增量不重排） -->
+              <template v-if="streamProjection(part) !== null">
+                <template v-for="block in streamProjection(part)!.blocks" :key="`${part.id}:${block.raw.length}:${block.mode}`">
+                  <div v-if="block.mode === 'code'" class="code-view reply-code">{{ block.src }}</div>
+                  <div v-else class="markdown-body feed-text" v-html="renderMarkdown(block.src)"></div>
+                </template>
+              </template>
+              <ReplySegments v-else-if="part.segments" :segments="part.segments" :part-key="part.id" />
               <div v-else class="feed-text">{{ part.text }}</div>
               <span v-if="part.state === 'streaming'" class="streaming-cursor" aria-label="生成中">▍</span>
             </div>

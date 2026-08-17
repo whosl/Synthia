@@ -42,8 +42,19 @@ export interface ModelClientConfig {
   readonly docMaxTokens?: number;
   /** When true, log raw response summaries to stderr (no secrets). */
   readonly debug?: boolean;
-  /** Injectable for tests. */
+  /** Injectable for tests (buffered path). */
   readonly post?: ChatPoster;
+  /** Injectable streaming poster for tests (chatStream path). */
+  readonly postStream?: ChatStreamPoster;
+  /** Stream idle watchdog: abort when no bytes arrive for this long.
+   *  Default 120000ms; 0 disables (no total timeout on streams). */
+  readonly streamIdleTimeoutMs?: number;
+}
+
+/** Low-level streaming poster abstraction. Unlike {@link ChatPoster} this
+ *  returns the raw Response so the SSE body can be consumed incrementally. */
+export interface ChatStreamPoster {
+  (input: { url: string; headers: Record<string, string>; body: string }): Promise<Response>;
 }
 
 export interface ChatMessage {
@@ -60,6 +71,22 @@ export interface ChatCompletionResponse {
   readonly status: number;
   readonly json?: unknown;
   readonly text: string;
+}
+
+/** One aggregated tool call reconstructed from streaming deltas. */
+export interface StreamedToolCall {
+  readonly index: number;
+  readonly id: string;
+  readonly name: string;
+  /** Raw concatenated arguments string (JSON.parse'd by the caller). */
+  readonly argsRaw: string;
+}
+
+/** Result of consuming one streaming chat completion. */
+export interface ChatStreamResult {
+  readonly text: string;
+  readonly toolCalls: readonly StreamedToolCall[];
+  readonly finishReason: string | null;
 }
 
 export interface ActionRequest {
@@ -104,7 +131,161 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
     toolMaxTokens: env.SYNTHIA_MODEL_TOOL_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_TOOL_MAX_TOKENS) : 4096,
     docMaxTokens: env.SYNTHIA_MODEL_DOC_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_DOC_MAX_TOKENS) : 8192,
     debug: env.SYNTHIA_MODEL_DEBUG === "1" || env.SYNTHIA_MODEL_DEBUG === "true",
+    streamIdleTimeoutMs: env.SYNTHIA_MODEL_STREAM_IDLE_MS ? Number(env.SYNTHIA_MODEL_STREAM_IDLE_MS) : 120_000,
   };
+}
+
+// ---------------------------------------------------------------------------
+// default streaming poster: native fetch, idle watchdog instead of a total
+// timeout (a long streamed turn must not be aborted merely for being long)
+// ---------------------------------------------------------------------------
+
+const defaultPostStream: ChatStreamPoster = async ({ url, headers, body }) => {
+  const res = await fetch(url, { method: "POST", headers, body });
+  return res;
+};
+
+// ---------------------------------------------------------------------------
+// SSE stream consumption (chat completions, stream: true)
+// ---------------------------------------------------------------------------
+
+/** Wire shape of one streaming delta (OpenAI-compatible). */
+interface WireDelta {
+  content?: string | null;
+  tool_calls?: Array<{
+    index?: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  }>;
+}
+
+/**
+ * Consume a `stream: true` chat-completions SSE body. Aggregates:
+ * - text deltas → accumulated text (+ {@link onDelta} per fragment);
+ * - tool_calls deltas → per-index argument string concatenation (the model
+ *   streams `arguments` in arbitrary fragments; OpenAI-compatible servers
+ *   send `index` on every fragment, `id`/`name` usually only on the first).
+ *
+ * Tolerated: CRLF line endings, multi-`data:` lines per event, comment lines,
+ * non-JSON payloads (skipped), missing `[DONE]` (natural stream end).
+ * Exported for direct unit testing against canned chunk sequences.
+ */
+export async function consumeChatSSE(
+  body: ReadableStream<Uint8Array>,
+  opts: {
+    onTextStart?: () => void;
+    onDelta?: (text: string) => void;
+  } = {},
+): Promise<ChatStreamResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let pendingData = ""; // data lines of the event being assembled (joined "\n")
+  let carry = ""; // partial line carried across stream reads
+  let text = "";
+  let textStarted = false;
+  let finishReason: string | null = null;
+  let done = false;
+  /** index → mutable aggregation cell (dynamic numeric keys). */
+  const cells = new Map<number, { index: number; id: string; name: string; argsRaw: string }>();
+
+  /** Apply one complete SSE line to the pending event. */
+  const handleLine = (rawLine: string): void => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line === "" || line.startsWith(":")) {
+      if (line === "") flushEvent(); // blank line terminates the event
+      return; // ":" comment / heartbeat
+    }
+    const colon = line.indexOf(":");
+    const field = colon < 0 ? line : line.slice(0, colon);
+    let value = colon < 0 ? "" : line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "data") pendingData = pendingData ? `${pendingData}\n${value}` : value;
+    // event:/id:/retry: irrelevant for upstream model streams — ignored.
+  };
+
+  const flushEvent = (): void => {
+    const payload = pendingData;
+    pendingData = "";
+    if (!payload) return;
+    if (payload.trim() === "[DONE]") {
+      done = true;
+      return;
+    }
+    let parsed: { choices?: Array<{ delta?: WireDelta; finish_reason?: string | null }> } | undefined;
+    try {
+      parsed = JSON.parse(payload) as typeof parsed;
+    } catch {
+      return; // skip malformed payloads rather than killing the stream
+    }
+    const choice = parsed?.choices?.[0];
+    if (!choice) return;
+    if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+    const delta = choice.delta;
+    if (!delta) return;
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      if (!textStarted) {
+        textStarted = true;
+        opts.onTextStart?.();
+      }
+      text += delta.content;
+      opts.onDelta?.(delta.content);
+    }
+    if (delta.tool_calls) {
+      for (const frag of delta.tool_calls) {
+        const index = typeof frag.index === "number" ? frag.index : 0;
+        let cell = cells.get(index);
+        if (!cell) {
+          cell = { index, id: "", name: "", argsRaw: "" };
+          cells.set(index, cell);
+        }
+        if (frag.id) cell.id = frag.id;
+        const fn = frag.function;
+        if (fn?.name) cell.name = cell.name ? cell.name + fn.name : fn.name;
+        if (typeof fn?.arguments === "string") cell.argsRaw += fn.arguments;
+      }
+    }
+  };
+
+  try {
+    while (!done) {
+      const { value, done: streamEnd } = await reader.read();
+      if (streamEnd) {
+        // Stream ended without [DONE]: flush any trailing partial event.
+        if (carry) {
+          handleLine(carry);
+          carry = "";
+        }
+        flushEvent();
+        break;
+      }
+      let chunk = carry + decoder.decode(value, { stream: true });
+      carry = "";
+      let newline = chunk.indexOf("\n");
+      while (newline >= 0) {
+        handleLine(chunk.slice(0, newline));
+        if (done) break;
+        chunk = chunk.slice(newline + 1);
+        newline = chunk.indexOf("\n");
+      }
+      if (done) break;
+      carry = chunk; // partial line continues on the next read
+    }
+    decoder.decode();
+  } finally {
+    reader.releaseLock();
+    body.cancel().catch(() => {});
+  }
+
+  // Tool calls sorted by index (their wire order), ids defaulted like parseChatTurn.
+  const toolCalls: StreamedToolCall[] = [...cells.values()]
+    .sort((a, b) => a.index - b.index)
+    .map((cell, i) => ({
+      index: cell.index,
+      id: cell.id || `call_${i}`,
+      name: cell.name,
+      argsRaw: cell.argsRaw,
+    }));
+  return { text, toolCalls, finishReason };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,11 +448,14 @@ export function renderUpstream(upstream?: UpstreamArtifacts): string {
 export class ModelClient implements LoopModel, ConversationalModel {
   private readonly cfg: ModelClientConfig;
   private readonly post: ChatPoster;
+  private readonly postStream: ChatStreamPoster | undefined;
 
   constructor(config: ModelClientConfig) {
     this.cfg = config;
     this.post = config.post ?? defaultPost;
+    this.postStream = config.postStream;
   }
+
 
   /** Low-level structured-action emission used by every phase method. */
   async emitAction(req: ActionRequest, validate: ActionValidator): Promise<EmitOutcome> {
@@ -366,34 +550,8 @@ export class ModelClient implements LoopModel, ConversationalModel {
    */
   async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
     const maxNetwork = Math.max(0, this.cfg.networkRetries ?? 2);
-    const timeoutMs = this.cfg.timeoutMs ?? 120_000;
-
-    // Convert AgentMessage[] → OpenAI wire messages.
-    const wireMessages = messages.map(toWireMessage);
-
-    // Convert AgentTool[] → OpenAI tools array. Always sent as function tools;
-    // tool_choice is "auto" so the model decides whether to call or reply.
-    const wireTools = tools.length === 0
-      ? []
-      : tools.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-
-    const body: Record<string, unknown> = {
-      model: this.cfg.model,
-      temperature: 0,
-      max_tokens: this.cfg.toolMaxTokens ?? 4096,
-      messages: wireMessages,
-    };
-    if (wireTools.length > 0) {
-      body.tools = wireTools;
-      body.tool_choice = "auto";
-    }
-
-    const req = {
-      url: `${this.cfg.baseUrl}/chat/completions`,
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey}` },
-      body: JSON.stringify(body),
-      timeoutMs,
-    };
+    const { url, headers, body } = this.buildChatRequest(messages, tools);
+    const req = { url, headers, body, timeoutMs: this.cfg.timeoutMs ?? 120_000 };
 
     let netAttempt = 0;
     let response: ChatCompletionResponse;
@@ -415,6 +573,102 @@ export class ModelClient implements LoopModel, ConversationalModel {
     if (this.cfg.debug) process.stderr.write(`[model-debug] chat: status=${response.status} len=${response.text.length}\n`);
 
     return parseChatTurn(response.json);
+  }
+
+  /**
+   * Streaming variant of {@link chat}: `stream: true` request, SSE body
+   * consumed incrementally (see {@link consumeChatSSE}). Text deltas invoke
+   * `opts.onDelta` live; tool-call argument fragments are concatenated
+   * per index. The returned ChatTurn is byte-equivalent to what chat()
+   * would return for the same completion (same fault-tolerant argument
+   * parsing), so the free-agent loop needs no special casing.
+   *
+   * A non-SSE response body (gateway ignoring `stream`, or an empty body)
+   * falls back to buffered parsing instead of failing.
+   */
+  async chatStream(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    opts: { onTextStart?: () => void; onDelta?: (text: string) => void } = {},
+  ): Promise<ChatTurn> {
+    const postStream = this.postStream ?? defaultPostStream;
+    const { url, headers, body } = this.buildChatRequest(messages, tools, { stream: true });
+
+    let netAttempt = 0;
+    let response: Response;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        response = await postStream({ url, headers, body });
+        break;
+      } catch (e) {
+        netAttempt++;
+        if (netAttempt > maxNetwork) throw e;
+        await sleep(backoffMs(netAttempt));
+      }
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`model-client.chatStream: upstream returned ${response.status}`);
+    }
+
+    const sseBody = response.body;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!sseBody || !contentType.includes("text/event-stream")) {
+      // Upstream ignored stream:true — parse the buffered JSON body.
+      if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: non-SSE response (${contentType || "no content-type"}), falling back to buffered parse\n`);
+      const text = await response.text();
+      let json: unknown;
+      try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
+      return parseChatTurn(json);
+    }
+
+    const result = await consumeChatSSE(sseBody, opts);
+    if (this.cfg.debug) {
+      process.stderr.write(
+        `[model-debug] chatStream: finish=${result.finishReason ?? "?"} ` +
+        `tool_calls=${result.toolCalls.length} text_len=${result.text.length}\n`,
+      );
+    }
+    if (result.toolCalls.length > 0) {
+      const calls: AgentToolCall[] = result.toolCalls.map((c) => {
+        let args: unknown;
+        if (c.argsRaw) {
+          try { args = JSON.parse(c.argsRaw); } catch { args = c.argsRaw; }
+        } else {
+          args = {};
+        }
+        return { toolCallId: c.id, name: c.name, args };
+      });
+      return { kind: "tool_calls", calls, content: result.text || null };
+    }
+    return { kind: "text", content: result.text };
+  }
+
+  /** Shared request builder for chat()/chatStream(). */
+  private buildChatRequest(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    opts: { stream?: boolean } = {},
+  ): { url: string; headers: Record<string, string>; body: string } {
+    const wireTools = tools.length === 0
+      ? []
+      : tools.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+    const body: Record<string, unknown> = {
+      model: this.cfg.model,
+      temperature: 0,
+      max_tokens: this.cfg.toolMaxTokens ?? 4096,
+      messages: messages.map(toWireMessage),
+    };
+    if (wireTools.length > 0) {
+      body.tools = wireTools;
+      body.tool_choice = "auto";
+    }
+    if (opts.stream) body.stream = true;
+    return {
+      url: `${this.cfg.baseUrl}/chat/completions`,
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey}` },
+      body: JSON.stringify(body),
+    };
   }
 
   /**

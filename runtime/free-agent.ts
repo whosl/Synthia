@@ -32,11 +32,13 @@ import type {
   BeforeModelCallHook,
   ChatTurn,
   ConversationalModel,
+  StreamingConversationalModel,
   FreeAgentController,
   FreeAgentSession,
   FreeAgentStatus,
   RegisteredArtifactInfo,
   ToolExecContext,
+  PromptStreamOptions,
 } from "./agent-types.ts";
 
 // ---------------------------------------------------------------------------
@@ -258,9 +260,11 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   /** Snapshot registry: snapshotId → member revision ids (for conformity). */
 
   private readonly snapshotsById = new Map<string, readonly string[]>();
-
   /** claim-check 审计记录（防呆 2；持久化进 conversation sidecar）。 */
   private readonly claimChecks: ClaimCheckRecord[] = [];
+
+  /** 流式 text part 单调计数（sp-<runId>-<n>）。 */
+  private streamPartCounter = 0;
 
   constructor(runId: string, deps: FreeAgentDeps) {
     this.runId = runId;
@@ -296,7 +300,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     return this._status;
   }
 
-  async prompt(text: string): Promise<string> {
+  async prompt(text: string, opts: PromptStreamOptions = {}): Promise<string> {
     if (this._status === "running") {
       throw new Error("free-agent: a prompt is already in progress");
     }
@@ -314,7 +318,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     await this.persist();
 
     try {
-      const reply = await this.runLoop();
+      const reply = await this.runLoop(opts);
       // Preserve the awaiting-approval lock: a locked session stays locked
       // across prompt boundaries (only core_check_gate approved unlocks it).
       this._status = this.isGateLocked() ? "awaiting_approval" : "idle";
@@ -349,7 +353,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * plain-text reply. Aborts and steer-injections are checked at every tool
    * boundary. Bounded by {@link MAX_TOOL_ROUNDS}.
    */
-  private async runLoop(): Promise<string> {
+  private async runLoop(opts: PromptStreamOptions = {}): Promise<string> {
     // 防呆 2：本 prompt() 内完成声明被拦截的次数（重试上限 MAX_CLAIM_RETRIES）。
     let claimRetries = 0;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -362,8 +366,29 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         return `[系统] 模型调用被数据域预检阻止: ${stop.reason}`;
       }
 
-      // Call the model with the full conversation + tool catalog.
-      const turn: ChatTurn = await this.deps.model.chat(this.messages, this.deps.tools);
+      // Call the model with the full conversation + tool catalog. When the
+      // model supports streaming AND the caller asked for live deltas, use
+      // chatStream; otherwise the buffered chat(). Streaming turns carry the
+      // same ChatTurn semantics (text | tool_calls) — no loop special-casing.
+      // Each model round that emits text gets its own streaming part id, so a
+      // multi-round turn (narration → tools → final reply) renders as
+      // separate text parts, mirroring the buffered rendering order.
+      const streamingModel = "chatStream" in this.deps.model
+        ? (this.deps.model as StreamingConversationalModel)
+        : undefined;
+      let partId: string | null = null;
+      const useStream = !!streamingModel && !!(opts.onTextStart || opts.onDelta);
+      const turn: ChatTurn = useStream && streamingModel
+        ? await streamingModel.chatStream(this.messages, this.deps.tools, {
+            onTextStart: () => {
+              partId = `sp-${this.runId}-${++this.streamPartCounter}`;
+              opts.onTextStart?.(partId);
+            },
+            onDelta: (t) => {
+              if (partId) opts.onDelta?.(partId, t);
+            },
+          })
+        : await this.deps.model.chat(this.messages, this.deps.tools);
 
       if (turn.kind === "text") {
         // 防呆 2：声称-记录一致性核查。绝不把「模型声称仿真通过 + 无 succeeded

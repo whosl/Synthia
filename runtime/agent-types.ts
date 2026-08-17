@@ -126,6 +126,29 @@ export interface ConversationalModel {
   chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn>;
 }
 
+/**
+ * 可选流式扩展：chat 的 `stream:true` 变体。模型文本增量实时回调
+ * （onDelta），聚合结果与 chat() 等价。未实现者由会话回退到缓冲 chat()。
+ */
+export interface StreamingConversationalModel {
+  chatStream(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    opts: { onTextStart?: () => void; onDelta?: (text: string) => void },
+  ): Promise<ChatTurn>;
+}
+
+/**
+ * prompt 的流式选项（SSE 切片）：模型文本 delta 实时写入会话消息流
+ * （流式 text part），完整轮次结束照旧落 audit（free_agent_reply）。
+ */
+export interface PromptStreamOptions {
+  /** 第一个文本 delta 到达（text part 创建，state=streaming）。 */
+  onTextStart?: (partId: string) => void;
+  /** 文本增量（追加到该 part）。 */
+  onDelta?: (partId: string, text: string) => void;
+}
+
 /** 会话状态机。 */
 export type FreeAgentStatus =
   | "idle"
@@ -143,8 +166,11 @@ export interface FreeAgentSession {
   /**
    * 新指令或闲聊。内部循环：chat → 若 tool_calls 则逐个执行（含钩子）→ 回填 → 再 chat，
    * 直到模型返回纯文本。返回该文本。可被 steer()/abort() 打断。
+   *
+   * opts（可选）：模型支持流式时逐 token 回调（onTextStart/onDelta）；
+   * 不支持流式的模型自动回退缓冲 chat()，回调不触发但轮次结果不变。
    */
-  prompt(text: string): Promise<string>;
+  prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
   /** 运行中接管/纠偏（下一工具结束后注入上下文），不入队新 prompt。 */
   steer(text: string): void;
   /** 立即终止。 */

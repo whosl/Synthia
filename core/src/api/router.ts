@@ -61,13 +61,13 @@ import {
   getTaskHandler,
   listTasksHandler,
   sendTaskMessageHandler,
+  streamTaskHandler,
 } from "./task-proxy.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
 
-type Handler = (ctx: RequestContext) => Promise<HandlerResult>;
-type RequiredScope = "core:read" | "core:write" | "core:approve";
+type Handler = (ctx: RequestContext) => Promise<HandlerResult | Response>;
 
 interface RouteMatch {
   readonly handler: Handler;
@@ -139,6 +139,9 @@ export async function routeApi(request: Request, pool: Pool, connector?: Connect
 
   try {
     const result = await match.handler({ ...ctx, params: match.params });
+    // Raw pass-through (SSE): the handler already built the final Response —
+    // no envelope wrap. Errors still surface through the JSON error envelope.
+    if (result instanceof Response) return result;
     return jsonBody(result.status, successEnvelope(result.data, correlationId));
   } catch (err) {
     return jsonBody(toErrorStatus(err), errorEnvelope(toApiError(err), correlationId));
@@ -245,6 +248,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     }
     if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "abort" && method === "POST") {
       return { handler: abortTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:write" };
+    }
+
+    // GET /projects/:projectId/tasks/:runId/stream — SSE pass-through (raw Response)
+    if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "stream" && method === "GET") {
+      return { handler: streamTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:read" };
     }
 
     // GET /projects/:projectId/jobs/:jobId/evidence
