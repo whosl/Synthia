@@ -3,7 +3,8 @@
  * - ``` 围栏代码块超 15 行折叠为代码卡；≤15 行内联（阈值边界）。
  * - 语言/文件名推断（```verilog / ```counter.v / ```verilog counter.v）。
  * - 未围栏长文本同理折叠；展开状态切换（toggleSetKey）。
- * - buildFeed：user_message → 用户气泡、free_agent_reply → 分段回复，按 seq 时序交织。
+ * - auditToParts：user_message → 用户气泡、free_agent_reply → 分段回复，按 seq 时序交织。
+ *   （v2 buildFeed 已由 v3 web/src/domain/parts.ts 取代）
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -16,7 +17,7 @@ import {
   type ReplyCodeSegment,
   type ReplySegment,
 } from "../src/domain/reply-segments.ts";
-import { buildFeed, type FeedPart } from "../src/domain/tasks.ts";
+import { auditToParts } from "../src/domain/parts.ts";
 import type { TaskAuditEvent, TaskRunDetail } from "../src/api/types.ts";
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
@@ -181,9 +182,9 @@ describe("makeTextSegment：工具结果长文本", () => {
   });
 });
 
-// ─── buildFeed：free-agent 对话进信息流 ────────────────────────────────
+// ─── auditToParts：free-agent 对话进对话流（v3 数据层）────────────────
 
-describe("buildFeed：free-agent 对话 part", () => {
+describe("auditToParts：free-agent 对话 part", () => {
   test("user_message → 用户气泡；free_agent_reply → 分段回复；与工具条按 seq 时序交织", () => {
     const detail = makeDetail({
       audit: [
@@ -195,16 +196,18 @@ describe("buildFeed：free-agent 对话 part", () => {
         audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "好的。" }),
       ],
     });
-    const feed = buildFeed(detail);
-    expect(feed.map((p) => p.kind)).toEqual(["user", "text", "reply", "tool", "user", "reply"]);
+    const parts = auditToParts(detail);
+    const kinds = parts.map((p) => (p.kind === "text" ? `text:${p.role}` : p.kind));
+    // seq2 叙述与 seq3 回复为相邻 Agent 文本 → 拼接为同一 part（流式拼接）
+    expect(kinds).toEqual(["text:user", "text:user", "text:agent", "tool", "text:user", "text:agent"]);
 
-    const reply = feed.find((p) => p.kind === "reply");
-    const segs = reply && reply.kind === "reply" ? reply.segments : [];
+    const reply = parts.find((p) => p.kind === "text" && p.role === "agent" && p.segments?.some((s) => s.kind === "code"));
+    const segs = reply?.segments ?? [];
     expect(segs.map((s) => s.kind)).toEqual(["text", "code"]);
     expect(codeSegment(segs[1])).toMatchObject({ filename: "counter.v", language: "Verilog", collapsible: false });
   });
 
-  test("回复中的长代码块 → 折叠代码卡段（刷屏修复验收点）", () => {
+  test("回复中的长代码块 → 折叠代码卡段（刷屏修复验收点；叙述文本不折叠）", () => {
     const detail = makeDetail({
       audit: [
         audit({
@@ -215,16 +218,16 @@ describe("buildFeed：free-agent 对话 part", () => {
         }),
       ],
     });
-    const feed = buildFeed(detail);
-    const reply = feed[0]!;
-    if (reply.kind !== "reply") throw new Error("expected reply part");
-    const code = codeSegment(reply.segments.find((s) => s.kind === "code"));
+    const parts = auditToParts(detail);
+    const reply = parts.find((p) => p.kind === "text" && p.role === "agent")!;
+    if (reply.kind !== "text") throw new Error("expected text part");
+    const code = codeSegment(reply.segments?.find((s) => s.kind === "code"));
     expect(code.collapsible).toBe(true);
     expect(code.lineCount).toBe(40);
     expect(code.filename).toBe("counter.v");
   });
 
-  test("空回复/空白用户消息不进信息流；steer 技术事件不进信息流", () => {
+  test("空回复/空白用户消息不进对话流；steer 事件为提示卡而非叙述", () => {
     const detail = makeDetail({
       audit: [
         audit({ category: "model", phase: "loop", action: "user_message", detail: "   " }),
@@ -233,20 +236,20 @@ describe("buildFeed：free-agent 对话 part", () => {
         audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "有效回复" }),
       ],
     });
-    const feed = buildFeed(detail);
-    expect(feed.length).toBe(1);
-    expect(feed[0]!.kind).toBe("reply");
+    const parts = auditToParts(detail);
+    expect(parts.filter((p) => p.kind === "text" && p.role === "user")).toHaveLength(1); // 仅 detail.task 首轮气泡
+    expect(parts.filter((p) => p.kind === "text" && p.role === "agent")).toHaveLength(1); // 仅有效回复；空回复不进流
+    expect(parts.some((p) => p.kind === "note")).toBe(true);
   });
 
-  test("回复 part key 唯一（v-for/折叠状态键稳定）", () => {
+  test("part id 唯一（v-for/折叠状态键稳定）", () => {
     const detail = makeDetail({
       audit: [
         audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "第一条" }),
         audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "第二条" }),
       ],
     });
-    const keys = buildFeed(detail).map((p: FeedPart) => p.key);
-    expect(new Set(keys).size).toBe(keys.length);
-    expect(keys).toEqual(["r1", "r2"]);
+    const ids = auditToParts(detail).map((p) => p.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

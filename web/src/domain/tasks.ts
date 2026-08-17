@@ -9,9 +9,7 @@
  */
 
 import { GATE_REVIEW_NAMES, type GateId } from "./gates.ts";
-import { phaseDocName } from "./artifacts.ts";
-import { segmentAgentReply, type ReplySegment } from "./reply-segments.ts";
-import type { TaskAuditEvent, TaskDocRef, TaskRunDetail } from "../api/types.ts";
+import type { TaskAuditEvent } from "../api/types.ts";
 
 // ─── 阶段链 ──────────────────────────────────────────────────────────
 
@@ -267,9 +265,9 @@ export function humanizeReason(reason: string | null | undefined): string {
   return "任务遇到问题，已安全停止；技术原因见运行记录。";
 }
 
-// ─── 信息流（opencode 模式，spec ui-redesign-v2 §4）──────────────────────
+// ─── 工具条文案（v3 对话流：parts.ts 工具 part 标题来源）────────────────
 
-/** 工具条标题（v2 §4.2）。 */
+/** 工具条标题（v2 §4.2 沿用）。 */
 export const TOOL_BAR_TITLES: Readonly<Record<string, string>> = {
   validate_sources: "编译检查",
   simulate: "仿真",
@@ -277,180 +275,13 @@ export const TOOL_BAR_TITLES: Readonly<Record<string, string>> = {
   implement: "实现并生成码流",
 };
 
-/** 阶段 id → 工具操作（工作台 current_stage 推导进行中工具条用）。 */
-const STAGE_TO_TOOL_OP: Readonly<Record<string, string>> = {
+/** 阶段 id → 工具操作（v3 状态带/对话流推导 pending 工具条用）。 */
+export const STAGE_TO_TOOL_OP: Readonly<Record<string, string>> = {
   validate: "validate_sources",
   simulate: "simulate",
   synthesize: "synthesize",
   implement: "implement",
 };
-
-export type ToolBarState = "running" | "ok" | "failed";
-export type GateBarState = "evaluating" | "passed" | "failed" | "awaiting";
-
-export type FeedPart =
-  | { readonly kind: "text"; readonly key: string; readonly ts: string; readonly text: string }
-  /** free-agent 用户消息（右侧气泡；首轮指令由 detail.task 气泡覆盖）。 */
-  | { readonly kind: "user"; readonly key: string; readonly ts: string; readonly text: string }
-  /** free-agent 回复（左侧 assistant 叙述；已分段，长代码块折叠为代码卡）。 */
-  | { readonly kind: "reply"; readonly key: string; readonly ts: string; readonly segments: readonly ReplySegment[] }
-  | { readonly kind: "tool"; readonly key: string; readonly ts: string | null; readonly op: string; readonly title: string; readonly state: ToolBarState; readonly durationMs: number | null; readonly reason: string | null }
-  | { readonly kind: "gate"; readonly key: string; readonly ts: string; readonly review: string; readonly state: GateBarState }
-  | { readonly kind: "file"; readonly key: string; readonly ts: string | null; readonly doc: TaskDocRef; readonly title: string }
-  | { readonly kind: "evidence"; readonly key: string; readonly ts: string | null; readonly count: number }
-  | { readonly kind: "terminal"; readonly key: string; readonly ts: string; readonly state: "succeeded" | "failed"; readonly text: string };
-
-/** 从 gate 类 action 提取门 id（如 "G2: …" → "G2"）。 */
-function gateIdFromAction(action: string): string | null {
-  const match = /^(G\d)/.exec(action);
-  return match && match[1]! in GATE_REVIEW_NAMES ? match[1]! : null;
-}
-
-/** 从 governance 登记事件 detail 提取产物路径（`type=… path=…`）。 */
-function pathFromGovernanceDetail(detail: string | undefined): string | null {
-  if (!detail) return null;
-  const match = /(?:^|\s)path=(\S+)/.exec(detail);
-  return match ? match[1]! : null;
-}
-
-/**
- * 物化对话信息流（v2 §4）：audit + docs + evidence → part 数组，按时间序，不重排。
- *
- * 规则：
- * - model → 文本叙述（narrateAuditEvent 的中文句；连续重复句合并）；
- * - tool_call → 工具条（成功/失败；耗时=完成事件与对应权限门事件的时间差）；
- * - gate（gate_review）→ 门禁条，同一门只保留一个 part，状态取最新事件；
- * - gate（权限门 "gate ok (vivado-batch-1)"）与 lifecycle → 隐藏；
- * - governance 登记 → 产物文件卡（按 detail 里的 path 关联 docs）；
- * - evidence → 末尾一条「已收集证据 · N 项」摘要；
- * - loop → 终态卡（成功绿 / 失败红 + 人话原因）；
- * - run 进行中且当前阶段是工具操作 → 追加「进行中」工具条。
- */
-export function buildFeed(detail: TaskRunDetail): FeedPart[] {
-  const parts: FeedPart[] = [];
-  const gatePartIndex = new Map<string, number>(); // gate → parts 下标
-  const gateOkTs = new Map<string, number>(); // 工具操作 → 权限门通过时间（耗时起点）
-  const filedDocs = new Set<string>(); // 已出文件卡的 revision_id
-
-  const sorted = [...detail.audit].sort((a, b) => a.seq - b.seq);
-
-  for (const event of sorted) {
-    switch (event.category) {
-      case "lifecycle":
-        break; // 心跳/重连一律隐藏（HIDDEN 集合）
-
-      case "model": {
-        // free-agent 对话事件：用户消息 → 右侧气泡；回复 → assistant 分段叙述。
-        // （free_agent_steer 无内容、free_agent_reply_error 已由输入区 ErrorNotice 覆盖，均不进流。）
-        if (event.action === "user_message") {
-          const text = event.detail?.trim();
-          if (text) parts.push({ kind: "user", key: `u${event.seq}`, ts: event.ts, text });
-          break;
-        }
-        if (event.action === "free_agent_reply") {
-          const text = event.detail?.trim();
-          if (text) parts.push({ kind: "reply", key: `r${event.seq}`, ts: event.ts, segments: segmentAgentReply(text) });
-          break;
-        }
-        const text = narrateAuditEvent(event);
-        if (!text) break;
-        const prev = parts[parts.length - 1];
-        if (prev?.kind === "text" && prev.text === text) break; // 降噪：连续重复句合并
-        parts.push({ kind: "text", key: `t${event.seq}`, ts: event.ts, text });
-        break;
-      }
-
-      case "tool_call": {
-        const title = TOOL_BAR_TITLES[event.phase];
-        if (!title) break;
-        const startTs = gateOkTs.get(event.phase);
-        const endTs = Date.parse(event.ts);
-        const durationMs = startTs !== undefined && Number.isFinite(endTs) && endTs >= startTs ? endTs - startTs : null;
-        const failed = event.result !== "ok";
-        parts.push({
-          kind: "tool",
-          key: `x${event.seq}`,
-          ts: event.ts,
-          op: event.phase,
-          title,
-          state: failed ? "failed" : "ok",
-          durationMs,
-          reason: failed ? `${title}未能完成，任务已安全停止。技术原因见运行记录。` : null,
-        });
-        break;
-      }
-
-      case "gate": {
-        if (event.phase !== "gate_review") {
-          // 权限门：记录时间戳供工具条耗时计算，本身不进信息流。
-          const ts = Date.parse(event.ts);
-          if (Number.isFinite(ts)) gateOkTs.set(event.phase, ts);
-          break;
-        }
-        const gateId = gateIdFromAction(event.action);
-        if (!gateId) break;
-        const review = GATE_REVIEW_NAMES[gateId as GateId];
-        let state: GateBarState;
-        if (event.action.includes("approved") || event.action.includes("auto-approved")) state = "passed";
-        else if (event.action.includes("rejected") || event.action.includes("withdrawn")) state = "failed";
-        else if (event.action.includes("awaiting human approval")) state = "awaiting";
-        else if (event.action.includes("polling approval status")) break; // 轮询属技术细节
-        else state = "evaluating"; // creating snapshot / submitting for review
-        const existing = gatePartIndex.get(gateId);
-        if (existing !== undefined) {
-          const prev = parts[existing]!;
-          if (prev.kind === "gate") parts[existing] = { ...prev, ts: event.ts, state };
-        } else {
-          gatePartIndex.set(gateId, parts.length);
-          parts.push({ kind: "gate", key: `g-${gateId}`, ts: event.ts, review, state });
-        }
-        break;
-      }
-
-      case "governance": {
-        const path = pathFromGovernanceDetail(event.detail);
-        const doc = path ? detail.docs.find((d) => d.path === path) : undefined;
-        if (doc && !filedDocs.has(doc.revision_id)) {
-          filedDocs.add(doc.revision_id);
-          parts.push({ kind: "file", key: `f-${doc.revision_id}`, ts: event.ts, doc, title: phaseDocName(doc.phase) });
-        }
-        break;
-      }
-
-      case "loop": {
-        if (event.action === "loop succeeded") {
-          parts.push({ kind: "terminal", key: `z${event.seq}`, ts: event.ts, state: "succeeded", text: "全流程完成，码流已生成 ✅" });
-        } else if (event.action === "loop failed" || event.action === "loop fail_closed") {
-          parts.push({ kind: "terminal", key: `z${event.seq}`, ts: event.ts, state: "failed", text: humanizeReason(detail.reason ?? event.detail) });
-        }
-        break; // "loop paused at Gx" 由门禁条 awaiting 覆盖
-      }
-    }
-  }
-
-  // 未能关联登记事件的产物 → 文件卡补到流尾。
-  for (const doc of detail.docs) {
-    if (filedDocs.has(doc.revision_id)) continue;
-    filedDocs.add(doc.revision_id);
-    parts.push({ kind: "file", key: `f-${doc.revision_id}`, ts: null, doc, title: phaseDocName(doc.phase) });
-  }
-
-  // 证据摘要：不内联全文，一行合并。
-  const evidenceCount = detail.evidence.reduce((n, ev) => n + Math.max(ev.entries.length, 1), 0);
-  if (evidenceCount > 0) {
-    parts.push({ kind: "evidence", key: "evidence", ts: null, count: evidenceCount });
-  }
-
-  // 进行中的工具条（当前阶段是工具操作且尚无该操作的完成/失败条）。
-  if (detail.status === "running" && detail.current_stage) {
-    const op = STAGE_TO_TOOL_OP[normalizeStageId(detail.current_stage)];
-    if (op && !parts.some((p) => p.kind === "tool" && p.op === op)) {
-      parts.push({ kind: "tool", key: `running-${op}`, ts: null, op, title: TOOL_BAR_TITLES[op]!, state: "running", durationMs: null, reason: null });
-    }
-  }
-
-  return parts;
-}
 
 /** 耗时格式化（工具条右侧）。 */
 export function formatDuration(ms: number): string {

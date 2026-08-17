@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+/**
+ * 统一项目页 v3（specs/unified-project-page-v3.md）：替换 v2 双栏版。
+ * 布局 = 顶部状态带（任务切换器 + 门序列 + 里程碑徽章 + 当前动作，运行记录为展开面板）
+ *        + 全宽对话流（准直播 3s 轮询增量渲染，可插话/打断）
+ *        + 底部审批抽屉（awaiting 时半屏滑出）。无右栏。
+ */
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../main.ts";
 import {
@@ -11,17 +17,15 @@ import {
   getProject,
   getRevisionContent,
   getTask,
-  listArtifacts,
   listBaselines,
   listGateSubmissions,
   listJobs,
-  listRevisions,
   listTasks,
   rejectGateSubmission,
   sendMessage,
+  abortRun,
 } from "../api/index.ts";
 import type {
-  Artifact,
   Baseline,
   GateSubmission,
   JobEvidenceContent,
@@ -32,83 +36,153 @@ import type {
   TaskRunSummary,
 } from "../api/types.ts";
 import {
-  GATE_REVIEW_NAMES,
   BASELINE_KINDS,
   BASELINE_NAMES,
   BASELINE_STATE_TEXT,
-  REVISION_STATE_TEXT,
-  currentGate,
+  GATES,
+  GATE_REVIEW_NAMES,
+  GATE_LANE_STATE_TEXT,
   deriveGateLanes,
   type GateId,
   type GateLaneState,
 } from "../domain/gates.ts";
 import {
+  STAGE_NAME_TEXT,
   TASK_STATUS_TEXT,
-  buildFeed,
   createPoller,
-  formatDuration,
-  type FeedPart,
+  normalizeStageId,
   type Poller,
 } from "../domain/tasks.ts";
+import { auditToParts, toolDurationLabel, type SynthiaPart } from "../domain/parts.ts";
+import { currentAction, actionStartedAt, waitText } from "../domain/band.ts";
 import {
-  artifactDocName,
-  artifactGroupName,
-  ARTIFACT_GROUP_ORDER,
-} from "../domain/artifacts.ts";
-import {
-  JOB_RUN_CLASS_TEXT,
-  JOB_STATE_TEXT,
-  UNIFIED_TABS,
+  EXAMPLE_TASKS,
   approvalButtonLabel,
   approvalMilestoneLine,
   buildApproveBody,
-  deriveApprovalCard,
   fetchMemberContent,
   findApprovalSubmission,
+  humanizeDecisionError,
+  humanizeLoadError,
   jobDurationText,
   jobOperationText,
+  JOB_RUN_CLASS_TEXT,
+  JOB_STATE_TEXT,
   loadRejectionReason,
   rejectDisabled,
   resolveSnapshotMembers,
-  tabFromQuery,
   type ApprovalMember,
-  type UnifiedTab,
+  type DecisionFailure,
 } from "../domain/unified.ts";
 import { renderMarkdown } from "../domain/markdown.ts";
 import { makeTextSegment, toggleSetKey } from "../domain/reply-segments.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
-import GateSwimlane from "../components/GateSwimlane.vue";
 import ReplySegments from "../components/ReplySegments.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 
-/**
- * 统一项目页（UI-3 方案 B+就地审批）：
- * 左栏 60% 对话工作台（信息流 + 就地审批卡 + 消息输入/新任务引导），
- * 右栏 40% 三标签（流程 G0~G9 + B0~B4 / 产物 GJB 分组 / 记录 jobs+证据）。
- */
 const route = useRoute();
 const projectId = String(route.params.id);
 
-// ── 基础数据 ─────────────────────────────────────────────────────────
+// ── 基础数据与轮询（准直播：3s；终态停）──────────────────────────────
 
 const project = ref<ProjectDetail | null>(null);
 const runs = ref<readonly TaskRunSummary[]>([]);
 const currentRunId = ref<string | null>(typeof route.query.run === "string" ? route.query.run : null);
 const detail = ref<TaskRunDetail | null>(null);
 const loading = ref(true);
-const error = ref<unknown>(null);
+/** 轮询错误的人话文案（连续失败累积等待提示；关联号只在记录面板）。 */
+const loadErrorText = ref<string | null>(null);
+const loadErrorStartedAt = ref<number | null>(null);
 
-// ── 右栏标签与数据 ───────────────────────────────────────────────────
-
-const tab = ref<UnifiedTab>(tabFromQuery(route.query.tab));
 const submissions = ref<GateSubmission[]>([]);
 const baselines = ref<Baseline[]>([]);
-const artifacts = ref<Artifact[]>([]);
-const jobs = ref<JobRunSummary[]>([]);
+
+let poller: Poller | null = null;
+let refreshing = false;
+const nowTick = ref(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+
+async function refresh(): Promise<void> {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const [subList, blList, runList] = await Promise.all([
+      listGateSubmissions(api, projectId),
+      listBaselines(api, projectId),
+      listTasks(api, projectId),
+    ]);
+    submissions.value = subList;
+    baselines.value = blList;
+    // 任务列表每轮全量刷新：后台任务继续跑，切换器徽章随之更新。
+    runs.value = [...runList.runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    if (currentRunId.value) detail.value = await getTask(api, projectId, currentRunId.value);
+    else if (runs.value.length > 0) currentRunId.value = runs.value[0]!.run_id;
+    loadErrorText.value = null;
+    loadErrorStartedAt.value = null;
+  } catch (err) {
+    // 人话化（spec §11）：不弹原文错误；记录面板可查关联号。
+    loadErrorText.value = humanizeLoadError(err);
+    loadErrorStartedAt.value ??= Date.now();
+  } finally {
+    refreshing = false;
+    loading.value = false;
+  }
+}
+
+/** 轮询错误横幅文案：人话 + 已等待时长 + 重试。 */
+const loadErrorBanner = computed(() => {
+  if (!loadErrorText.value) return null;
+  const waited = loadErrorStartedAt.value !== null ? waitText(Date.now() - loadErrorStartedAt.value) : null;
+  return waited ? `${loadErrorText.value}（已持续 ${waited}）` : loadErrorText.value;
+});
+
+onMounted(async () => {
+  nowTimer = setInterval(() => (nowTick.value = Date.now()), 1000);
+  try {
+    project.value = await getProject(api, projectId);
+  } catch (err) {
+    loadErrorText.value = humanizeLoadError(err);
+  } finally {
+    loading.value = false;
+  }
+  await refresh();
+  poller = createPoller(() => {
+    void refresh();
+    // 终态且无其他在跑任务 → 停轮询（审批等操作会手动 refresh 重启数据流）。
+    const active = runs.value.some((r) => r.status === "running" || r.status === "awaiting_approval");
+    return active || detail.value === null || !isWatchStatus(detail.value.status);
+  }, 3000);
+  // 展开记录面板时按需拉取 jobs。
+  watch(recordsOpen, (open) => {
+    if (open && jobs.value.length === 0) void loadJobs();
+  });
+});
+
+function isWatchStatus(status: string): boolean {
+  return status === "running" || status === "awaiting_approval";
+}
+
+onBeforeUnmount(() => {
+  poller?.stop();
+  poller = null;
+  if (nowTimer) clearInterval(nowTimer);
+  nowTimer = null;
+});
+
+// ── 状态带：门序列 / 里程碑 / 当前动作 ───────────────────────────────
 
 const lanes = computed<Record<GateId, GateLaneState>>(() => deriveGateLanes(submissions.value));
 
-/** 每种里程碑取最新一条（同 kind 可能被替换多次）。 */
+/** 门序列紧凑展示：✅ 已过 / 🟡 等待 / ⬜ 未开始 / ❌ 驳回；hover 中文名。 */
+const gateChips = computed(() =>
+  GATES.map((gate) => {
+    const state = lanes.value[gate];
+    const mark = state === "approved" ? "✅" : state === "in_review" ? "🟡" : state === "rejected" ? "❌" : "⬜";
+    return { gate, mark, state, title: `${gate} ${GATE_REVIEW_NAMES[gate]} · ${GATE_LANE_STATE_TEXT[state]}` };
+  }),
+);
+
+/** 每种里程碑取最新一条。 */
 const latestBaselines = computed(() => {
   const byKind = new Map<string, Baseline>();
   for (const bl of baselines.value) {
@@ -118,99 +192,173 @@ const latestBaselines = computed(() => {
   return byKind;
 });
 
-// ── 刷新与轮询（3s）─────────────────────────────────────────────────
+const milestoneChips = computed(() =>
+  BASELINE_KINDS.map((kind) => ({
+    kind,
+    active: latestBaselines.value.has(kind),
+    title: latestBaselines.value.has(kind)
+      ? `${kind} ${BASELINE_NAMES[kind]} · ${BASELINE_STATE_TEXT[latestBaselines.value.get(kind)!.state] ?? "已建立"} · ${new Date(latestBaselines.value.get(kind)!.created_at).toLocaleString("zh-CN")}`
+      : `${kind} ${BASELINE_NAMES[kind]} · 未建立`,
+  })),
+);
 
-let poller: Poller | null = null;
-let refreshing = false;
+/** 「当前动作」一句话（v3 §4）：awaiting 高亮 / running 阶段+已用时 / 终态人话。 */
+const action = computed(() => {
+  if (!detail.value) return null;
+  const d = detail.value;
+  const lastAuditTs = d.audit.length > 0 ? d.audit[d.audit.length - 1]!.ts : null;
+  const startedAt = actionStartedAt(d.status, approvalSub.value?.submitted_at ?? null, lastAuditTs);
+  const elapsedMs = startedAt ? nowTick.value - Date.parse(startedAt) : null;
+  return currentAction({
+    status: d.status,
+    stageName: d.current_stage ? (STAGE_NAME_TEXT[normalizeStageId(d.current_stage)] ?? null) : null,
+    awaitingReview: d.awaiting_gate ? (GATE_REVIEW_NAMES[d.awaiting_gate as GateId] ?? null) : null,
+    elapsedMs: Number.isFinite(elapsedMs as number) ? elapsedMs : null,
+  });
+});
 
-async function refresh(): Promise<void> {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    const [subList, blList] = await Promise.all([
-      listGateSubmissions(api, projectId),
-      listBaselines(api, projectId),
-    ]);
-    submissions.value = subList;
-    baselines.value = blList;
-    if (currentRunId.value) detail.value = await getTask(api, projectId, currentRunId.value);
-    if (tab.value === "artifacts") artifacts.value = await listArtifacts(api, projectId);
-    if (tab.value === "records") jobs.value = await listJobs(api, projectId);
-    error.value = null;
-  } catch (err) {
-    error.value = err;
-  } finally {
-    refreshing = false;
-    loading.value = false;
-  }
+const runStatusLabel = computed(() => (detail.value ? (TASK_STATUS_TEXT[detail.value.status] ?? detail.value.status) : ""));
+
+// ── 任务切换器（多任务并存；切换只换对话流，后台继续跑）──────────────
+
+function switchRun(runId: string): void {
+  if (runId === currentRunId.value) return;
+  currentRunId.value = runId;
+  detail.value = null;
+  void refresh().then(() => scrollToBottom(true));
 }
 
-onMounted(async () => {
-  try {
-    const [proj, runList] = await Promise.all([getProject(api, projectId), listTasks(api, projectId)]);
-    project.value = proj;
-    runs.value = [...runList.runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    if (!currentRunId.value) currentRunId.value = runs.value[0]?.run_id ?? null;
-  } catch (err) {
-    error.value = err;
-  } finally {
-    loading.value = false;
-  }
-  await refresh();
-  poller = createPoller(() => {
-    void refresh();
-    return true;
-  }, 3000);
-});
 
-onBeforeUnmount(() => {
-  poller?.stop();
-  poller = null;
-});
+function taskShortLabel(run: TaskRunSummary): string {
+  const d = detail.value;
+  const text = run.run_id === d?.run_id && d.task ? d.task : run.run_id;
+  return text.length > 18 ? `${text.slice(0, 18)}…` : text;
+}
 
-/** 切标签时按需补拉该标签数据（记录/产物只在激活时轮询）。 */
-watch(tab, () => void refresh());
+// ── 对话流（auditToParts + 底部锚定滚动）────────────────────────────
 
-// ── 左栏：信息流（复用 buildFeed：user 气泡 + reply 叙述 + 工具/门禁/文件卡）──
+const parts = computed<readonly SynthiaPart[]>(() => (detail.value ? auditToParts(detail.value) : []));
 
-const feed = computed<FeedPart[]>(() => (detail.value ? buildFeed(detail.value) : []));
-
-/** 失败工具条/门禁条的展开状态。 */
+/** 展开的工具/门禁卡（error 可展开）。 */
 const expandedParts = ref<ReadonlySet<string>>(new Set());
-
-function togglePart(key: string) {
-  expandedParts.value = toggleSetKey(expandedParts.value, key);
+function togglePart(id: string): void {
+  expandedParts.value = toggleSetKey(expandedParts.value, id);
 }
 
-const GATE_BAR_TEXT: Readonly<Record<string, string>> = {
-  evaluating: "评估中…",
-  passed: "已通过",
-  failed: "未通过",
-  awaiting: "等待人工批准",
-};
+const feedEl = ref<HTMLElement | null>(null);
+/** 用户上滚时暂停自动滚动（距底 > 80px 视为离开底部）。 */
+const stickBottom = ref(true);
 
-const statusBadgeKind = computed<"accent" | "warn" | "ok" | "danger" | "plain">(() => {
-  switch (detail.value?.status) {
-    case "running": return "accent";
-    case "awaiting_approval": return "warn";
-    case "succeeded": return "ok";
-    case "failed":
-    case "fail_closed": return "danger";
-    default: return "plain";
+function onFeedScroll(): void {
+  const el = feedEl.value;
+  if (!el) return;
+  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+function scrollToBottom(force = false): void {
+  if (!force && !stickBottom.value) return;
+  void nextTick(() => {
+    const el = feedEl.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+watch(parts, () => scrollToBottom());
+
+// ── 可插话：发送（默认入队）+「直接插入」（abort + 立即新消息）────────
+
+const messageDraft = ref("");
+const sending = ref(false);
+const sendErrorText = ref<string | null>(null);
+
+/** 运行中发送 = steer（入队，下一工具间隙生效）；发送后显示「已排队」标记。 */
+const queuedNotice = ref<string | null>(null);
+
+async function handleSend(): Promise<void> {
+  const text = messageDraft.value.trim();
+  if (!text || !currentRunId.value || sending.value) return;
+  sending.value = true;
+  sendErrorText.value = null;
+  try {
+    const result = await sendMessage(api, projectId, currentRunId.value, text);
+    messageDraft.value = "";
+    if (result.steered) queuedNotice.value = text;
+    void refresh();
+  } catch (err) {
+    sendErrorText.value = humanizeDecisionError(err, "发送").text;
+  } finally {
+    sending.value = false;
   }
-});
+}
 
-// ── 就地审批卡（信息流内，真实 state 驱动）──────────────────────────
+/** 「直接插入」：abort 当前轮 + 立即以新消息重新 prompt（流内留打断标记卡）。 */
+const inserting = ref(false);
+async function handleInterruptSend(): Promise<void> {
+  const text = messageDraft.value.trim();
+  if (!text || !currentRunId.value || inserting.value) return;
+  inserting.value = true;
+  sendErrorText.value = null;
+  try {
+    await abortRun(api, projectId, currentRunId.value);
+    await sendMessage(api, projectId, currentRunId.value, text);
+    messageDraft.value = "";
+    queuedNotice.value = null;
+    void refresh();
+  } catch (err) {
+    sendErrorText.value = humanizeDecisionError(err, "发送").text;
+  } finally {
+    inserting.value = false;
+  }
+}
+
+function onMessageEnter(e: KeyboardEvent): void {
+  if (e.shiftKey) return;
+  e.preventDefault();
+  void handleSend();
+}
+
+const composerRunning = computed(() => detail.value?.status === "running");
+
+// ── 空项目首屏（居中对话框 + 示例任务卡）────────────────────────────
+
+const newTaskText = ref("");
+const taskCreating = ref(false);
+const taskErrorText = ref<string | null>(null);
+
+function useExample(text: string): void {
+  newTaskText.value = text;
+}
+
+async function startNewTask(): Promise<void> {
+  const task = newTaskText.value.trim();
+  if (task.length === 0 || taskCreating.value) return;
+  taskCreating.value = true;
+  taskErrorText.value = null;
+  try {
+    const { runId } = await createTask(api, projectId, { task, mode: "agent" }, crypto.randomUUID());
+    currentRunId.value = runId;
+    newTaskText.value = "";
+    await refresh();
+  } catch (err) {
+    taskErrorText.value = humanizeDecisionError(err, "发送").text;
+  } finally {
+    taskCreating.value = false;
+  }
+}
+
+function onNewTaskEnter(e: KeyboardEvent): void {
+  if (e.shiftKey) return;
+  e.preventDefault();
+  void startNewTask();
+}
+
+// ── 底部审批抽屉（run awaiting_approval 且 submission in_review）────
 
 const approvalSub = ref<GateSubmission | null>(null);
-
-/** 待审产物 = 快照成员修订（snapshot.created payload.memberRevisionIds）。 */
 const members = ref<ApprovalMember[] | null>(null);
 const membersResolved = ref(false);
-const membersError = ref<unknown>(null);
+const membersErrorText = ref<string | null>(null);
 
-/** run 进入 awaiting 时绑定该门最新提交；离开后保留已决卡作为对话记录。
- *  同时依赖 submissions（轮询替换）：run 先变 awaiting、提交列表后到时也能补绑。 */
 watch(
   () => [detail.value?.status, detail.value?.awaiting_gate, submissions.value] as const,
   ([status, gate]) => {
@@ -220,8 +368,9 @@ watch(
       approvalSub.value = found;
       members.value = null;
       membersResolved.value = false;
-      membersError.value = null;
+      membersErrorText.value = null;
       memberContent.value = new Map();
+      expandedMembers.value = new Set();
       rejectReason.value = "";
       rejectionReason.value = null;
       void loadMembers(found);
@@ -230,41 +379,51 @@ watch(
   { immediate: true },
 );
 
-const cardState = computed(() =>
-  deriveApprovalCard(
-    { status: detail.value?.status ?? "", awaiting_gate: detail.value?.awaiting_gate ?? null },
-    approvalSub.value,
-  ),
+/** 抽屉开合：pending 时滑出；批准/驳回后（state 已决）收起。 */
+const drawerOpen = computed(() =>
+  detail.value?.status === "awaiting_approval"
+  && approvalSub.value !== null
+  && approvalSub.value.state === "in_review",
 );
+
+/** 已决卡（流内事件卡）：批准 → ✓ + 里程碑行；驳回 → ✗ + 理由。 */
+const decidedCard = computed(() => {
+  const sub = approvalSub.value;
+  if (!sub || drawerOpen.value) return null;
+  if (sub.state === "approved") return { kind: "approved" as const, gate: sub.gate };
+  if (sub.state === "rejected") return { kind: "rejected" as const, gate: sub.gate };
+  return null;
+});
 
 const approvalGate = computed(() => approvalSub.value?.gate ?? "");
 const approvalReviewName = computed(() => GATE_REVIEW_NAMES[approvalGate.value as GateId] ?? approvalGate.value);
 const approveLabel = computed(() => approvalButtonLabel(approvalGate.value));
 const milestoneLine = computed(() => approvalMilestoneLine(approvalGate.value));
-/** 成员修订展开内容（按需加载 revision content）。 */
+
+async function loadMembers(sub: GateSubmission): Promise<void> {
+  try {
+    const resolved = await resolveSnapshotMembers(api, projectId, sub.snapshot_id);
+    if (approvalSub.value?.id !== sub.id) return;
+    members.value = resolved;
+    membersResolved.value = resolved !== null;
+    membersErrorText.value = null;
+  } catch (err) {
+    if (approvalSub.value?.id !== sub.id) return;
+    membersErrorText.value = humanizeLoadError(err);
+  }
+}
+
+/** 待审产物逐份展开（markdown 阅读区）。 */
 interface MemberContent {
   loading: boolean;
-  error: unknown;
+  error: string | null;
   html: string | null;
   text: string | null;
 }
 const expandedMembers = ref<ReadonlySet<string>>(new Set());
 const memberContent = ref<Map<string, MemberContent>>(new Map());
 
-async function loadMembers(sub: GateSubmission) {
-  try {
-    const resolved = await resolveSnapshotMembers(api, projectId, sub.snapshot_id);
-    if (approvalSub.value?.id !== sub.id) return;
-    members.value = resolved;
-    membersResolved.value = resolved !== null;
-    membersError.value = null;
-  } catch (err) {
-    if (approvalSub.value?.id !== sub.id) return;
-    membersError.value = err;
-  }
-}
-
-async function toggleMember(revisionId: string) {
+async function toggleMember(revisionId: string): Promise<void> {
   expandedMembers.value = toggleSetKey(expandedMembers.value, revisionId);
   if (!expandedMembers.value.has(revisionId) || memberContent.value.has(revisionId)) return;
   const member = members.value?.find((m) => m.revisionId === revisionId);
@@ -279,30 +438,35 @@ async function toggleMember(revisionId: string) {
       text: content,
     });
   } catch (err) {
-    memberContent.value = new Map(memberContent.value).set(revisionId, { loading: false, error: err, html: null, text: null });
+    memberContent.value = new Map(memberContent.value).set(revisionId, {
+      loading: false,
+      error: humanizeLoadError(err),
+      html: null,
+      text: null,
+    });
   }
 }
 
-// 批准/驳回
+// 批准 / 驳回（失败人话提示，含 active 基线冲突场景）
 const approving = ref(false);
-const approveError = ref<unknown>(null);
+const approveFailure = ref<DecisionFailure | null>(null);
 const rejectReason = ref("");
 const rejecting = ref(false);
-const rejectError = ref<unknown>(null);
+const rejectFailure = ref<DecisionFailure | null>(null);
 const rejectionReason = ref<string | null>(null);
 
 async function doApprove(): Promise<void> {
   const sub = approvalSub.value;
   if (!sub || approving.value) return;
   approving.value = true;
-  approveError.value = null;
+  approveFailure.value = null;
   try {
     const full = await getGateSubmission(api, projectId, sub.id);
     await approveGateSubmission(api, projectId, sub.id, await buildApproveBody(full), crypto.randomUUID());
     approvalSub.value = await getGateSubmission(api, projectId, sub.id);
-    await refresh();
+    await refresh(); // 抽屉收起，流内出现已批准事件卡，Agent 自动续跑
   } catch (err) {
-    approveError.value = err;
+    approveFailure.value = humanizeDecisionError(err, "批准");
   } finally {
     approving.value = false;
   }
@@ -313,117 +477,37 @@ async function doReject(): Promise<void> {
   const reason = rejectReason.value.trim();
   if (!sub || rejecting.value || reason.length === 0) return;
   rejecting.value = true;
-  rejectError.value = null;
+  rejectFailure.value = null;
   try {
     await rejectGateSubmission(api, projectId, sub.id, reason, crypto.randomUUID());
     approvalSub.value = await getGateSubmission(api, projectId, sub.id);
     rejectionReason.value = (await loadRejectionReason(api, projectId, sub.id)) ?? reason;
     await refresh();
   } catch (err) {
-    rejectError.value = err;
+    rejectFailure.value = humanizeDecisionError(err, "驳回");
   } finally {
     rejecting.value = false;
   }
 }
 
-// ── 对话输入（POST /projects/:id/tasks/:runId/message）与新任务引导 ────
+// ── 运行记录展开面板（状态带展开项；L3 技术内容仅在此）──────────────
 
-const messageDraft = ref("");
-const sending = ref(false);
-const sendError = ref<unknown>(null);
+const recordsOpen = ref(false);
+const jobs = ref<JobRunSummary[]>([]);
+const jobsLoading = ref(false);
+const jobsError = ref<unknown>(null);
 
-async function handleSend(): Promise<void> {
-  const text = messageDraft.value.trim();
-  if (!text || !currentRunId.value || sending.value) return;
-  sending.value = true;
-  sendError.value = null;
+async function loadJobs(): Promise<void> {
+  jobsLoading.value = true;
+  jobsError.value = null;
   try {
-    await sendMessage(api, projectId, currentRunId.value, text);
-    messageDraft.value = "";
-    void refresh();
+    jobs.value = await listJobs(api, projectId);
   } catch (err) {
-    sendError.value = err;
+    jobsError.value = err;
   } finally {
-    sending.value = false;
+    jobsLoading.value = false;
   }
 }
-
-function onMessageEnter(e: KeyboardEvent): void {
-  if (e.shiftKey) return; // Shift+Enter 换行
-  e.preventDefault();
-  void handleSend();
-}
-
-/** 无任务时「新任务」引导（mode=agent：自由 Agent 会话）。 */
-const newTaskText = ref("");
-const taskCreating = ref(false);
-const taskError = ref<unknown>(null);
-
-async function startNewTask(): Promise<void> {
-  const task = newTaskText.value.trim();
-  if (task.length === 0 || taskCreating.value) return;
-  taskCreating.value = true;
-  taskError.value = null;
-  try {
-    const { runId } = await createTask(api, projectId, { task, mode: "agent" }, crypto.randomUUID());
-    currentRunId.value = runId;
-    newTaskText.value = "";
-    const runList = await listTasks(api, projectId);
-    runs.value = [...runList.runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    await refresh();
-  } catch (err) {
-    taskError.value = err;
-  } finally {
-    taskCreating.value = false;
-  }
-}
-
-// ── 产物标签：GJB 文档名分组 + 预览 ───────────────────────────────────
-
-const artifactGroups = computed(() =>
-  ARTIFACT_GROUP_ORDER.map((group) => ({
-    group,
-    items: artifacts.value.filter((a) => artifactGroupName(a.artifact_type) === group),
-  })).filter((g) => g.items.length > 0),
-);
-
-interface ArtifactPreview {
-  loading: boolean;
-  error: unknown;
-  html: string | null;
-  meta: string | null;
-}
-const previewedArtifact = ref<string | null>(null);
-const artifactPreview = ref<ArtifactPreview | null>(null);
-
-async function toggleArtifactPreview(artifactId: string) {
-  if (previewedArtifact.value === artifactId) {
-    previewedArtifact.value = null;
-    artifactPreview.value = null;
-    return;
-  }
-  previewedArtifact.value = artifactId;
-  artifactPreview.value = { loading: true, error: null, html: null, meta: null };
-  try {
-    const revisions = await listRevisions(api, projectId, artifactId);
-    const latest = [...revisions].sort((a, b) => b.version - a.version)[0];
-    if (!latest) {
-      artifactPreview.value = { loading: false, error: null, html: null, meta: "无版本" };
-      return;
-    }
-    const content = await getRevisionContent(api, projectId, artifactId, latest.id);
-    artifactPreview.value = {
-      loading: false,
-      error: null,
-      html: renderMarkdown(content.content),
-      meta: `v${latest.version} · ${REVISION_STATE_TEXT[latest.state] ?? "候选"} · ${new Date(latest.created_at).toLocaleString("zh-CN")}`,
-    };
-  } catch (err) {
-    artifactPreview.value = { loading: false, error: err, html: null, meta: null };
-  }
-}
-
-// ── 记录标签：GET /projects/:id/jobs 列表 + 按需证据 ──────────────────
 
 function jobBadgeKind(state: string): "ok" | "warn" | "danger" | "accent" | "plain" {
   if (state === "succeeded") return "ok";
@@ -437,7 +521,7 @@ const jobEvidence = ref<JobEvidenceManifest | null>(null);
 const evidenceLoading = ref(false);
 const evidenceError = ref<unknown>(null);
 
-async function toggleJob(jobId: string) {
+async function toggleJob(jobId: string): Promise<void> {
   if (expandedJob.value === jobId) {
     expandedJob.value = null;
     jobEvidence.value = null;
@@ -462,7 +546,7 @@ const evidenceContent = ref<JobEvidenceContent | null>(null);
 const evidenceContentLoading = ref(false);
 const evidenceContentError = ref<unknown>(null);
 
-async function openEvidence(jobId: string, name: string) {
+async function openEvidence(jobId: string, name: string): Promise<void> {
   evidenceContent.value = null;
   evidenceContentError.value = null;
   evidenceContentLoading.value = true;
@@ -481,313 +565,353 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MiB`;
 }
 
+// ── 产物阅读抽屉（对话流产物卡点开右侧滑出）────────────────────────
+
+const readingDoc = ref<{ title: string; html: string | null; loading: boolean; error: string | null } | null>(null);
+
+async function openDoc(docArtifactId: string, docRevisionId: string, title: string): Promise<void> {
+  readingDoc.value = { title, html: null, loading: true, error: null };
+  try {
+    const data = await getRevisionContent(api, projectId, docArtifactId, docRevisionId);
+    readingDoc.value = { title, html: renderMarkdown(data.content), loading: false, error: null };
+  } catch (err) {
+    readingDoc.value = { title, html: null, loading: false, error: humanizeLoadError(err) };
+  }
+}
+
+/** 交付摘要导出（占位按钮；后端另立切片）。 */
+function exportSummary(): void {
+  window.alert("《交付摘要》导出功能将在后续切片提供（后端生成服务待接入）。");
+}
 </script>
 
 <template>
-  <div class="unified">
-    <!-- 左栏 60%：对话工作台 -->
-    <section class="unified-left">
-      <div class="unified-left-head">
-        <b>{{ project?.name ?? projectId }}</b>
-        <StatusBadge
-          v-if="detail"
-          :kind="statusBadgeKind"
-          :text="TASK_STATUS_TEXT[detail.status] ?? detail.status"
-        />
-        <span class="muted" style="font-size: 12px">每 3s 自动刷新</span>
+  <div class="v3page">
+    <!-- ── 顶部状态带（常驻紧凑；运行记录为展开面板）────────────── -->
+    <header class="band" data-component="status-band">
+      <div class="band-row">
+        <div class="band-project">
+          <b>{{ project?.name ?? projectId }}</b>
+          <StatusBadge v-if="detail" :kind="action?.tone === 'awaiting' ? 'warn' : action?.tone === 'running' ? 'accent' : action?.tone === 'done' ? 'ok' : action?.tone === 'failed' ? 'danger' : 'plain'" :text="runStatusLabel" />
+        </div>
+
+        <!-- 任务切换器：多任务并存，切换只换对话流，后台继续跑 -->
+        <label class="band-tasks">
+          <span class="muted band-label">任务</span>
+          <select class="band-select" :value="currentRunId ?? ''" @change="switchRun(($event.target as HTMLSelectElement).value)">
+            <option v-for="run in runs" :key="run.run_id" :value="run.run_id">
+              [{{ TASK_STATUS_TEXT[run.status] ?? run.status }}] {{ taskShortLabel(run) }}
+            </option>
+          </select>
+        </label>
+
+        <!-- 门序列 G1-G9（hover 中文名）+ 里程碑徽章 -->
+        <div class="band-gates" aria-label="门序列">
+          <span v-for="chip in gateChips" :key="chip.gate" class="gate-chip" :class="chip.state" :title="chip.title">{{ chip.gate }}{{ chip.mark }}</span>
+        </div>
+        <div class="band-milestones" aria-label="里程碑">
+          <span v-for="chip in milestoneChips" :key="chip.kind" class="ms-chip" :class="chip.active ? 'active' : 'inactive'" :title="chip.title">
+            {{ chip.kind }}{{ chip.active ? "✓" : "○" }}
+          </span>
+        </div>
+
+        <!-- 当前动作一句话（awaiting 高亮） -->
+        <div v-if="action" class="band-action" :class="action.tone">{{ action.text }}</div>
+
+        <!-- 运行记录入口（状态带展开面板；L3 仅在此） -->
+        <button class="band-records-btn" type="button" :class="{ on: recordsOpen }" @click="recordsOpen = !recordsOpen">
+          运行记录
+        </button>
       </div>
 
-      <ErrorNotice v-if="error" :error="error" />
-      <div v-if="loading" class="muted" style="padding: 16px">加载中…</div>
+      <!-- 展开面板：工具运行 + 证据（L3） -->
+      <div v-if="recordsOpen" class="band-records" data-component="records-panel">
+        <div class="band-records-head">
+          <b>运行记录</b>
+          <span class="muted" style="font-size: 12px">技术细节（工具运行、证据、关联号）仅在此面板可见。</span>
+          <a class="btn-link" @click.prevent="recordsOpen = false">收起</a>
+        </div>
+        <ErrorNotice v-if="loadErrorBanner" :error="loadErrorBanner" />
+        <div v-if="jobsLoading" class="muted">运行记录加载中…</div>
+        <ErrorNotice v-else-if="jobsError" :error="jobsError" />
+        <div v-else-if="jobs.length === 0" class="muted">该项目暂无工具运行。</div>
+        <div v-for="job in jobs" :key="job.id" class="job-row">
+          <div class="job-row-head" @click="toggleJob(job.id)">
+            <span class="job-op">{{ jobOperationText(job.operation) }}</span>
+            <StatusBadge :text="JOB_STATE_TEXT[job.state] ?? job.state" :kind="jobBadgeKind(job.state)" />
+            <span class="muted" style="font-size: 12px">{{ JOB_RUN_CLASS_TEXT[job.runClass] ?? job.runClass }}</span>
+            <span v-if="jobDurationText(job.startTime, job.endTime)" class="muted" style="font-size: 12px">
+              {{ jobDurationText(job.startTime, job.endTime) }}
+            </span>
+            <span v-if="job.errorCode" class="job-error mono" :title="job.id">{{ job.errorCode }}</span>
+          </div>
+          <div v-if="expandedJob === job.id" class="job-detail">
+            <div class="muted mono" style="font-size: 11px">{{ job.id }}</div>
+            <div v-if="evidenceLoading" class="muted">证据清单加载中…</div>
+            <ErrorNotice v-else-if="evidenceError" :error="evidenceError" />
+            <template v-else-if="jobEvidence">
+              <div v-if="jobEvidence.entries.length === 0" class="muted">该运行无证据条目。</div>
+              <table v-else class="data">
+                <thead><tr><th>文件</th><th>大小</th><th>SHA-256</th></tr></thead>
+                <tbody>
+                  <tr v-for="entry in jobEvidence.entries" :key="entry.name">
+                    <td><a :title="entry.mediaType" @click.prevent="openEvidence(job.id, entry.name)">{{ entry.name }}</a></td>
+                    <td class="muted">{{ formatBytes(entry.sizeBytes) }}</td>
+                    <td class="mono muted" style="font-size: 11px">{{ entry.sha256.slice(0, 16) }}…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+            <div v-if="evidenceContentLoading" class="muted" style="margin-top: 8px">证据内容加载中…</div>
+            <ErrorNotice v-else-if="evidenceContentError" :error="evidenceContentError" />
+            <div v-else-if="evidenceContent" class="panel" style="margin-top: 8px; background: #fbfcfd">
+              <div class="mono muted" style="font-size: 11px">{{ evidenceContent.name }}{{ evidenceContent.truncated ? "（内容过长已截断）" : "" }}</div>
+              <pre class="code-view">{{ evidenceContent.content }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
 
-      <!-- 无任务：新任务引导（mode=agent） -->
-      <div v-else-if="runs.length === 0" class="onboarding">
-        <div class="onboarding-title">这个项目还没有任务</div>
-        <p class="muted" style="font-size: 13px">输入你的工程目标，Synthia 将以自由 Agent 模式从需求推进到码流。</p>
-        <ErrorNotice v-if="taskError" :error="taskError" />
+    <!-- ── 全宽对话流 ───────────────────────────────────────────── -->
+    <main class="v3main">
+      <div v-if="loading" class="muted" style="padding: 32px; text-align: center">加载中…</div>
+
+      <!-- 空项目首屏：居中对话框 + 示例任务卡 -->
+      <div v-else-if="runs.length === 0" class="empty-hero">
+        <div class="empty-hero-title">开始你的第一个任务</div>
+        <p class="muted" style="font-size: 13px; margin: 6px 0 20px">描述工程目标，Synthia 将从需求推进到码流。</p>
+        <div v-if="taskErrorText" class="notice error">{{ taskErrorText }}</div>
         <textarea
           v-model="newTaskText"
-          class="composer-input"
-          rows="3"
+          class="composer-input empty-hero-input"
+          rows="4"
           placeholder="例如：设计一个 UART 收发器，9600 波特率、8N1、100MHz 时钟，完成从需求到码流的 GJB 全流程"
           :disabled="taskCreating"
+          @keydown.enter="onNewTaskEnter"
         />
         <button class="composer-send" type="button" :disabled="taskCreating || newTaskText.trim().length === 0" @click="startNewTask">
           {{ taskCreating ? "启动中…" : "启动新任务" }}
         </button>
+        <div class="example-cards">
+          <button v-for="example in EXAMPLE_TASKS" :key="example" type="button" class="example-card" @click="useExample(example)">
+            {{ example }}
+          </button>
+        </div>
       </div>
 
-      <!-- 有任务：信息流 + 就地审批卡 + 消息输入 -->
+      <!-- 有任务：对话流 + 底部输入 -->
       <template v-else>
-        <div class="unified-feed">
-          <!-- 首轮指令气泡 -->
-          <div v-if="detail?.task" class="msg-user">
-            <div>{{ detail.task }}</div>
-            <div v-if="detail" class="msg-meta">{{ new Date(detail.created_at).toLocaleString("zh-CN") }}</div>
-          </div>
-          <div v-if="detail && feed.length === 0 && detail.status !== 'awaiting_approval'" class="muted">正在启动，暂无进展。</div>
+        <div v-if="loadErrorBanner" class="notice error v3-loaderr">{{ loadErrorBanner }}</div>
 
-          <!-- assistant 信息流 -->
-          <div class="feed">
-            <template v-for="part in feed" :key="part.key">
-              <p v-if="part.kind === 'text'" class="feed-text">{{ part.text }}</p>
-
-              <div v-else-if="part.kind === 'user'" class="msg-user feed-msg-user">
-                <div>{{ part.text }}</div>
-                <div class="msg-meta">{{ new Date(part.ts).toLocaleString("zh-CN") }}</div>
-              </div>
-
-              <div v-else-if="part.kind === 'reply'" class="feed-reply">
-                <ReplySegments :segments="part.segments" :part-key="part.key" />
-              </div>
-
-              <div
-                v-else-if="part.kind === 'tool'"
-                class="tool-bar"
-                :class="[part.state, { expandable: part.state === 'failed' }]"
-                @click="part.state === 'failed' && togglePart(part.key)"
-              >
-                <span class="bar-icon">◆</span>
-                <span class="bar-title">{{ part.title }}</span>
-                <span v-if="part.state === 'ok'" class="bar-mark">✓</span>
-                <span v-else-if="part.state === 'failed'" class="bar-mark">✗ {{ expandedParts.has(part.key) ? "收起" : "详情" }}</span>
-                <span v-if="part.durationMs !== null" class="bar-duration">{{ formatDuration(part.durationMs) }}</span>
-                <div v-if="part.state === 'failed' && expandedParts.has(part.key) && part.reason" class="bar-detail">
-                  <ReplySegments :segments="[makeTextSegment(`${part.key}-reason`, part.reason)]" :part-key="`${part.key}-reason`" />
-                </div>
-              </div>
-
-              <div
-                v-else-if="part.kind === 'gate'"
-                class="tool-bar gate-bar"
-                :class="[part.state, { expandable: part.state === 'failed' }]"
-                @click="part.state === 'failed' && togglePart(part.key)"
-              >
-                <span class="bar-icon">▲</span>
-                <span class="bar-title">{{ part.review }}</span>
-                <span class="bar-mark">{{ GATE_BAR_TEXT[part.state] }}</span>
-              </div>
-
-              <div
-                v-else-if="part.kind === 'file'"
-                class="file-card"
-                @click="part.doc.artifact_id && toggleArtifactPreview(part.doc.artifact_id); tab = 'artifacts'"
-              >
-                <span class="bar-icon">▤</span>
-                <span class="bar-title">《{{ part.title }}》</span>
-                <StatusBadge text="候选" kind="accent" />
-              </div>
-
-              <div v-else-if="part.kind === 'evidence'" class="tool-bar evidence-bar">
-                <span class="bar-icon">▦</span>
-                <span class="bar-title">已收集证据 · {{ part.count }} 项</span>
-                <a class="bar-mark" @click.prevent="tab = 'records'">查看详情 →</a>
-              </div>
-
-              <div v-else-if="part.kind === 'terminal'" class="terminal-card" :class="part.state">
-                {{ part.text }}
-              </div>
-            </template>
-          </div>
-
-          <!-- 就地审批卡（信息流内） -->
-          <div v-if="cardState === 'pending' && approvalSub" class="approval-card pending">
-            <div class="approval-card-title">
-              ⏸ <b>{{ approvalReviewName }}等待你批准</b>
-              <span class="muted approval-card-sub">提交于 {{ approvalSub.submitted_at ? new Date(approvalSub.submitted_at).toLocaleString("zh-CN") : "—" }}</span>
+        <div ref="feedEl" class="feed v3-feed" @scroll.passive="onFeedScroll">
+          <template v-for="part in parts" :key="part.id">
+            <!-- 用户气泡（右）；Agent 叙述（左，永不折叠） -->
+            <div v-if="part.kind === 'text' && part.role === 'user'" class="msg-user feed-msg-user">
+              <div>{{ part.text }}</div>
             </div>
 
-            <div class="approval-card-section">待审候选产物（{{ members?.length ?? 0 }}）</div>
-            <ErrorNotice v-if="membersError" :error="membersError" />
-            <div v-if="!membersResolved && !membersError" class="muted" style="font-size: 12px">产物清单解析中…</div>
-            <template v-else-if="members">
-              <div v-for="m in members" :key="m.revisionId" class="approval-doc">
-                <div class="approval-doc-head">
-                  <b>《{{ m.docName }}》</b>
-                  <span class="badge accent">v{{ m.version ?? "?" }} 候选</span>
-                  <a class="approval-doc-toggle" @click.prevent="toggleMember(m.revisionId)">
-                    {{ expandedMembers.has(m.revisionId) ? "收起" : "展开" }}
-                  </a>
-                </div>
-                <div v-if="expandedMembers.has(m.revisionId)" class="approval-doc-body">
-                  <div v-if="memberContent.get(m.revisionId)?.loading" class="muted">内容加载中…</div>
-                  <ErrorNotice v-else-if="memberContent.get(m.revisionId)?.error" :error="memberContent.get(m.revisionId)!.error" />
-                  <div v-else-if="memberContent.get(m.revisionId)?.html" class="markdown-body" v-html="memberContent.get(m.revisionId)!.html"></div>
-                  <div v-else-if="memberContent.has(m.revisionId)" class="muted">（该产物无内联内容）</div>
-                  <div v-else class="muted">点击「展开」查看文档内容。</div>
-                </div>
-              </div>
-            </template>
-
-            <div class="approval-actions">
-              <ErrorNotice v-if="approveError" :error="approveError" />
-              <button class="btn approval-approve-btn" :disabled="approving" @click="doApprove">
-                {{ approving ? "提交中…" : approveLabel }}
-              </button>
-              <div class="approval-reject-row">
-                <input
-                  v-model="rejectReason"
-                  type="text"
-                  class="approval-reject-input"
-                  placeholder="驳回理由（必填）"
-                  :disabled="rejecting"
-                  @keydown.enter.prevent="!rejectDisabled(rejectReason) && doReject()"
-                />
-                <button
-                  class="btn danger"
-                  :disabled="rejecting || rejectDisabled(rejectReason)"
-                  @click="doReject"
-                >
-                  {{ rejecting ? "提交中…" : "驳回" }}
-                </button>
-              </div>
-              <ErrorNotice v-if="rejectError" :error="rejectError" />
+            <div v-else-if="part.kind === 'text'" class="feed-reply" :data-state="part.state">
+              <ReplySegments v-if="part.segments" :segments="part.segments" :part-key="part.id" />
+              <div v-else class="feed-text">{{ part.text }}</div>
+              <span v-if="part.state === 'streaming'" class="streaming-cursor" aria-label="生成中">▍</span>
             </div>
+
+            <!-- 工具条四态：pending 微光+不可展开 / running / completed 弱化+耗时 / error 红可展开 -->
+            <div
+              v-else-if="part.kind === 'tool'"
+              class="tool-bar"
+              :class="part.status"
+              role="button"
+              :tabindex="part.status === 'error' ? 0 : -1"
+              :aria-expanded="part.status === 'error' ? expandedParts.has(part.id) : undefined"
+              @click="part.status === 'error' && togglePart(part.id)"
+              @keydown.enter.prevent="part.status === 'error' && togglePart(part.id)"
+            >
+              <span class="bar-icon">◆</span>
+              <span class="bar-title">{{ part.title }}</span>
+              <span v-if="part.status === 'completed'" class="bar-mark">✓</span>
+              <span v-else-if="part.status === 'error'" class="bar-mark">✗ {{ expandedParts.has(part.id) ? "收起" : "详情" }}</span>
+              <span v-if="part.status === 'pending' || part.status === 'running'" class="bar-mark">{{ part.status === 'pending' ? "准备中" : "运行中" }}</span>
+              <span v-if="toolDurationLabel(part.durationMs)" class="bar-duration">{{ toolDurationLabel(part.durationMs) }}</span>
+              <div v-if="part.status === 'error' && expandedParts.has(part.id) && part.errorText" class="bar-detail">
+                <ReplySegments :segments="[makeTextSegment(`${part.id}-reason`, part.errorText)]" :part-key="`${part.id}-reason`" />
+              </div>
+            </div>
+
+            <!-- 门禁状态事件卡 -->
+            <div v-else-if="part.kind === 'gate'" class="event-card" :class="part.state">
+              <span class="event-mark">{{ part.state === "passed" ? "✓" : part.state === "failed" ? "✗" : part.state === "awaiting" ? "⏸" : "…" }}</span>
+              <span>{{ part.review }}<template v-if="part.state === 'passed'">已通过</template><template v-else-if="part.state === 'awaiting'">正在等待批准</template><template v-else-if="part.state === 'failed'">未通过</template><template v-else>评审中…</template></span>
+            </div>
+
+            <!-- 产物卡（点开右侧抽屉阅读） -->
+            <button v-else-if="part.kind === 'doc'" type="button" class="file-card" @click="openDoc(part.doc.artifact_id, part.doc.revision_id, part.title)">
+              <span class="bar-icon">▤</span>
+              <span class="bar-title">《{{ part.title }}》</span>
+              <StatusBadge text="候选" kind="accent" />
+              <span class="bar-mark">阅读 →</span>
+            </button>
+
+            <!-- 治理事件卡 -->
+            <div v-else-if="part.kind === 'governance'" class="event-card muted-card">{{ part.text }}</div>
+
+            <!-- 证据摘要（详情在记录面板） -->
+            <div v-else-if="part.kind === 'evidence'" class="tool-bar evidence-bar">
+              <span class="bar-icon">▦</span>
+              <span class="bar-title">证据链 · {{ part.count }} 项</span>
+              <a class="bar-mark" @click.prevent="recordsOpen = true">查看运行记录 →</a>
+            </div>
+
+            <!-- 大成功卡 / 失败对话式汇报（无弹窗无按钮组） -->
+            <div v-else-if="part.kind === 'lifecycle'" class="terminal-card" :class="part.state">
+              <template v-if="part.state === 'succeeded'">
+                <div class="terminal-title">🏁 {{ part.text }}</div>
+                <div v-if="part.bitstream" class="terminal-meta">
+                  码流 {{ part.bitstream.name }} · {{ formatBytes(part.bitstream.sizeBytes) }} · SHA-256 前 16 位 {{ part.bitstream.sha256.slice(0, 16) }}…
+                </div>
+                <div class="terminal-meta">证据链 {{ part.evidenceCount }} 项（运行记录可查）</div>
+                <div class="terminal-actions">
+                  <span class="muted" style="font-size: 12px">下载入口即将开放</span>
+                  <button class="btn secondary" type="button" @click="exportSummary">导出《交付摘要》</button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="terminal-title">{{ part.text }}</div>
+                <div class="terminal-meta muted">技术原因与关联号见运行记录。</div>
+              </template>
+            </div>
+
+            <!-- 提示卡（排队注入 / 回复错误） -->
+            <div v-else-if="part.kind === 'note'" class="event-card note-card" :class="part.tone">{{ part.text }}</div>
+
+            <!-- 打断标记卡 -->
+            <div v-else-if="part.kind === 'interrupt'" class="event-card interrupt-card">⚡ {{ part.text }}</div>
+          </template>
+
+          <!-- 已排队标记（steer 已注入，尚未生效） -->
+          <div v-if="queuedNotice" class="event-card note-card queued">已排队：「{{ queuedNotice.length > 40 ? queuedNotice.slice(0, 40) + "…" : queuedNotice }}」将在 Agent 当前工具结束后生效</div>
+
+          <!-- 已决审批事件卡（流内记录；抽屉已收起） -->
+          <div v-if="decidedCard?.kind === 'approved'" class="event-card passed">
+            ✓ 已批准 {{ GATE_REVIEW_NAMES[decidedCard.gate as GateId] ?? decidedCard.gate }}
+            <template v-if="milestoneLine">&nbsp;{{ milestoneLine }}</template>
+          </div>
+          <div v-else-if="decidedCard?.kind === 'rejected'" class="event-card failed">
+            ✗ 已驳回 {{ GATE_REVIEW_NAMES[decidedCard.gate as GateId] ?? decidedCard.gate }}<template v-if="rejectionReason">（理由：{{ rejectionReason }}）</template>
           </div>
 
-          <!-- 已批准卡（真实 state：submission.state === approved） -->
-          <div v-else-if="cardState === 'approved'" class="approval-card approved">
-            <div class="approval-card-title">✓ 已批准 {{ approvalReviewName }}</div>
-            <div v-if="milestoneLine" class="approval-card-milestone">{{ milestoneLine }}</div>
-          </div>
-
-          <!-- 已驳回卡（真实 state：submission.state === rejected + 理由） -->
-          <div v-else-if="cardState === 'rejected'" class="approval-card rejected">
-            <div class="approval-card-title">✗ 已驳回 {{ approvalReviewName }}</div>
-            <div v-if="rejectionReason" class="muted" style="font-size: 12px; margin-top: 4px">理由：{{ rejectionReason }}</div>
-            <div class="muted" style="font-size: 12px">提交已退回，Agent 可修改后重新提交。</div>
-          </div>
+          <div v-if="detail && parts.length === 0" class="muted" style="padding: 8px 0">正在启动，暂无进展。</div>
         </div>
 
-        <!-- 底部消息输入 -->
-        <div class="composer">
+        <!-- 底部输入：运行时不锁死；发送=入队；「直接插入」=打断 -->
+        <div class="composer v3-composer">
           <textarea
             v-model="messageDraft"
             class="composer-input"
             rows="2"
-            :placeholder="detail?.status === 'running' ? '给 Agent 发消息纠偏…（运行中将注入上下文）' : '给 Agent 发消息…'"
-            :disabled="sending"
+            :placeholder="composerRunning ? '发送将入队，Agent 在当前工具结束后处理；或点「直接插入」立即打断' : '给 Agent 发消息…'"
+            :disabled="sending || inserting"
             @keydown.enter="onMessageEnter"
           />
-          <button class="composer-send" type="button" :disabled="sending || !messageDraft.trim()" @click="handleSend">
-            {{ sending ? "发送中…" : "发送" }}
-          </button>
-        </div>
-        <ErrorNotice v-if="sendError" :error="sendError" />
-      </template>
-    </section>
-
-    <!-- 右栏 40%：三标签 -->
-    <section class="unified-right">
-      <div class="unified-tabs" role="tablist">
-        <button
-          v-for="t in UNIFIED_TABS"
-          :key="t.id"
-          type="button"
-          role="tab"
-          :class="{ on: tab === t.id }"
-          @click="tab = t.id"
-        >
-          {{ t.label }}
-        </button>
-      </div>
-
-      <div class="unified-tab-body">
-        <!-- 流程：G0~G9 状态 + B0~B4 里程碑徽章 -->
-        <template v-if="tab === 'flow'">
-          <div class="unified-pane-title">阶段门（悬停查看编号）</div>
-          <GateSwimlane :lanes="lanes" />
-          <p class="muted" style="font-size: 12px; margin: 8px 0 16px">
-            当前门：{{ currentGate(lanes) ? `${GATE_REVIEW_NAMES[currentGate(lanes)!]}（${currentGate(lanes)}）` : "全部通过，项目已交付" }}
-          </p>
-          <div class="unified-pane-title">里程碑</div>
-          <div class="baseline-strip" style="flex-direction: column; align-items: flex-start; gap: 6px">
-            <div
-              v-for="kind in BASELINE_KINDS"
-              :key="kind"
-              class="baseline-chip"
-              :class="latestBaselines.has(kind) ? 'active' : 'inactive'"
+          <div class="composer-actions">
+            <button
+              v-if="composerRunning"
+              class="btn danger"
+              type="button"
+              :disabled="inserting || sending || messageDraft.trim().length === 0"
+              :title="composerRunning ? '终止当前回复并立即发送新消息（流内留打断标记）' : undefined"
+              @click="handleInterruptSend"
             >
-              <span class="kind">{{ kind }}</span>
-              <span class="name">{{ BASELINE_NAMES[kind] }}</span>
-              <span v-if="latestBaselines.get(kind)" class="muted" style="font-size: 11px">
-                {{ BASELINE_STATE_TEXT[latestBaselines.get(kind)!.state] ?? "已建立" }} ·
-                {{ new Date(latestBaselines.get(kind)!.created_at).toLocaleString("zh-CN") }}
-              </span>
-            </div>
+              {{ inserting ? "插入中…" : "直接插入" }}
+            </button>
+            <button class="composer-send" type="button" :disabled="sending || inserting || messageDraft.trim().length === 0" @click="handleSend">
+              {{ sending ? "发送中…" : composerRunning ? "入队发送" : "发送" }}
+            </button>
           </div>
-        </template>
+        </div>
+        <div v-if="sendErrorText" class="notice error" style="margin: 0 16px 8px">{{ sendErrorText }}</div>
+      </template>
+    </main>
 
-        <!-- 产物：GJB 文档名分组 + 预览 -->
-        <template v-else-if="tab === 'artifacts'">
-          <div v-if="artifactGroups.length === 0" class="muted">该项目暂无产物。</div>
-          <div v-for="group in artifactGroups" :key="group.group" class="artifact-group">
-            <div class="unified-pane-title">{{ group.group }}（{{ group.items.length }}）</div>
-            <div v-for="a in group.items" :key="a.id" class="artifact-row">
-              <div class="artifact-row-head">
-                <b style="font-size: 13px">《{{ artifactDocName(a.artifact_type) }}》</b>
-                <a @click.prevent="toggleArtifactPreview(a.id)">
-                  {{ previewedArtifact === a.id ? "收起预览" : "预览" }}
+    <!-- ── 产物阅读抽屉（右侧滑出）────────────────────────────── -->
+    <div v-if="readingDoc" class="drawer right-drawer" role="dialog" aria-label="产物阅读">
+      <div class="drawer-head">
+        <b>《{{ readingDoc.title }}》</b>
+        <a class="btn-link" @click.prevent="readingDoc = null">关闭</a>
+      </div>
+      <div class="drawer-body">
+        <div v-if="readingDoc.loading" class="muted">内容加载中…</div>
+        <div v-else-if="readingDoc.error" class="notice error">{{ readingDoc.error }}</div>
+        <div v-else-if="readingDoc.html" class="markdown-body" v-html="readingDoc.html"></div>
+        <div v-else class="muted">（该产物无内联内容）</div>
+      </div>
+    </div>
+    <div v-if="readingDoc" class="drawer-mask" @click="readingDoc = null"></div>
+
+    <!-- ── 底部审批抽屉（awaiting 时半屏滑出）──────────────────── -->
+    <transition name="drawer-slide">
+      <div v-if="drawerOpen && approvalSub" class="drawer bottom-drawer" role="dialog" aria-label="审批">
+        <div class="drawer-head">
+          <b>⏸ {{ approvalReviewName }}等待你批准</b>
+          <span class="muted" style="font-size: 12px">
+            提交于 {{ approvalSub.submitted_at ? new Date(approvalSub.submitted_at).toLocaleString("zh-CN") : "—" }}
+          </span>
+        </div>
+
+        <div class="bottom-drawer-body">
+          <!-- 待审产物列表：快照成员 → GJB 文档名 → 展开 markdown 阅读区 -->
+          <div class="approval-card-section">待审候选产物（{{ members?.length ?? 0 }}，均为候选）</div>
+          <div v-if="membersErrorText" class="notice error">{{ membersErrorText }}</div>
+          <div v-if="!membersResolved && !membersErrorText" class="muted" style="font-size: 12px">产物清单解析中…</div>
+          <template v-else-if="members">
+            <div v-for="m in members" :key="m.revisionId" class="approval-doc">
+              <div class="approval-doc-head">
+                <b>《{{ m.docName }}》</b>
+                <span class="badge accent">v{{ m.version ?? "?" }} 候选</span>
+                <a class="approval-doc-toggle" @click.prevent="toggleMember(m.revisionId)">
+                  {{ expandedMembers.has(m.revisionId) ? "收起" : "展开" }}
                 </a>
               </div>
-              <div class="muted" style="font-size: 12px">{{ new Date(a.created_at).toLocaleString("zh-CN") }}</div>
-              <div v-if="previewedArtifact === a.id" class="artifact-preview">
-                <div v-if="artifactPreview?.loading" class="muted">加载中…</div>
-                <ErrorNotice v-else-if="artifactPreview?.error" :error="artifactPreview.error" />
-                <template v-else>
-                  <div v-if="artifactPreview?.meta" class="muted" style="font-size: 12px; margin-bottom: 6px">{{ artifactPreview.meta }}</div>
-                  <div v-if="artifactPreview?.html" class="markdown-body" v-html="artifactPreview.html"></div>
-                </template>
+              <div v-if="expandedMembers.has(m.revisionId)" class="approval-doc-body">
+                <div v-if="memberContent.get(m.revisionId)?.loading" class="muted">内容加载中…</div>
+                <div v-else-if="memberContent.get(m.revisionId)?.error" class="notice error">{{ memberContent.get(m.revisionId)!.error }}</div>
+                <div v-else-if="memberContent.get(m.revisionId)?.html" class="markdown-body" v-html="memberContent.get(m.revisionId)!.html"></div>
+                <div v-else-if="memberContent.has(m.revisionId)" class="muted">（该产物无内联内容）</div>
+                <div v-else class="muted">点击「展开」查看文档内容。</div>
               </div>
             </div>
-          </div>
-        </template>
+          </template>
 
-        <!-- 记录：GET /projects/:id/jobs + 按需证据内容（L3 技术页） -->
-        <template v-else>
-          <div class="muted" style="font-size: 12px; margin-bottom: 8px">
-            技术详情：工具运行与证据。此页内容是平台内部机制，日常无需关注。
-          </div>
-          <div v-if="jobs.length === 0" class="muted">该项目暂无工具运行。</div>
-          <div v-for="job in jobs" :key="job.id" class="job-row">
-            <div class="job-row-head" @click="toggleJob(job.id)">
-              <span class="job-op">{{ jobOperationText(job.operation) }}</span>
-              <StatusBadge :text="JOB_STATE_TEXT[job.state] ?? job.state" :kind="jobBadgeKind(job.state)" />
-              <span class="muted" style="font-size: 12px">{{ JOB_RUN_CLASS_TEXT[job.runClass] ?? job.runClass }}</span>
-              <span v-if="jobDurationText(job.startTime, job.endTime)" class="muted" style="font-size: 12px">
-                {{ jobDurationText(job.startTime, job.endTime) }}
-              </span>
-              <span v-if="job.errorCode" class="job-error mono" :title="job.id">{{ job.errorCode }}</span>
+          <!-- 操作区：里程碑文案 + 驳回理由必填；失败人话提示 -->
+          <div class="approval-actions">
+            <div v-if="approveFailure" class="notice error">
+              {{ approveFailure.text }}
+              <div v-if="approveFailure.hint" class="muted" style="font-size: 12px; margin-top: 4px">{{ approveFailure.hint }}</div>
             </div>
-            <div v-if="expandedJob === job.id" class="job-detail">
-              <div class="muted mono" style="font-size: 11px">{{ job.id }}</div>
-              <div v-if="evidenceLoading" class="muted">证据清单加载中…</div>
-              <ErrorNotice v-else-if="evidenceError" :error="evidenceError" />
-              <template v-else-if="jobEvidence">
-                <div v-if="jobEvidence.entries.length === 0" class="muted">该运行无证据条目。</div>
-                <table v-else class="data">
-                  <thead>
-                    <tr><th>文件</th><th>大小</th><th>SHA-256</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="entry in jobEvidence.entries" :key="entry.name">
-                      <td><a :title="entry.mediaType" @click.prevent="openEvidence(job.id, entry.name)">{{ entry.name }}</a></td>
-                      <td class="muted">{{ formatBytes(entry.sizeBytes) }}</td>
-                      <td class="mono muted" style="font-size: 11px">{{ entry.sha256.slice(0, 16) }}…</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </template>
-              <div v-if="evidenceContentLoading" class="muted" style="margin-top: 8px">证据内容加载中…</div>
-              <ErrorNotice v-else-if="evidenceContentError" :error="evidenceContentError" />
-              <div v-else-if="evidenceContent" class="panel" style="margin-top: 8px; background: #fbfcfd">
-                <div class="mono muted" style="font-size: 11px">{{ evidenceContent.name }}{{ evidenceContent.truncated ? "（内容过长已截断）" : "" }}</div>
-                <pre class="code-view">{{ evidenceContent.content }}</pre>
-              </div>
+            <div v-if="rejectFailure" class="notice error">
+              {{ rejectFailure.text }}
+              <div v-if="rejectFailure.hint" class="muted" style="font-size: 12px; margin-top: 4px">{{ rejectFailure.hint }}</div>
+            </div>
+            <button class="btn approval-approve-btn" :disabled="approving" @click="doApprove">
+              {{ approving ? "提交中…" : approveLabel }}
+            </button>
+            <div class="approval-reject-row">
+              <input
+                v-model="rejectReason"
+                type="text"
+                class="approval-reject-input"
+                placeholder="驳回理由（必填）"
+                :disabled="rejecting"
+                @keydown.enter.prevent="!rejectDisabled(rejectReason) && doReject()"
+              />
+              <button class="btn danger" :disabled="rejecting || rejectDisabled(rejectReason)" @click="doReject">
+                {{ rejecting ? "提交中…" : "驳回" }}
+              </button>
             </div>
           </div>
-        </template>
+        </div>
       </div>
-    </section>
+    </transition>
   </div>
 </template>

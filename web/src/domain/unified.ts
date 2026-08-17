@@ -7,7 +7,7 @@
  * - 记录标签：GET /projects/:id/jobs 的工具运行中文映射（L3 页，允许技术词）。
  */
 
-import type { ApiClient } from "../api/client.ts";
+import { ApiError, NetworkError, type ApiClient } from "../api/client.ts";
 import {
   getRevisionContent,
   listArtifacts,
@@ -269,4 +269,74 @@ export function jobDurationText(startTime: string | null, endTime: string | null
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+// ─── v3 统一项目页：空项目示例 / 错误人话化（spec §6/§11）────────────────
+
+/** 空项目首屏示例任务卡（真实可一键填入的任务文案）。 */
+export const EXAMPLE_TASKS: readonly string[] = [
+  "设计一个 UART 收发器：9600 波特率、8N1 格式、100MHz 系统时钟，从需求推进到码流",
+  "设计一个 8 位 ALU：支持加减与按位逻辑运算，带零/进位/溢出标志位输出",
+  "梳理本项目当前的需求与门禁状态，总结进展并给出下一步建议",
+  "审查项目现有 RTL 源代码，指出时序与命名问题并给出修改建议",
+];
+
+/** 批准/驳回/发送等决策动作失败 → 人话。 */
+export type DecisionAction = "批准" | "驳回" | "发送";
+
+export interface DecisionFailure {
+  /** 人话原因（主页面展示，不含英文错误码/关联号）。 */
+  readonly text: string;
+  /** 可操作建议（无则 null）。 */
+  readonly hint: string | null;
+}
+
+/**
+ * 决策动作失败 → 人话（spec §5：批准失败显示人话原因与建议；
+ * 关联号与错误码只在记录面板可见，故此处不拼接 err.code/correlationId）。
+ * active 基线冲突 = 同一 (project, kind) 已有 active Baseline 的唯一索引冲突
+ * （core schema baseline_unique_active_project_kind，409）。
+ */
+export function humanizeDecisionError(err: unknown, action: DecisionAction): DecisionFailure {
+  if (err instanceof ApiError) {
+    if (err.status === 409) {
+      if (/baseline|unique/i.test(`${err.code} ${err.message}`)) {
+        return {
+          text: `${action}失败：该项目同类里程碑已存在生效基线（active 基线冲突），本次未能建立新里程碑。`,
+          hint: "请稍候刷新查看最新里程碑状态；若需重新建立，请联系管理员处理旧基线后重试。",
+        };
+      }
+      if (/NOT_REVIEWABLE|NOT_SUBMITTABLE/i.test(err.code)) {
+        return { text: `该提交已被处理过（状态已变化），${action}未生效。`, hint: "页面将自动刷新至最新状态，请确认结果。" };
+      }
+      return { text: `该提交状态已变化，${action}未生效。`, hint: null };
+    }
+    if (err.status === 403) {
+      return { text: `当前账号没有${action}权限。`, hint: "请使用具备审批角色的账号操作。" };
+    }
+    if (err.status === 401) {
+      return { text: "登录已失效，请重新登录后再操作。", hint: null };
+    }
+    if (err.status >= 500) {
+      return { text: `服务暂时不可用，${action}未完成。`, hint: "请点击重试；若持续失败，请查看运行记录中的关联号并联系管理员。" };
+    }
+    return { text: `${action}请求失败，请重试。`, hint: null };
+  }
+  if (err instanceof NetworkError) {
+    return { text: `网络连接失败，${action}未完成。`, hint: "请检查网络后点击重试。" };
+  }
+  return { text: `${action}请求失败，请重试。`, hint: null };
+}
+
+/** 轮询/加载失败 → 人话（spec §11：等待/失败显示人话 + 可操作）。 */
+export function humanizeLoadError(err: unknown): string {
+  if (err instanceof NetworkError) return "网络连接失败，服务可能暂不可达。";
+  if (err instanceof ApiError) {
+    if (err.status === 404) return "请求的内容不存在或已被清理。";
+    if (err.status === 401) return "登录已失效，请重新登录。";
+    if (err.status === 403) return "当前账号无权查看该内容。";
+    if (err.status >= 500) return "服务暂时不可用，正在自动重试。";
+    return "服务请求失败，正在自动重试。";
+  }
+  return "服务请求失败，正在自动重试。";
 }

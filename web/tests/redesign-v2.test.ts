@@ -3,10 +3,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   TOOL_BAR_TITLES,
-  buildFeed,
   formatDuration,
-  type FeedPart,
 } from "../src/domain/tasks.ts";
+import { auditToParts, type SynthiaPart } from "../src/domain/parts.ts";
 import { BASELINE_NAMES, BASELINE_KINDS } from "../src/domain/gates.ts";
 import {
   ARTIFACT_DOC_NAMES,
@@ -41,8 +40,8 @@ function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
   };
 }
 
-function kinds(feed: readonly FeedPart[]): string[] {
-  return feed.map((p) => p.kind);
+function kinds(parts: readonly SynthiaPart[]): string[] {
+  return parts.map((p) => (p.kind === "text" ? `text:${p.role}` : p.kind));
 }
 
 // ─── §5.2 GJB 文档名 ──────────────────────────────────────────────────
@@ -110,10 +109,10 @@ describe("「基线」改名「里程碑」（v2 §2）", () => {
   });
 });
 
-// ─── §5.3 turn 式信息流 ────────────────────────────────────────────────
+// ─── §5.3 turn 式对话流（v3：web/src/domain/parts.ts auditToParts）────────
 
-describe("信息流 part 映射（v2 §4）", () => {
-  test("完整流：叙述/门禁/文件卡/工具条/证据/终态按时间序", () => {
+describe("对话流 part 映射（v3）", () => {
+  test("完整流：叙述/产物卡/门禁卡/工具条/终态/证据按时间序", () => {
     const doc: TaskDocRef = { phase: "intake", path: "docs/intake.md", artifact_id: "a1", revision_id: "r1" };
     const detail = makeDetail({
       status: "succeeded",
@@ -130,26 +129,25 @@ describe("信息流 part 映射（v2 §4）", () => {
       ],
       evidence: [{ jobId: "job-1", operation: "synthesize", status: "succeeded", inputSha256: "a".repeat(64), entries: [{ name: "synth.rpt", sha256: "b".repeat(64), sizeBytes: 1024, mediaType: "text/plain" }] }],
     });
-    const feed = buildFeed(detail);
-    expect(kinds(feed)).toEqual(["text", "file", "gate", "tool", "terminal", "evidence"]);
-
-    const gate = feed.find((p) => p.kind === "gate");
+    const parts = auditToParts(detail);
+    expect(kinds(parts)).toEqual(["text:user", "text:agent", "doc", "gate", "tool", "lifecycle", "evidence"]);
+    const gate = parts.find((p) => p.kind === "gate");
     expect(gate && gate.kind === "gate" ? gate.state : null).toBe("passed"); // 同一门只留一个 part，取最新状态
     expect(gate && gate.kind === "gate" ? gate.review : null).toBe("需求审查");
 
-    const tool = feed.find((p) => p.kind === "tool");
-    expect(tool && tool.kind === "tool" ? tool.state : null).toBe("ok");
+    const tool = parts.find((p) => p.kind === "tool");
+    expect(tool && tool.kind === "tool" ? tool.status : null).toBe("completed");
     expect(tool && tool.kind === "tool" ? tool.durationMs : null).toBe(12_000); // 权限门→完成的时间差
     expect(tool && tool.kind === "tool" ? tool.title : null).toBe("综合");
 
-    const terminal = feed.find((p) => p.kind === "terminal");
-    expect(terminal && terminal.kind === "terminal" ? terminal.state : null).toBe("succeeded");
+    const terminal = parts.find((p) => p.kind === "lifecycle");
+    expect(terminal && terminal.kind === "lifecycle" ? terminal.state : null).toBe("succeeded");
 
-    const evidence = feed.find((p) => p.kind === "evidence");
+    const evidence = parts.find((p) => p.kind === "evidence");
     expect(evidence && evidence.kind === "evidence" ? evidence.count : null).toBe(1);
   });
 
-  test("lifecycle 事件一律不进信息流（§5.5）", () => {
+  test("lifecycle 事件一律不进对话流（§5.5）", () => {
     const detail = makeDetail({
       audit: [
         audit({ category: "lifecycle", phase: "loop", action: "connector heartbeat", result: "ok" }),
@@ -157,33 +155,32 @@ describe("信息流 part 映射（v2 §4）", () => {
         audit({ category: "model", phase: "generate_rtl", action: "rtl generated", result: "ok" }),
       ],
     });
-    const feed = buildFeed(detail);
-    expect(feed.length).toBe(1);
-    expect(feed[0]!.kind).toBe("text");
+    const parts = auditToParts(detail);
+    // 首轮指令气泡 + 一条叙述（lifecycle 不进流）
+    expect(kinds(parts)).toEqual(["text:user", "text:agent"]);
   });
 
-  test("权限门与轮询技术事件隐藏；等待批准 → 流内 awaiting 标记", () => {
+  test("权限门转为工具启动；轮询技术事件隐藏；等待批准 → 流内 awaiting 标记", () => {
     const detail = makeDetail({
       status: "awaiting_approval",
-      current_stage: "intake",
+      current_stage: "validate",
       awaiting_gate: "G2",
       audit: [
         audit({ category: "gate", phase: "validate_sources", action: "gate ok (vivado-batch-1)", result: "ok" }),
+        audit({ category: "tool_call", phase: "validate_sources", action: "validate_sources succeeded", result: "ok" }),
         audit({ category: "gate", phase: "gate_review", action: "G2: submitting for review", result: "ok" }),
         audit({ category: "gate", phase: "gate_review", action: "G2: polling approval status", result: "ok" }),
         audit({ category: "gate", phase: "gate_review", action: "G2: awaiting human approval", result: "ok" }),
         audit({ category: "loop", phase: "loop", action: "loop paused at G2", result: "ok" }),
       ],
     });
-    const feed = buildFeed(detail);
-    expect(feed.length).toBe(1);
-    const gate = feed[0]!;
-    expect(gate.kind).toBe("gate");
-    expect(gate.kind === "gate" ? gate.state : null).toBe("awaiting");
-    expect(gate.kind === "gate" ? gate.review : null).toBe("行为审查");
+    const parts = auditToParts(detail);
+    const gate = parts.find((p) => p.kind === "gate")!;
+    expect(gate.kind === "gate" && gate.state).toBe("awaiting");
+    expect(gate.kind === "gate" && gate.review).toBe("行为审查");
   });
 
-  test("工具失败 → 红色可展开（人话原因）；不泄漏 jobId/错误码", () => {
+  test("工具失败 → error 可展开（人话原因）；不泄漏 jobId/错误码", () => {
     const detail = makeDetail({
       status: "fail_closed",
       current_stage: "simulate",
@@ -193,33 +190,18 @@ describe("信息流 part 映射（v2 §4）", () => {
       ],
       reason: "simulate returned fail-closed status failed",
     });
-    const feed = buildFeed(detail);
-    const tool = feed.find((p) => p.kind === "tool");
-    expect(tool && tool.kind === "tool" ? tool.state : null).toBe("failed");
-    const reason = tool && tool.kind === "tool" ? tool.reason : null;
+    const parts = auditToParts(detail);
+    const tool = parts.find((p) => p.kind === "tool");
+    expect(tool && tool.kind === "tool" ? tool.status : null).toBe("error");
+    const reason = tool && tool.kind === "tool" ? tool.errorText : null;
     expect(reason).toBeTruthy();
     expect(reason).not.toContain("SIM_ASSERT");
     expect(reason).not.toContain("job-7");
-    const terminal = feed.find((p) => p.kind === "terminal");
-    expect(terminal && terminal.kind === "terminal" ? terminal.state : null).toBe("failed");
+    const terminal = parts.find((p) => p.kind === "lifecycle");
+    expect(terminal && terminal.kind === "lifecycle" ? terminal.state : null).toBe("failed");
   });
 
-  test("进行中工具条由 current_stage 合成；完成后不再重复", () => {
-    const running = makeDetail({ status: "running", current_stage: "synthesize" });
-    const feedRunning = buildFeed(running);
-    const bar = feedRunning.find((p) => p.kind === "tool");
-    expect(bar && bar.kind === "tool" ? bar.state : null).toBe("running");
-    expect(bar && bar.kind === "tool" ? bar.title : null).toBe("综合");
-
-    const done = makeDetail({
-      status: "running",
-      current_stage: "synthesize",
-      audit: [audit({ category: "tool_call", phase: "synthesize", action: "synthesize succeeded", result: "ok" })],
-    });
-    expect(buildFeed(done).filter((p) => p.kind === "tool").length).toBe(1);
-  });
-
-  test("连续重复叙述合并；无登记事件的产物补文件卡到流尾", () => {
+  test("连续重复叙述合并；无登记事件的产物补产物卡到流尾", () => {
     const doc: TaskDocRef = { phase: "architecture", path: "docs/arch.md", artifact_id: "a2", revision_id: "r2" };
     const detail = makeDetail({
       docs: [doc],
@@ -229,11 +211,12 @@ describe("信息流 part 映射（v2 §4）", () => {
         audit({ category: "model", phase: "generate_intake", action: "intake doc generated: c", result: "ok" }),
       ],
     });
-    const feed = buildFeed(detail);
-    expect(feed.filter((p) => p.kind === "text").length).toBe(1); // 三句相同 → 合并一行
-    const file = feed[feed.length - 1]!;
-    expect(file.kind).toBe("file");
-    expect(file.kind === "file" ? file.title : null).toBe("PLDS 结构设计说明");
+    const parts = auditToParts(detail);
+    expect(parts.filter((p) => p.kind === "text" && p.role === "agent").length).toBe(1); // 三句相同 → 合并一段
+    expect(parts.filter((p) => p.kind === "text").length).toBe(2); // 首轮指令 + 合并后的叙述
+    const file = parts[parts.length - 1]!;
+    expect(file.kind).toBe("doc");
+    expect(file.kind === "doc" ? file.title : null).toBe("PLDS 结构设计说明");
   });
 
   test("工具条标题映射与耗时格式化", () => {

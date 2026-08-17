@@ -1041,11 +1041,12 @@ button.btn.danger {
   font-weight: 600;
 }
 
-/* ── 统一项目页（UI-3 方案 B：左 60% 对话 + 右 40% 三标签）────────── */
+/* ── 统一项目页 v3（状态带 + 全宽对话流 + 底部审批抽屉；无右栏）──────── */
 
-.unified {
-  display: grid;
-  grid-template-columns: 3fr 2fr; /* 60% / 40% */
+.v3page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   height: calc(100vh - 24px - 48px);
   min-height: 480px;
   background: var(--c-panel);
@@ -1054,143 +1055,470 @@ button.btn.danger {
   overflow: hidden;
 }
 
-.unified-left,
-.unified-right {
+/* 顶部状态带（常驻紧凑） */
+.band {
+  border-bottom: 1px solid var(--c-border);
+  background: #fbfcfd;
+}
+
+.band-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  flex-wrap: wrap;
+}
+
+.band-project {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.band-label {
+  font-size: 12px;
+}
+
+.band-select {
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-panel);
+  color: var(--c-text);
+  font-size: 13px;
+  padding: 4px 8px;
+  max-width: 240px;
+}
+
+.band-gates {
+  display: flex;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.gate-chip {
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.gate-chip.in_review {
+  background: rgba(176, 125, 24, 0.12);
+  font-weight: 700;
+}
+
+.gate-chip.rejected {
+  background: rgba(179, 55, 47, 0.1);
+}
+
+.gate-chip.approved {
+  opacity: 0.85;
+}
+
+.gate-chip.not_started {
+  opacity: 0.45;
+}
+
+.band-milestones {
+  display: flex;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.ms-chip {
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.ms-chip.active {
+  color: var(--c-ok);
+  font-weight: 700;
+}
+
+.ms-chip.inactive {
+  opacity: 0.45;
+}
+
+.band-action {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--c-text-dim);
+  white-space: nowrap;
+}
+
+.band-action.awaiting {
+  color: var(--c-warn);
+  font-weight: 700;
+  background: rgba(176, 125, 24, 0.1);
+  padding: 3px 10px;
+  border-radius: 12px;
+}
+
+.band-action.running {
+  color: var(--c-accent);
+}
+
+.band-action.done {
+  color: var(--c-ok);
+}
+
+.band-action.failed {
+  color: var(--c-danger);
+}
+
+.band-records-btn {
+  border: 1px solid var(--c-border);
+  background: transparent;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--c-text-dim);
+  cursor: pointer;
+}
+
+.band-records-btn:hover {
+  background: var(--c-info-bg);
+}
+
+.band-records-btn.on {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+/* 运行记录展开面板（L3 仅在此） */
+.band-records {
+  border-top: 1px solid var(--c-border);
+  background: var(--c-panel);
+  max-height: 45%;
+  overflow-y: auto;
+  padding: 10px 16px 14px;
+}
+
+.band-records-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.band-records-head a {
+  margin-left: auto;
+}
+
+/* 全宽对话流主体 */
+.v3main {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-.unified-left-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--c-border);
+.v3-loaderr {
+  margin: 8px 16px 0;
 }
 
-.unified-feed {
+.v3-feed {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 16px 18px;
+}
+
+/* 流内事件卡（门禁状态/治理/提示/打断/已决审批） */
+.event-card {
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
   gap: 8px;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border);
+  background: #fbfcfd;
+  max-width: 88%;
 }
 
-.unified-left > .composer,
-.unified-left > .notice {
-  margin: 0 16px 12px;
+.event-card .event-mark {
+  font-weight: 700;
 }
 
-/* 右栏标签 */
-.unified-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--c-border);
+.event-card.passed {
+  border-color: rgba(46, 125, 79, 0.4);
+  color: var(--c-ok);
 }
 
-.unified-tabs button {
-  flex: 1;
-  padding: 10px 0;
-  border: none;
-  background: transparent;
+.event-card.failed {
+  border-color: rgba(179, 55, 47, 0.4);
+  color: var(--c-danger);
+}
+
+.event-card.awaiting {
+  border-color: rgba(176, 125, 24, 0.4);
+  color: var(--c-warn);
+}
+
+.event-card.muted-card {
   color: var(--c-text-dim);
-  font-size: 14px;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
 }
 
-.unified-tabs button.on {
+.event-card.note-card.info {
+  color: var(--c-text-dim);
+}
+
+.event-card.note-card.warn {
+  border-color: rgba(176, 125, 24, 0.4);
+  color: var(--c-warn);
+}
+
+.event-card.note-card.error {
+  border-color: rgba(179, 55, 47, 0.4);
+  color: var(--c-danger);
+}
+
+.event-card.note-card.queued {
+  border-style: dashed;
+  color: var(--c-text-dim);
+}
+
+.event-card.interrupt-card {
+  border-style: dashed;
+  border-color: var(--c-accent);
   color: var(--c-accent);
-  border-bottom-color: var(--c-accent);
   font-weight: 600;
 }
 
-.unified-tab-body {
+/* 流式光标（streaming 尾块） */
+.streaming-cursor {
+  display: inline-block;
+  animation: cursor-blink 1s step-end infinite;
+  color: var(--c-accent);
+  margin-left: 2px;
+}
+
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 工具条四态：pending 微光（沿用 running 流光）、completed 弱化、error 红 */
+.tool-bar.pending {
+  background: linear-gradient(90deg, #fbfcfd 0%, var(--c-info-bg) 50%, #fbfcfd 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  opacity: 0.9;
+}
+
+.tool-bar.pending .bar-title,
+.tool-bar.running .bar-title {
+  font-weight: 600;
+}
+
+.tool-bar.completed {
+  opacity: 0.72;
+}
+
+.tool-bar.completed .bar-mark {
+  color: var(--c-ok);
+}
+
+.tool-bar.error {
+  border-color: rgba(179, 55, 47, 0.5);
+}
+
+.tool-bar.error .bar-mark,
+.tool-bar.error .bar-icon {
+  color: var(--c-danger);
+}
+
+.tool-bar.expandable,
+.tool-bar.error {
+  cursor: pointer;
+}
+
+/* 大成功卡 / 失败卡 */
+.terminal-card {
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  max-width: 92%;
+  background: var(--c-panel);
+}
+
+.terminal-card.succeeded {
+  border-color: rgba(46, 125, 79, 0.5);
+  background: linear-gradient(180deg, rgba(46, 125, 79, 0.06), var(--c-panel));
+}
+
+.terminal-card.failed {
+  border-color: rgba(179, 55, 47, 0.5);
+}
+
+.terminal-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.terminal-card.succeeded .terminal-title {
+  color: var(--c-ok);
+}
+
+.terminal-card.failed .terminal-title {
+  color: var(--c-danger);
+}
+
+.terminal-meta {
+  font-size: 12px;
+  color: var(--c-text-dim);
+  margin-top: 6px;
+}
+
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+/* 空项目首屏（居中对话框 + 示例卡） */
+.empty-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  max-width: 640px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.empty-hero-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.empty-hero-input {
+  width: 100%;
+}
+
+.empty-hero .composer-send {
+  margin-top: 10px;
+}
+
+.example-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin-top: 22px;
+}
+
+.example-card {
+  text-align: left;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--c-text);
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.example-card:hover {
+  border-color: var(--c-accent);
+  background: var(--c-info-bg);
+}
+
+/* 底部输入（v3：双按钮） */
+.v3-composer {
+  border-top: 1px solid var(--c-border);
+  background: #fbfcfd;
+}
+
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+/* 抽屉骨架（审批半屏 / 产物右侧） */
+.drawer {
+  position: absolute;
+  z-index: 30;
+  background: var(--c-panel);
+  box-shadow: 0 -6px 24px rgba(34, 48, 60, 0.14);
+  display: flex;
+  flex-direction: column;
+}
+
+.bottom-drawer {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 50%;
+  border-top: 2px solid var(--c-warn);
+  border-radius: 12px 12px 0 0;
+}
+
+.right-drawer {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 72%);
+  border-left: 1px solid var(--c-border);
+  z-index: 40;
+}
+
+.drawer-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  background: rgba(34, 48, 60, 0.18);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--c-border);
+  font-size: 14px;
+}
+
+.drawer-head a {
+  margin-left: auto;
+}
+
+.bottom-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.right-drawer .drawer-body {
   flex: 1;
   overflow-y: auto;
   padding: 14px 16px;
 }
 
-.unified-pane-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--c-text-dim);
-  margin-bottom: 8px;
+.drawer-slide-enter-active,
+.drawer-slide-leave-active {
+  transition: transform 0.25s ease;
 }
 
-/* 新任务引导（无任务时） */
-.onboarding {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 24px;
-  max-width: 560px;
+.drawer-slide-enter-from,
+.drawer-slide-leave-to {
+  transform: translateY(100%);
 }
 
-.onboarding-title {
-  font-size: 16px;
-  font-weight: 700;
-}
-
-/* 就地审批卡 */
-.approval-card {
-  border: 1px solid var(--c-border);
-  border-radius: 10px;
-  background: var(--c-panel);
-  padding: 12px;
-  max-width: 95%;
-  font-size: 13px;
-}
-
-.approval-card.pending {
-  border-color: var(--c-warn);
-}
-
-.approval-card.approved {
-  border-color: var(--c-ok);
-}
-
-.approval-card.rejected {
-  border-color: var(--c-danger);
-}
-
-.approval-card-title {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: 14px;
-  margin-bottom: 8px;
-}
-
-.approval-card.pending .approval-card-title {
-  color: var(--c-warn);
-}
-
-.approval-card.approved .approval-card-title {
-  color: var(--c-ok);
-}
-
-.approval-card.rejected .approval-card-title {
-  color: var(--c-danger);
-}
-
-.approval-card-sub {
-  font-size: 11px;
-}
-
-.approval-card-milestone {
-  color: var(--c-accent);
-  margin-top: 4px;
-  font-weight: 600;
-}
-
+/* 审批抽屉内产物清单（沿用 v2 approval-doc 骨架） */
 .approval-card-section {
   font-size: 12px;
   color: var(--c-text-dim);
-  margin: 8px 0 6px;
+  margin: 4px 0 6px;
 }
 
 .approval-doc {
@@ -1222,7 +1550,7 @@ button.btn.danger {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 .approval-approve-btn {
@@ -1244,37 +1572,7 @@ button.btn.danger {
   font-size: 13px;
 }
 
-/* 产物标签 */
-.artifact-group {
-  margin-bottom: 16px;
-}
-
-.artifact-row {
-  border: 1px solid var(--c-border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-bottom: 6px;
-}
-
-.artifact-row-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.artifact-row-head a {
-  margin-left: auto;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.artifact-preview {
-  margin-top: 8px;
-  border-top: 1px dashed var(--c-border);
-  padding-top: 8px;
-}
-
-/* 记录标签（L3 技术页） */
+/* 运行记录（L3 技术面板，沿用工单行骨架） */
 .job-row {
   border-bottom: 1px solid var(--c-border);
   padding: 6px 0;
@@ -1305,4 +1603,3 @@ button.btn.danger {
 .job-detail table.data {
   margin-top: 6px;
 }
-
