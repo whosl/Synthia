@@ -292,6 +292,10 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
       case "model": {
         if (event.action === "user_message") {
           const text = event.detail?.trim();
+          // A user message starts a NEW conversation turn: close the open
+          // agent narration run so replies from different turns never merge
+          // (dsh/opencode semantics: strict turn-by-turn ordering).
+          openAgentText = -1;
           if (text) push({ kind: "text", id: `u${event.seq}`, role: "user", state: "done", text, segments: null });
           break;
         }

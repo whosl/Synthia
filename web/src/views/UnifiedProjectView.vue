@@ -297,18 +297,29 @@ const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
  * 同 id 冲突时（定稿事件与 audit 的 free_agent_reply 同时到达）以 audit 为准。
  */
 const parts = computed<readonly SynthiaPart[]>(() => {
-  // Id matching is not enough: the SSE finalize part (sp-*) and the audit
-  // free_agent_reply (t<seq>) carry the SAME text under DIFFERENT ids.
-  // Deduplicate by text fingerprint — if a streamed part (any state) already
-  // carries this exact text, drop the audit-materialized copy.
-  const streamed = new Set(
-    streamFeed.value.filter((s) => s.kind === "text").map((s) => s.text.trim()),
+  // Turn-scoped ordering (dsh/opencode semantics): audit parts render in
+  // seq order; a LIVE streamed part renders in place of the audit reply it
+  // corresponds to, not appended at the end. Match by exact text fingerprint
+  // (SSE finalize sp-* vs audit t<seq> share text, not ids).
+  const streamedDone = new Set(
+    streamFeed.value.filter((s) => s.kind === "text" && s.state === "done").map((s) => s.text.trim()),
   );
-  const base = auditParts.value.filter((p) => {
-    if (p.kind !== "text" || p.role !== "agent") return true;
-    return !streamed.has(p.text.trim());
+  // Streaming (in-flight) parts append at the tail — they have no audit copy yet.
+  const liveOnes = streamingTextParts.value.filter((p) => p.state === "streaming");
+  const replaced = auditParts.value.map((p) => {
+    if (p.kind !== "text" || p.role !== "agent" || p.state !== "done") return p;
+    return streamedDone.has(p.text.trim()) ? { ...p, streamedFinal: true } : p;
   });
-  return [...base, ...streamingTextParts.value];
+  // Drop the audit copy when its streamed twin already finalized in place:
+  // mark-and-swap — replace audit text part content with the streamed one's.
+  const base = replaced.map((p) => {
+    if (p.kind === "text" && p.role === "agent" && (p as SynthiaTextPart & { streamedFinal?: boolean }).streamedFinal) {
+      const twin = streamFeed.value.find((s) => s.kind === "text" && s.text.trim() === p.text.trim());
+      if (twin) return { ...p, id: twin.id, segments: null } as SynthiaPart;
+    }
+    return p;
+  });
+  return [...base, ...liveOnes];
 });
 
 /** 任务切换器短标签（优先显示任务文案前 18 字）。 */
