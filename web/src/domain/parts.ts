@@ -284,6 +284,10 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
 
   const sorted = [...detail.audit].sort((a, b) => a.seq - b.seq);
   for (const event of sorted) {
+    // Any non-model event closes the open agent narration run — otherwise
+    // narration written before a tool bar merges with narration after it
+    // (opencode semantics: text and tool parts interleave strictly by time).
+    if (event.category !== "model") openAgentText = -1;
     switch (event.category) {
       case "model": {
         if (event.action === "user_message") {
@@ -292,6 +296,10 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
           break;
         }
         if (event.action === "free_agent_reply") {
+          // Streaming finalize dedup: SSE already rendered this text as a
+          // streaming part (sp-*) that transitioned to done. Match by full
+          // text fingerprint instead of id, or the reply renders twice
+          // (once streamed, once from audit).
           appendAgentText(event.seq, event.detail ?? "");
           break;
         }

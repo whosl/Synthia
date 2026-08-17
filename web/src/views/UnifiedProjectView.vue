@@ -297,7 +297,17 @@ const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
  * 同 id 冲突时（定稿事件与 audit 的 free_agent_reply 同时到达）以 audit 为准。
  */
 const parts = computed<readonly SynthiaPart[]>(() => {
-  const base = auditParts.value.filter((p) => !(p.kind === "text" && streamFeed.value.some((s) => s.id === p.id)));
+  // Id matching is not enough: the SSE finalize part (sp-*) and the audit
+  // free_agent_reply (t<seq>) carry the SAME text under DIFFERENT ids.
+  // Deduplicate by text fingerprint — if a streamed part (any state) already
+  // carries this exact text, drop the audit-materialized copy.
+  const streamed = new Set(
+    streamFeed.value.filter((s) => s.kind === "text").map((s) => s.text.trim()),
+  );
+  const base = auditParts.value.filter((p) => {
+    if (p.kind !== "text" || p.role !== "agent") return true;
+    return !streamed.has(p.text.trim());
+  });
   return [...base, ...streamingTextParts.value];
 });
 
@@ -785,9 +795,11 @@ function exportSummary(): void {
             <div v-if="part.kind === 'text' && part.role === 'user'" class="msg-user feed-msg-user">
               <div>{{ part.text }}</div>
             </div>
+            <div v-else-if="part.kind === 'text' && !part.text.trim() && part.state === 'streaming'" class="feed-reply streaming-empty" :data-state="part.state">
+              <span class="streaming-cursor" aria-label="生成中">▍</span>
+            </div>
 
             <div v-else-if="part.kind === 'text'" class="feed-reply" :data-state="part.state">
-              <!-- SSE 流式 part：markdown-stream 投影（稳定块 + live 尾块，代码围栏增量不重排） -->
               <template v-if="streamProjection(part) !== null">
                 <template v-for="block in streamProjection(part)!.blocks" :key="`${part.id}:${block.raw.length}:${block.mode}`">
                   <div v-if="block.mode === 'code'" class="code-view reply-code">{{ block.src }}</div>
