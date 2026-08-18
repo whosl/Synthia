@@ -156,10 +156,8 @@ export interface TaskRunDetail extends TaskRunSummary {
   readonly reason?: string | null;
 }
 
-/** POST .../message 响应 data（idle/终态 → prompt 返回 reply；running → steer 返回 steered）。 */
+/** POST .../message 响应 data（runtime 已改流式，agent 回复不再随此响应返回，走 SSE）。 */
 export interface SendMessageResult {
-  /** prompt 返回的 agent 文本（steer 路径无）。 */
-  readonly reply?: string;
   /** running 会话走 steer 时为 true。 */
   readonly steered?: boolean;
   /** free-agent 会话状态（idle/running/awaiting_approval/completed/cancelled/failed）。 */

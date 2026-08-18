@@ -1,10 +1,12 @@
 /**
- * 统一项目页领域规则（UI-3：/projects/:id 单页承接总览/工作台/审批/记录）。
+ * 统一项目页领域规则（v4 集成阶段：部分保留——见 spec §5.2）。
  *
- * - 旧路由 → 统一页重定向（含 tab/run 查询参数）；
  * - 就地审批卡：渲染条件、里程碑/非里程碑文案、批准请求体、驳回理由必填；
  * - 待审产物 = 快照成员修订（snapshot.created payload.memberRevisionIds）；
  * - 记录标签：GET /projects/:id/jobs 的工具运行中文映射（L3 页，允许技术词）。
+ *
+ * 旧路由重定向（LEGACY_ROUTES / unifiedRedirectTarget）已随 v3 UnifiedProjectView
+ * 一并作废并删除——v4 路由结构不再需要旧四路由 → 统一页的重定向规则。
  */
 
 import { ApiError, NetworkError, type ApiClient } from "../api/client.ts";
@@ -39,38 +41,6 @@ export const UNIFIED_TABS: readonly { readonly id: UnifiedTab; readonly label: s
 /** 查询参数 → 标签（仅接受三个合法值，其余回退「流程」）。 */
 export function tabFromQuery(value: unknown): UnifiedTab {
   return value === "artifacts" || value === "records" ? value : "flow";
-}
-
-// ─── 旧路由重定向（UI-3 路由收敛）─────────────────────────────────────
-
-export interface LegacyRouteRule {
-  /** 旧路径模式（vue-router path 语法）。 */
-  readonly path: string;
-  /** 重定向到的统一页标签；无则默认「流程」。 */
-  readonly tab?: UnifiedTab;
-  /** 是否把 :runId 作为 run 查询参数带到统一页。 */
-  readonly carryRun?: boolean;
-}
-
-/** 旧四路由 → 统一项目页（/projects/:id）。 */
-export const LEGACY_ROUTES: readonly LegacyRouteRule[] = [
-  { path: "/projects/:id/artifacts", tab: "artifacts" },
-  { path: "/projects/:id/tasks" },
-  { path: "/projects/:id/tasks/:runId", carryRun: true },
-  { path: "/projects/:id/runs", tab: "records" },
-];
-
-/** 旧路由 → 统一页目标（query 里的 run 参数保留传递）。 */
-export function unifiedRedirectTarget(
-  rule: LegacyRouteRule,
-  params: Record<string, string>,
-  query: Record<string, string | undefined> = {},
-): { path: string; query: Record<string, string> } {
-  const q: Record<string, string> = {};
-  if (rule.tab) q.tab = rule.tab;
-  const run = rule.carryRun ? params.runId : query.run;
-  if (run) q.run = run;
-  return { path: `/projects/${params.id ?? ""}`, query: q };
 }
 
 // ─── 就地审批卡（信息流内）───────────────────────────────────────────

@@ -66,7 +66,15 @@ describe("auditToParts：工具四态转移", () => {
     const parts = auditToParts(makeDetail({ status: "running", current_stage: "synthesize" }));
     const tools = toolParts(parts);
     expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ op: "synthesize", title: "综合", status: "pending", time: { start: null, end: null }, durationMs: null });
+    expect(tools[0]).toMatchObject({
+      op: "synthesize",
+      title: "综合",
+      status: "pending",
+      time: { start: null, end: null },
+      durationMs: null,
+      jobId: null,
+      errorCode: null,
+    });
   });
 
   test("权限门事件：pending → running（time.start 记录）", () => {
@@ -102,6 +110,9 @@ describe("auditToParts：工具四态转移", () => {
     expect(tools[0]!.time).toEqual({ start: "2026-08-17T10:00:10Z", end: "2026-08-17T10:02:10Z" });
     expect(tools[0]!.durationMs).toBe(120_000);
     expect(tools[0]!.errorText).toBeNull();
+    // 成功事件不带 jobId/errorCode 时兜底为 null（本用例的 toolDone 未设置 jobId）。
+    expect(tools[0]!.jobId).toBeNull();
+    expect(tools[0]!.errorCode).toBeNull();
   });
 
   test("失败事件：running → error（人话 errorText，可展开）", () => {
@@ -119,13 +130,15 @@ describe("auditToParts：工具四态转移", () => {
     expect(tools[0]!.status).toBe("error");
     expect(tools[0]!.errorText).toBe("仿真未能完成，任务已安全停止。技术详情见运行记录。");
     expect(tools[0]!.errorText).not.toMatch(/X/); // 错误码不进对话流（L3）
+    // 错误码/jobId 仍在 part 数据上（记录面板用），只是不进 errorText 人话展开区。
+    expect(tools[0]!.errorCode).toBe("X");
   });
 
   test("无权限门事件的完成事件 → 直接 completed part（容错）", () => {
     const parts = auditToParts(makeDetail({ status: "running", audit: [toolDone("validate_sources")] }));
     const tools = toolParts(parts);
     expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ op: "validate_sources", status: "completed", title: "编译检查" });
+    expect(tools[0]).toMatchObject({ op: "validate_sources", status: "completed", title: "编译检查", jobId: null, errorCode: null });
     expect(tools[0]!.time.start).toBeNull();
   });
 
@@ -138,6 +151,41 @@ describe("auditToParts：工具四态转移", () => {
     expect(toolDurationLabel(1500)).toBeNull();
     expect(toolDurationLabel(2000)).toBe("2s");
     expect(toolDurationLabel(125_000)).toBe("2m5s");
+  });
+});
+
+// ─── jobId / errorCode 关联（跳转运行记录面板用，见 domain/records.ts）───
+
+describe("auditToParts：tool_call 事件的 jobId/errorCode 透传", () => {
+  test("成功事件带 jobId → part.jobId 透传，errorCode 恒为 null（即使事件本身携带）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        status: "running",
+        audit: [
+          audit({ category: "tool_call", phase: "synthesize", action: "synthesize succeeded", result: "ok", jobId: "job-abc", errorCode: "SHOULD_NOT_APPEAR" }),
+        ],
+      }),
+    );
+    const tools = toolParts(parts);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.jobId).toBe("job-abc");
+    // 映射代码只在失败态透传 errorCode；成功态即便事件本身带了错误码也不应出现在 part 上。
+    expect(tools[0]!.errorCode).toBeNull();
+  });
+
+  test("失败事件带 jobId + errorCode → 两者都透传到 part", () => {
+    const parts = auditToParts(
+      makeDetail({
+        status: "fail_closed",
+        audit: [
+          audit({ category: "tool_call", phase: "implement", action: "implement failed", result: "failed", jobId: "job-abc", errorCode: "SOME_CODE" }),
+        ],
+      }),
+    );
+    const tools = toolParts(parts);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.jobId).toBe("job-abc");
+    expect(tools[0]!.errorCode).toBe("SOME_CODE");
   });
 });
 

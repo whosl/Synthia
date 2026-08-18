@@ -45,6 +45,10 @@ export interface SynthiaToolPart {
   readonly durationMs: number | null;
   /** error 态可展开的人话说明。 */
   readonly errorText: string | null;
+  /** 关联的 job id（tool_call 完成事件带来，未完成为 null）；驱动跳转运行记录面板。 */
+  readonly jobId: string | null;
+  /** 错误码原文（仅记录面板展示，对话流不直接暴露）。 */
+  readonly errorCode: string | null;
 }
 
 /** 文本 part：user 气泡（右）/ Agent 叙述（左，永不折叠）。 */
@@ -117,7 +121,7 @@ export interface SynthiaLifecyclePart {
 
 export type NoteTone = "info" | "warn" | "error";
 
-/** 提示卡（排队注入/回复出错/进化提示位）。 */
+/** 提示卡（插话/纠偏注入、回复出错、进化提示位）。 */
 export interface SynthiaNotePart {
   readonly kind: "note";
   readonly id: string;
@@ -204,7 +208,8 @@ function evidenceEntryCount(evidence: TaskRunDetail["evidence"]): number {
  * 映射规则：
  * - model/user_message → user 文本气泡；free_agent_reply / 叙述类 model 事件 →
  *   Agent 文本（连续事件拼接到同一 part = 文本流式拼接；连续重复句降噪合并）；
- * - free_agent_steer → note（排队注入提示）；free_agent_reply_error → note（错误）；
+ * - free_agent_steer → note（插话/纠偏注入提示；是 steer 注入，不是排队，见 D21）；
+ *   free_agent_reply_error → note（错误）；
  *   free_agent_abort → interrupt（打断标记卡）；
  * - gate（权限门，phase=操作）→ 工具 part 进入 running（time.start）；
  * - tool_call → 工具 part 四态转移（ok → completed / 其他 → error，time.end + 耗时）；
@@ -266,7 +271,15 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
   const roundToolId = (op: string): string =>
     `tool-${op}-${parts.filter((p) => p.kind === "tool" && p.op === op).length}`;
 
-  const makeTool = (id: string, op: string, status: ToolPartStatus, time: ToolPartTime, errorText: string | null): SynthiaToolPart => ({
+  const makeTool = (
+    id: string,
+    op: string,
+    status: ToolPartStatus,
+    time: ToolPartTime,
+    errorText: string | null,
+    jobId: string | null = null,
+    errorCode: string | null = null,
+  ): SynthiaToolPart => ({
     kind: "tool",
     id,
     op,
@@ -275,6 +288,8 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
     time,
     durationMs: durationBetween(time),
     errorText,
+    jobId,
+    errorCode,
   });
 
   // 首轮指令气泡（runtime 不为初始 task 记 user_message 事件，取 run-state.task）。
@@ -328,6 +343,8 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
         const op = event.phase;
         if (!(op in TOOL_BAR_TITLES)) break; // repair 诊断等内部事件不进流
         const failed = event.result !== "ok";
+        const jobId = event.jobId ?? null;
+        const errorCode = failed ? event.errorCode ?? null : null;
         const idx = firstOpenTool(op);
         if (idx >= 0) {
           const prev = parts[idx] as SynthiaToolPart;
@@ -337,6 +354,8 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
             time: { start: prev.time.start, end: event.ts },
             durationMs: durationBetween({ start: prev.time.start, end: event.ts }),
             errorText: failed ? toolErrorText(prev.title, event.result) : null,
+            jobId,
+            errorCode,
           };
         } else {
           push(
@@ -346,6 +365,8 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
               failed ? "error" : "completed",
               { start: null, end: event.ts },
               failed ? toolErrorText(TOOL_BAR_TITLES[op]!, event.result) : null,
+              jobId,
+              errorCode,
             ),
           );
         }

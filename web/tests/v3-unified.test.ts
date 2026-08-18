@@ -1,8 +1,8 @@
 /**
- * v3 统一项目页领域规则测试（band.ts / unified.ts v3 增量 / 路由重定向沿用）：
+ * v3 统一项目页领域规则测试（band.ts / unified.ts v3 增量，v4 集成阶段仍保留）：
  * - 「当前动作」一句话推导（awaiting 高亮、running 阶段+已用时、终态人话）；
  * - 等待时长人话；批准失败人话（含 active 基线冲突）；
- * - 空项目示例任务文案真实可用；旧路由重定向不回归。
+ * - 空项目示例任务文案真实可用。
  */
 import { describe, expect, test } from "bun:test";
 import { currentAction, terminalActionText, waitText } from "../src/domain/band.ts";
