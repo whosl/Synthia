@@ -152,17 +152,17 @@ export async function createToolRun(client: Client, run: ToolRun): Promise<void>
 
 export async function transitionToolRunState(
   client: Client,
-  runId: string,
+  agentId: string,
   to: ToolRun["state"],
 ): Promise<void> {
   const { rows } = await client.query<{ state: ToolRun["state"] }>(
     "SELECT state FROM tool_run WHERE id = $1 FOR UPDATE",
-    [runId],
+    [agentId],
   );
-  if (rows.length === 0) throw new Error(`ToolRun not found: ${runId}`);
+  if (rows.length === 0) throw new Error(`ToolRun not found: ${agentId}`);
   const from = rows[0].state;
   toolRunMachine.assertTransition(from, to);
-  const updated = await client.query("UPDATE tool_run SET state = $1 WHERE id = $2 AND state = $3", [to, runId, from]);
+  const updated = await client.query("UPDATE tool_run SET state = $1 WHERE id = $2 AND state = $3", [to, agentId, from]);
   if ((updated.rowCount ?? 0) !== 1) throw new Error("STATE_TRANSITION_CONFLICT");
 }
 

@@ -29,8 +29,8 @@ export {
 export type {
   RuntimeClient,
   RuntimeDocRef,
-  RuntimeRunSummary,
-  RuntimeRunDetail,
+  RuntimeAgentSummary,
+  RuntimeAgentDetail,
   RuntimeListResponse,
   RuntimeCreateResponse,
   RuntimeTaskStatus,

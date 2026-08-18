@@ -12,10 +12,10 @@
  *   2. creates a ConfigurationSnapshot,
  *   3. creates a GateSubmission,
  *   4. submits it for review (preparing→in_review),
- *   5. stops in `awaiting_approval` status and persists run-state.
+ *   5. stops in `awaiting_approval` status and persists agent-state.
  *
  * The operator approves/rejects via the human-only Core approve endpoint.
- * `--resume <runId>` polls the gate submission state: approved → continue;
+ * `--resume <agentId>` polls the gate submission state: approved → continue;
  * in_review → still waiting; rejected/withdrawn → fail-closed.
  *
  * Every Connector call passes a permission gate (whitelist + versioned
@@ -44,7 +44,7 @@ import {
   type LoopStatus,
   type TerminalCause,
   type RegisteredRevision,
-  type RunState,
+  type AgentState,
   type RtlGeneration,
   type StageId,
   type TbGeneration,
@@ -62,7 +62,7 @@ import {
   type LoopStatus,
   type TerminalCause,
   type RegisteredRevision,
-  type RunState,
+  type AgentState,
   type RtlGeneration,
   type StageId,
   type TbGeneration,
@@ -135,10 +135,10 @@ export interface LoopDeps {
   readonly maxRepairRounds?: number;
   readonly correlationId?: string;
   readonly onEvent?: (e: AuditEvent) => void;
-  /** Called after each stage boundary / gate stop with the updated RunState. */
-  readonly onStateChange?: (state: RunState) => Promise<void>;
+  /** Called after each stage boundary / gate stop with the updated AgentState. */
+  readonly onStateChange?: (state: AgentState) => Promise<void>;
   /** Called when the loop pauses at a gate, to print the CLI message. */
-  readonly onAwaitingApproval?: (gate: GateId, submissionId: string, runId: string) => void;
+  readonly onAwaitingApproval?: (gate: GateId, submissionId: string, agentId: string) => void;
 }
 
 
@@ -148,8 +148,8 @@ export class LoopExecutor {
   private readonly evidence: EvidenceSummary[] = [];
   private task = "";
   private seq = 0;
-  private runId?: string;
-  private runState?: RunState;
+  private agentId?: string;
+  private agentState?: AgentState;
 
   constructor(deps: LoopDeps) { this.deps = deps; }
 
@@ -157,16 +157,16 @@ export class LoopExecutor {
    * Execute a fresh run from the intake stage through to G4 submission.
    * The loop pauses at each gate (G1–G4) in `awaiting_approval` status.
    */
-  async run(task: string, opts?: { runId?: string; runState?: RunState }): Promise<LoopResult> {
+  async run(task: string, opts?: { agentId?: string; agentState?: AgentState }): Promise<LoopResult> {
     this.task = task;
-    this.runId = opts?.runId;
-    this.runState = opts?.runState;
+    this.agentId = opts?.agentId;
+    this.agentState = opts?.agentState;
     try {
-      if (this.runState && this.runState.status === "awaiting_approval" && this.runState.awaitingGate) {
+      if (this.agentState && this.agentState.status === "awaiting_approval" && this.agentState.awaitingGate) {
         // Resume: check the pending gate first.
         return await this.resumeFromGate();
       }
-      return await this.executeChain(opts?.runState?.currentStage ?? "intake");
+      return await this.executeChain(opts?.agentState?.currentStage ?? "intake");
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       const status: LoopStatus = e instanceof FailClosedError || e instanceof PermissionDeniedError ? "fail_closed" : "failed";
@@ -178,10 +178,10 @@ export class LoopExecutor {
    * Resume a paused run. Polls the pending gate submission; if approved,
    * continues to the next stage.
    */
-  async resume(runState: RunState): Promise<LoopResult> {
-    this.task = runState.task;
-    this.runId = runState.runId;
-    this.runState = runState;
+  async resume(agentState: AgentState): Promise<LoopResult> {
+    this.task = agentState.task;
+    this.agentId = agentState.agentId;
+    this.agentState = agentState;
     try {
       return await this.resumeFromGate();
     } catch (e) {
@@ -362,7 +362,7 @@ export class LoopExecutor {
 
   /**
    * At a gate: register pending revisions → snapshot → submission → submit →
-   * persist run-state → pause in awaiting_approval.
+   * persist agent-state → pause in awaiting_approval.
    * Returns a LoopResult when the loop should pause or terminate; returns
    * undefined to continue (gate already approved, e.g. --no-governance).
    */
@@ -399,10 +399,10 @@ export class LoopExecutor {
       return undefined;
     }
 
-    // Pause: sync ALL chain context into run-state before persisting.
+    // Pause: sync ALL chain context into agent-state before persisting.
     await this.syncChainContextToState({ status: "awaiting_approval", awaitingGate: gate });
-    this.deps.onAwaitingApproval?.(gate, submissionId, this.runId ?? "unknown");
-    this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: awaiting human approval`, result: "ok", detail: `submission=${submissionId} run=${this.runId}` });
+    this.deps.onAwaitingApproval?.(gate, submissionId, this.agentId ?? "unknown");
+    this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: awaiting human approval`, result: "ok", detail: `submission=${submissionId} agent=${this.agentId}` });
     return this.finishAwaiting(gate, submissionId);
   }
 
@@ -411,12 +411,12 @@ export class LoopExecutor {
    * If rejected/withdrawn, fail-closed. If still in_review, return awaiting.
    */
   private async resumeFromGate(): Promise<LoopResult> {
-    if (!this.runState?.awaitingGate) {
+    if (!this.agentState?.awaitingGate) {
       this.restoreChainContext();
-      return await this.executeChain(this.runState?.currentStage ?? "intake");
+      return await this.executeChain(this.agentState?.currentStage ?? "intake");
     }
-    const gate = this.runState.awaitingGate;
-    const submissionId = this.runState.gateSubmissions?.[gate];
+    const gate = this.agentState.awaitingGate;
+    const submissionId = this.agentState.gateSubmissions?.[gate];
     if (!submissionId) {
       return this.finish("failed", `resume: no submission id for pending gate ${gate}`);
     }
@@ -426,7 +426,7 @@ export class LoopExecutor {
 
     if (state === "approved") {
       this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: approved — continuing`, result: "ok" });
-      // Restore chain context from run-state.
+      // Restore chain context from agent-state.
       this.restoreChainContext();
       // Move to the stage AFTER the gate.
       const nextStage = this.stageAfterGate(gate);
@@ -441,7 +441,7 @@ export class LoopExecutor {
       return this.finish("fail_closed", `gate ${gate} was ${state} — stopping (fail-closed)`, this.allArtifacts(), "governance_rejected");
     }
     // Still in_review / preparing / checking — still waiting.
-    this.deps.onAwaitingApproval?.(gate, submissionId, this.runId ?? "unknown");
+    this.deps.onAwaitingApproval?.(gate, submissionId, this.agentId ?? "unknown");
     return this.finishAwaiting(gate, submissionId);
   }
 
@@ -485,7 +485,7 @@ export class LoopExecutor {
 
   private async registerDocArtifact(stage: StageId, doc: DocGeneration, artifactType: ArtifactType): Promise<void> {
     if (!this.deps.governance) return;
-    const artifactId = `art-${stage}-${sha256Hex(`${this.runId ?? ""}:${this.task}`).slice(0, 8)}`;
+    const artifactId = `art-${stage}-${sha256Hex(`${this.agentId ?? ""}:${this.task}`).slice(0, 8)}`;
     const version = (this.chainCtx.docRevisions[stage]?.version ?? 0) + 1;
     const raw = await this.deps.governance.registerCandidateArtifact({
       artifactId,
@@ -499,12 +499,12 @@ export class LoopExecutor {
     const rev: RegisteredRevision = { ...raw, contentLocation: doc.docPath };
     this.chainCtx.docRevisions[stage] = rev;
     this.pushAudit({ category: "governance", phase: "governance", action: `registered ${stage} artifact: ${rev.revisionId}`, result: "ok", detail: `type=${artifactType} path=${doc.docPath}` });
-    await this.updateState({ docs: { ...this.runState?.docs, [stage]: rev } });
+    await this.updateState({ docs: { ...this.agentState?.docs, [stage]: rev } });
   }
 
   private async registerRtlArtifact(): Promise<void> {
     if (!this.deps.governance || !this.chainCtx.rtl) return;
-    const artifactId = `art-rtl-${sha256Hex(`${this.runId ?? ""}:${this.task}`).slice(0, 8)}`;
+    const artifactId = `art-rtl-${sha256Hex(`${this.agentId ?? ""}:${this.task}`).slice(0, 8)}`;
     const content = this.chainCtx.rtl.sources.map(s => s.content).join("\n");
     const version = (this.chainCtx.rtlRevision?.version ?? 0) + 1;
     const raw = await this.deps.governance.registerCandidateArtifact({
@@ -522,21 +522,21 @@ export class LoopExecutor {
     await this.updateState({ rtlRevision: rev });
   }
 
-  // ----- run-state persistence -----
+  // ----- agent-state persistence -----
 
-  private async updateState(patch: Partial<RunState>): Promise<void> {
-    if (!this.runState || !this.deps.onStateChange) return;
-    this.runState = { ...this.runState, ...patch, updatedAt: new Date().toISOString() };
-    await this.deps.onStateChange(this.runState);
+  private async updateState(patch: Partial<AgentState>): Promise<void> {
+    if (!this.agentState || !this.deps.onStateChange) return;
+    this.agentState = { ...this.agentState, ...patch, updatedAt: new Date().toISOString() };
+    await this.deps.onStateChange(this.agentState);
   }
 
   /**
    * Sync the full in-memory chain context (doc revisions, gate submissions,
-   * RTL revision, current stage) into run-state, then persist. Called at
+   * RTL revision, current stage) into agent-state, then persist. Called at
    * gate-pause boundaries so --resume has everything it needs.
    */
-  private async syncChainContextToState(extra: Partial<RunState>): Promise<void> {
-    if (!this.runState || !this.deps.onStateChange) return;
+  private async syncChainContextToState(extra: Partial<AgentState>): Promise<void> {
+    if (!this.agentState || !this.deps.onStateChange) return;
     const docs: Record<string, RegisteredRevision> = {};
     for (const [stage, rev] of Object.entries(this.chainCtx.docRevisions)) {
       if (rev) docs[stage] = rev;
@@ -545,8 +545,8 @@ export class LoopExecutor {
     for (const [gate, subId] of Object.entries(this.chainCtx.gateSubmissions)) {
       if (subId) gateSubs[gate] = subId;
     }
-    this.runState = {
-      ...this.runState,
+    this.agentState = {
+      ...this.agentState,
       ...extra,
       docs,
       gateSubmissions: gateSubs,
@@ -556,29 +556,29 @@ export class LoopExecutor {
       ...(this.chainCtx.xdc ? { xdcArtifacts: { constraints: this.chainCtx.xdc.constraints } } : {}),
       updatedAt: new Date().toISOString(),
     };
-    await this.deps.onStateChange(this.runState);
+    await this.deps.onStateChange(this.agentState);
   }
   private restoreChainContext(): void {
-    if (!this.runState) return;
-    if (this.runState.docs) {
-      for (const [stage, rev] of Object.entries(this.runState.docs)) {
+    if (!this.agentState) return;
+    if (this.agentState.docs) {
+      for (const [stage, rev] of Object.entries(this.agentState.docs)) {
         if (rev) this.chainCtx.docRevisions[stage as StageId] = rev;
       }
     }
-    if (this.runState.rtlRevision) {
-      this.chainCtx.rtlRevision = this.runState.rtlRevision;
+    if (this.agentState.rtlRevision) {
+      this.chainCtx.rtlRevision = this.agentState.rtlRevision;
     }
-    if (this.runState.rtlArtifacts) {
-      this.chainCtx.rtl = { phase: "generate_rtl", reasoning: "restored from run-state", topModule: this.runState.rtlArtifacts.topModule, sources: this.runState.rtlArtifacts.sources };
+    if (this.agentState.rtlArtifacts) {
+      this.chainCtx.rtl = { phase: "generate_rtl", reasoning: "restored from agent-state", topModule: this.agentState.rtlArtifacts.topModule, sources: this.agentState.rtlArtifacts.sources };
     }
-    if (this.runState.tbArtifacts) {
-      this.chainCtx.tb = { phase: "generate_testbench", reasoning: "restored from run-state", testbenchModule: this.runState.tbArtifacts.testbenchModule, testbench: this.runState.tbArtifacts.testbench };
+    if (this.agentState.tbArtifacts) {
+      this.chainCtx.tb = { phase: "generate_testbench", reasoning: "restored from agent-state", testbenchModule: this.agentState.tbArtifacts.testbenchModule, testbench: this.agentState.tbArtifacts.testbench };
     }
-    if (this.runState.xdcArtifacts) {
-      this.chainCtx.xdc = { phase: "generate_xdc", reasoning: "restored from run-state", constraints: this.runState.xdcArtifacts.constraints };
+    if (this.agentState.xdcArtifacts) {
+      this.chainCtx.xdc = { phase: "generate_xdc", reasoning: "restored from agent-state", constraints: this.agentState.xdcArtifacts.constraints };
     }
-    if (this.runState.gateSubmissions) {
-      for (const [gate, subId] of Object.entries(this.runState.gateSubmissions)) {
+    if (this.agentState.gateSubmissions) {
+      for (const [gate, subId] of Object.entries(this.agentState.gateSubmissions)) {
         if (subId) this.chainCtx.gateSubmissions[gate as GjbGate] = subId;
       }
     }
@@ -878,7 +878,7 @@ export class LoopExecutor {
       ...this.allArtifacts(),
       evidence: this.evidence, audit: this.audit,
       endedReason: `awaiting GJB gate ${gate} approval (submission ${submissionId})`,
-      ...(this.runId ? { runId: this.runId } : {}),
+      ...(this.agentId ? { agentId: this.agentId } : {}),
       awaitingGate: gate,
     };
   }
@@ -897,7 +897,7 @@ export class LoopExecutor {
       ...(artifacts?.docs ? { docs: artifacts.docs } : {}),
       evidence: this.evidence, audit: this.audit, endedReason: reason,
       ...(cause ? { terminalCause: cause } : {}),
-      ...(this.runId ? { runId: this.runId } : {}),
+      ...(this.agentId ? { agentId: this.agentId } : {}),
     };
   }
 }

@@ -22,7 +22,7 @@ import {
   normalizeStageId,
   STAGE_TO_TOOL_OP,
 } from "./tasks.ts";
-import type { TaskDocRef, TaskRunDetail } from "../api/types.ts";
+import type { TaskDocRef, TaskAgentDetail } from "../api/types.ts";
 
 // ─── SynthiaPart 判别联合 ────────────────────────────────────────────
 
@@ -196,7 +196,7 @@ export function bitstreamFromEvidence(
   return null;
 }
 
-function evidenceEntryCount(evidence: TaskRunDetail["evidence"]): number {
+function evidenceEntryCount(evidence: TaskAgentDetail["evidence"]): number {
   return evidence.reduce((n, ev) => n + Math.max(ev.entries.length, 1), 0);
 }
 
@@ -223,7 +223,7 @@ function evidenceEntryCount(evidence: TaskRunDetail["evidence"]): number {
  *   （新工具条 3 秒内可见：阶段一翻即可见，先于权限门事件）。
  * - 流尾 Agent 文本且 run 仍 running → state=streaming，否则 done。
  */
-export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
+export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
   const parts: SynthiaPart[] = [];
   /** 当前「开放」的 Agent 文本 part 下标（连续文本事件拼接目标）。 */
   let openAgentText = -1;
@@ -292,7 +292,7 @@ export function auditToParts(detail: TaskRunDetail): SynthiaPart[] {
     errorCode,
   });
 
-  // 首轮指令气泡（runtime 不为初始 task 记 user_message 事件，取 run-state.task）。
+  // 首轮指令气泡（runtime 不为初始 task 记 user_message 事件，取 agent-state.task）。
   if (detail.task && detail.task.trim()) {
     push({ kind: "text", id: "t0-task", role: "user", state: "done", text: detail.task.trim(), segments: null });
   }

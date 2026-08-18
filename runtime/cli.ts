@@ -3,7 +3,7 @@
  *
  *   bun run runtime/cli.ts "<中文任务>" [--part <part>] [--project <id>]
  *        [--via-core] [--fake-connector] [--offline] [--no-governance]
- *        [--resume <runId>]
+ *        [--resume <agentId>]
  *
  * Modes:
  *  - default         real model (SYNTHIA_MODEL_*) + real Cloudflare connector
@@ -15,7 +15,7 @@
  *  - --no-governance  skip artifact registration and gate flow (dev/debug only;
  *                    audit records governance_skipped). Requires --offline or
  *                    --fake-connector.
- *  - --resume <runId> resume a paused run; polls the pending gate and continues
+ *  - --resume <agentId> resume a paused agent; polls the pending gate and continues
  *                    if approved, or reports still-waiting / fail-closed.
  *
  * Governance: when --via-core, artifact registration and gate submissions go
@@ -42,8 +42,8 @@ import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
 import { LoopExecutor, FakeVivadoConnector, successBehavior, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import { resolveCoreApiConfig } from "./core-api-connector.ts";
 import { CoreGovernanceClient } from "./governance-client.ts";
-import { newRunId, createRunState, loadRunState, saveRunState } from "./run-state.ts";
-import type { GovernanceClient, LoopModel, LoopResult, RunState } from "./types.ts";
+import { newAgentId, createAgentState, loadAgentState, saveAgentState } from "./agent-state.ts";
+import type { GovernanceClient, LoopModel, LoopResult, AgentState } from "./types.ts";
 import { NoGovernanceClient as NoGovClient } from "./types.ts";
 import { CounterScriptedModel, buildRemoteConnector, buildCoreApiConnector } from "./deps.ts";
 
@@ -58,23 +58,23 @@ interface CliArgs {
   fakeConnector: boolean;
   offline: boolean;
   noGovernance: boolean;
-  resumeRunId?: string;
+  resumeAgentId?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const rest = argv.slice(2);
   if (rest.length === 0 || rest[0] === "--help" || rest[0] === "-h") {
-    console.error('usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--via-core] [--fake-connector] [--offline] [--no-governance] [--resume <runId>]');
+    console.error('usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--via-core] [--fake-connector] [--offline] [--no-governance] [--resume <agentId>]');
     process.exit(rest.length === 0 ? 1 : 0);
   }
   // --resume can appear without a task argument.
   const resumeIdx = rest.indexOf("--resume");
-  let resumeRunId: string | undefined;
+  let resumeAgentId: string | undefined;
   let taskArgs = rest;
   if (resumeIdx >= 0) {
-    resumeRunId = rest[resumeIdx + 1];
-    if (!resumeRunId) {
-      console.error("--resume requires a runId argument");
+    resumeAgentId = rest[resumeIdx + 1];
+    if (!resumeAgentId) {
+      console.error("--resume requires a agentId argument");
       process.exit(1);
     }
     taskArgs = rest.filter((_, i) => i !== resumeIdx && i !== resumeIdx + 1);
@@ -95,7 +95,7 @@ function parseArgs(argv: string[]): CliArgs {
     fakeConnector: flags.includes("--fake-connector"),
     offline: flags.includes("--offline"),
     noGovernance: flags.includes("--no-governance"),
-    resumeRunId,
+    resumeAgentId,
   };
 }
 
@@ -107,7 +107,7 @@ function renderReport(result: LoopResult): string {
   lines.push(`=== Synthia Runtime report ===`);
   lines.push(`status: ${result.status}`);
   lines.push(`part: ${result.part}`);
-  if (result.runId) lines.push(`runId: ${result.runId}`);
+  if (result.agentId) lines.push(`agentId: ${result.agentId}`);
   if (result.awaitingGate) lines.push(`awaitingGate: ${result.awaitingGate}`);
   if (result.endedReason) lines.push(`reason: ${result.endedReason}`);
   if (result.docs?.length) lines.push(`docs: ${result.docs.map(d => d.docPath).join(", ")}`);
@@ -165,17 +165,17 @@ async function main(): Promise<void> {
   process.stderr.write(`[runtime] model=${args.offline ? "offline-scripted" : "openai-compatible"} connector=${connector.id} part=${args.part} cap=${VIVADO_CAPABILITY_VERSION}\n`);
 
   // Run-state persistence
-  let runState: RunState | undefined;
-  let runId: string;
+  let agentState: AgentState | undefined;
+  let agentId: string;
 
-  if (args.resumeRunId) {
-    runState = await loadRunState(args.resumeRunId);
-    runId = runState.runId;
-    process.stderr.write(`[runtime] resuming run ${runId} (status=${runState.status}, stage=${runState.currentStage}${runState.awaitingGate ? `, gate=${runState.awaitingGate}` : ""})\n`);
+  if (args.resumeAgentId) {
+    agentState = await loadAgentState(args.resumeAgentId);
+    agentId = agentState.agentId;
+    process.stderr.write(`[runtime] resuming agent ${agentId} (status=${agentState.status}, stage=${agentState.currentStage}${agentState.awaitingGate ? `, gate=${agentState.awaitingGate}` : ""})\n`);
   } else {
-    runId = newRunId();
-    runState = createRunState({ runId, task: args.task, part: args.part, projectId: args.project });
-    process.stderr.write(`[runtime] starting new run ${runId}\n`);
+    agentId = newAgentId();
+    agentState = createAgentState({ agentId, task: args.task, part: args.part, projectId: args.project });
+    process.stderr.write(`[runtime] starting new agent ${agentId}\n`);
   }
 
   const loop = new LoopExecutor({
@@ -185,20 +185,20 @@ async function main(): Promise<void> {
     toolModelPolicyHash: process.env.SYNTHIA_TOOL_MODEL_POLICY_HASH ?? "synthia-policy-v1",
     actorId: "synthia-runtime",
     onEvent: (e) => process.stderr.write(`[runtime] ${e.category}/${e.phase} ${e.action} ${e.result ?? ""}\n`),
-    onStateChange: async (state) => { await saveRunState(state); },
+    onStateChange: async (state) => { await saveAgentState(state); },
     onAwaitingApproval: (gate, submissionId, rid) => {
       process.stderr.write(`\n[runtime] ═══════════════════════════════════════════════════\n`);
       process.stderr.write(`[runtime]  等待 ${gate} 人工批准\n`);
       process.stderr.write(`[runtime]  submission: ${submissionId}\n`);
-      process.stderr.write(`[runtime]  run: ${rid}\n`);
+      process.stderr.write(`[runtime]  agent: ${rid}\n`);
       process.stderr.write(`[runtime]  批准后执行: bun run runtime/cli.ts --resume ${rid}\n`);
       process.stderr.write(`[runtime] ═══════════════════════════════════════════════════\n\n`);
     },
   });
 
-  const result = args.resumeRunId && runState
-    ? await loop.resume(runState)
-    : await loop.run(args.task, { runId, runState });
+  const result = args.resumeAgentId && agentState
+    ? await loop.resume(agentState)
+    : await loop.run(args.task, { agentId, agentState });
 
   process.stdout.write(renderReport(result) + "\n");
   // Exit codes: 0=succeeded, 1=failed, 3=fail_closed, 4=awaiting_approval

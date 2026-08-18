@@ -47,7 +47,7 @@ export interface RegisteredArtifactInfo {
  * - **门禁锁定**：`core_submit_gate` 成功后调用 {@link lockForGate} 进入「等待批准」状态；
  *   在该状态下会话在**工具执行层硬拦**除 `core_check_gate` 外的一切 skill/vivado 工具调用。
  *   {@link core_check_gate} 返回 `approved` 时 {@link unlockGate} 解除；`rejected`/`withdrawn`
- *   保持锁定。锁定状态持久化进 run-state（重启后仍锁定）。
+ *   保持锁定。锁定状态持久化进 agent-state（重启后仍锁定）。
  * - **登记簿**：skill 工具登记候选时调用 {@link recordArtifact}，`core_create_snapshot`
  *   记录快照成员；`core_submit_gate` 据此在提交前运行主题/名称/端口符合性校验。
  */
@@ -60,7 +60,7 @@ export interface FreeAgentController {
   lockForGate(gate: GateId, submissionId: string): void;
   /** 解除锁定（批准到达）并持久化。 */
   unlockGate(): void;
-  /** 流程实例 id（createGateSubmission 入参；来自 run-state）。 */
+  /** 流程实例 id（createGateSubmission 入参；来自 agent-state）。 */
   readonly processInstanceId: string;
   /** 记录已登记候选制品（符合性校验用）。 */
   recordArtifact(info: RegisteredArtifactInfo): void;
@@ -160,7 +160,7 @@ export type FreeAgentStatus =
 
 /** 自由 Agent 会话。server/web 面向此接口编程（Slice D）。 */
 export interface FreeAgentSession {
-  readonly runId: string;
+  readonly agentId: string;
   readonly projectId: string;
   status(): FreeAgentStatus;
   /**

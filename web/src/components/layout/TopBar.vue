@@ -46,7 +46,7 @@ function onBack(): void {
     </div>
 
     <div class="topbar-right">
-      <TaskSwitcher :runs="props.runs" :current-run="props.currentRun" @select-run="(id) => emit('select-run', id)" />
+      <TaskSwitcher :agents="props.agents" :current-agent="props.currentAgent" @select-agent="(id) => emit('select-agent', id)" />
 
       <button
         type="button"

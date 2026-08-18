@@ -40,7 +40,7 @@ export const STAGE_CHAIN: readonly StageNode[] = [
   { id: "G4", kind: "gate", name: GATE_REVIEW_NAMES.G4 },
 ];
 
-/** Runtime run-state 的阶段别名 → 阶段链节点 id（runtime 用 rtl_build，Contract 链用 rtl）。 */
+/** Runtime agent-state 的阶段别名 → 阶段链节点 id（runtime 用 rtl_build，Contract 链用 rtl）。 */
 const STAGE_ALIASES: Readonly<Record<string, string>> = {
   rtl_build: "rtl",
 };
@@ -77,7 +77,7 @@ export interface StageChainInput {
 }
 
 /**
- * 由 run 状态推导阶段链各节点状态。
+ * 由 agent 状态推导阶段链各节点状态。
  *
  * - succeeded：全部完成。
  * - awaiting_approval：等待门之前的节点全部完成，该门「等待批准」，之后未开始。
@@ -115,7 +115,7 @@ export function deriveStageChain(input: StageChainInput): StageChainNode[] {
   }));
 }
 
-// ─── run 状态文案 ─────────────────────────────────────────────────────
+// ─── agent 状态文案 ─────────────────────────────────────────────────────
 
 export const TASK_STATUS_TEXT: Readonly<Record<string, string>> = {
   running: "运行中",
@@ -131,9 +131,18 @@ export function isTerminalStatus(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "fail_closed" || status === "interrupted";
 }
 
-/** run_id 短码：run-<uuid> → 取 uuid 前 8 位。 */
-export function shortRunId(runId: string): string {
-  const rest = runId.startsWith("run-") ? runId.slice(4) : runId;
+/**
+ * agent_id 短码：`agent-<uuid>` → 取 uuid 前 8 位。
+ *
+ * 仍认 `run-` 旧前缀：改名前落盘的 agent-state 文件（`.runs/run-<uuid>.json`）
+ * 恢复后仍带旧 id，不能显示成 `run-abcd…`。
+ */
+export function shortAgentId(agentId: string): string {
+  const rest = agentId.startsWith("agent-")
+    ? agentId.slice("agent-".length)
+    : agentId.startsWith("run-")
+      ? agentId.slice("run-".length)
+      : agentId;
   return rest.length > 8 ? `${rest.slice(0, 8)}…` : rest;
 }
 
@@ -298,7 +307,7 @@ export interface Poller {
 
 /**
  * 简单轮询器：setInterval + stop 清理（页面卸载时必须 stop）。
- * tick 返回 false 时自动停止（如 run 到达终态）。
+ * tick 返回 false 时自动停止（如 agent 到达终态）。
  */
 export function createPoller(tick: () => boolean | void, intervalMs: number): Poller {
   const timer = setInterval(() => {

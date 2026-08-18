@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  newRunId,
-  runStatePath,
-  createRunState,
-  saveRunState,
-  loadRunState,
-  listRuns,
-  deleteRun,
+  newAgentId,
+  agentStatePath,
+  createAgentState,
+  saveAgentState,
+  loadAgentState,
+  listAgents,
+  deleteAgent,
   STAGE_ORDER,
   nextStage,
   withStage,
@@ -15,19 +15,19 @@ import {
   withDocArtifact,
   withGateSubmission,
   withGateDecision,
-} from "./run-state.ts";
-import type { RunState, RegisteredRevision } from "./types.ts";
+} from "./agent-state.ts";
+import type { AgentState, RegisteredRevision } from "./types.ts";
 import { join } from "node:path";
 
-describe("run-state persistence", () => {
-  test("newRunId generates run-<uuid> format", () => {
-    const id = newRunId();
-    expect(id).toMatch(/^run-[0-9a-f-]{36}$/);
+describe("agent-state persistence", () => {
+  test("newAgentId generates agent-<uuid> format", () => {
+    const id = newAgentId();
+    expect(id).toMatch(/^agent-[0-9a-f-]{36}$/);
   });
 
-  test("createRunState initializes all fields", () => {
-    const state = createRunState({ runId: "r1", task: "counter", part: "xc7", projectId: "p1" });
-    expect(state.runId).toBe("r1");
+  test("createAgentState initializes all fields", () => {
+    const state = createAgentState({ agentId: "r1", task: "counter", part: "xc7", projectId: "p1" });
+    expect(state.agentId).toBe("r1");
     expect(state.task).toBe("counter");
     expect(state.currentStage).toBe("intake");
     expect(state.status).toBe("running");
@@ -37,33 +37,33 @@ describe("run-state persistence", () => {
   });
 
   test("save + load round-trips state", async () => {
-    const state = createRunState({ runId: "r-test-rt", task: "test", part: "xc7", projectId: "p1" });
+    const state = createAgentState({ agentId: "r-test-rt", task: "test", part: "xc7", projectId: "p1" });
     const updated = withAwaitingApproval(state, "G1");
-    await saveRunState(updated);
-    const loaded = await loadRunState("r-test-rt");
+    await saveAgentState(updated);
+    const loaded = await loadAgentState("r-test-rt");
     expect(loaded.status).toBe("awaiting_approval");
     expect(loaded.awaitingGate).toBe("G1");
-    await deleteRun("r-test-rt");
+    await deleteAgent("r-test-rt");
   });
 
-  test("loadRunState throws for non-existent run", async () => {
-    await expect(loadRunState("nonexistent")).rejects.toThrow();
+  test("loadAgentState throws for non-existent agent", async () => {
+    await expect(loadAgentState("nonexistent")).rejects.toThrow();
   });
 
-  test("listRuns returns saved run ids", async () => {
-    const state1 = createRunState({ runId: "r-list-1", task: "a", part: "p", projectId: "p1" });
-    const state2 = createRunState({ runId: "r-list-2", task: "b", part: "p", projectId: "p1" });
-    await saveRunState(state1);
-    await saveRunState(state2);
-    const runs = await listRuns();
-    expect(runs).toContain("r-list-1");
-    expect(runs).toContain("r-list-2");
-    await deleteRun("r-list-1");
-    await deleteRun("r-list-2");
+  test("listAgents returns saved agent ids", async () => {
+    const state1 = createAgentState({ agentId: "r-list-1", task: "a", part: "p", projectId: "p1" });
+    const state2 = createAgentState({ agentId: "r-list-2", task: "b", part: "p", projectId: "p1" });
+    await saveAgentState(state1);
+    await saveAgentState(state2);
+    const agents = await listAgents();
+    expect(agents).toContain("r-list-1");
+    expect(agents).toContain("r-list-2");
+    await deleteAgent("r-list-1");
+    await deleteAgent("r-list-2");
   });
 
-  test("deleteRun is no-op for non-existent", async () => {
-    await deleteRun("does-not-exist"); // should not throw
+  test("deleteAgent is no-op for non-existent", async () => {
+    await deleteAgent("does-not-exist"); // should not throw
   });
 });
 
@@ -88,8 +88,8 @@ describe("stage ordering", () => {
   });
 });
 
-describe("run-state functional updates", () => {
-  const base: RunState = createRunState({ runId: "r1", task: "t", part: "p", projectId: "p1" });
+describe("agent-state functional updates", () => {
+  const base: AgentState = createAgentState({ agentId: "r1", task: "t", part: "p", projectId: "p1" });
 
   test("withStage updates currentStage and status", () => {
     const s = withStage(base, "rtl_build");

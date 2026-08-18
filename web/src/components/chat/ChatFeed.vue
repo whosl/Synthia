@@ -107,7 +107,7 @@ onMounted(() => void nextTick(scrollToBottom));
             </button>
           </div>
         </template>
-        <template v-else-if="runStatus === null">
+        <template v-else-if="agentStatus === null">
           <p class="chat-feed-empty-title">正在加载对话…</p>
         </template>
         <template v-else>

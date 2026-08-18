@@ -29,7 +29,7 @@ import {
   alwaysFailBehavior,
   unsupportedBehavior,
 } from "./loop.ts";
-import { loadRunState } from "./run-state.ts";
+import { loadAgentState } from "./agent-state.ts";
 import type {
   AgentMessage,
   ChatTurn,
@@ -86,17 +86,17 @@ function parseJSON(s: string | undefined): Record<string, unknown> | null {
 // Isolation: temp runs dir
 // ---------------------------------------------------------------------------
 
-let runsDir: string;
+let agentsDir: string;
 let idCounter = 0;
 
 beforeAll(async () => {
-  runsDir = await mkdtemp(join(tmpdir(), "synthia-free-agent-test-"));
-  process.env.SYNTHIA_RUNS_DIR = runsDir;
+  agentsDir = await mkdtemp(join(tmpdir(), "synthia-free-agent-test-"));
+  process.env.SYNTHIA_RUNS_DIR = agentsDir;
 });
 
 afterAll(async () => {
   delete process.env.SYNTHIA_RUNS_DIR;
-  await rm(runsDir, { recursive: true, force: true });
+  await rm(agentsDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -110,8 +110,8 @@ function makeSession(opts: {
   initialGateLock?: { gate: "G1" | "G2" | "G3" | "G4"; submissionId: string };
   processInstanceId?: string;
 }) {
-  const runId = `run-fa-test-${++idCounter}`;
-  const session = createFreeAgentSession(runId, {
+  const agentId = `agent-fa-test-${++idCounter}`;
+  const session = createFreeAgentSession(agentId, {
     model: opts.model,
     tools: [...assembleSkillTools(), ...assembleGateTools(), assembleVivadoTool()],
     systemPrompt: "test system prompt",
@@ -122,9 +122,9 @@ function makeSession(opts: {
     connector: opts.connector ?? null,
     ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     ...(opts.initialGateLock ? { initialGateLock: opts.initialGateLock } : {}),
-    runsDir,
+    agentsDir,
   });
-  return { session, runId };
+  return { session, agentId };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +468,7 @@ describe("free-agent: content-conformity gate", () => {
 });
 
 describe("free-agent: lock persistence across restart", () => {
-  test("locked run-state is restored on session reconstruction", async () => {
+  test("locked agent-state is restored on session reconstruction", async () => {
     const gov = new MockGovernanceClient();
     gov.setSubmitResult("in_review");
     const modelA = new ScriptedModel([
@@ -477,13 +477,13 @@ describe("free-agent: lock persistence across restart", () => {
       call("tc3", "core_submit_gate", { gate: "G2", snapshot_id: "snap-mock-2" }),
       txt("submitted, awaiting approval."),
     ]);
-    const { session: sessionA, runId } = makeSession({ model: modelA, governance: gov });
+    const { session: sessionA, agentId } = makeSession({ model: modelA, governance: gov });
 
     await sessionA.prompt("submit to G2");
     expect(sessionA.status()).toBe("awaiting_approval");
 
-    // The persisted run-state carries the lock.
-    const state = await loadRunState(runId);
+    // The persisted agent-state carries the lock.
+    const state = await loadAgentState(agentId);
     expect(state.freeAgentLock).toBeDefined();
     expect(state.freeAgentLock!.gate).toBe("G2");
     expect(state.freeAgentLock!.submissionId).toBe("sub-mock-3");
@@ -514,9 +514,9 @@ describe("free-agent: lock persistence across restart", () => {
   test("conversation sidecar is persisted for resume", async () => {
     const gov = new MockGovernanceClient();
     const model = new ScriptedModel([txt("persisted reply")]);
-    const { session, runId } = makeSession({ model, governance: gov });
+    const { session, agentId } = makeSession({ model, governance: gov });
     await session.prompt("test message");
-    const convo = await loadFreeAgentConversation(runId);
+    const convo = await loadFreeAgentConversation(agentId);
     expect(convo).not.toBeNull();
     expect(convo!.messages.length).toBeGreaterThan(0);
     expect(convo!.messages[0]!.role).toBe("system");
@@ -738,7 +738,7 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
     const claimed = "仿真已通过，全部功能验证完成。";
     const corrected = "抱歉，我尚未实际运行仿真。现在调用 vivado_run 运行仿真后再汇报。";
     const model = new ScriptedModel([txt(claimed), txt(corrected)]);
-    const { session, runId } = makeSession({ model });
+    const { session, agentId } = makeSession({ model });
 
     const reply = await session.prompt("仿真跑完了吗？");
 
@@ -752,7 +752,7 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
     expect(feedback).toBeDefined();
     expect(feedback!.content).toContain("没有 succeeded 的 simulate 记录");
     // 被拦截的声称文本不出现在持久化会话里（绝不并排展示给用户）。
-    const convo = await loadFreeAgentConversation(runId);
+    const convo = await loadFreeAgentConversation(agentId);
     expect(JSON.stringify(convo!.messages)).not.toContain(claimed);
     // audit：一条 intercepted_retry 记录。
     expect(convo!.claimChecks).toHaveLength(1);
@@ -773,13 +773,13 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
       }),
       txt(claimed),
     ]);
-    const { session, runId } = makeSession({ model, connector });
+    const { session, agentId } = makeSession({ model, connector });
 
     const reply = await session.prompt("请仿真并汇报");
 
     expect(reply).toBe(claimed);
     expect(model.calls.length).toBe(2); // 无额外回灌轮次
-    const convo = await loadFreeAgentConversation(runId);
+    const convo = await loadFreeAgentConversation(agentId);
     expect(JSON.stringify(convo!.messages)).toContain(claimed);
     expect(convo!.claimChecks).toHaveLength(1);
     expect(convo!.claimChecks![0]!.disposition).toBe("passed");
@@ -792,13 +792,13 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
       txt("仿真确实通过了。"),
       txt("我确认仿真通过。"),
     ]);
-    const { session, runId } = makeSession({ model });
+    const { session, agentId } = makeSession({ model });
 
     const reply = await session.prompt("仿真跑完了吗？");
 
     expect(reply).toBe("[系统] 上述完成声明未经工具记录支撑，已拦截。请要求 Agent 实际运行仿真。");
     expect(model.calls.length).toBe(3); // 3 次文本尝试（1 + 2 次重试）
-    const convo = await loadFreeAgentConversation(runId);
+    const convo = await loadFreeAgentConversation(agentId);
     // 三次声称的具体文本都不入会话历史（回灌消息里的「声称仿真通过」是系统核查文案，非模型原文）。
     expect(JSON.stringify(convo!.messages)).not.toContain("仿真通过。");
     expect(JSON.stringify(convo!.messages)).not.toContain("仿真确实通过了");
@@ -810,20 +810,20 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
   test("非完成性表述不误拦（否定/过程性）", async () => {
     const negated = "仿真尚未通过，需要先修复计数器逻辑。";
     const modelA = new ScriptedModel([txt(negated)]);
-    const { session: sessionA, runId: runIdA } = makeSession({ model: modelA });
+    const { session: sessionA, agentId: agentIdA } = makeSession({ model: modelA });
     const replyA = await sessionA.prompt("进展如何？");
     expect(replyA).toBe(negated);
     expect(modelA.calls.length).toBe(1);
-    const convoA = await loadFreeAgentConversation(runIdA);
+    const convoA = await loadFreeAgentConversation(agentIdA);
     expect(convoA!.claimChecks).toBeUndefined(); // 无命中，sidecar 不含该字段
 
     const planned = "I will run the simulation next and report back.";
     const modelB = new ScriptedModel([txt(planned)]);
-    const { session: sessionB, runId: runIdB } = makeSession({ model: modelB });
+    const { session: sessionB, agentId: agentIdB } = makeSession({ model: modelB });
     const replyB = await sessionB.prompt("status?");
     expect(replyB).toBe(planned);
     expect(modelB.calls.length).toBe(1);
-    const convoB = await loadFreeAgentConversation(runIdB);
+    const convoB = await loadFreeAgentConversation(agentIdB);
     expect(convoB!.claimChecks).toBeUndefined();
   });
 });

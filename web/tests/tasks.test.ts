@@ -9,7 +9,7 @@ import {
   describeAuditEvent,
   isTerminalStatus,
   normalizeStageId,
-  shortRunId,
+  shortAgentId,
 } from "../src/domain/tasks.ts";
 
 describe("阶段链硬编码与 Contract 一致", () => {
@@ -164,7 +164,7 @@ describe("轮询清理", () => {
   });
 });
 
-describe("run 状态辅助", () => {
+describe("agent 状态辅助", () => {
   test("终态判定与状态文案", () => {
     expect(isTerminalStatus("succeeded")).toBe(true);
     expect(isTerminalStatus("failed")).toBe(true);
@@ -174,8 +174,13 @@ describe("run 状态辅助", () => {
     expect(TASK_STATUS_TEXT.awaiting_approval).toBe("等待批准");
   });
 
-  test("run_id 短码", () => {
-    expect(shortRunId("run-12345678-abcd-ef00")).toBe("12345678…");
-    expect(shortRunId("run-abc")).toBe("abc");
+  test("agent_id 短码", () => {
+    expect(shortAgentId("agent-12345678-abcd-ef00")).toBe("12345678…");
+    expect(shortAgentId("agent-abc")).toBe("abc");
+  });
+
+  test("agent_id 短码：仍认 run- 旧前缀（改名前落盘的 state 恢复后仍带旧 id）", () => {
+    expect(shortAgentId("run-12345678-abcd-ef00")).toBe("12345678…");
+    expect(shortAgentId("run-abc")).toBe("abc");
   });
 });

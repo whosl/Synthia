@@ -2,16 +2,16 @@
  * Synthia Runtime — HTTP task service.
  *
  * Wraps LoopExecutor in a Bun.serve HTTP server with:
- *   POST /tasks                  → async-start a loop run, 201 {run_id}
- *   GET  /tasks                  → list all runs
- *   GET  /tasks/:runId           → run detail (status, docs, audit, evidence)
- *   POST /tasks/:runId/resume    → idempotent resume, 200 {resumed:true}
+ *   POST /tasks                  → async-start a loop agent, 201 {agent_id}
+ *   GET  /tasks                  → list all agents
+ *   GET  /tasks/:agentId           → agent detail (status, docs, audit, evidence)
+ *   POST /tasks/:agentId/resume    → idempotent resume, 200 {resumed:true}
  *
  * Approval auto-resume monitor: polls Core gate-submission state for every
- * awaiting_approval run every `gatePollMs`; approved → auto-resume;
+ * awaiting_approval agent every `gatePollMs`; approved → auto-resume;
  * rejected/withdrawn → fail_closed terminal.
  *
- * Disk recovery: on startup, loads .runs/ from disk; runs whose persisted
+ * Disk recovery: on startup, loads .runs/ from disk; agents whose persisted
  * status was "running" are marked "interrupted" (a server-level concept;
  * disk is updated to "failed" with reason).
  *
@@ -37,11 +37,11 @@ import type { Server } from "bun";
 // ── loop + persistence ──────────────────────────────────────────────────────
 import { LoopExecutor, FakeVivadoConnector, successBehavior } from "./loop.ts";
 import {
-  newRunId, createRunState, loadRunState, saveRunState, listRuns,
-} from "./run-state.ts";
+  newAgentId, createAgentState, loadAgentState, saveAgentState, listAgents,
+} from "./agent-state.ts";
 import type {
   AuditEvent, EvidenceSummary, GateId, GovernanceClient, LoopModel,
-  LoopConnector, LoopResult, RegisteredRevision, RunState, StageId,
+  LoopConnector, LoopResult, RegisteredRevision, AgentState, StageId,
   TerminalCause,
 } from "./types.ts";
 
@@ -70,8 +70,8 @@ export type ServerStatus =
   | "idle" | "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed"
   | "interrupted";
 
-export interface RunHandle {
-  readonly runId: string;
+export interface AgentHandle {
+  readonly agentId: string;
   readonly projectId: string;
   readonly processInstanceId: string;
   readonly task: string;
@@ -93,10 +93,10 @@ export interface RunHandle {
   readonly skillPrompts: SkillPrompts;
   readonly toolModelPolicyHash: string;
   // latest persisted state (mirrors disk; updated via onStateChange)
-  currentState?: RunState;
+  currentState?: AgentState;
 }
 
-export interface RunDeps {
+export interface AgentDeps {
   readonly model: LoopModel;
   readonly connector: LoopConnector;
   readonly governance: GovernanceClient;
@@ -105,7 +105,7 @@ export interface RunDeps {
 export type DepsFactory = (opts: {
   projectId: string;
   processInstanceId: string;
-}) => Promise<RunDeps>;
+}) => Promise<AgentDeps>;
 
 export interface ServerConfig {
   readonly skillPrompts: SkillPrompts;
@@ -142,7 +142,7 @@ function errorResponse(status: number, code: string, message: string): Response 
 // ---------------------------------------------------------------------------
 
 export class RuntimeServer {
-  private readonly registry = new Map<string, RunHandle>();
+  private readonly registry = new Map<string, AgentHandle>();
   private readonly sessions = new Map<string, FreeAgentSession>();
   private server?: Server;
   private monitorTimer?: ReturnType<typeof setInterval>;
@@ -244,7 +244,7 @@ export class RuntimeServer {
       return errorResponse(400, "bad_request", "task is required");
 
     // Build deps before creating state so a factory failure doesn't orphan files.
-    let deps: RunDeps;
+    let deps: AgentDeps;
     try {
       deps = await this.depsFactory({ projectId, processInstanceId });
     } catch (e) {
@@ -252,60 +252,60 @@ export class RuntimeServer {
       return errorResponse(503, "capability_unavailable", `failed to build runtime deps: ${msg}`);
     }
 
-    const runId = newRunId();
-    const runState = createRunState({ runId, task, part, projectId, processInstanceId });
-    await saveRunState(runState);
+    const agentId = newAgentId();
+    const agentState = createAgentState({ agentId, task, part, projectId, processInstanceId });
+    await saveAgentState(agentState);
 
-    const handle: RunHandle = {
-      runId, projectId, processInstanceId, task, part,
+    const handle: AgentHandle = {
+      agentId, projectId, processInstanceId, task, part,
       status: "running",
       currentStage: "intake",
       busy: false,
       audit: [],
       evidence: [],
       docs: {},
-      createdAt: runState.createdAt,
+      createdAt: agentState.createdAt,
       model: deps.model,
       connector: deps.connector,
       governance: deps.governance,
       skillPrompts: this.config.skillPrompts,
       toolModelPolicyHash: this.config.toolModelPolicyHash,
-      currentState: runState,
+      currentState: agentState,
     };
-    this.registry.set(runId, handle);
+    this.registry.set(agentId, handle);
 
     // mode="agent": free-agent conversation only — do NOT start the GJB
-    // pipeline loop. The run stays idle until /message drives it.
+    // pipeline loop. The agent stays idle until /message drives it.
     if (body.mode === "agent") {
       handle.status = "idle";
-      return json({ run_id: runId }, 201);
+      return json({ agent_id: agentId }, 201);
     }
 
     // Async start — don't await.
-    this.executeRun(runId, "initial").catch((e) => {
-      process.stderr.write(`[runtime-server] executeRun error for ${runId}: ${e}\n`);
+    this.executeAgent(agentId, "initial").catch((e) => {
+      process.stderr.write(`[runtime-server] executeAgent error for ${agentId}: ${e}\n`);
     });
 
-    return json({ run_id: runId }, 201);
+    return json({ agent_id: agentId }, 201);
   }
 
   // GET /tasks
   private handleListTasks(): Response {
-    const runs = [...this.registry.values()].map((h) => ({
-      run_id: h.runId,
+    const agents = [...this.registry.values()].map((h) => ({
+      agent_id: h.agentId,
       project_id: h.projectId,
       status: h.status,
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
       created_at: h.createdAt,
     }));
-    return json({ runs });
+    return json({ agents });
   }
 
-  // GET /tasks/:runId
-  private handleGetTask(runId: string): Response {
-    const h = this.registry.get(runId);
-    if (!h) return errorResponse(404, "not_found", `run ${runId} not found`);
+  // GET /tasks/:agentId
+  private handleGetTask(agentId: string): Response {
+    const h = this.registry.get(agentId);
+    if (!h) return errorResponse(404, "not_found", `agent ${agentId} not found`);
 
     const docs = Object.entries(h.docs)
       .filter(([, rev]) => rev)
@@ -317,7 +317,7 @@ export class RuntimeServer {
       }));
 
     return json({
-      run_id: h.runId,
+      agent_id: h.agentId,
       project_id: h.projectId,
       task: h.task,
       status: h.status,
@@ -331,20 +331,20 @@ export class RuntimeServer {
     });
   }
 
-  // POST /tasks/:runId/resume
-  private handleResume(runId: string): Response {
-    const h = this.registry.get(runId);
-    if (!h) return errorResponse(404, "not_found", `run ${runId} not found`);
+  // POST /tasks/:agentId/resume
+  private handleResume(agentId: string): Response {
+    const h = this.registry.get(agentId);
+    if (!h) return errorResponse(404, "not_found", `agent ${agentId} not found`);
 
-    // Governance-rejected runs are permanently terminal — never resumable.
+    // Governance-rejected agents are permanently terminal — never resumable.
     if (h.terminalCause === "governance_rejected") {
       return errorResponse(
         409, "not_resumable",
-        `run ${runId} terminated by governance rejection (${h.endedReason ?? "gate rejected"}) — not resumable`,
+        `agent ${agentId} terminated by governance rejection (${h.endedReason ?? "gate rejected"}) — not resumable`,
       );
     }
 
-    // Idempotent: always return {resumed:true} if the run exists and is not
+    // Idempotent: always return {resumed:true} if the agent exists and is not
     // governance-rejected. Only trigger actual execution when resumable and
     // not busy.
     const resumable =
@@ -354,8 +354,8 @@ export class RuntimeServer {
       h.status === "fail_closed";
 
     if (!h.busy && resumable) {
-      this.executeRun(runId, "resume").catch((e) => {
-        process.stderr.write(`[runtime-server] resume executeRun error for ${runId}: ${e}\n`);
+      this.executeAgent(agentId, "resume").catch((e) => {
+        process.stderr.write(`[runtime-server] resume executeAgent error for ${agentId}: ${e}\n`);
       });
     }
 
@@ -364,18 +364,18 @@ export class RuntimeServer {
 
   // ----- free-agent conversation (spec 001-agent-freedom) -----
 
-  /** run 是否存在于 registry 或磁盘。 */
-  private async runExists(runId: string): Promise<boolean> {
-    if (this.registry.has(runId)) return true;
+  /** agent 是否存在于 registry 或磁盘。 */
+  private async agentExists(agentId: string): Promise<boolean> {
+    if (this.registry.has(agentId)) return true;
     try {
-      return !!(await loadRunState(runId));
+      return !!(await loadAgentState(agentId));
     } catch {
       return false;
     }
   }
 
   /**
-   * POST /tasks/:runId/message — 给自由 Agent 发消息（立即 accepted）。
+   * POST /tasks/:agentId/message — 给自由 Agent 发消息（立即 accepted）。
    *
    * 语义（SSE 切片）：不再阻塞等整轮完成。idle/终态 → 后台启动
    * session.prompt（流式回调 → StreamHub → SSE 推送），立即返回
@@ -384,7 +384,7 @@ export class RuntimeServer {
    * 的 audit（free_agent_reply/free_agent_reply_error）可查，旧行为的
    * `{reply}` 字段不再返回（前端已改为流式/轮询渲染，轮询路径不受影响）。
    */
-  private async handleSendMessage(runId: string, req: Request): Promise<Response> {
+  private async handleSendMessage(agentId: string, req: Request): Promise<Response> {
     let body: Record<string, unknown>;
     try {
       body = await req.json() as Record<string, unknown>;
@@ -394,32 +394,32 @@ export class RuntimeServer {
     const text = typeof body.text === "string" ? body.text.trim() : "";
     if (!text) return errorResponse(400, "bad_request", "text is required");
 
-    if (!(await this.runExists(runId))) {
-      return errorResponse(404, "not_found", `run ${runId} not found`);
+    if (!(await this.agentExists(agentId))) {
+      return errorResponse(404, "not_found", `agent ${agentId} not found`);
     }
 
-    const session = await this.getOrCreateSession(runId);
+    const session = await this.getOrCreateSession(agentId);
     if (!session) {
       return errorResponse(503, "capability_unavailable", "failed to assemble free-agent session (model/governance/snapshot)");
     }
 
-    this.recordConversationAudit(runId, "user_message", text);
+    this.recordConversationAudit(agentId, "user_message", text);
 
     if (session.status() === "running") {
       // 运行中：注入纠偏上下文（下一工具结束后生效），不开新 prompt。
       session.steer(text);
-      this.recordConversationAudit(runId, "free_agent_steer");
+      this.recordConversationAudit(agentId, "free_agent_steer");
       return json({ steered: true, status: session.status() });
     }
 
-    // idle/终态：后台启动整轮，立即返回 accepted。同一 run 同时只允许
+    // idle/终态：后台启动整轮，立即返回 accepted。同一 agent 同时只允许
     // 一个 prompt（session.prompt 自身对 running 抛错，这里是双保险）。
-    const hub = StreamHub.for(runId);
+    const hub = StreamHub.for(agentId);
     hub.emit({ type: "status", status: "running", ts: new Date().toISOString() });
-    const opts = this.streamOptions(runId);
+    const opts = this.streamOptions(agentId);
     void session.prompt(text, opts)
       .then((reply) => {
-        this.recordConversationAudit(runId, "free_agent_reply", reply);
+        this.recordConversationAudit(agentId, "free_agent_reply", reply);
         opts.finalize();
         const status = session.status();
         hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
@@ -427,7 +427,7 @@ export class RuntimeServer {
       })
       .catch((e: unknown) => {
         const reason = e instanceof Error ? e.message : String(e);
-        this.recordConversationAudit(runId, "free_agent_reply_error", reason);
+        this.recordConversationAudit(agentId, "free_agent_reply_error", reason);
         opts.finalize();
         const status = session.status();
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
@@ -437,19 +437,19 @@ export class RuntimeServer {
   }
 
   /**
-   * GET /tasks/:runId/stream — SSE 事件流（part/delta/status/done + 心跳）。
+   * GET /tasks/:agentId/stream — SSE 事件流（part/delta/status/done + 心跳）。
    *
    * - 事件按 hub 的单调 seq 有序推送，id=seq（EventSource 重连带回
    *   Last-Event-ID 即续传）；
    * - 心跳为 SSE 注释行（`: hb\n\n`），15s 一次防中间层超时；
    * - 会话 idle 时连接保持（等待下一轮），客户端断开即清理订阅；
-   * - run 不存在 → 404（同步 JSON 错误，不进入流）。
+   * - agent 不存在 → 404（同步 JSON 错误，不进入流）。
    */
-  private async handleStream(runId: string, req: Request): Promise<Response> {
-    if (!(await this.runExists(runId))) {
-      return errorResponse(404, "not_found", `run ${runId} not found`);
+  private async handleStream(agentId: string, req: Request): Promise<Response> {
+    if (!(await this.agentExists(agentId))) {
+      return errorResponse(404, "not_found", `agent ${agentId} not found`);
     }
-    const hub = StreamHub.for(runId);
+    const hub = StreamHub.for(agentId);
     const lastEventId = Number(req.headers.get("last-event-id") ?? "");
     const after = Number.isFinite(lastEventId) && lastEventId > 0 ? lastEventId : undefined;
     const cursor = hub.subscribe(after);
@@ -514,13 +514,13 @@ export class RuntimeServer {
   }
 
   /** 流式 prompt 回调 → hub 事件（part 定位用 Map 累计文本）。 */
-  private streamOptions(runId: string): {
+  private streamOptions(agentId: string): {
     onTextStart: (partId: string) => void;
     onDelta: (partId: string, text: string) => void;
     /** 轮次结束：所有未定稿 part 补发 state=done 定稿事件。 */
     finalize: () => void;
   } {
-    const hub = StreamHub.for(runId);
+    const hub = StreamHub.for(agentId);
     const parts = new Map<string, string>();
     return {
       onTextStart: (partId) => {
@@ -542,26 +542,26 @@ export class RuntimeServer {
     };
   }
 
-  /** POST /tasks/:runId/abort — 终止自由 Agent 会话。 */
-  private async handleAbort(runId: string): Promise<Response> {
-    const session = this.sessions.get(runId);
+  /** POST /tasks/:agentId/abort — 终止自由 Agent 会话。 */
+  private async handleAbort(agentId: string): Promise<Response> {
+    const session = this.sessions.get(agentId);
     if (!session) {
-      if (!(await this.runExists(runId))) {
-        return errorResponse(404, "not_found", `run ${runId} not found`);
+      if (!(await this.agentExists(agentId))) {
+        return errorResponse(404, "not_found", `agent ${agentId} not found`);
       }
       return json({ aborted: false, status: null, reason: "no active free-agent session" });
     }
     session.abort("aborted via web");
-    this.recordConversationAudit(runId, "free_agent_abort");
+    this.recordConversationAudit(agentId, "free_agent_abort");
     return json({ aborted: true, status: session.status() });
   }
 
   /**
-   * 取或懒装配 FreeAgentSession。run 已确认存在（调用方先 runExists）；
+   * 取或懒装配 FreeAgentSession。agent 已确认存在（调用方先 agentExists）；
    * 装配失败（deps/model/snapshot）→ 返回 null（调用方返 503）。
    */
-  private async getOrCreateSession(runId: string): Promise<FreeAgentSession | null> {
-    const existing = this.sessions.get(runId);
+  private async getOrCreateSession(agentId: string): Promise<FreeAgentSession | null> {
+    const existing = this.sessions.get(agentId);
     if (existing) return existing;
     let projectId: string | undefined;
     let part: string | undefined;
@@ -570,7 +570,7 @@ export class RuntimeServer {
     let processInstanceId = "pi-default";
     let initialGateLock: { gate: GateId; submissionId: string } | undefined;
 
-    const handle = this.registry.get(runId);
+    const handle = this.registry.get(agentId);
     if (handle) {
       projectId = handle.projectId;
       part = handle.part;
@@ -579,9 +579,9 @@ export class RuntimeServer {
       processInstanceId = handle.processInstanceId ?? "pi-default";
       initialGateLock = handle.currentState?.freeAgentLock;
     } else {
-      let state: RunState | undefined;
+      let state: AgentState | undefined;
       try {
-        state = await loadRunState(runId);
+        state = await loadAgentState(agentId);
       } catch {
         state = undefined;
       }
@@ -597,7 +597,7 @@ export class RuntimeServer {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         process.stderr.write(
-          `[runtime-server] free-agent deps build failed for ${runId}: ${msg}\n`,
+          `[runtime-server] free-agent deps build failed for ${agentId}: ${msg}\n`,
         );
         return null;
       }
@@ -612,7 +612,7 @@ export class RuntimeServer {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(
-        `[runtime-server] free-agent model unavailable for ${runId}: ${msg}\n`,
+        `[runtime-server] free-agent model unavailable for ${agentId}: ${msg}\n`,
       );
       return null;
     }
@@ -623,7 +623,7 @@ export class RuntimeServer {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(
-        `[runtime-server] context snapshot failed for ${runId}: ${msg}\n`,
+        `[runtime-server] context snapshot failed for ${agentId}: ${msg}\n`,
       );
       return null;
     }
@@ -639,21 +639,21 @@ export class RuntimeServer {
       connector,
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
-      ...(process.env.SYNTHIA_RUNS_DIR ? { runsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
+      ...(process.env.SYNTHIA_RUNS_DIR ? { agentsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
     };
 
-    const session = createFreeAgentSession(runId, deps);
-    this.sessions.set(runId, session);
+    const session = createFreeAgentSession(agentId, deps);
+    this.sessions.set(agentId, session);
     return session;
   }
 
   /**
    * 记录对话/接管/终止审计事件，进入 handle.audit（带单调 seq），
-   * 供 GET /tasks/:runId 的 audit 序列返回（web 信息流据此渲染）。
-   * run 无 in-memory handle 时静默跳过（磁盘恢复竞态，罕见）。
+   * 供 GET /tasks/:agentId 的 audit 序列返回（web 信息流据此渲染）。
+   * agent 无 in-memory handle 时静默跳过（磁盘恢复竞态，罕见）。
    */
-  private recordConversationAudit(runId: string, action: string, detail?: string): void {
-    const handle = this.registry.get(runId);
+  private recordConversationAudit(agentId: string, action: string, detail?: string): void {
+    const handle = this.registry.get(agentId);
     if (!handle) return;
     const seq = handle.audit.reduce((max, e) => (e.seq > max ? e.seq : max), -1) + 1;
     const event: AuditEvent = {
@@ -669,18 +669,18 @@ export class RuntimeServer {
 
   // ----- core execution -----
 
-  private async executeRun(
-    runId: string,
+  private async executeAgent(
+    agentId: string,
     trigger: "initial" | "resume",
   ): Promise<void> {
-    const h = this.registry.get(runId);
+    const h = this.registry.get(agentId);
     if (!h) return;
     if (h.busy) return; // concurrent guard
 
     h.busy = true;
 
     try {
-      const runState = await loadRunState(runId);
+      const agentState = await loadAgentState(agentId);
 
       const loop = new LoopExecutor({
         model: h.model,
@@ -694,7 +694,7 @@ export class RuntimeServer {
         actorId: "synthia-runtime-server",
         onEvent: (e) => { h.audit.push(e); },
         onStateChange: async (state) => {
-          await saveRunState(state);
+          await saveAgentState(state);
           h.currentState = state;
           h.currentStage = state.currentStage;
           h.docs = { ...(state.docs ?? {}) };
@@ -702,7 +702,7 @@ export class RuntimeServer {
         },
         onAwaitingApproval: (gate, submissionId, rid) => {
           process.stderr.write(
-            `[runtime-server] run ${rid} awaiting ${gate} (submission: ${submissionId})\n`,
+            `[runtime-server] agent ${rid} awaiting ${gate} (submission: ${submissionId})\n`,
           );
         },
       });
@@ -713,11 +713,11 @@ export class RuntimeServer {
 
       const isResume =
         trigger === "resume" ||
-        (runState.status === "awaiting_approval" && runState.awaitingGate);
+        (agentState.status === "awaiting_approval" && agentState.awaitingGate);
 
       const result: LoopResult = isResume
-        ? await loop.resume(runState)
-        : await loop.run(h.task, { runId, runState });
+        ? await loop.resume(agentState)
+        : await loop.run(h.task, { agentId, agentState });
 
       this.applyResult(h, result);
     } catch (e) {
@@ -725,14 +725,14 @@ export class RuntimeServer {
       h.status = "failed";
       h.endedReason = reason;
       h.terminalCause = "execution_error";
-      process.stderr.write(`[runtime-server] executeRun failed for ${runId}: ${reason}\n`);
+      process.stderr.write(`[runtime-server] executeAgent failed for ${agentId}: ${reason}\n`);
       await this.persistTerminal(h, "failed", reason, "execution_error").catch(() => {});
     } finally {
       h.busy = false;
     }
   }
 
-  private applyResult(h: RunHandle, result: LoopResult): void {
+  private applyResult(h: AgentHandle, result: LoopResult): void {
     if (result.awaitingGate) {
       h.status = "awaiting_approval";
       h.awaitingGate = result.awaitingGate;
@@ -754,20 +754,20 @@ export class RuntimeServer {
   }
 
   private async persistTerminal(
-    h: RunHandle,
+    h: AgentHandle,
     status: "succeeded" | "failed" | "fail_closed",
     reason?: string,
     cause?: TerminalCause,
   ): Promise<void> {
     if (!h.currentState) return;
-    const terminal: RunState = {
+    const terminal: AgentState = {
       ...h.currentState,
       status,
       endedReason: reason,
       ...(cause ? { terminalCause: cause } : {}),
       awaitingGate: undefined,
     };
-    await saveRunState(terminal);
+    await saveAgentState(terminal);
     h.currentState = terminal;
   }
 
@@ -797,7 +797,7 @@ export class RuntimeServer {
     await Promise.allSettled(awaiting.map((h) => this.pollGate(h)));
   }
 
-  private async pollGate(h: RunHandle): Promise<void> {
+  private async pollGate(h: AgentHandle): Promise<void> {
     const gate = h.awaitingGate;
     if (!gate) return;
     const submissionId = h.currentState?.gateSubmissions?.[gate];
@@ -807,12 +807,12 @@ export class RuntimeServer {
 
     if (state === "approved") {
       process.stderr.write(
-        `[runtime-server] gate ${gate} approved for run ${h.runId} — auto-resuming\n`,
+        `[runtime-server] gate ${gate} approved for agent ${h.agentId} — auto-resuming\n`,
       );
-      this.executeRun(h.runId, "resume").catch(() => {});
+      this.executeAgent(h.agentId, "resume").catch(() => {});
     } else if (state === "rejected" || state === "withdrawn") {
       process.stderr.write(
-        `[runtime-server] gate ${gate} ${state} for run ${h.runId} — fail-closed\n`,
+        `[runtime-server] gate ${gate} ${state} for agent ${h.agentId} — fail-closed\n`,
       );
       h.status = "fail_closed";
       h.endedReason = `gate ${gate} was ${state} — stopping (fail-closed)`;
@@ -826,10 +826,10 @@ export class RuntimeServer {
   // ----- disk recovery -----
 
   private async recover(): Promise<void> {
-    const runIds = await listRuns();
-    for (const runId of runIds) {
+    const agentIds = await listAgents();
+    for (const agentId of agentIds) {
       try {
-        const state = await loadRunState(runId);
+        const state = await loadAgentState(agentId);
         const wasRunning = state.status === "running";
         const processInstanceId = state.processInstanceId ?? "pi-default";
 
@@ -838,8 +838,8 @@ export class RuntimeServer {
           processInstanceId,
         });
 
-        const handle: RunHandle = {
-          runId,
+        const handle: AgentHandle = {
+          agentId,
           projectId: state.projectId,
           processInstanceId,
           task: state.task,
@@ -862,27 +862,27 @@ export class RuntimeServer {
           toolModelPolicyHash: this.config.toolModelPolicyHash,
           currentState: state,
         };
-        this.registry.set(runId, handle);
+        this.registry.set(agentId, handle);
 
-        // Persist interrupted runs as "failed" on disk (RunState has no
+        // Persist interrupted agents as "failed" on disk (AgentState has no
         // "interrupted" status; the handle tracks it in-memory).
         if (wasRunning) {
-          const updated: RunState = {
+          const updated: AgentState = {
             ...state,
             status: "failed",
             endedReason: "interrupted by server restart",
             terminalCause: "execution_error",
           };
-          await saveRunState(updated);
+          await saveAgentState(updated);
           handle.currentState = updated;
         }
 
         process.stderr.write(
-          `[runtime-server] recovered run ${runId} (status=${handle.status})\n`,
+          `[runtime-server] recovered agent ${agentId} (status=${handle.status})\n`,
         );
       } catch (e) {
         process.stderr.write(
-          `[runtime-server] recovery: failed to load ${runId}: ${e}\n`,
+          `[runtime-server] recovery: failed to load ${agentId}: ${e}\n`,
         );
       }
     }

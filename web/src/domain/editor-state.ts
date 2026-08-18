@@ -26,20 +26,20 @@ import type { Theme } from "./theme.ts";
  *
  * @param revisionState 当前查看版本的 `ArtifactRevision.state` 原文；未打开
  *   任何文件（无版本可判定）时传 null，此时无意义地返回 null（不进入只读态）。
- * @param runStatus 当前 run 状态原文（`TaskRunDetail.status`）；项目尚无 run 时
+ * @param agentStatus 当前 run 状态原文（`TaskAgentDetail.status`）；项目尚无 run 时
  *   传 null（视为「没有 agent 在跑」）。
- * @param isRunTerminal 判定 run 状态是否终态的谓词。以依赖注入方式传入而不是
+ * @param isAgentTerminal 判定 run 状态是否终态的谓词。以依赖注入方式传入而不是
  *   直接 import `domain/tasks.ts:isTerminalStatus`，让本模块保持零耦合、纯函数，
  *   单测无需构造完整的 run 状态机。
  */
 export function deriveReadonlyReason(
   revisionState: string | null,
-  runStatus: string | null,
-  isRunTerminal: (status: string) => boolean,
+  agentStatus: string | null,
+  isAgentTerminal: (status: string) => boolean,
 ): EditorReadonlyReason {
   if (revisionState === null) return null;
   if (revisionState === "approved") return "approved";
-  if (runStatus !== null && !isRunTerminal(runStatus)) return "agent-running";
+  if (agentStatus !== null && !isAgentTerminal(agentStatus)) return "agent-running";
   return null;
 }
 

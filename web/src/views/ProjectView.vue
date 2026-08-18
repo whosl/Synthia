@@ -15,7 +15,7 @@ import { useRoute, useRouter } from "vue-router";
 import { api } from "../main.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
-  abortRun,
+  abortAgent,
   createTask,
   getJobEvidenceContent,
   getProject,
@@ -30,8 +30,8 @@ import type {
   Artifact,
   ArtifactRevision,
   ProjectDetail,
-  TaskRunDetail,
-  TaskRunSummary,
+  TaskAgentDetail,
+  TaskAgentSummary,
 } from "../api/types.ts";
 import { createPoller, deriveStageChain, isTerminalStatus, type Poller } from "../domain/tasks.ts";
 import { auditToParts, type SynthiaPart, type SynthiaTextPart } from "../domain/parts.ts";
@@ -75,9 +75,9 @@ const projectId = String(route.params.id);
 // ─────────────────────────────────────────────────────────────────────
 
 const project = ref<ProjectDetail | null>(null);
-const runs = ref<readonly TaskRunSummary[]>([]);
-const currentRunId = ref<string | null>(typeof route.query.run === "string" ? route.query.run : null);
-const detail = ref<TaskRunDetail | null>(null);
+const agents = ref<readonly TaskAgentSummary[]>([]);
+const currentAgentId = ref<string | null>(typeof route.query.run === "string" ? route.query.run : null);
+const detail = ref<TaskAgentDetail | null>(null);
 const artifacts = ref<readonly Artifact[]>([]);
 const revisionsByArtifact = ref<Record<string, readonly ArtifactRevision[]>>({});
 
@@ -102,9 +102,9 @@ async function refresh(): Promise<void> {
   refreshing = true;
   try {
     const [taskList] = await Promise.all([listTasks(api, projectId), loadArtifactsAndRevisions()]);
-    runs.value = [...taskList.runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    if (!currentRunId.value && runs.value.length > 0) currentRunId.value = runs.value[0]!.run_id;
-    detail.value = currentRunId.value ? await getTask(api, projectId, currentRunId.value) : null;
+    agents.value = [...taskList.agents].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    if (!currentAgentId.value && agents.value.length > 0) currentAgentId.value = agents.value[0]!.agent_id;
+    detail.value = currentAgentId.value ? await getTask(api, projectId, currentAgentId.value) : null;
     loadErrorText.value = null;
   } catch (err) {
     loadErrorText.value = humanizeLoadError(err);
@@ -123,7 +123,7 @@ onMounted(async () => {
   loading.value = false;
   poller = createPoller(() => {
     void refresh();
-    const active = runs.value.some((r) => r.status === "running" || r.status === "awaiting_approval");
+    const active = agents.value.some((r) => r.status === "running" || r.status === "awaiting_approval");
     // 有其它后台 run 在跑，或当前 run 未知/未到终态 → 继续轮询；否则停。
     return active || detail.value === null || !isTerminalStatus(detail.value.status);
   }, 3000);
@@ -137,20 +137,20 @@ onBeforeUnmount(() => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// SSE 订阅（跟随 currentRunId）+ 对话流合成（audit 物化 + 流式增量，回合制去重）
+// SSE 订阅（跟随 currentAgentId）+ 对话流合成（audit 物化 + 流式增量，回合制去重）
 // ─────────────────────────────────────────────────────────────────────
 
 let streamHandle: StreamHandle | null = null;
 const streamFeed = ref<readonly StreamFeedPart[]>([]);
 const streamPhase = ref<StreamPhase>("connecting");
 
-function openStream(runId: string): void {
+function openStream(agentId: string): void {
   streamHandle?.close();
   streamHandle = null;
   streamFeed.value = [];
   streamPhase.value = "connecting";
   streamHandle = subscribeTaskStream(
-    `${(import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ""}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/stream`,
+    `${(import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ""}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/stream`,
     readToken(),
     0,
     {
@@ -166,10 +166,10 @@ function openStream(runId: string): void {
 }
 
 watch(
-  currentRunId,
-  (runId) => {
-    if (runId) {
-      openStream(runId);
+  currentAgentId,
+  (agentId) => {
+    if (agentId) {
+      openStream(agentId);
     } else {
       streamHandle?.close();
       streamHandle = null;
@@ -212,7 +212,7 @@ const fileTreeEntries = computed<FileTreeEntry[]>(() =>
   buildFileTreeEntries(artifacts.value, revisionsByArtifact.value, detail.value?.docs ?? []),
 );
 
-const hasRun = computed(() => runs.value.length > 0);
+const hasAgent = computed(() => agents.value.length > 0);
 
 // ─────────────────────────────────────────────────────────────────────
 // 中栏：当前打开的文件 / 版本 / 内容 / 只读态
@@ -321,14 +321,14 @@ function onExitDiff(): void {
 // ─────────────────────────────────────────────────────────────────────
 
 const stageChain = computed(() => (detail.value ? deriveStageChain(detail.value) : null));
-const currentRun = computed<TaskRunSummary | null>(() => runs.value.find((r) => r.run_id === currentRunId.value) ?? null);
+const currentAgent = computed<TaskAgentSummary | null>(() => agents.value.find((r) => r.agent_id === currentAgentId.value) ?? null);
 
 const viewMode = ref<FileTreeViewMode>("path");
 const focusStageId = ref<string | null>(null);
 
-function onSelectRun(runId: string): void {
-  if (runId === currentRunId.value) return;
-  currentRunId.value = runId;
+function onSelectAgent(agentId: string): void {
+  if (agentId === currentAgentId.value) return;
+  currentAgentId.value = agentId;
   detail.value = null;
   openArtifactId.value = null;
   openRevisionId.value = null;
@@ -378,7 +378,7 @@ const chatOverlayOpen = ref(false);
 // ─────────────────────────────────────────────────────────────────────
 
 const composerMode = computed<ChatComposerMode>(() => {
-  if (runs.value.length === 0) return "new-task";
+  if (agents.value.length === 0) return "new-task";
   if (detail.value?.status === "running") return "steer";
   return "prompt";
 });
@@ -392,10 +392,10 @@ async function onSend(text: string): Promise<void> {
   sendError.value = null;
   try {
     if (composerMode.value === "new-task") {
-      const { runId } = await createTask(api, projectId, { task: text, mode: "agent" }, crypto.randomUUID());
-      currentRunId.value = runId;
-    } else if (currentRunId.value) {
-      await sendMessage(api, projectId, currentRunId.value, text);
+      const { agentId } = await createTask(api, projectId, { task: text, mode: "agent" }, crypto.randomUUID());
+      currentAgentId.value = agentId;
+    } else if (currentAgentId.value) {
+      await sendMessage(api, projectId, currentAgentId.value, text);
     }
     await refresh();
   } catch (err) {
@@ -406,11 +406,11 @@ async function onSend(text: string): Promise<void> {
 }
 
 async function onAbort(): Promise<void> {
-  if (!currentRunId.value || sending.value) return;
+  if (!currentAgentId.value || sending.value) return;
   sending.value = true;
   sendError.value = null;
   try {
-    await abortRun(api, projectId, currentRunId.value);
+    await abortAgent(api, projectId, currentAgentId.value);
     await refresh();
   } catch (err) {
     sendError.value = humanizeLoadError(err);
@@ -457,8 +457,8 @@ async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
 const topBarProps = computed<TopBarProps>(() => ({
   projectName: project.value?.name ?? "",
   stageChain: stageChain.value,
-  currentRun: currentRun.value,
-  runs: runs.value,
+  currentAgent: currentAgent.value,
+  agents: agents.value,
   theme: theme.value,
   treeDrawerOpen: treeDrawerOpen.value,
   chatOverlayOpen: chatOverlayOpen.value,
@@ -467,7 +467,7 @@ const topBarProps = computed<TopBarProps>(() => ({
 const fileTreeProps = computed<FileTreeProps>(() => ({
   entries: fileTreeEntries.value,
   viewMode: viewMode.value,
-  hasRun: hasRun.value,
+  hasAgent: hasAgent.value,
   openArtifactId: openArtifactId.value,
   drawerMode: leftCollapsed.value,
   focusStageId: focusStageId.value,
@@ -486,7 +486,7 @@ const codeEditorProps = computed<CodeEditorProps>(() => ({
 
 const chatFeedProps = computed<ChatFeedProps>(() => ({
   parts: parts.value,
-  runStatus: detail.value?.status ?? null,
+  agentStatus: detail.value?.status ?? null,
   streamPhase: streamPhase.value,
   composerMode: composerMode.value,
   canAbort: canAbort.value,
@@ -533,7 +533,7 @@ function onToggleChatOverlay(): void {
     <header class="project-view-topbar">
       <TopBar
         v-bind="topBarProps"
-        @select-run="onSelectRun"
+        @select-agent="onSelectAgent"
         @select-stage="onSelectStage"
         @toggle-theme="onToggleTheme"
         @toggle-tree-drawer="onToggleTreeDrawer"

@@ -19,7 +19,7 @@
  * buildFileTree）都以契约的 `FileTreeEntry` 为输入——也就是 FileTree.vue 实际
  * 拿到的 `props.entries`，可以直接喂给这里的函数，不需要重新关联一遍。
  *
- * 边界情况（spec R7）：项目无 run 时（`hasRun=false`）docs 为空，全部 entry 的
+ * 边界情况（spec R7）：项目无 run 时（`hasAgent=false`）docs 为空，全部 entry 的
  * path/phase 都是 null，「路径」「阶段」视图此时**降级**（返回空分组 + 提示
  * 文案，不崩、不静默丢数据）；「产物类型」视图的分组键 artifactType 不依赖
  * docs，不受影响，始终可用。
@@ -186,9 +186,9 @@ function orderPathKeys(keys: readonly string[]): string[] {
   return [...known, ...rest, ...tail];
 }
 
-/** 路径视图（默认）。`hasRun=false` 时降级：无 run 就没有 docs，path 全部缺失，无法分组。 */
-export function buildPathTree(entries: readonly FileTreeEntry[], hasRun: boolean): FileTreeResult {
-  if (!hasRun) return { groups: [], degraded: true, degradedMessage: DEGRADED_MESSAGE };
+/** 路径视图（默认）。`hasAgent=false` 时降级：无 run 就没有 docs，path 全部缺失，无法分组。 */
+export function buildPathTree(entries: readonly FileTreeEntry[], hasAgent: boolean): FileTreeResult {
+  if (!hasAgent) return { groups: [], degraded: true, degradedMessage: DEGRADED_MESSAGE };
 
   const buckets = new Map<string, FileTreeFileNode[]>();
   for (const entry of entries) {
@@ -208,7 +208,7 @@ export function buildPathTree(entries: readonly FileTreeEntry[], hasRun: boolean
 // 产物类型视图：不依赖 docs，无 run 时同样可用（spec R7）
 // ─────────────────────────────────────────────────────────────────────────
 
-/** 产物类型视图，分组用 `domain/artifacts.ts:artifactGroupName` 取中文名，恒可用（不受 hasRun 影响）。 */
+/** 产物类型视图，分组用 `domain/artifacts.ts:artifactGroupName` 取中文名，恒可用（不受 hasAgent 影响）。 */
 export function buildTypeTree(entries: readonly FileTreeEntry[]): FileTreeResult {
   const buckets = new Map<string, FileTreeFileNode[]>();
   for (const entry of entries) {
@@ -234,9 +234,9 @@ export function buildTypeTree(entries: readonly FileTreeEntry[]): FileTreeResult
 
 const STAGE_ORDER_INDEX: ReadonlyMap<string, number> = new Map(STAGE_CHAIN.map((node, i) => [node.id, i]));
 
-/** 阶段视图。`hasRun=false` 时降级：无 run 就没有 docs，phase 全部缺失，无法分组。 */
-export function buildStageTree(entries: readonly FileTreeEntry[], hasRun: boolean): FileTreeResult {
-  if (!hasRun) return { groups: [], degraded: true, degradedMessage: DEGRADED_MESSAGE };
+/** 阶段视图。`hasAgent=false` 时降级：无 run 就没有 docs，phase 全部缺失，无法分组。 */
+export function buildStageTree(entries: readonly FileTreeEntry[], hasAgent: boolean): FileTreeResult {
+  if (!hasAgent) return { groups: [], degraded: true, degradedMessage: DEGRADED_MESSAGE };
 
   const buckets = new Map<string, FileTreeFileNode[]>();
   for (const entry of entries) {
@@ -268,10 +268,10 @@ export function buildStageTree(entries: readonly FileTreeEntry[], hasRun: boolea
 // ─────────────────────────────────────────────────────────────────────────
 
 /** 三种视图的统一入口，FileTree.vue 按 viewMode 调这一个函数即可。 */
-export function buildFileTree(entries: readonly FileTreeEntry[], viewMode: FileTreeViewMode, hasRun: boolean): FileTreeResult {
-  if (viewMode === "path") return buildPathTree(entries, hasRun);
+export function buildFileTree(entries: readonly FileTreeEntry[], viewMode: FileTreeViewMode, hasAgent: boolean): FileTreeResult {
+  if (viewMode === "path") return buildPathTree(entries, hasAgent);
   if (viewMode === "type") return buildTypeTree(entries);
-  return buildStageTree(entries, hasRun);
+  return buildStageTree(entries, hasAgent);
 }
 
 /**

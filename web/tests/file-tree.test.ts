@@ -170,7 +170,7 @@ describe("buildPathTree：路径视图", () => {
     expect(result.groups.some((g) => g.key === "sim")).toBe(false);
   });
 
-  test("R7 边界：项目无 run（hasRun=false）时降级，groups 为空、给出提示文案，不崩不丢数据", () => {
+  test("R7 边界：项目无 run（hasAgent=false）时降级，groups 为空、给出提示文案，不崩不丢数据", () => {
     const result = buildPathTree(entries, false);
     expect(result.degraded).toBe(true);
     expect(result.groups).toEqual([]);
@@ -256,7 +256,7 @@ describe("buildStageTree：阶段视图", () => {
     expect(result.groups.at(-1)!.files.map((f) => f.artifactId)).toEqual(["a2"]);
   });
 
-  test("R7 边界：项目无 run（hasRun=false）时降级，groups 为空、给出提示文案", () => {
+  test("R7 边界：项目无 run（hasAgent=false）时降级，groups 为空、给出提示文案", () => {
     const entries: FileTreeEntry[] = [entry({ artifactId: "a1", artifactType: "RTL_SOURCE_SET", phase: "rtl" })];
     const result = buildStageTree(entries, false);
     expect(result.degraded).toBe(true);
@@ -300,7 +300,7 @@ describe("buildFileTree：统一入口按 viewMode 分发", () => {
     expect(buildFileTree(entries, "stage", true).groups[0]!.key).toBe("rtl");
   });
 
-  test("hasRun=false 时 path/stage 降级，type 不受影响", () => {
+  test("hasAgent=false 时 path/stage 降级，type 不受影响", () => {
     expect(buildFileTree(entries, "path", false).degraded).toBe(true);
     expect(buildFileTree(entries, "stage", false).degraded).toBe(true);
     expect(buildFileTree(entries, "type", false).degraded).toBe(false);

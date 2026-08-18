@@ -133,8 +133,8 @@ export class MemoryRepository {
     return this.save("toolRun", run);
   }
 
-  retryToolRun(runId: string, replacement: ToolRun): ToolRun {
-    const previous = this.get<ToolRun>("toolRun", runId);
+  retryToolRun(agentId: string, replacement: ToolRun): ToolRun {
+    const previous = this.get<ToolRun>("toolRun", agentId);
     if (!previous) throw new InvariantError("TOOL_RUN_NOT_FOUND");
     if (previous.state === "unknown_effect") throw new InvariantError("UNKNOWN_EFFECT_REQUIRES_HUMAN_RESOLUTION");
     return this.createToolRun(replacement);

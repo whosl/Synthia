@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../main.ts";
 import { createProject, listGateSubmissions, listProjects, listTasks } from "../api/index.ts";
-import type { GateSubmission, Project, TaskRunSummary } from "../api/types.ts";
+import type { GateSubmission, Project, TaskAgentSummary } from "../api/types.ts";
 import {
   GATE_REVIEW_NAMES,
   PROJECT_STATUS_TEXT,
@@ -32,7 +32,7 @@ interface PendingApproval {
 }
 interface ActiveTask {
   readonly project: Project;
-  readonly run: TaskRunSummary;
+  readonly run: TaskAgentSummary;
 }
 
 const pendingApprovals = ref<PendingApproval[]>([]);
@@ -78,16 +78,16 @@ onMounted(async () => {
         const maxTs = (a: string, b: string | null | undefined) => (b && b > a ? b : a);
         let latest = project.created_at;
         try {
-          const [subs, runList] = await Promise.all([
+          const [subs, agentList] = await Promise.all([
             listGateSubmissions(api, project.id),
-            listTasks(api, project.id).catch(() => ({ runs: [] as readonly TaskRunSummary[] })),
+            listTasks(api, project.id).catch(() => ({ agents: [] as readonly TaskAgentSummary[] })),
           ]);
           lanes.set(project.id, deriveGateLanes(subs));
           for (const sub of subs) {
             latest = maxTs(latest, sub.submitted_at ?? sub.created_at);
             if (sub.state === "in_review") approvals.push({ project, submission: sub });
           }
-          for (const run of runList.runs) {
+          for (const run of agentList.agents) {
             latest = maxTs(latest, run.created_at);
             if (run.status === "running" || run.status === "awaiting_approval") {
               tasks.push({ project, run });
@@ -178,9 +178,9 @@ async function submitCreate() {
             提交于 {{ new Date(item.submission.submitted_at ?? item.submission.created_at).toLocaleString("zh-CN") }}
           </span>
         </li>
-        <li v-for="item in activeTasks" :key="item.run.run_id">
+        <li v-for="item in activeTasks" :key="item.run.agent_id">
           <StatusBadge :text="item.run.status === 'awaiting_approval' ? '等待批准' : '进行中'" kind="accent" />
-          <router-link :to="`/projects/${item.project.id}?run=${item.run.run_id}`">
+          <router-link :to="`/projects/${item.project.id}?run=${item.run.agent_id}`">
             {{ item.project.name }} · 任务执行中
           </router-link>
           <span class="muted" style="font-size: 12px">

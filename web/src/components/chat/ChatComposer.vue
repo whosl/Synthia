@@ -2,7 +2,7 @@
 /**
  * 右栏输入区（spec §3.5，D21）。语义判定完全交给 `domain/composer.ts`，本组件
  * 只管渲染：占位文案随 `mode` 切换、`mode==="steer"` 时的纠偏提示与「⏹ 打断」
- * 按钮、发送/打断进行中的禁用态。是否可发消息（`hasRun`/`runStatus` 推导）由
+ * 按钮、发送/打断进行中的禁用态。是否可发消息（`hasAgent`/`agentStatus` 推导）由
  * ProjectView 通过 `composerMode`/`canAbort` 下发，本组件不重复判定 run 状态。
  *
  * v-model（modelValue）由 ChatFeed 持有：这样点击「空态示例任务」时 ChatFeed

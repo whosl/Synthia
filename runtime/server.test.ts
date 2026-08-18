@@ -13,7 +13,7 @@ import { CounterScriptedModel } from "./deps.ts";
 import { FakeVivadoConnector, successBehavior, alwaysFailBehavior } from "./loop.ts";
 import { MockGovernanceClient } from "./governance-client.ts";
 import { NoGovernanceClient } from "./types.ts";
-import { createRunState, saveRunState, deleteRun } from "./run-state.ts";
+import { createAgentState, saveAgentState, deleteAgent } from "./agent-state.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 import type { GateSubmissionState } from "../core/src/domain/enums.ts";
 
@@ -76,33 +76,33 @@ async function postTask(
     body: JSON.stringify(body),
   });
   expect(res.status).toBe(201);
-  const json = await res.json() as { run_id: string };
-  return json.run_id;
+  const json = await res.json() as { agent_id: string };
+  return json.agent_id;
 }
 
 async function getTask(
   server: RuntimeServer,
-  runId: string,
+  agentId: string,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${server.url}/tasks/${runId}`);
+  const res = await fetch(`${server.url}/tasks/${agentId}`);
   expect(res.status).toBe(200);
   return await res.json() as Record<string, unknown>;
 }
 
 async function waitForStatus(
   server: RuntimeServer,
-  runId: string,
+  agentId: string,
   statuses: ServerStatus[],
   timeoutMs = 15_000,
 ): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const body = await getTask(server, runId);
+    const body = await getTask(server, agentId);
     if (statuses.includes(body.status as ServerStatus)) return body;
     await Bun.sleep(30);
   }
   throw new Error(
-    `timeout waiting for status ${statuses.join("|")} (run ${runId})`,
+    `timeout waiting for status ${statuses.join("|")} (agent ${agentId})`,
   );
 }
 
@@ -110,20 +110,20 @@ async function waitForStatus(
 // Setup / teardown
 // ---------------------------------------------------------------------------
 
-let runsDir: string;
-const createdRunIds: string[] = [];
+let agentsDir: string;
+const createdAgentIds: string[] = [];
 
 beforeAll(async () => {
-  runsDir = await mkdtemp(join(tmpdir(), "synthia-runtime-test-"));
-  process.env.SYNTHIA_RUNS_DIR = runsDir;
+  agentsDir = await mkdtemp(join(tmpdir(), "synthia-runtime-test-"));
+  process.env.SYNTHIA_RUNS_DIR = agentsDir;
 });
 
 afterAll(async () => {
-  for (const runId of createdRunIds) {
-    await deleteRun(runId).catch(() => {});
+  for (const agentId of createdAgentIds) {
+    await deleteAgent(agentId).catch(() => {});
   }
   delete process.env.SYNTHIA_RUNS_DIR;
-  await rm(runsDir, { recursive: true, force: true });
+  await rm(agentsDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("RuntimeServer — POST /tasks + full chain", () => {
-  test("auto-approve (no-governance) run completes the full stage chain", async () => {
+  test("auto-approve (no-governance) agent completes the full stage chain", async () => {
     const gov = new NoGovernanceClient();
     const server = new RuntimeServer(
       makeConfig(),
@@ -143,15 +143,15 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p1",
         process_instance_id: "pi-test",
         task: "8位计数器",
       });
-      createdRunIds.push(runId);
-      expect(runId).toMatch(/^run-/);
+      createdAgentIds.push(agentId);
+      expect(agentId).toMatch(/^agent-/);
 
-      const body = await waitForStatus(server, runId, ["succeeded"]);
+      const body = await waitForStatus(server, agentId, ["succeeded"]);
       expect(body["status"]).toBe("succeeded");
       expect(body["project_id"]).toBe("p1");
       expect(body["task"]).toBe("8位计数器");
@@ -161,7 +161,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
   });
 });
 
-describe("RuntimeServer — GET /tasks/:runId detail fields", () => {
+describe("RuntimeServer — GET /tasks/:agentId detail fields", () => {
   test("response includes all required fields with correct shapes", async () => {
     const gov = new NoGovernanceClient();
     const server = new RuntimeServer(
@@ -174,17 +174,17 @@ describe("RuntimeServer — GET /tasks/:runId detail fields", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p1",
         process_instance_id: "pi-detail",
         task: "详细字段测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
-      const body = await waitForStatus(server, runId, ["succeeded"]);
+      const body = await waitForStatus(server, agentId, ["succeeded"]);
 
       // Required fields
-      expect(body["run_id"]).toBe(runId);
+      expect(body["agent_id"]).toBe(agentId);
       expect(body["project_id"]).toBe("p1");
       expect(body["task"]).toBe("详细字段测试");
       expect(body["status"]).toBe("succeeded");
@@ -212,7 +212,7 @@ describe("RuntimeServer — GET /tasks/:runId detail fields", () => {
 });
 
 describe("RuntimeServer — GET /tasks list", () => {
-  test("lists all runs with summary fields", async () => {
+  test("lists all agents with summary fields", async () => {
     const gov = new NoGovernanceClient();
     const server = new RuntimeServer(
       makeConfig(),
@@ -224,25 +224,25 @@ describe("RuntimeServer — GET /tasks list", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-list",
         process_instance_id: "pi-list",
         task: "列表测试",
       });
-      createdRunIds.push(runId);
-      await waitForStatus(server, runId, ["succeeded"]);
+      createdAgentIds.push(agentId);
+      await waitForStatus(server, agentId, ["succeeded"]);
 
       const res = await fetch(`${server.url}/tasks`);
       expect(res.status).toBe(200);
-      const body = await res.json() as { runs: Record<string, unknown>[] };
-      expect(body.runs.length).toBeGreaterThanOrEqual(1);
+      const body = await res.json() as { agents: Record<string, unknown>[] };
+      expect(body.agents.length).toBeGreaterThanOrEqual(1);
 
-      const ourRun = body.runs.find((r) => r.run_id === runId);
-      expect(ourRun).toBeDefined();
-      expect(ourRun!["project_id"]).toBe("p-list");
-      expect(ourRun!["status"]).toBe("succeeded");
-      expect(typeof ourRun!["current_stage"]).toBe("string");
-      expect(typeof ourRun!["created_at"]).toBe("string");
+      const ourAgent = body.agents.find((r) => r.agent_id === agentId);
+      expect(ourAgent).toBeDefined();
+      expect(ourAgent!["project_id"]).toBe("p-list");
+      expect(ourAgent!["status"]).toBe("succeeded");
+      expect(typeof ourAgent!["current_stage"]).toBe("string");
+      expect(typeof ourAgent!["created_at"]).toBe("string");
     } finally {
       await server.stop();
     }
@@ -264,15 +264,15 @@ describe("RuntimeServer — approval auto-resume monitor", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-gate",
         process_instance_id: "pi-gate",
         task: "门禁流程测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
       // Wait for G1 pause
-      await waitForStatus(server, runId, ["awaiting_approval"]);
+      await waitForStatus(server, agentId, ["awaiting_approval"]);
 
       // Approve G1; make subsequent gates auto-approve
       const g1Sub = gov.submissions[gov.submissions.length - 1]!.submissionId;
@@ -280,7 +280,7 @@ describe("RuntimeServer — approval auto-resume monitor", () => {
       gov.setSubmitResult("approved");
 
       // Monitor auto-resumes → full chain completes
-      await waitForStatus(server, runId, ["succeeded"], 20_000);
+      await waitForStatus(server, agentId, ["succeeded"], 20_000);
     } finally {
       await server.stop();
     }
@@ -300,20 +300,20 @@ describe("RuntimeServer — approval auto-resume monitor", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-reject",
         process_instance_id: "pi-reject",
         task: "拒绝测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
-      await waitForStatus(server, runId, ["awaiting_approval"]);
+      await waitForStatus(server, agentId, ["awaiting_approval"]);
 
       const g1Sub = gov.submissions[gov.submissions.length - 1]!.submissionId;
       gov.setGateState(g1Sub, "rejected");
 
       // Monitor detects rejection → fail_closed
-      const body = await waitForStatus(server, runId, ["fail_closed"]);
+      const body = await waitForStatus(server, agentId, ["fail_closed"]);
       expect(body["reason"]).toContain("rejected");
     } finally {
       await server.stop();
@@ -321,8 +321,8 @@ describe("RuntimeServer — approval auto-resume monitor", () => {
   });
 });
 
-describe("RuntimeServer — parallel runs", () => {
-  test("two runs execute concurrently and both succeed", async () => {
+describe("RuntimeServer — parallel agents", () => {
+  test("two agents execute concurrently and both succeed", async () => {
     const gov = new NoGovernanceClient();
     const server = new RuntimeServer(
       makeConfig(),
@@ -334,23 +334,23 @@ describe("RuntimeServer — parallel runs", () => {
     );
     await server.start();
     try {
-      const runId1 = await postTask(server, {
+      const agentId1 = await postTask(server, {
         project_id: "p-par",
         process_instance_id: "pi-par-1",
         task: "并行任务A",
       });
-      createdRunIds.push(runId1);
+      createdAgentIds.push(agentId1);
 
-      const runId2 = await postTask(server, {
+      const agentId2 = await postTask(server, {
         project_id: "p-par",
         process_instance_id: "pi-par-2",
         task: "并行任务B",
       });
-      createdRunIds.push(runId2);
+      createdAgentIds.push(agentId2);
 
       // Both should succeed independently
-      await waitForStatus(server, runId1, ["succeeded"], 15_000);
-      await waitForStatus(server, runId2, ["succeeded"], 15_000);
+      await waitForStatus(server, agentId1, ["succeeded"], 15_000);
+      await waitForStatus(server, agentId2, ["succeeded"], 15_000);
     } finally {
       await server.stop();
     }
@@ -358,20 +358,20 @@ describe("RuntimeServer — parallel runs", () => {
 });
 
 describe("RuntimeServer — restart recovery", () => {
-  test("running run on disk is recovered as interrupted", async () => {
-    // Seed a run-state file with status "running" on disk.
-    const seedRunId = "run-test-recovery-001";
-    const seedState = createRunState({
-      runId: seedRunId,
+  test("running agent on disk is recovered as interrupted", async () => {
+    // Seed a agent-state file with status "running" on disk.
+    const seedAgentId = "agent-test-recovery-001";
+    const seedState = createAgentState({
+      agentId: seedAgentId,
       task: "恢复测试",
       part: "xc7k70tfbv676-1",
       projectId: "p-recover",
       processInstanceId: "pi-recover",
     });
-    await saveRunState(seedState);
-    createdRunIds.push(seedRunId);
+    await saveAgentState(seedState);
+    createdAgentIds.push(seedAgentId);
 
-    // Start a fresh server — recover() picks up the run.
+    // Start a fresh server — recover() picks up the agent.
     const gov = new NoGovernanceClient();
     const server = new RuntimeServer(
       makeConfig(),
@@ -383,16 +383,16 @@ describe("RuntimeServer — restart recovery", () => {
     );
     await server.start();
     try {
-      // The run should be listed with status "interrupted".
-      const body = await getTask(server, seedRunId);
+      // The agent should be listed with status "interrupted".
+      const body = await getTask(server, seedAgentId);
       expect(body["status"]).toBe("interrupted");
-      expect(body["run_id"]).toBe(seedRunId);
+      expect(body["agent_id"]).toBe(seedAgentId);
       expect(body["reason"]).toContain("interrupted");
 
       // Also visible in the list.
       const listRes = await fetch(`${server.url}/tasks`);
-      const listBody = await listRes.json() as { runs: Record<string, unknown>[] };
-      const recovered = listBody.runs.find((r) => r.run_id === seedRunId);
+      const listBody = await listRes.json() as { agents: Record<string, unknown>[] };
+      const recovered = listBody.agents.find((r) => r.agent_id === seedAgentId);
       expect(recovered).toBeDefined();
       expect(recovered!["status"]).toBe("interrupted");
     } finally {
@@ -402,7 +402,7 @@ describe("RuntimeServer — restart recovery", () => {
 });
 
 describe("RuntimeServer — resume endpoint", () => {
-  test("POST /tasks/:runId/resume is idempotent", async () => {
+  test("POST /tasks/:agentId/resume is idempotent", async () => {
     const gov = new TestGovernance();
     gov.setSubmitResult("in_review");
 
@@ -416,18 +416,18 @@ describe("RuntimeServer — resume endpoint", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-resume",
         process_instance_id: "pi-resume",
         task: "续跑幂等测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
-      await waitForStatus(server, runId, ["awaiting_approval"]);
+      await waitForStatus(server, agentId, ["awaiting_approval"]);
 
       // Multiple resume calls should all return {resumed:true}
       for (let i = 0; i < 3; i++) {
-        const res = await fetch(`${server.url}/tasks/${runId}/resume`, {
+        const res = await fetch(`${server.url}/tasks/${agentId}/resume`, {
           method: "POST",
         });
         expect(res.status).toBe(200);
@@ -440,13 +440,13 @@ describe("RuntimeServer — resume endpoint", () => {
       gov.setGateState(g1Sub, "approved");
       gov.setSubmitResult("approved");
 
-      await waitForStatus(server, runId, ["succeeded"], 20_000);
+      await waitForStatus(server, agentId, ["succeeded"], 20_000);
     } finally {
       await server.stop();
     }
   });
 
-  test("resume returns 404 for unknown run", async () => {
+  test("resume returns 404 for unknown agent", async () => {
     const server = new RuntimeServer(
       makeConfig(),
       makeFactory(
@@ -457,7 +457,7 @@ describe("RuntimeServer — resume endpoint", () => {
     );
     await server.start();
     try {
-      const res = await fetch(`${server.url}/tasks/run-nonexistent/resume`, {
+      const res = await fetch(`${server.url}/tasks/agent-nonexistent/resume`, {
         method: "POST",
       });
       expect(res.status).toBe(404);
@@ -468,7 +468,7 @@ describe("RuntimeServer — resume endpoint", () => {
 });
 
 describe("RuntimeServer — error handling", () => {
-  test("GET /tasks/:runId returns 404 for unknown run", async () => {
+  test("GET /tasks/:agentId returns 404 for unknown agent", async () => {
     const server = new RuntimeServer(
       makeConfig(),
       makeFactory(
@@ -479,7 +479,7 @@ describe("RuntimeServer — error handling", () => {
     );
     await server.start();
     try {
-      const res = await fetch(`${server.url}/tasks/run-does-not-exist`);
+      const res = await fetch(`${server.url}/tasks/agent-does-not-exist`);
       expect(res.status).toBe(404);
       const body = await res.json() as { error: { code: string } };
       expect(body.error.code).toBe("not_found");
@@ -513,7 +513,7 @@ describe("RuntimeServer — error handling", () => {
 
 describe("RuntimeServer — resume from execution failure", () => {
   test("infra fail_closed → resume → succeeds from breakpoint stage", async () => {
-    // Use no-governance (auto-approve) so the run reaches tool stages.
+    // Use no-governance (auto-approve) so the agent reaches tool stages.
     // The connector always fails synthesize → fail_closed (execution_error).
     const gov = new NoGovernanceClient();
     const failConnector = new FakeVivadoConnector({
@@ -525,20 +525,20 @@ describe("RuntimeServer — resume from execution failure", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-infra",
         process_instance_id: "pi-infra",
         task: "基础设施故障恢复测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
       // Run should fail_closed due to synthesize always failing.
-      const failed = await waitForStatus(server, runId, ["fail_closed", "failed"]);
+      const failed = await waitForStatus(server, agentId, ["fail_closed", "failed"]);
       expect(failed["status"]).toMatch(/fail_closed|failed/);
       expect(failed["terminal_cause"]).toBe("execution_error");
 
       // Now swap to a working connector via a new server instance sharing
-      // the same runs dir. The failed run is recovered from disk, then
+      // the same .runs/ dir. The failed run is recovered from disk, then
       // resume is called with a healthy connector.
       await server.stop();
 
@@ -549,14 +549,14 @@ describe("RuntimeServer — resume from execution failure", () => {
       );
       await server2.start();
       try {
-        // The recovered run should be fail_closed (not interrupted — it was
+        // The recovered agent should be fail_closed (not interrupted — it was
         // already terminal on disk).
-        const recovered = await getTask(server2, runId);
+        const recovered = await getTask(server2, agentId);
         expect(recovered["status"]).toMatch(/fail_closed|failed/);
         expect(recovered["terminal_cause"]).toBe("execution_error");
 
         // Resume should be accepted (not 409).
-        const resumeRes = await fetch(`${server2.url}/tasks/${runId}/resume`, {
+        const resumeRes = await fetch(`${server2.url}/tasks/${agentId}/resume`, {
           method: "POST",
         });
         expect(resumeRes.status).toBe(200);
@@ -564,7 +564,7 @@ describe("RuntimeServer — resume from execution failure", () => {
         expect(resumeBody.resumed).toBe(true);
 
         // Run should now succeed with the healthy connector.
-        const succeeded = await waitForStatus(server2, runId, ["succeeded"], 20_000);
+        const succeeded = await waitForStatus(server2, agentId, ["succeeded"], 20_000);
         expect(succeeded["status"]).toBe("succeeded");
       } finally {
         await server2.stop();
@@ -589,25 +589,25 @@ describe("RuntimeServer — resume from execution failure", () => {
     );
     await server.start();
     try {
-      const runId = await postTask(server, {
+      const agentId = await postTask(server, {
         project_id: "p-gate-rej",
         process_instance_id: "pi-gate-rej",
         task: "门禁拒绝不可恢复测试",
       });
-      createdRunIds.push(runId);
+      createdAgentIds.push(agentId);
 
       // Wait for G1 pause.
-      await waitForStatus(server, runId, ["awaiting_approval"]);
+      await waitForStatus(server, agentId, ["awaiting_approval"]);
 
       // Reject G1 → monitor detects → fail_closed with governance_rejected.
       const g1Sub = gov.submissions[gov.submissions.length - 1]!.submissionId;
       gov.setGateState(g1Sub, "rejected");
 
-      const rejected = await waitForStatus(server, runId, ["fail_closed"]);
+      const rejected = await waitForStatus(server, agentId, ["fail_closed"]);
       expect(rejected["terminal_cause"]).toBe("governance_rejected");
 
       // POST resume → 409 not_resumable.
-      const resumeRes = await fetch(`${server.url}/tasks/${runId}/resume`, {
+      const resumeRes = await fetch(`${server.url}/tasks/${agentId}/resume`, {
         method: "POST",
       });
       expect(resumeRes.status).toBe(409);
@@ -615,7 +615,7 @@ describe("RuntimeServer — resume from execution failure", () => {
       expect(body.error.code).toBe("not_resumable");
 
       // Status should remain fail_closed (resume did not trigger execution).
-      const stillRejected = await getTask(server, runId);
+      const stillRejected = await getTask(server, agentId);
       expect(stillRejected["status"]).toBe("fail_closed");
       expect(stillRejected["terminal_cause"]).toBe("governance_rejected");
     } finally {

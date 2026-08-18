@@ -2,7 +2,7 @@
  * Synthia Runtime — 会话事件流 hub（SSE 切片）。
  *
  * FreeAgentSession 的模型文本 delta 与 server 的会话状态变化汇聚为带单调 seq
- * 的事件流，供 GET /tasks/:runId/stream 按 seq 有序推送：
+ * 的事件流，供 GET /tasks/:agentId/stream 按 seq 有序推送：
  *
  *  - `part`   新/更新 part 的 JSON（kind + state + 完整文本）；
  *  - `delta`  {partId, text} 纯文本追加（打字机增量）；
@@ -10,7 +10,7 @@
  *  - `done`   整轮完成（携带最终 reply 摘要）；
  *  - `reset`  订阅游标早于保留窗口（客户端应全量刷新后重订）。
  *
- * 设计：每 run 一个 hub（`StreamHub.for(runId)`），事件保留环形上限（默认
+ * 设计：每 agent 一个 hub（`StreamHub.for(agentId)`），事件保留环形上限（默认
  * 2000 条）；订阅 = 每连接独立游标 + 等待者（emit 广播唤醒），断线重连可用
  * Last-Event-ID 续传；游标过老收到 `reset` 后全量刷新。
  */
@@ -55,11 +55,11 @@ interface HubInternal {
 const DEFAULT_RETAIN = 2000;
 const hubs = new Map<string, HubInternal>();
 
-function hubFor(runId: string, retain: number = DEFAULT_RETAIN): HubInternal {
-  let hub = hubs.get(runId);
+function hubFor(agentId: string, retain: number = DEFAULT_RETAIN): HubInternal {
+  let hub = hubs.get(agentId);
   if (!hub) {
     hub = { events: [], seq: 0, retain, waiters: [] };
-    hubs.set(runId, hub);
+    hubs.set(agentId, hub);
   }
   return hub;
 }
@@ -72,9 +72,9 @@ function eventsSince(hub: HubInternal, cursor: number): readonly StreamEvent[] {
 export class StreamHub {
   private constructor(private readonly hub: HubInternal) {}
 
-  /** 取或创建 run 的 hub。 */
-  static for(runId: string, retain?: number): StreamHub {
-    return new StreamHub(hubFor(runId, retain));
+  /** 取或创建 agent 的 hub。 */
+  static for(agentId: string, retain?: number): StreamHub {
+    return new StreamHub(hubFor(agentId, retain));
   }
 
   /** 当前最大 seq（Last-Event-ID 校验用）。 */
@@ -149,11 +149,11 @@ export class StreamHub {
     return cursorObj;
   }
 
-  /** 丢弃 run 的 hub（run 删除时）。 */
-  static drop(runId: string): void {
-    const hub = hubs.get(runId);
+  /** 丢弃 agent 的 hub（agent 删除时）。 */
+  static drop(agentId: string): void {
+    const hub = hubs.get(agentId);
     if (hub) {
-      hubs.delete(runId);
+      hubs.delete(agentId);
       for (const wake of hub.waiters.splice(0)) wake();
     }
   }

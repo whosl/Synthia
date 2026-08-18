@@ -16,7 +16,7 @@ import ViewSwitcher from "./ViewSwitcher.vue";
 const props = defineProps<FileTreeProps>();
 const emit = defineEmits<FileTreeEmits>();
 
-const result = computed(() => buildFileTree(props.entries, props.viewMode, props.hasRun));
+const result = computed(() => buildFileTree(props.entries, props.viewMode, props.hasAgent));
 
 // ─── 分组展开/折叠（纯本地 UI 态：默认全部展开，不跨刷新保留）───────────────
 

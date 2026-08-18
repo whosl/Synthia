@@ -9,14 +9,14 @@
  * instance / outbox event) or the forwarded/faked Runtime response.
  *
  * Coverage:
- *   - POST /projects/:id/tasks happy path: 201 { runId }; default process
+ *   - POST /projects/:id/tasks happy path: 201 { agentId }; default process
  *     instance lazily created (pi-default:<projectId>); outbox event appended
  *   - explicit process_instance_id validated for ownership (not in project → 404)
  *   - GET /projects/:id/tasks list filtered to the project
- *   - GET /projects/:id/tasks/:runId happy path; cross-project run → 404
+ *   - GET /projects/:id/tasks/:agentId happy path; cross-project agent → 404
  *   - Runtime unreachable / timeout → 503 capability_unavailable (retryable)
  *   - Runtime 404 passthrough → not_found
- *   - idempotent replay (same Idempotency-Key) returns the same runId without
+ *   - idempotent replay (same Idempotency-Key) returns the same agentId without
  *     re-contacting the Runtime; same key + different body → 409
  *   - Runtime not configured → 503 capability_unavailable
  *   - auth: missing scope (read-only token on POST) → 403
@@ -36,21 +36,21 @@ import {
   type RuntimeClient,
   type RuntimeCreateResponse,
   type RuntimeListResponse,
-  type RuntimeRunDetail,
+  type RuntimeAgentDetail,
 } from "../src/api/task-proxy.ts";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? "";
 
 // ─── fake runtime ────────────────────────────────────────────────────────────
 
-interface StoredRun {
-  runId: string;
+interface StoredAgent {
+  agentId: string;
   projectId: string;
   processInstanceId: string;
   task: string;
   part?: string;
-  status: RuntimeRunDetail["status"];
-  detail: RuntimeRunDetail;
+  status: RuntimeAgentDetail["status"];
+  detail: RuntimeAgentDetail;
 }
 
 /**
@@ -59,7 +59,7 @@ interface StoredRun {
  * simulation (unreachable / timeoutMs).
  */
 class FakeRuntimeClient implements RuntimeClient {
-  private readonly runs = new Map<string, StoredRun>();
+  private readonly agents = new Map<string, StoredAgent>();
   /** Set to make the next createTask reject (e.g. → 503 / 404). */
   createError: RuntimeClientError | null = null;
   /** Set to make the next getTask reject. */
@@ -71,7 +71,7 @@ class FakeRuntimeClient implements RuntimeClient {
   lastCreate: { project_id: string; process_instance_id: string; task: string; part?: string } | null = null;
 
   reset(): void {
-    this.runs.clear();
+    this.agents.clear();
     this.createError = null;
     this.getError = null;
     this.unreachable = false;
@@ -89,9 +89,9 @@ class FakeRuntimeClient implements RuntimeClient {
     this.lastCreate = body;
     if (this.unreachable) throw new RuntimeClientError(503, "runtime unreachable", { retryable: true });
     if (this.createError) throw this.createError;
-    const runId = `run-${randomUUID()}`;
-    const detail: RuntimeRunDetail = {
-      run_id: runId,
+    const agentId = `agent-${randomUUID()}`;
+    const detail: RuntimeAgentDetail = {
+      agent_id: agentId,
       project_id: body.project_id,
       status: "running",
       current_stage: "intake",
@@ -100,8 +100,8 @@ class FakeRuntimeClient implements RuntimeClient {
       ],
       audit: [{ ts: new Date().toISOString(), seq: 1, category: "lifecycle", action: "started", result: "ok" }],
     };
-    this.runs.set(runId, {
-      runId,
+    this.agents.set(agentId, {
+      agentId,
       projectId: body.project_id,
       processInstanceId: body.process_instance_id,
       task: body.task,
@@ -109,33 +109,33 @@ class FakeRuntimeClient implements RuntimeClient {
       status: "running",
       detail,
     });
-    return { run_id: runId };
+    return { agent_id: agentId };
   }
 
   async listTasks(projectId: string): Promise<RuntimeListResponse> {
-    const runs = [...this.runs.values()]
+    const agents = [...this.agents.values()]
       .filter((r) => r.projectId === projectId)
       .map((r) => ({
-        run_id: r.runId,
+        agent_id: r.agentId,
         project_id: r.projectId,
         status: r.status,
         current_stage: r.detail.current_stage,
         awaiting_gate: r.detail.awaiting_gate,
         created_at: "2026-01-01T00:00:00Z",
       }));
-    return { runs };
+    return { agents };
   }
 
-  async getTask(runId: string): Promise<RuntimeRunDetail> {
+  async getTask(agentId: string): Promise<RuntimeAgentDetail> {
     if (this.getError) throw this.getError;
-    const run = this.runs.get(runId);
-    if (!run) throw new RuntimeClientError(404, `run not found: ${runId}`, { code: "RUN_NOT_FOUND", retryable: false });
+    const run = this.agents.get(agentId);
+    if (!run) throw new RuntimeClientError(404, `agent not found: ${agentId}`, { code: "AGENT_NOT_FOUND", retryable: false });
     return run.detail;
   }
 
   /** Drive a run to a terminal state with optional reason (test helper). */
-  setRun(runId: string, patch: Partial<RuntimeRunDetail>): void {
-    const run = this.runs.get(runId);
+  setAgent(agentId: string, patch: Partial<RuntimeAgentDetail>): void {
+    const run = this.agents.get(agentId);
     if (!run) return;
     run.detail = { ...run.detail, ...patch };
     if (patch.status) run.status = patch.status;
@@ -146,7 +146,7 @@ class FakeRuntimeClient implements RuntimeClient {
   /** When set, streamTask rejects (→ mapped error). */
   streamError: RuntimeClientError | null = null;
 
-  async streamTask(_runId: string): Promise<Response> {
+  async streamTask(_agentId: string): Promise<Response> {
     if (this.streamError) throw this.streamError;
     if (this.streamBody === null) throw new RuntimeClientError(503, "runtime unreachable", { retryable: true });
     return new Response(this.streamBody, {
@@ -235,7 +235,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
 
   // ─── POST happy path ────────────────────────────────────────────────────────
 
-  test("POST /tasks: 201 {runId}; lazily creates default process instance + outbox event", async () => {
+  test("POST /tasks: 201 {agentId}; lazily creates default process instance + outbox event", async () => {
     const projectId = await createProject();
 
     const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks`, {
@@ -247,8 +247,8 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
 
     expect(status).toBe(201);
     const data = envelopeData(json);
-    expect(typeof data.runId).toBe("string");
-    expect((data.runId as string).startsWith("run-")).toBe(true);
+    expect(typeof data.agentId).toBe("string");
+    expect((data.agentId as string).startsWith("agent-")).toBe(true);
 
     // Default process instance lazily provisioned (pi-default:<projectId>).
     const piRow = await client.query("SELECT id, gate_profile_version, current_gate FROM process_instance WHERE project_id = $1", [projectId]);
@@ -266,7 +266,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     expect(fake.lastCreate!.part).toBe("xc7vx690tffg1761-2");
 
     // Outbox event appended (observability).
-    const outboxRow = await client.query("SELECT event_type, payload FROM outbox_events WHERE aggregate_id = $1", [data.runId]);
+    const outboxRow = await client.query("SELECT event_type, payload FROM outbox_events WHERE aggregate_id = $1", [data.agentId]);
     expect(outboxRow.rows.length).toBe(1);
     expect((outboxRow.rows[0] as Record<string, unknown>).event_type).toBe("task.forwarded");
   });
@@ -368,21 +368,21 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       headers: { "idempotency-key": `idem-${randomUUID()}` },
       body: { task: "项目 A 的任务" },
     });
-    const runId = (envelopeData(create.json).runId as string);
+    const agentId = (envelopeData(create.json).agentId as string);
     // Seed a run belonging to otherProject directly in the fake.
     await fake.createTask({ project_id: otherProject, process_instance_id: "pi-x", task: "项目 B 的任务" });
 
     const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks`, { token: ids.humanToken });
     expect(status).toBe(200);
     const data = envelopeData(json);
-    expect(Array.isArray(data.runs)).toBe(true);
-    expect((data.runs as unknown[]).length).toBe(1);
-    const only = (data.runs as Record<string, unknown>[])[0]!;
-    expect(only.run_id).toBe(runId);
+    expect(Array.isArray(data.agents)).toBe(true);
+    expect((data.agents as unknown[]).length).toBe(1);
+    const only = (data.agents as Record<string, unknown>[])[0]!;
+    expect(only.agent_id).toBe(agentId);
     expect(only.project_id).toBe(projectId);
   });
 
-  test("GET /tasks/:runId: detail with docs (artifact_id + revision_id passed through)", async () => {
+  test("GET /tasks/:agentId: detail with docs (artifact_id + revision_id passed through)", async () => {
     const projectId = await createProject();
     const create = await callApi(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",
@@ -390,12 +390,12 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       headers: { "idempotency-key": `idem-${randomUUID()}` },
       body: { task: "查看详情" },
     });
-    const runId = envelopeData(create.json).runId as string;
+    const agentId = envelopeData(create.json).agentId as string;
 
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${runId}`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${agentId}`, { token: ids.humanToken });
     expect(status).toBe(200);
     const data = envelopeData(json);
-    expect(data.run_id).toBe(runId);
+    expect(data.agent_id).toBe(agentId);
     expect(data.project_id).toBe(projectId);
     expect(data.status).toBe("running");
     const docs = data.docs as Record<string, unknown>[];
@@ -405,7 +405,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     expect(docs[0]!.path).toBe("docs/intake.md");
   });
 
-  test("GET /tasks/:runId: cross-project run → 404 (project_id mismatch)", async () => {
+  test("GET /tasks/:agentId: cross-project agent → 404 (project_id mismatch)", async () => {
     const projectId = await createProject();
     const otherProject = await createProject();
     // Create a run under otherProject.
@@ -415,18 +415,18 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       headers: { "idempotency-key": `idem-${randomUUID()}` },
       body: { task: "别的项目的 run" },
     });
-    const runId = envelopeData(create.json).runId as string;
+    const agentId = envelopeData(create.json).agentId as string;
 
     // Ask for it under projectId → must not leak.
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${runId}`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${agentId}`, { token: ids.humanToken });
     expect(status).toBe(404);
     expect(envelopeError(json).code).toBe("not_found");
   });
 
-  test("GET /tasks/:runId: Runtime reports unknown run → 404 passthrough", async () => {
+  test("GET /tasks/:agentId: Runtime reports unknown run → 404 passthrough", async () => {
     const projectId = await createProject();
-    fake.getError = new RuntimeClientError(404, "run not found: ghost", { code: "RUN_NOT_FOUND", retryable: false });
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/run-ghost`, { token: ids.humanToken });
+    fake.getError = new RuntimeClientError(404, "agent not found: ghost", { code: "AGENT_NOT_FOUND", retryable: false });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/agent-ghost`, { token: ids.humanToken });
     expect(status).toBe(404);
     expect(envelopeError(json).code).toBe("not_found");
   });
@@ -439,10 +439,10 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       headers: { "idempotency-key": `idem-${randomUUID()}` },
       body: { task: "会失败的任务" },
     });
-    const runId = envelopeData(create.json).runId as string;
-    fake.setRun(runId, { status: "failed", reason: "simulate 阶段超时" });
+    const agentId = envelopeData(create.json).agentId as string;
+    fake.setAgent(agentId, { status: "failed", reason: "simulate 阶段超时" });
 
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${runId}`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${agentId}`, { token: ids.humanToken });
     expect(status).toBe(200);
     const data = envelopeData(json);
     expect(data.status).toBe("failed");
@@ -482,7 +482,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
   test("Runtime 503 on GET → 503 capability_unavailable", async () => {
     const projectId = await createProject();
     fake.getError = new RuntimeClientError(503, "runtime overloaded", { retryable: true });
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/run-any`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/agent-any`, { token: ids.humanToken });
     expect(status).toBe(503);
     expect(envelopeError(json).code).toBe("capability_unavailable");
   });
@@ -519,7 +519,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
 
   // ─── idempotency ──────────────────────────────────────────────────────────────
 
-  test("idempotent replay returns same runId without re-contacting Runtime", async () => {
+  test("idempotent replay returns same agentId without re-contacting Runtime", async () => {
     const projectId = await createProject();
     const key = `idem-${randomUUID()}`;
     const body = { task: "幂等任务" };
@@ -528,15 +528,15 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       method: "POST", token: ids.humanToken, headers: { "idempotency-key": key }, body,
     });
     expect(first.status).toBe(201);
-    const firstRunId = envelopeData(first.json).runId as string;
+    const firstAgentId = envelopeData(first.json).agentId as string;
     expect(fake.createCount).toBe(1);
 
     const second = await callApi(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST", token: ids.humanToken, headers: { "idempotency-key": key }, body,
     });
     expect(second.status).toBe(201);
-    const secondRunId = envelopeData(second.json).runId as string;
-    expect(secondRunId).toBe(firstRunId);
+    const secondAgentId = envelopeData(second.json).agentId as string;
+    expect(secondAgentId).toBe(firstAgentId);
     // Runtime was NOT contacted again.
     expect(fake.createCount).toBe(1);
   });
@@ -574,7 +574,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       method: "POST", token: ids.serviceToken, headers: { "idempotency-key": `idem-${randomUUID()}` }, body: { task: "服务身份创建任务" },
     });
     expect(status).toBe(201);
-    expect(typeof envelopeData(json).runId).toBe("string");
+    expect(typeof envelopeData(json).agentId).toBe("string");
   });
 
   test("missing auth → 401", async () => {
@@ -588,9 +588,9 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
 
   // ─── SSE stream pass-through ────────────────────────────────────────────────
 
-  test("GET .../tasks/:runId/stream passes Runtime SSE through verbatim (no envelope)", async () => {
+  test("GET .../tasks/:agentId/stream passes Runtime SSE through verbatim (no envelope)", async () => {
     const projectId = await createProject();
-    const { run_id: runId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
     fake.streamBody = [
       `event: status\nid: 1\ndata: {"status":"running","ts":"t1"}\n\n`,
       `event: part\nid: 2\ndata: {"part":{"kind":"text","id":"sp-1","state":"streaming","text":"","ts":"t2"}}\n\n`,
@@ -598,7 +598,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
       `event: done\nid: 4\ndata: {"reply":"你好","status":"idle","ts":"t4"}\n\n`,
     ].join("");
 
-    const res = await fetch(`${baseUrl}/api/v1/projects/${projectId}/tasks/${runId}/stream`, {
+    const res = await fetch(`${baseUrl}/api/v1/projects/${projectId}/tasks/${agentId}/stream`, {
       headers: { authorization: `Bearer ${ids.humanToken}` },
     });
     expect(res.status).toBe(200);
@@ -608,21 +608,21 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     expect(body).toBe(fake.streamBody);
   });
 
-  test("stream cross-project run → 404 (ownership enforced before piping)", async () => {
+  test("stream cross-project agent → 404 (ownership enforced before piping)", async () => {
     const projectIdA = await createProject();
     const projectIdB = await createProject();
-    const { run_id: runId } = await fake.createTask({ project_id: projectIdA, process_instance_id: "pi-x", task: "sse" });
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectIdA, process_instance_id: "pi-x", task: "sse" });
     fake.streamBody = "event: status\nid: 1\ndata: {}\n\n";
-    const { status, json } = await callApi(`/api/v1/projects/${projectIdB}/tasks/${runId}/stream`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectIdB}/tasks/${agentId}/stream`, { token: ids.humanToken });
     expect(status).toBe(404);
     expect(envelopeError(json).code).toBe("not_found");
   });
 
   test("stream Runtime unreachable → 503 capability_unavailable", async () => {
     const projectId = await createProject();
-    const { run_id: runId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-x", task: "sse" });
     fake.streamError = new RuntimeClientError(503, "runtime unreachable", { retryable: true });
-    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${runId}/stream`, { token: ids.humanToken });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${agentId}/stream`, { token: ids.humanToken });
     expect(status).toBe(503);
     expect(envelopeError(json).code).toBe("capability_unavailable");
     expect(envelopeError(json).retryable).toBe(true);
@@ -631,7 +631,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
   test("stream unknown run → 404 passthrough", async () => {
     const projectId = await createProject();
     fake.streamBody = "";
-    const { status } = await callApi(`/api/v1/projects/${projectId}/tasks/run-nope/stream`, { token: ids.humanToken });
+    const { status } = await callApi(`/api/v1/projects/${projectId}/tasks/agent-nope/stream`, { token: ids.humanToken });
     expect(status).toBe(404);
   });
 });

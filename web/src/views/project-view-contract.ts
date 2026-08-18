@@ -16,7 +16,7 @@
  * 关联，四个栏位组件与后续开发者不需要、也不应该自己再关联一遍。
  */
 
-import type { ArtifactRevision, JobEvidenceContent, TaskRunSummary } from "../api/types.ts";
+import type { ArtifactRevision, JobEvidenceContent, TaskAgentSummary } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
 import type { StageChainNode } from "../domain/tasks.ts";
@@ -122,9 +122,9 @@ export interface TopBarProps {
    * 当前选中的 run 摘要（`GET .../tasks` 列表项）。驱动「③ RTL 编写 · 进行中 ·
    * 8/15」一类文案与任务切换器的高亮项；为 null 当且仅当 stageChain 也为 null。
    */
-  readonly currentRun: TaskRunSummary | null;
+  readonly currentAgent: TaskAgentSummary | null;
   /** 项目全部 run（`GET .../tasks`，按 created_at 倒序），供任务切换器列出（含仍在后台跑的其它 run）。 */
-  readonly runs: readonly TaskRunSummary[];
+  readonly agents: readonly TaskAgentSummary[];
   /** 当前生效主题，驱动 ☀/☾ 图标显示哪一个。 */
   readonly theme: Theme;
   /** <1024px 时文件树抽屉是否已展开（驱动汉堡按钮的开合态）。见 spec R3。 */
@@ -135,7 +135,7 @@ export interface TopBarProps {
 
 export interface TopBarEmits {
   /** 任务切换器选中另一个 run（其它 run 仍在后台继续跑，不受影响）。 */
-  "select-run": [runId: string];
+  "select-agent": [agentId: string];
   /**
    * 点击阶段/门节点：左栏应联动切换到「阶段」视图并定位到该阶段的产物分组
    * （spec §3.1 末条）。stageId 对齐 `STAGE_CHAIN` 的 node.id（含门节点 G1/G3/G4）。
@@ -164,7 +164,7 @@ export interface FileTreeProps {
    * 项目是否存在至少一个 run。为 false 时「路径」「阶段」视图应降级提示
    * （path/phase 全部缺失，无法分组），「产物类型」视图仍可正常工作（spec R7）。
    */
-  readonly hasRun: boolean;
+  readonly hasAgent: boolean;
   /** 当前编辑器打开的 artifactId；树上据此高亮，未打开任何文件为 null。 */
   readonly openArtifactId: string | null;
   /** <1024px 抽屉模式：为 true 时组件可在用户选中文件后自行 emit close-drawer 收起浮层。 */
@@ -260,8 +260,8 @@ export interface ChatFeedProps {
    * 合并去重，ChatFeed 只管按数组顺序渲染，不需要再关心两路数据的合并规则。
    */
   readonly parts: readonly SynthiaPart[];
-  /** 当前 run 状态原文（`TaskRunDetail.status`）；无 run 为 null。中文映射见 `domain/tasks.ts:TASK_STATUS_TEXT`。 */
-  readonly runStatus: string | null;
+  /** 当前 run 状态原文（`TaskAgentDetail.status`）；无 run 为 null。中文映射见 `domain/tasks.ts:TASK_STATUS_TEXT`。 */
+  readonly agentStatus: string | null;
   /** SSE 实时连接阶段；"degraded" 时应提示「实时连接中断，已切换定时刷新」。 */
   readonly streamPhase: StreamPhase;
   /** 输入框行为模式，见上，直接决定占位文案与按钮语义（不得出现"排队"措辞，D21）。 */
@@ -283,7 +283,7 @@ export interface ChatFeedEmits {
    * 按 run 状态自动决定 prompt / steer 语义）。
    */
   send: [text: string];
-  /** 点击「⏹ 打断」（`POST .../tasks/:runId/abort`）；仅 canAbort=true 时应可点击。 */
+  /** 点击「⏹ 打断」（`POST .../tasks/:agentId/abort`）；仅 canAbort=true 时应可点击。 */
   abort: [];
   /** 点击产物卡关联的文档 → 中栏编辑器打开（不再弹抽屉，这是三栏相对 v3 的主要收益）。 */
   "open-doc": [artifactId: string];

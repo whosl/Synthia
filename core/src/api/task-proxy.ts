@@ -4,7 +4,7 @@
  * Core forwards task lifecycle requests to the Runtime HTTP service
  * (runtime/server.ts) WITHOUT persistencing task truth. Core's role is:
  *   1. project ownership validation (project exists, process instance belongs
- *      to the project, the run's project_id matches the path);
+ *      to the project, the agent's project_id matches the path);
  *   2. lazy default process instance provisioning (one project → one G0→G9
  *      main flow, materialized as process_instance "pi-default:<projectId>");
  *   3. envelope + error-model translation between Runtime's error vocabulary
@@ -19,7 +19,7 @@
  * Idempotency: POST /projects/:id/tasks requires an Idempotency-Key and stores
  * the forwarded Runtime response in `idempotency_records` (same table, same
  * semantics as every other write) so a same-key replay returns the original
- * runId WITHOUT re-contacting the Runtime.
+ * agentId WITHOUT re-contacting the Runtime.
  */
 
 import {
@@ -57,7 +57,7 @@ export interface RuntimeDocRef {
   readonly revision_id: string;
 }
 
-/** Condensed audit entry returned by GET /tasks/:runId (last ~50). */
+/** Condensed audit entry returned by GET /tasks/:agentId (last ~50). */
 export interface RuntimeAuditEntry {
   readonly ts: string;
   readonly seq: number;
@@ -68,7 +68,7 @@ export interface RuntimeAuditEntry {
   readonly detail?: string;
 }
 
-/** Evidence summary entry for a terminal run. */
+/** Evidence summary entry for a terminal agent. */
 export interface RuntimeEvidenceEntry {
   readonly job_id: string;
   readonly operation: string;
@@ -76,8 +76,8 @@ export interface RuntimeEvidenceEntry {
   readonly entries?: ReadonlyArray<{ name: string; sha256: string; size_bytes: number; media_type: string }>;
 }
 
-export interface RuntimeRunSummary {
-  readonly run_id: string;
+export interface RuntimeAgentSummary {
+  readonly agent_id: string;
   readonly project_id: string;
   readonly status: RuntimeTaskStatus;
   readonly current_stage?: string;
@@ -85,8 +85,8 @@ export interface RuntimeRunSummary {
   readonly created_at?: string;
 }
 
-export interface RuntimeRunDetail {
-  readonly run_id: string;
+export interface RuntimeAgentDetail {
+  readonly agent_id: string;
   readonly project_id: string;
   readonly status: RuntimeTaskStatus;
   readonly current_stage?: string;
@@ -98,11 +98,11 @@ export interface RuntimeRunDetail {
 }
 
 export interface RuntimeListResponse {
-  readonly runs: readonly RuntimeRunSummary[];
+  readonly agents: readonly RuntimeAgentSummary[];
 }
 
 export interface RuntimeCreateResponse {
-  readonly run_id: string;
+  readonly agent_id: string;
 }
 
 // ─── Runtime client port ─────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ export interface RuntimeCreateResponse {
  * API errors. Absence of a client (Runtime not configured) → 503.
  */
 export interface RuntimeClient {
-  /** POST /tasks — asynchronously start a loop run. */
+  /** POST /tasks — asynchronously start a loop agent. */
   createTask(body: {
     project_id: string;
     process_instance_id: string;
@@ -122,20 +122,20 @@ export interface RuntimeClient {
     /** "agent" = free-agent session only (do not start the pipeline loop). */
     mode?: "agent";
   }): Promise<RuntimeCreateResponse>;
-  /** GET /tasks — list runs filtered by project. */
+  /** GET /tasks — list agents filtered by project. */
   listTasks(projectId: string): Promise<RuntimeListResponse>;
-  /** GET /tasks/:runId — fetch a single run's detail. */
-  getTask(runId: string): Promise<RuntimeRunDetail>;
-  /** POST /tasks/:runId/message — free-agent conversation (prompt/steer). */
-  sendMessage(runId: string, text: string): Promise<unknown>;
-  /** POST /tasks/:runId/abort — abort the free-agent session. */
-  abortTask(runId: string): Promise<unknown>;
+  /** GET /tasks/:agentId — fetch a single agent's detail. */
+  getTask(agentId: string): Promise<RuntimeAgentDetail>;
+  /** POST /tasks/:agentId/message — free-agent conversation (prompt/steer). */
+  sendMessage(agentId: string, text: string): Promise<unknown>;
+  /** POST /tasks/:agentId/abort — abort the free-agent session. */
+  abortTask(agentId: string): Promise<unknown>;
   /**
-   * GET /tasks/:runId/stream — open the SSE event stream and return the raw
+   * GET /tasks/:agentId/stream — open the SSE event stream and return the raw
    * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
    * RuntimeClientError when the Runtime is unreachable (→ 503).
    */
-  streamTask(runId: string, init?: { signal?: AbortSignal }): Promise<Response>;
+  streamTask(agentId: string, init?: { signal?: AbortSignal }): Promise<Response>;
 }
 
 /**
@@ -169,7 +169,7 @@ const DEFAULT_RUNTIME_TIMEOUT_MS = 15_000;
  * resets, timeouts, and Runtime 5xx responses all surface as a retryable
  * RuntimeClientError (status 503), so the handler maps them to a single
  * capability_unavailable. Runtime 4xx responses are passed through with their
- * status so a 404 (unknown run) / 400 (malformed task) maps to the matching
+ * status so a 404 (unknown agent) / 400 (malformed task) maps to the matching
  * Core error.
  */
 export class HttpRuntimeClient implements RuntimeClient {
@@ -246,27 +246,27 @@ export class HttpRuntimeClient implements RuntimeClient {
     return this.request<RuntimeListResponse>("GET", `/tasks?project_id=${encodeURIComponent(projectId)}`);
   }
 
-  async getTask(runId: string): Promise<RuntimeRunDetail> {
-    return this.request<RuntimeRunDetail>("GET", `/tasks/${encodeURIComponent(runId)}`);
+  async getTask(agentId: string): Promise<RuntimeAgentDetail> {
+    return this.request<RuntimeAgentDetail>("GET", `/tasks/${encodeURIComponent(agentId)}`);
   }
 
-  async sendMessage(runId: string, text: string): Promise<unknown> {
+  async sendMessage(agentId: string, text: string): Promise<unknown> {
     // A free-agent turn (context + tool calls + generation) takes minutes,
     // not seconds — never the 15s control-path timeout.
-    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/message`, { text }, { timeoutMs: 10 * 60_000 });
+    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/message`, { text }, { timeoutMs: 10 * 60_000 });
   }
 
-  async abortTask(runId: string): Promise<unknown> {
-    return this.request("POST", `/tasks/${encodeURIComponent(runId)}/abort`);
+  async abortTask(agentId: string): Promise<unknown> {
+    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/abort`);
   }
 
-  async streamTask(runId: string, init?: { signal?: AbortSignal }): Promise<Response> {
+  async streamTask(agentId: string, init?: { signal?: AbortSignal }): Promise<Response> {
     // SSE pass-through must NOT go through request(): no buffering, no
     // read-then-parse, no timeout — the body is handed to the caller as-is.
     let response: Response;
     try {
       response = await fetch(
-        `${this.baseUrl.replace(/\/+$/, "")}/tasks/${encodeURIComponent(runId)}/stream`,
+        `${this.baseUrl.replace(/\/+$/, "")}/tasks/${encodeURIComponent(agentId)}/stream`,
         { method: "GET", signal: init?.signal, headers: { accept: "text/event-stream" } },
       );
     } catch (err) {
@@ -454,14 +454,14 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
 // ─── handlers ────────────────────────────────────────────────────────────────
 
 /**
- * POST /projects/:projectId/tasks — start a Runtime loop run for this project.
+ * POST /projects/:projectId/tasks — start a Runtime loop agent for this project.
  *
  * Body: `{ task, part? }` (and optionally an explicit `process_instance_id`,
  * which MUST belong to the project). Core lazily provisions the default main-
  * flow process instance when none is supplied, then forwards to the Runtime's
  * POST /tasks with `project_id` + `process_instance_id` injected. The forwarded
- * response `{ run_id }` is translated to `{ runId }` and stored idempotently so
- * a same-key replay returns the original runId without re-contacting the
+ * response `{ agent_id }` is translated to `{ agentId }` and stored idempotently so
+ * a same-key replay returns the original agentId without re-contacting the
  * Runtime. Core emits a `task.forwarded` outbox event (observability only —
  * task truth lives in the Runtime).
  */
@@ -474,7 +474,7 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
   const mode = nullableString(body, "mode");
   const explicitPi = nullableString(body, "process_instance_id");
 
-  const result = await runIdempotent<{ runId: string }>(ctx, "create_task", projectId, async (tx) => {
+  const result = await runIdempotent<{ agentId: string }>(ctx, "create_task", projectId, async (tx) => {
     const processInstanceId = await resolveProcessInstance(tx, projectId, explicitPi);
 
     let response: RuntimeCreateResponse;
@@ -490,21 +490,21 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
       throw mapRuntimeError(err);
     }
 
-    await outboxEvent(tx, ctx, { type: "task", id: response.run_id }, "task.forwarded", {
-      runId: response.run_id,
+    await outboxEvent(tx, ctx, { type: "task", id: response.agent_id }, "task.forwarded", {
+      agentId: response.agent_id,
       projectId,
       processInstanceId,
     });
-    return { runId: response.run_id };
+    return { agentId: response.agent_id };
   });
 
   return { status: 201, data: result };
 }
 
 /**
- * GET /projects/:projectId/tasks — list task runs for this project.
+ * GET /projects/:projectId/tasks — list task agents for this project.
  *
- * Core forwards to Runtime GET /tasks and filters to runs whose project_id
+ * Core forwards to Runtime GET /tasks and filters to agents whose project_id
  * matches the path. The Runtime is the authority for task state.
  */
 export async function listTasksHandler(ctx: RequestContext): Promise<HandlerResult> {
@@ -521,78 +521,78 @@ export async function listTasksHandler(ctx: RequestContext): Promise<HandlerResu
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  const runs = (list.runs ?? []).filter((r) => r.project_id === projectId);
-  return { status: 200, data: { runs } };
+  const agents = (list.agents ?? []).filter((r) => r.project_id === projectId);
+  return { status: 200, data: { agents } };
 }
 
 /**
- * GET /projects/:projectId/tasks/:runId — fetch a single task run's detail.
+ * GET /projects/:projectId/tasks/:agentId — fetch a single task agent's detail.
  *
- * Core forwards to Runtime GET /tasks/:runId; the returned run's project_id
+ * Core forwards to Runtime GET /tasks/:agentId; the returned agent's project_id
  * MUST match the path project_id (else 404 — never surface another project's
- * run). docs entries are passed through verbatim, including artifact_id +
+ * agent). docs entries are passed through verbatim, including artifact_id +
  * revision_id so the frontend can render revision content via Core's content
  * endpoint without a reverse lookup.
  */
 export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
-  const runId = ctx.params.runId!;
+  const agentId = ctx.params.agentId!;
   const runtime = requireRuntime(ctx);
 
-  let detail: RuntimeRunDetail;
+  let detail: RuntimeAgentDetail;
   try {
-    detail = await runtime.getTask(runId);
+    detail = await runtime.getTask(agentId);
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
   return { status: 200, data: detail };
 }
 
 /**
- * POST /projects/:projectId/tasks/:runId/message — forward a free-agent
+ * POST /projects/:projectId/tasks/:agentId/message — forward a free-agent
  * conversation message (prompt when idle, steer when running). Ownership of
- * the run is verified before forwarding; the Runtime reply is passed through.
+ * the agent is verified before forwarding; the Runtime reply is passed through.
  */
 export async function sendTaskMessageHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
-  const runId = ctx.params.runId!;
+  const agentId = ctx.params.agentId!;
   const runtime = requireRuntime(ctx);
   const body = asObject(ctx.body);
   const text = requireString(body, "text");
 
-  let detail: RuntimeRunDetail;
+  let detail: RuntimeAgentDetail;
   try {
-    detail = await runtime.getTask(runId);
+    detail = await runtime.getTask(agentId);
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
 
   try {
-    const reply = await runtime.sendMessage(runId, text);
+    const reply = await runtime.sendMessage(agentId, text);
     return { status: 200, data: reply };
   } catch (err) {
     throw mapRuntimeError(err);
   }
 }
 
-/** POST /projects/:projectId/tasks/:runId/abort — abort the free-agent session. */
+/** POST /projects/:projectId/tasks/:agentId/abort — abort the free-agent session. */
 export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
-  const runId = ctx.params.runId!;
+  const agentId = ctx.params.agentId!;
   const runtime = requireRuntime(ctx);
 
-  let detail: RuntimeRunDetail;
+  let detail: RuntimeAgentDetail;
   try {
-    detail = await runtime.getTask(runId);
+    detail = await runtime.getTask(agentId);
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
 
   try {
-    const result = await runtime.abortTask(runId);
+    const result = await runtime.abortTask(agentId);
     return { status: 200, data: result };
   } catch (err) {
     throw mapRuntimeError(err);
@@ -600,9 +600,9 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
 }
 
 /**
- * GET /projects/:projectId/tasks/:runId/stream — SSE pass-through.
+ * GET /projects/:projectId/tasks/:agentId/stream — SSE pass-through.
  *
- * Ownership is verified against the Runtime run detail (same as the other
+ * Ownership is verified against the Runtime agent detail (same as the other
  * task routes), then the Runtime SSE response is forwarded VERBATIM: the
  * body stream is never buffered and content-type stays text/event-stream.
  * The response bypasses the JSON envelope by design (EventSource clients
@@ -613,20 +613,20 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
  */
 export async function streamTaskHandler(ctx: RequestContext): Promise<Response> {
   const projectId = ctx.params.projectId!;
-  const runId = ctx.params.runId!;
+  const agentId = ctx.params.agentId!;
   const runtime = requireRuntime(ctx);
 
-  let detail: RuntimeRunDetail;
+  let detail: RuntimeAgentDetail;
   try {
-    detail = await runtime.getTask(runId);
+    detail = await runtime.getTask(agentId);
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${runId}`);
+  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
 
   let upstream: Response;
   try {
-    upstream = await runtime.streamTask(runId);
+    upstream = await runtime.streamTask(agentId);
   } catch (err) {
     throw mapRuntimeError(err);
   }

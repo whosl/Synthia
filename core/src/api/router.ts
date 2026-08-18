@@ -237,22 +237,22 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       return { handler: getJobStatusHandler, params: { projectId, jobId: segments[3]! }, requiredScope: "core:read" };
     }
 
-    // GET /projects/:projectId/tasks/:runId
+    // GET /projects/:projectId/tasks/:agentId
     if (segments.length === 4 && segments[2] === "tasks" && method === "GET") {
-      return { handler: getTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:read" };
+      return { handler: getTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:read" };
     }
 
-    // POST /projects/:projectId/tasks/:runId/message | /abort (free-agent conversation)
+    // POST /projects/:projectId/tasks/:agentId/message | /abort (free-agent conversation)
     if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "message" && method === "POST") {
-      return { handler: sendTaskMessageHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:write" };
+      return { handler: sendTaskMessageHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:write" };
     }
     if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "abort" && method === "POST") {
-      return { handler: abortTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:write" };
+      return { handler: abortTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:write" };
     }
 
-    // GET /projects/:projectId/tasks/:runId/stream — SSE pass-through (raw Response)
+    // GET /projects/:projectId/tasks/:agentId/stream — SSE pass-through (raw Response)
     if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "stream" && method === "GET") {
-      return { handler: streamTaskHandler, params: { projectId, runId: segments[3]! }, requiredScope: "core:read" };
+      return { handler: streamTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:read" };
     }
 
     // GET /projects/:projectId/jobs/:jobId/evidence

@@ -4,7 +4,7 @@
 
 import type { ApiClient } from "./client.ts";
 import type {
-  AbortRunResult,
+  AbortAgentResult,
   Artifact,
   ArtifactRevision,
   Baseline,
@@ -20,8 +20,8 @@ import type {
   ProjectDetail,
   RevisionContent,
   SendMessageResult,
-  TaskRunDetail,
-  TaskRunList,
+  TaskAgentDetail,
+  TaskAgentList,
 } from "./types.ts";
 
 const V1 = "/api/v1";
@@ -126,41 +126,41 @@ export function createTask(client: ApiClient, projectId: string, body: CreateTas
 }
 
 /** 项目任务列表（Core 已按 project 过滤）。 */
-export function listTasks(client: ApiClient, projectId: string): Promise<TaskRunList> {
-  return client<TaskRunList>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`);
+export function listTasks(client: ApiClient, projectId: string): Promise<TaskAgentList> {
+  return client<TaskAgentList>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`);
 }
 
 /** 任务详情（Core 校验 project 归属，不匹配 404）。 */
-export function getTask(client: ApiClient, projectId: string, runId: string): Promise<TaskRunDetail> {
-  return client<TaskRunDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}`);
+export function getTask(client: ApiClient, projectId: string, agentId: string): Promise<TaskAgentDetail> {
+  return client<TaskAgentDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}`);
 }
 
 // ─── 自由 Agent 对话（spec 001-agent-freedom：发消息/纠偏/终止）────────────────
 
 /**
- * POST /tasks/:runId/message — 给运行中的自由 Agent 发消息。
+ * POST /tasks/:agentId/message — 给运行中的自由 Agent 发消息。
  * idle/终态会话走 prompt（新指令/闲聊，返回 reply）；running 会话走 steer（接管/纠偏）。
  */
 export function sendMessage(
   client: ApiClient,
   projectId: string,
-  runId: string,
+  agentId: string,
   text: string,
 ): Promise<SendMessageResult> {
   return client<SendMessageResult>(
-    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/message`,
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/message`,
     { method: "POST", body: { text } },
   );
 }
 
-/** POST /tasks/:runId/abort — 终止自由 Agent 会话。 */
-export function abortRun(
+/** POST /tasks/:agentId/abort — 终止自由 Agent 会话。 */
+export function abortAgent(
   client: ApiClient,
   projectId: string,
-  runId: string,
-): Promise<AbortRunResult> {
-  return client<AbortRunResult>(
-    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runId)}/abort`,
+  agentId: string,
+): Promise<AbortAgentResult> {
+  return client<AbortAgentResult>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/abort`,
     { method: "POST" },
   );
 }

@@ -17,7 +17,7 @@ import type { SynthiaGatePart, SynthiaNotePart, SynthiaPart, SynthiaTextPart } f
 
 describe("judgeComposer", () => {
   test("项目尚无 run → new-task，占位「说点什么…」，不可打断", () => {
-    const j = judgeComposer({ hasRun: false, runStatus: null, sending: false });
+    const j = judgeComposer({ hasAgent: false, agentStatus: null, sending: false });
     expect(j.mode).toBe("new-task");
     expect(j.placeholder).toBe("说点什么…");
     expect(j.canAbort).toBe(false);
@@ -25,7 +25,7 @@ describe("judgeComposer", () => {
   });
 
   test("run 运行中 → steer，占位含「当前步骤结束后生效」，可打断", () => {
-    const j = judgeComposer({ hasRun: true, runStatus: "running", sending: false });
+    const j = judgeComposer({ hasAgent: true, agentStatus: "running", sending: false });
     expect(j.mode).toBe("steer");
     expect(j.placeholder).toContain("当前步骤结束后生效");
     expect(j.canAbort).toBe(true);
@@ -33,7 +33,7 @@ describe("judgeComposer", () => {
 
   test("run 终态（succeeded/failed/…）→ prompt，占位「说点什么…」，不可打断", () => {
     for (const status of ["succeeded", "failed", "fail_closed", "interrupted", "awaiting_approval"]) {
-      const j = judgeComposer({ hasRun: true, runStatus: status, sending: false });
+      const j = judgeComposer({ hasAgent: true, agentStatus: status, sending: false });
       expect(j.mode).toBe("prompt");
       expect(j.placeholder).toBe("说点什么…");
       expect(j.canAbort).toBe(false);
@@ -41,9 +41,9 @@ describe("judgeComposer", () => {
   });
 
   test("sending=true 时 canSend 为 false，与 mode 无关", () => {
-    expect(judgeComposer({ hasRun: false, runStatus: null, sending: true }).canSend).toBe(false);
-    expect(judgeComposer({ hasRun: true, runStatus: "running", sending: true }).canSend).toBe(false);
-    expect(judgeComposer({ hasRun: true, runStatus: "succeeded", sending: true }).canSend).toBe(false);
+    expect(judgeComposer({ hasAgent: false, agentStatus: null, sending: true }).canSend).toBe(false);
+    expect(judgeComposer({ hasAgent: true, agentStatus: "running", sending: true }).canSend).toBe(false);
+    expect(judgeComposer({ hasAgent: true, agentStatus: "succeeded", sending: true }).canSend).toBe(false);
   });
 
   test("占位文案表里绝不出现「排队」措辞（D21 铁律）", () => {

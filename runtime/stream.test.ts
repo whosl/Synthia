@@ -2,7 +2,7 @@
  * Synthia Runtime — SSE streaming integration tests.
  *
  * Full-chain (mock model stream → FreeAgentSession deltas → StreamHub →
- * GET /tasks/:runId/stream SSE):
+ * GET /tasks/:agentId/stream SSE):
  *  1. consumeChatSSE: canned chunk sequences (text + tool-call argument
  *     fragments, cross-chunk splits, CRLF, [DONE], malformed payloads);
  *  2. ModelClient.chatStream against a mock SSE server: aggregation matches
@@ -338,13 +338,13 @@ class ScriptedStreamModel implements ConversationalModel {
 }
 
 describe("RuntimeServer SSE (mode=agent full chain)", () => {
-  let runsDir: string;
+  let agentsDir: string;
   let server: RuntimeServer;
-  const runIds: string[] = [];
+  const agentIds: string[] = [];
 
   beforeAll(async () => {
-    runsDir = await mkdtemp(join(tmpdir(), "synthia-sse-test-"));
-    process.env.SYNTHIA_RUNS_DIR = runsDir;
+    agentsDir = await mkdtemp(join(tmpdir(), "synthia-sse-test-"));
+    process.env.SYNTHIA_RUNS_DIR = agentsDir;
     // The env model is only built lazily via getOrCreateSession → ModelClient;
     // point it at a placeholder (session assembly in these tests injects the
     // scripted model through depsFactory + a patched sessions map is NOT
@@ -390,8 +390,8 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     delete process.env.SYNTHIA_MODEL_KEY;
     delete process.env.SYNTHIA_MODEL_NAME;
     delete process.env.SYNTHIA_MODEL_PROTOCOL;
-    await rm(runsDir, { recursive: true, force: true });
-    for (const runId of runIds) StreamHub.drop(runId);
+    await rm(agentsDir, { recursive: true, force: true });
+    for (const agentId of agentIds) StreamHub.drop(agentId);
   });
 
   test("message accepted immediately; SSE delivers ordered part/delta/done", async () => {
@@ -406,11 +406,11 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
       }),
     });
     expect(createRes.status).toBe(201);
-    const runId = (await createRes.json() as { run_id: string }).run_id;
-    runIds.push(runId);
+    const agentId = (await createRes.json() as { agent_id: string }).agent_id;
+    agentIds.push(agentId);
 
     const startedAt = Date.now();
-    const msgRes = await fetch(`${server.url}/tasks/${runId}/message`, {
+    const msgRes = await fetch(`${server.url}/tasks/${agentId}/message`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "设计一个计数器" }),
@@ -423,7 +423,7 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
 
     const events = await readSSE(
-      `${server.url}/tasks/${runId}/stream`,
+      `${server.url}/tasks/${agentId}/stream`,
       {},
       // Read through the turn-end status event (emitted right after done).
       (ev, all) => ev.event === "status" && all.some((e) => e.event === "done"),
@@ -450,8 +450,8 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     expect((lastPart.data as { part: { text: string } }).part.text).toBe("我来设计计数器");
   }, 20_000);
 
-  test("stream 404s for unknown run", async () => {
-    const res = await fetch(`${server.url}/tasks/run-does-not-exist/stream`);
+  test("stream 404s for unknown agent", async () => {
+    const res = await fetch(`${server.url}/tasks/agent-does-not-exist/stream`);
     expect(res.status).toBe(404);
     await res.text();
   });
@@ -467,16 +467,16 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
         mode: "agent",
       }),
     });
-    const runId = (await createRes.json() as { run_id: string }).run_id;
-    runIds.push(runId);
-    await fetch(`${server.url}/tasks/${runId}/message`, {
+    const agentId = (await createRes.json() as { agent_id: string }).agent_id;
+    agentIds.push(agentId);
+    await fetch(`${server.url}/tasks/${agentId}/message`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "开始" }),
     });
     // The turn completes almost instantly with the mock; either steered (if
     // running) or accepted (if already idle) is a valid outcome — both are 200.
-    const res = await fetch(`${server.url}/tasks/${runId}/message`, {
+    const res = await fetch(`${server.url}/tasks/${agentId}/message`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "改一下" }),

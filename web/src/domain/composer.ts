@@ -1,7 +1,7 @@
 /**
  * 右栏输入区语义（spec §3.5，D21：如实叫「插话/纠偏」，不伪装成排队）。
  *
- * 后端 `POST .../tasks/:runId/message` 是同一个端点，服务端按 run 状态自动决定
+ * 后端 `POST .../tasks/:agentId/message` 是同一个端点，服务端按 run 状态自动决定
  * 语义：run 处于 idle/终态时是新一轮 `session.prompt`；run 运行中时是
  * `session.steer`——**纠偏注入，不是排队**，不保证按顺序逐条送达，前端不得出现
  * 「排队」「已加入队列」这类措辞（v3 对齐轮次的明确决策，见 spec D21）。
@@ -48,11 +48,11 @@ export interface ComposerJudgement {
  * - 其余（idle 未建过 run 之外的场景理论不存在 / 已到终态）→ "prompt"（新一轮）。
  */
 export function judgeComposer(input: {
-  readonly hasRun: boolean;
-  readonly runStatus: string | null;
+  readonly hasAgent: boolean;
+  readonly agentStatus: string | null;
   readonly sending: boolean;
 }): ComposerJudgement {
-  const mode: ChatComposerMode = !input.hasRun ? "new-task" : input.runStatus === "running" ? "steer" : "prompt";
+  const mode: ChatComposerMode = !input.hasAgent ? "new-task" : input.agentStatus === "running" ? "steer" : "prompt";
   return {
     mode,
     placeholder: composerPlaceholder(mode),

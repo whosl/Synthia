@@ -17,7 +17,7 @@
  *   register_spec 四份文档 + RTL_SOURCE_SET），**TB、XDC 和所有 Vivado 报告都不
  *   登记为 artifact**，所以左栏「路径」视图里 `tb/`、`sim/`、`prj/constr/` 三个
  *   分组在当前后端下永远是空的——这是后端事实，不是 mock 偷懒。
- * - artifactId = `art-<stage>-<sha8(runId:task)>`，因此**不同 run 的产物是不同的
+ * - artifactId = `art-<stage>-<sha8(agentId:task)>`，因此**不同 run 的产物是不同的
  *   artifact**。项目里两轮 run ⇒ 10 个 artifact，当前选中 run 之外的 5 个没有
  *   docs 可关联，会落进左栏的「未关联当前任务」分组（这是真实边界，留着测它）。
  * - 文档路径取自 `runtime/deps.ts` 的 docPath；RTL 路径为 `rtl/<首个源文件>`。
@@ -32,8 +32,8 @@ import type {
   TaskAuditEvent,
   TaskDocRef,
   TaskEvidenceSummary,
-  TaskRunDetail,
-  TaskRunSummary,
+  TaskAgentDetail,
+  TaskAgentSummary,
 } from "../api/types.ts";
 import { VIVADO_FIXTURE } from "./vivado-fixture.ts";
 import { DOC_INTAKE, DOC_BEHAVIOR, DOC_ARCH, DOC_REG } from "./docs.ts";
@@ -97,7 +97,7 @@ const DOC_SPECS: readonly DocSpec[] = [
 
 const RTL_PATH = "rtl/pwm_gen.v";
 
-interface RunArtifacts {
+interface AgentArtifacts {
   readonly artifacts: readonly Artifact[];
   readonly revisions: Readonly<Record<string, readonly ArtifactRevision[]>>;
   readonly content: Readonly<Record<string, string>>;
@@ -111,11 +111,11 @@ interface RunArtifacts {
 /**
  * 造一轮 run 的 5 个 artifact。
  *
- * @param suffix        artifactId 的 sha8 位（真实实现里是 sha256(runId:task) 前 8 位）
+ * @param suffix        artifactId 的 sha8 位（真实实现里是 sha256(agentId:task) 前 8 位）
  * @param baseTs        产物创建时间基准
  * @param rtlApproved   RTL 最新修订是否已批准（succeeded 的 run 为 true → 编辑器只读）
  */
-function buildRunArtifacts(suffix: string, baseTs: string, rtlApproved: boolean): RunArtifacts {
+function buildAgentArtifacts(suffix: string, baseTs: string, rtlApproved: boolean): AgentArtifacts {
   const artifacts: Artifact[] = [];
   const revisions: Record<string, readonly ArtifactRevision[]> = {};
   const content: Record<string, string> = {};
@@ -254,7 +254,7 @@ export const IMPLEMENT_NARRATION_TEXT = IMPLEMENT_NARRATION.join("");
  */
 function buildAudit(
   startIso: string,
-  art: RunArtifacts,
+  art: AgentArtifacts,
   stopAfter: "implement-gate" | "loop-succeeded",
 ): { events: readonly TaskAuditEvent[]; evidence: readonly TaskEvidenceSummary[]; endIso: string } {
   const b = new AuditBuilder(startIso);
@@ -318,11 +318,11 @@ function buildAudit(
 // 两轮 run（老的已完成；新的停在实现阶段，由 SSE 推到完成）
 // ─────────────────────────────────────────────────────────────────────
 
-const RUN_A = "run-2026081603-8f21ac";
-const RUN_B = "run-2026081714-3d09be";
+const AGENT_A = "agent-2026081603-8f21ac";
+const AGENT_B = "agent-2026081714-3d09be";
 
-const ART_A = buildRunArtifacts("8f21ac41", "2026-08-16T03:12:00.000Z", true);
-const ART_B = buildRunArtifacts("3d09be07", "2026-08-17T14:03:00.000Z", false);
+const ART_A = buildAgentArtifacts("8f21ac41", "2026-08-16T03:12:00.000Z", true);
+const ART_B = buildAgentArtifacts("3d09be07", "2026-08-17T14:03:00.000Z", false);
 
 const AUDIT_A = buildAudit("2026-08-16T03:12:00.000Z", ART_A, "loop-succeeded");
 const AUDIT_B_RUNNING = buildAudit("2026-08-17T14:03:00.000Z", ART_B, "implement-gate");
@@ -337,8 +337,8 @@ export const MOCK_REVISIONS: Readonly<Record<string, readonly ArtifactRevision[]
 
 export const MOCK_CONTENT: Readonly<Record<string, string>> = { ...ART_A.content, ...ART_B.content };
 
-const SUMMARY_A: TaskRunSummary = {
-  run_id: RUN_A,
+const SUMMARY_A: TaskAgentSummary = {
+  agent_id: AGENT_A,
   project_id: PROJECT_ID,
   status: "succeeded",
   current_stage: "implement",
@@ -346,7 +346,7 @@ const SUMMARY_A: TaskRunSummary = {
   created_at: "2026-08-16T03:12:00.000Z",
 };
 
-const DETAIL_A: TaskRunDetail = {
+const DETAIL_A: TaskAgentDetail = {
   ...SUMMARY_A,
   task: TASK_TEXT,
   docs: ART_A.docs,
@@ -355,8 +355,8 @@ const DETAIL_A: TaskRunDetail = {
   reason: null,
 };
 
-const SUMMARY_B_RUNNING: TaskRunSummary = {
-  run_id: RUN_B,
+const SUMMARY_B_RUNNING: TaskAgentSummary = {
+  agent_id: AGENT_B,
   project_id: PROJECT_ID,
   status: "running",
   current_stage: "implement",
@@ -364,7 +364,7 @@ const SUMMARY_B_RUNNING: TaskRunSummary = {
   created_at: "2026-08-17T14:03:00.000Z",
 };
 
-const DETAIL_B_RUNNING: TaskRunDetail = {
+const DETAIL_B_RUNNING: TaskAgentDetail = {
   ...SUMMARY_B_RUNNING,
   task: TASK_TEXT,
   docs: ART_B.docs,
@@ -373,9 +373,9 @@ const DETAIL_B_RUNNING: TaskRunDetail = {
   reason: null,
 };
 
-const SUMMARY_B_DONE: TaskRunSummary = { ...SUMMARY_B_RUNNING, status: "succeeded" };
+const SUMMARY_B_DONE: TaskAgentSummary = { ...SUMMARY_B_RUNNING, status: "succeeded" };
 
-const DETAIL_B_DONE: TaskRunDetail = {
+const DETAIL_B_DONE: TaskAgentDetail = {
   ...SUMMARY_B_DONE,
   task: TASK_TEXT,
   docs: ART_B.docs,
@@ -389,15 +389,15 @@ const DETAIL_B_DONE: TaskRunDetail = {
  * （前端轮询随即拉到完整 audit + 码流成功卡）。
  */
 export const mockState = {
-  runBDone: false,
+  agentBDone: false,
   /** 用户在 mock 里新建/发送的消息，回显进对话流。 */
-  extraUserMessages: [] as Array<{ runId: string; text: string; ts: string }>,
+  extraUserMessages: [] as Array<{ agentId: string; text: string; ts: string }>,
 };
 
-export const LIVE_RUN_ID = RUN_B;
+export const LIVE_AGENT_ID = AGENT_B;
 
-export function mockRuns(): readonly TaskRunSummary[] {
-  return [mockState.runBDone ? SUMMARY_B_DONE : SUMMARY_B_RUNNING, SUMMARY_A];
+export function mockAgents(): readonly TaskAgentSummary[] {
+  return [mockState.agentBDone ? SUMMARY_B_DONE : SUMMARY_B_RUNNING, SUMMARY_A];
 }
 
 /**
@@ -421,11 +421,11 @@ export function mockJobEvidenceContent(jobId: string, name: string): { name: str
   };
 }
 
-export function mockRunDetail(runId: string): TaskRunDetail | null {
+export function mockAgentDetail(agentId: string): TaskAgentDetail | null {
   const base =
-    runId === RUN_A ? DETAIL_A : runId === RUN_B ? (mockState.runBDone ? DETAIL_B_DONE : DETAIL_B_RUNNING) : null;
+    agentId === AGENT_A ? DETAIL_A : agentId === AGENT_B ? (mockState.agentBDone ? DETAIL_B_DONE : DETAIL_B_RUNNING) : null;
   if (!base) return null;
-  const extras = mockState.extraUserMessages.filter((m) => m.runId === runId);
+  const extras = mockState.extraUserMessages.filter((m) => m.agentId === agentId);
   if (extras.length === 0) return base;
   const lastSeq = base.audit.reduce((n, e) => Math.max(n, e.seq), 0);
   const appended: TaskAuditEvent[] = [];

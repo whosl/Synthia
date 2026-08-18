@@ -211,7 +211,7 @@ export interface LoopResult {
   readonly evidence: readonly EvidenceSummary[];
   readonly audit: readonly AuditEvent[];
   readonly endedReason?: string;
-  readonly runId?: string;
+  readonly agentId?: string;
   /** Structured cause when status is failed/fail_closed (drives resume). */
   readonly terminalCause?: TerminalCause;
 }
@@ -411,8 +411,8 @@ export class NoGovernanceClient implements GovernanceClient {
 // ---------------------------------------------------------------------------
 // Run-state persistence.
 // ---------------------------------------------------------------------------
-export interface RunState {
-  readonly runId: string;
+export interface AgentState {
+  readonly agentId: string;
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
@@ -445,7 +445,7 @@ export interface RunState {
   readonly terminalCause?: TerminalCause;
   /**
    * 自由 Agent 门禁锁定：core_submit_gate 成功后置位，core_check_gate approved
-   * 或 unlockGate 清除。持久化进 run-state，重启后仍锁定（会话恢复时据此置位）。
+   * 或 unlockGate 清除。持久化进 agent-state，重启后仍锁定（会话恢复时据此置位）。
    */
   readonly freeAgentLock?: { readonly gate: GateId; readonly submissionId: string };
 }

@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildRecordJobs } from "../src/domain/records.ts";
 import { TOOL_BAR_TITLES } from "../src/domain/tasks.ts";
-import type { TaskAuditEvent, TaskEvidenceSummary, TaskRunDetail } from "../src/api/types.ts";
+import type { TaskAuditEvent, TaskEvidenceSummary, TaskAgentDetail } from "../src/api/types.ts";
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
 
@@ -18,10 +18,10 @@ function audit(partial: Partial<TaskAuditEvent> & Pick<TaskAuditEvent, "category
   return { ts: ts ?? `2026-08-17T10:00:${String(seq).padStart(2, "0")}Z`, seq, ...partial };
 }
 
-function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
+function makeDetail(overrides: Partial<TaskAgentDetail>): TaskAgentDetail {
   seq = 0;
   return {
-    run_id: "run-test",
+    agent_id: "agent-test",
     project_id: "proj-1",
     status: "running",
     current_stage: null,

@@ -9,7 +9,7 @@
  * hooks (beforeToolCall permission + whitelist + data-domain, afterToolCall
  * lineage, beforeModelCall data-domain pre-check).
  *
- * State is persisted to `.runs/` each iteration (RunState + conversation
+ * State is persisted to `.runs/` each iteration (AgentState + conversation
  * sidecar) so that steer/abort/intermediate artifacts survive crashes.
  *
  * GJB red line (non-negotiable): the agent only produces candidates. It must
@@ -20,8 +20,8 @@
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
-import { saveRunState, createRunState, runStatePath } from "./run-state.ts";
-import type { RunState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
+import { saveAgentState, createAgentState, agentStatePath } from "./agent-state.ts";
+import type { AgentState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
 import type {
   AgentMessage,
   AgentTool,
@@ -56,14 +56,14 @@ export interface FreeAgentDeps {
   connector: LoopConnector | null;
   /** 流程实例 id（createGateSubmission 入参）；默认 "pi-default"。 */
   readonly processInstanceId?: string;
-  /** 会话恢复时的初始门禁锁定（重启后仍锁定）；来自 run-state.freeAgentLock。 */
+  /** 会话恢复时的初始门禁锁定（重启后仍锁定）；来自 agent-state.freeAgentLock。 */
   readonly initialGateLock?: { readonly gate: GateId; readonly submissionId: string };
   /** Override for the .runs/ directory (defaults to SYNTHIA_RUNS_DIR or built-in). */
-  runsDir?: string;
+  agentsDir?: string;
 }
 
-export function createFreeAgentSession(runId: string, deps: FreeAgentDeps): FreeAgentSession {
-  return new FreeAgentSessionImpl(runId, deps);
+export function createFreeAgentSession(agentId: string, deps: FreeAgentDeps): FreeAgentSession {
+  return new FreeAgentSessionImpl(agentId, deps);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ const CLAIM_CHECK_FALLBACK =
   "[系统] 上述完成声明未经工具记录支撑，已拦截。请要求 Agent 实际运行仿真。";
 
 class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
-  readonly runId: string;
+  readonly agentId: string;
   readonly projectId: string;
 
   private readonly deps: FreeAgentDeps;
@@ -248,10 +248,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private readonly afterToolCallHook: AfterToolCallHook;
   private readonly beforeModelCallHook: BeforeModelCallHook;
 
-  /** Managed RunState for .runs/ persistence. */
-  private runState: RunState;
+  /** Managed AgentState for .runs/ persistence. */
+  private agentState: AgentState;
 
-  /** Gate-lock state (awaiting human approval). Persisted into run-state. */
+  /** Gate-lock state (awaiting human approval). Persisted into agent-state. */
   private lockGate: GateId | undefined;
   private lockSubmissionId: string | undefined;
   /** Artifact registry: revisionId → info (for content-conformity pre-check). */
@@ -263,11 +263,11 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   /** claim-check 审计记录（防呆 2；持久化进 conversation sidecar）。 */
   private readonly claimChecks: ClaimCheckRecord[] = [];
 
-  /** 流式 text part 单调计数（sp-<runId>-<n>）。 */
+  /** 流式 text part 单调计数（sp-<agentId>-<n>）。 */
   private streamPartCounter = 0;
 
-  constructor(runId: string, deps: FreeAgentDeps) {
-    this.runId = runId;
+  constructor(agentId: string, deps: FreeAgentDeps) {
+    this.agentId = agentId;
     this.projectId = deps.projectId;
     this.deps = deps;
 
@@ -280,8 +280,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // Seed conversation with the system prompt.
     this.messages.push({ role: "system", content: deps.systemPrompt });
 
-    this.runState = createRunState({
-      runId,
+    this.agentState = createAgentState({
+      agentId,
       task: "free-agent session",
       part: deps.part,
       projectId: deps.projectId,
@@ -314,7 +314,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.messages.push({ role: "user", content: text });
 
     // Update the persisted task to the latest prompt for resume clarity.
-    this.runState = { ...this.runState, task: text };
+    this.agentState = { ...this.agentState, task: text };
     await this.persist();
 
     try {
@@ -381,7 +381,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       const turn: ChatTurn = useStream && streamingModel
         ? await streamingModel.chatStream(this.messages, this.deps.tools, {
             onTextStart: () => {
-              partId = `sp-${this.runId}-${++this.streamPartCounter}`;
+              partId = `sp-${this.agentId}-${++this.streamPartCounter}`;
               opts.onTextStart?.(partId);
             },
             onDelta: (t) => {
@@ -657,7 +657,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
 
   // ----- persistence -----
 
-  /** Persist RunState (status) + conversation sidecar to .runs/. */
+  /** Persist AgentState (status) + conversation sidecar to .runs/. */
   private async persist(): Promise<void> {
     const status = this.mapStatus();
     const endedReason =
@@ -665,8 +665,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         ? this.abortReason ?? this._status
         : undefined;
 
-    this.runState = {
-      ...this.runState,
+    this.agentState = {
+      ...this.agentState,
       updatedAt: new Date().toISOString(),
       status,
       ...(endedReason ? { endedReason } : {}),
@@ -674,23 +674,23 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         ? { freeAgentLock: { gate: this.lockGate, submissionId: this.lockSubmissionId } }
         : { freeAgentLock: undefined }),
     };
-    // saveRunState serializes with JSON.stringify; an explicit undefined field
+    // saveAgentState serializes with JSON.stringify; an explicit undefined field
     // is dropped, clearing any previously-persisted lock on unlock.
-    await saveRunState(this.runState);
+    await saveAgentState(this.agentState);
 
     // Conversation sidecar: full message history for crash recovery.
     await this.persistConversation();
   }
 
   private async persistConversation(): Promise<void> {
-    const dir = this.deps.runsDir ?? dirname(runStatePath(this.runId));
-    const path = join(dir, `${this.runId}.conversation.json`);
+    const dir = this.deps.agentsDir ?? dirname(agentStatePath(this.agentId));
+    const path = join(dir, `${this.agentId}.conversation.json`);
     await mkdir(dir, { recursive: true });
     await writeFile(
       path,
       JSON.stringify(
         {
-          runId: this.runId,
+          agentId: this.agentId,
           status: this._status,
           messages: this.messages,
           // 防呆 2：claim-check 审计记录（无记录时省略，保持 sidecar 向后兼容）。
@@ -703,8 +703,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     );
   }
 
-  /** Map FreeAgentStatus → RunState status (pipeline-oriented but reused). */
-  private mapStatus(): RunState["status"] {
+  /** Map FreeAgentStatus → AgentState status (pipeline-oriented but reused). */
+  private mapStatus(): AgentState["status"] {
     switch (this._status) {
       case "running":
       case "idle":
@@ -732,11 +732,11 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
  * resumed session continues with full context.
  */
 export async function loadFreeAgentConversation(
-  runId: string,
-  runsDir?: string,
+  agentId: string,
+  agentsDir?: string,
 ): Promise<LoadedFreeAgentConversation | null> {
-  const dir = runsDir ?? dirname(runStatePath(runId));
-  const path = join(dir, `${runId}.conversation.json`);
+  const dir = agentsDir ?? dirname(agentStatePath(agentId));
+  const path = join(dir, `${agentId}.conversation.json`);
   try {
     const raw = await readFile(path, "utf8");
     return JSON.parse(raw) as LoadedFreeAgentConversation;
@@ -747,7 +747,7 @@ export async function loadFreeAgentConversation(
 
 /** 崩溃恢复快照：消息历史 + 防呆 2 的 claim-check 审计记录。 */
 export interface LoadedFreeAgentConversation {
-  readonly runId: string;
+  readonly agentId: string;
   readonly status: FreeAgentStatus;
   readonly messages: AgentMessage[];
   /** claim-check 审计记录（无命中时缺失；向后兼容旧 sidecar）。 */

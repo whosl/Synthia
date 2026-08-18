@@ -197,7 +197,7 @@ describe("事件流人话叙述（§4.3）", () => {
     expect(eventNarration(evt("gate.approved", { gate: "G1", baselineId: "b" }))).toBe("「需求审查」已通过。");
     expect(eventNarration(evt("gate_submission.submitted_for_review", {}))).toBe("审查已提交，等待批准。");
     expect(eventNarration(evt("revision.created", { artifactId: "a" }))).toBe("产物文档有新版本（候选）。");
-    expect(eventNarration(evt("task.forwarded", { runId: "run-1" }))).toBe("新任务已下发执行。");
+    expect(eventNarration(evt("task.forwarded", { agentId: "agent-1" }))).toBe("新任务已下发执行。");
   });
 
   test("全部已知类型 + 未知类型通过禁止词检查", () => {

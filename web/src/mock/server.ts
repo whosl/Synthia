@@ -11,7 +11,7 @@
  */
 
 import {
-  LIVE_RUN_ID,
+  LIVE_AGENT_ID,
   MOCK_ARTIFACTS,
   MOCK_CONTENT,
   MOCK_PROJECT,
@@ -19,8 +19,8 @@ import {
   IMPLEMENT_NARRATION,
   IMPLEMENT_NARRATION_TEXT,
   mockJobEvidenceContent,
-  mockRunDetail,
-  mockRuns,
+  mockAgentDetail,
+  mockAgents,
   mockState,
 } from "./data.ts";
 
@@ -56,7 +56,7 @@ function sseFrame(event: string, id: number, data: unknown): string {
  * 在 run 还是 running 的时候刷新，成功卡不出来。已完成的 run（或重新订阅的老 run）
  * 只发保活注释，模拟 Core 那边的空闲长连接。
  */
-function liveStream(runId: string, signal: AbortSignal | null | undefined): Response {
+function liveStream(agentId: string, signal: AbortSignal | null | undefined): Response {
   const encoder = new TextEncoder();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -74,8 +74,8 @@ function liveStream(runId: string, signal: AbortSignal | null | undefined): Resp
           timer = setTimeout(resolve, ms);
         });
 
-      const partId = `sp-implement-${runId}`;
-      if (runId === LIVE_RUN_ID && !mockState.runBDone) {
+      const partId = `sp-implement-${agentId}`;
+      if (agentId === LIVE_AGENT_ID && !mockState.agentBDone) {
         send("part", { part: { kind: "text", id: partId, state: "streaming", text: "" } });
         for (const chunk of IMPLEMENT_NARRATION) {
           await wait(DELTA_INTERVAL_MS);
@@ -85,7 +85,7 @@ function liveStream(runId: string, signal: AbortSignal | null | undefined): Resp
         await wait(DELTA_INTERVAL_MS);
         if (stopped) return;
         send("part", { part: { kind: "text", id: partId, state: "done", text: IMPLEMENT_NARRATION_TEXT } });
-        mockState.runBDone = true;
+        mockState.agentBDone = true;
         send("status", { status: "succeeded" });
         send("done", { reply: IMPLEMENT_NARRATION_TEXT });
       }
@@ -148,32 +148,32 @@ async function route(pathname: string, method: string, body: unknown, signal: Ab
     return null;
   }
 
-  // /projects/:id/tasks[/:runId[/message|abort|stream]]
+  // /projects/:id/tasks[/:agentId[/message|abort|stream]]
   if (rest[0] === "tasks") {
     if (rest.length === 1) {
-      if (method === "GET") return ok({ runs: mockRuns() });
+      if (method === "GET") return ok({ agents: mockAgents() });
       if (method === "POST") {
         // mock 不真的开新 run：把指令回显到当前活动 run 上，并说明这是离线模式。
         const text = String((body as { task?: unknown } | null)?.task ?? "");
-        mockState.extraUserMessages.push({ runId: LIVE_RUN_ID, text, ts: new Date().toISOString() });
-        return ok({ runId: LIVE_RUN_ID });
+        mockState.extraUserMessages.push({ agentId: LIVE_AGENT_ID, text, ts: new Date().toISOString() });
+        return ok({ agentId: LIVE_AGENT_ID });
       }
       return null;
     }
-    const runId = rest[1]!;
+    const agentId = rest[1]!;
     if (rest.length === 2 && method === "GET") {
-      const detail = mockRunDetail(runId);
+      const detail = mockAgentDetail(agentId);
       return detail ? ok(detail) : fail(404, "not_found", "run 不存在");
     }
-    if (rest.length === 3 && rest[2] === "stream" && method === "GET") return liveStream(runId, signal);
+    if (rest.length === 3 && rest[2] === "stream" && method === "GET") return liveStream(agentId, signal);
     if (rest.length === 3 && rest[2] === "message" && method === "POST") {
       const text = String((body as { text?: unknown } | null)?.text ?? "");
-      mockState.extraUserMessages.push({ runId, text, ts: new Date().toISOString() });
-      const status = mockRunDetail(runId)?.status ?? "idle";
+      mockState.extraUserMessages.push({ agentId, text, ts: new Date().toISOString() });
+      const status = mockAgentDetail(agentId)?.status ?? "idle";
       return ok({ steered: status === "running", status });
     }
     if (rest.length === 3 && rest[2] === "abort" && method === "POST") {
-      mockState.runBDone = true;
+      mockState.agentBDone = true;
       return ok({ aborted: true, status: "interrupted" });
     }
     return null;

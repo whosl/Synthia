@@ -92,12 +92,12 @@ export interface CreateTaskRequest {
 
 /** POST /projects/:id/tasks 成功响应 data。 */
 export interface CreateTaskResult {
-  readonly runId: string;
+  readonly agentId: string;
 }
 
 /** GET /projects/:id/tasks 列表项。 */
-export interface TaskRunSummary {
-  readonly run_id: string;
+export interface TaskAgentSummary {
+  readonly agent_id: string;
   readonly project_id: string;
   readonly status: string;
   readonly current_stage: string | null;
@@ -106,8 +106,8 @@ export interface TaskRunSummary {
 }
 
 /** GET /projects/:id/tasks 响应 data。 */
-export interface TaskRunList {
-  readonly runs: readonly TaskRunSummary[];
+export interface TaskAgentList {
+  readonly agents: readonly TaskAgentSummary[];
 }
 
 /** 任务产物引用（Runtime 登记产物时透传 artifact_id / revision_id）。 */
@@ -146,9 +146,9 @@ export interface TaskEvidenceSummary {
   }>;
 }
 
-/** GET /projects/:id/tasks/:runId 响应 data。 */
-export interface TaskRunDetail extends TaskRunSummary {
-  /** 任务指令（Runtime 透传 run-state.task）。 */
+/** GET /projects/:id/tasks/:agentId 响应 data。 */
+export interface TaskAgentDetail extends TaskAgentSummary {
+  /** 任务指令（Runtime 透传 agent-state.task）。 */
   readonly task?: string;
   readonly docs: readonly TaskDocRef[];
   readonly audit: readonly TaskAuditEvent[];
@@ -165,7 +165,7 @@ export interface SendMessageResult {
 }
 
 /** POST .../abort 响应 data。 */
-export interface AbortRunResult {
+export interface AbortAgentResult {
   readonly aborted: boolean;
   /** 无活动会话时为 null。 */
   readonly status?: string | null;

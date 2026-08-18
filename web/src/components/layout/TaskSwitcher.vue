@@ -2,29 +2,29 @@
 /**
  * 顶栏 · 任务切换器（spec §3.1 末条）。
  *
- * 下拉列出本项目全部 run（run_id 短码 + 状态 + 创建时间），切换到另一 run 后
+ * 下拉列出本项目全部 run（agent_id 短码 + 状态 + 创建时间），切换到另一 run 后
  * 对话流与阶段条同步换源，其它 run 仍在后台继续跑，不受影响。
  */
 import { computed, ref } from "vue";
-import type { TaskRunSummary } from "../../api/types.ts";
-import { TASK_STATUS_TEXT, isTerminalStatus, shortRunId } from "../../domain/tasks.ts";
+import type { TaskAgentSummary } from "../../api/types.ts";
+import { TASK_STATUS_TEXT, isTerminalStatus, shortAgentId } from "../../domain/tasks.ts";
 import Dropdown from "../ui/Dropdown.vue";
 import Badge from "../ui/Badge.vue";
 
 const props = defineProps<{
-  readonly runs: readonly TaskRunSummary[];
-  readonly currentRun: TaskRunSummary | null;
+  readonly agents: readonly TaskAgentSummary[];
+  readonly currentAgent: TaskAgentSummary | null;
 }>();
 
 const emit = defineEmits<{
-  "select-run": [runId: string];
+  "select-agent": [agentId: string];
 }>();
 
 const open = ref(false);
 
-const runs = computed(() => [...props.runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+const agents = computed(() => [...props.agents].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
 
-function statusTone(run: TaskRunSummary): "ok" | "accent" | "warn" | "danger" | "neutral" {
+function statusTone(run: TaskAgentSummary): "ok" | "accent" | "warn" | "danger" | "neutral" {
   if (run.status === "succeeded") return "ok";
   if (run.status === "awaiting_approval") return "warn";
   if (run.status === "failed" || run.status === "fail_closed") return "danger";
@@ -32,7 +32,7 @@ function statusTone(run: TaskRunSummary): "ok" | "accent" | "warn" | "danger" | 
   return "accent";
 }
 
-function statusText(run: TaskRunSummary): string {
+function statusText(run: TaskAgentSummary): string {
   return TASK_STATUS_TEXT[run.status] ?? run.status;
 }
 
@@ -43,10 +43,10 @@ function formatCreatedAt(iso: string): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function onPick(runId: string): void {
+function onPick(agentId: string): void {
   open.value = false;
-  if (runId === props.currentRun?.run_id) return;
-  emit("select-run", runId);
+  if (agentId === props.currentAgent?.agent_id) return;
+  emit("select-agent", agentId);
 }
 </script>
 
@@ -54,9 +54,9 @@ function onPick(runId: string): void {
   <Dropdown v-model:open="open" align="start" class="task-switcher">
     <template #trigger>
       <button type="button" class="task-switcher-trigger">
-        <span v-if="currentRun" class="task-switcher-current">
-          <Badge variant="dot" :tone="statusTone(currentRun)">{{ shortRunId(currentRun.run_id) }}</Badge>
-          <span class="task-switcher-current-status">{{ statusText(currentRun) }}</span>
+        <span v-if="currentAgent" class="task-switcher-current">
+          <Badge variant="dot" :tone="statusTone(currentAgent)">{{ shortAgentId(currentAgent.agent_id) }}</Badge>
+          <span class="task-switcher-current-status">{{ statusText(currentAgent) }}</span>
         </span>
         <span v-else class="task-switcher-empty">尚无任务</span>
         <span class="task-switcher-caret" aria-hidden="true">▾</span>
@@ -64,18 +64,18 @@ function onPick(runId: string): void {
     </template>
 
     <div class="task-switcher-menu">
-      <div v-if="runs.length === 0" class="task-switcher-menu-empty">本项目还没有任务</div>
+      <div v-if="agents.length === 0" class="task-switcher-menu-empty">本项目还没有任务</div>
       <button
-        v-for="run in runs"
-        :key="run.run_id"
+        v-for="run in agents"
+        :key="run.agent_id"
         type="button"
         class="task-switcher-row"
-        :class="{ 'is-current': run.run_id === currentRun?.run_id }"
+        :class="{ 'is-current': run.agent_id === currentAgent?.agent_id }"
         role="menuitemradio"
-        :aria-checked="run.run_id === currentRun?.run_id"
-        @click="onPick(run.run_id)"
+        :aria-checked="run.agent_id === currentAgent?.agent_id"
+        @click="onPick(run.agent_id)"
       >
-        <Badge variant="dot" :tone="statusTone(run)">{{ shortRunId(run.run_id) }}</Badge>
+        <Badge variant="dot" :tone="statusTone(run)">{{ shortAgentId(run.agent_id) }}</Badge>
         <span class="task-switcher-row-status">{{ statusText(run) }}</span>
         <span class="task-switcher-row-time">{{ formatCreatedAt(run.created_at) }}</span>
       </button>

@@ -9,42 +9,42 @@ import {
 } from "../src/domain/editor-state.ts";
 
 /** 简化的终态判定 mock：与 domain/tasks.ts:isTerminalStatus 语义一致，但不依赖它。 */
-function isRunTerminal(status: string): boolean {
+function isAgentTerminal(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "fail_closed" || status === "interrupted";
 }
 
 describe("deriveReadonlyReason", () => {
   test("未打开文件（无版本）→ null", () => {
-    expect(deriveReadonlyReason(null, "running", isRunTerminal)).toBeNull();
-    expect(deriveReadonlyReason(null, null, isRunTerminal)).toBeNull();
+    expect(deriveReadonlyReason(null, "running", isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason(null, null, isAgentTerminal)).toBeNull();
   });
 
   test("已批准版本 → approved（优先级最高，不看 run 状态）", () => {
-    expect(deriveReadonlyReason("approved", "running", isRunTerminal)).toBe("approved");
-    expect(deriveReadonlyReason("approved", null, isRunTerminal)).toBe("approved");
-    expect(deriveReadonlyReason("approved", "succeeded", isRunTerminal)).toBe("approved");
+    expect(deriveReadonlyReason("approved", "running", isAgentTerminal)).toBe("approved");
+    expect(deriveReadonlyReason("approved", null, isAgentTerminal)).toBe("approved");
+    expect(deriveReadonlyReason("approved", "succeeded", isAgentTerminal)).toBe("approved");
   });
 
   test("候选版本 + run 运行中（非终态）→ agent-running", () => {
-    expect(deriveReadonlyReason("candidate", "running", isRunTerminal)).toBe("agent-running");
-    expect(deriveReadonlyReason("in_review", "awaiting_approval", isRunTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason("candidate", "running", isAgentTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason("in_review", "awaiting_approval", isAgentTerminal)).toBe("agent-running");
   });
 
   test("候选版本 + run 已到终态 → 可编辑（null）", () => {
-    expect(deriveReadonlyReason("candidate", "succeeded", isRunTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "failed", isRunTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "fail_closed", isRunTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "interrupted", isRunTerminal)).toBeNull();
+    expect(deriveReadonlyReason("candidate", "succeeded", isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason("candidate", "failed", isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason("candidate", "fail_closed", isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason("candidate", "interrupted", isAgentTerminal)).toBeNull();
   });
 
-  test("候选版本 + 项目尚无 run（runStatus=null）→ 可编辑（null）", () => {
-    expect(deriveReadonlyReason("candidate", null, isRunTerminal)).toBeNull();
+  test("候选版本 + 项目尚无 run（agentStatus=null）→ 可编辑（null）", () => {
+    expect(deriveReadonlyReason("candidate", null, isAgentTerminal)).toBeNull();
   });
 
   test("rejected/superseded/invalidated 等非 approved 状态一律走候选分支的判定规则", () => {
-    expect(deriveReadonlyReason("rejected", "running", isRunTerminal)).toBe("agent-running");
-    expect(deriveReadonlyReason("superseded", "succeeded", isRunTerminal)).toBeNull();
-    expect(deriveReadonlyReason("invalidated", "running", isRunTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason("rejected", "running", isAgentTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason("superseded", "succeeded", isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason("invalidated", "running", isAgentTerminal)).toBe("agent-running");
   });
 });
 

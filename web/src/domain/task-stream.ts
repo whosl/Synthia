@@ -1,7 +1,7 @@
 /**
  * 任务 SSE 订阅（打字机数据源）。
  *
- * 订阅 GET /api/v1/projects/:id/tasks/:runId/stream（Core 透传 Runtime SSE）。
+ * 订阅 GET /api/v1/projects/:id/tasks/:agentId/stream（Core 透传 Runtime SSE）。
  * 说明：Core 鉴权为 Bearer 头，而原生 EventSource 无法携带自定义头，故用
  * fetch + ReadableStream 解析同构的 SSE 字节流（事件语义与 EventSource 完全
  * 一致：event/id/data 字段），断线用指数退避重连（Last-Event-ID 续传），
