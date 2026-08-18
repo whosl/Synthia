@@ -24,6 +24,7 @@
  *   SYNTHIA_TOOL_MODEL_POLICY_HASH (default synthia-policy-v1)
  *   SYNTHIA_RUNS_DIR           override .runs/ directory (tests)
  *   SYNTHIA_MODEL_URL / KEY / NAME  (real model, non-offline mode)
+ *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort)
  *   SYNTHIA_CORE_TOKEN / URL        (core / governance mode)
  *
  * Usage:

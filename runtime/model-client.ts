@@ -49,6 +49,9 @@ export interface ModelClientConfig {
   /** Stream idle watchdog: abort when no bytes arrive for this long.
    *  Default 120000ms; 0 disables (no total timeout on streams). */
   readonly streamIdleTimeoutMs?: number;
+  /** Reasoning budget for reasoning-capable models, sent as `reasoning_effort`.
+   *  Omitted from the request when unset, so non-reasoning models are unaffected. */
+  readonly reasoningEffort?: string;
 }
 
 /** Low-level streaming poster abstraction. Unlike {@link ChatPoster} this
@@ -132,6 +135,7 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
     docMaxTokens: env.SYNTHIA_MODEL_DOC_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_DOC_MAX_TOKENS) : 8192,
     debug: env.SYNTHIA_MODEL_DEBUG === "1" || env.SYNTHIA_MODEL_DEBUG === "true",
     streamIdleTimeoutMs: env.SYNTHIA_MODEL_STREAM_IDLE_MS ? Number(env.SYNTHIA_MODEL_STREAM_IDLE_MS) : 120_000,
+    ...(env.SYNTHIA_MODEL_REASONING_EFFORT?.trim() ? { reasoningEffort: env.SYNTHIA_MODEL_REASONING_EFFORT.trim() } : {}),
   };
 }
 
@@ -663,6 +667,7 @@ export class ModelClient implements LoopModel, ConversationalModel {
       body.tools = wireTools;
       body.tool_choice = "auto";
     }
+    if (this.cfg.reasoningEffort) body.reasoning_effort = this.cfg.reasoningEffort;
     if (opts.stream) body.stream = true;
     return {
       url: `${this.cfg.baseUrl}/chat/completions`,
@@ -718,6 +723,7 @@ export class ModelClient implements LoopModel, ConversationalModel {
     } else {
       base.response_format = { type: "json_object" };
     }
+    if (this.cfg.reasoningEffort) base.reasoning_effort = this.cfg.reasoningEffort;
     return {
       url: `${this.cfg.baseUrl}/chat/completions`,
       headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey}` },
