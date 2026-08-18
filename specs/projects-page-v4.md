@@ -5,6 +5,8 @@
 - 前身：v3（`UnifiedProjectView.vue` 单页对话流）——本版**推翻其信息架构**，不是增量修改
 - 对齐轮次：2026-08-17 / 08-18 与 owner 逐轮确认，决策见 §1
 - 后端契约已逐条核实，见 §6（与初稿的出入已在正文修正）
+- **2026-08-18 增补**：D24–D26（agent 分层）+ §1.1 模型 + §3.7 前端落地 + §8 第三批；D17 由 D24 取代
+- **术语**：本版起 agent 会话统一称 **agent**，不再叫 run；`run_class` / `ToolRun` 仍指 Vivado 工具执行，**是另一个概念**，未改
 
 ---
 
@@ -28,13 +30,92 @@
 | D14 | 旧代码处置 | UI 全推，**保留 `domain/` 纯逻辑** |
 | D15 | 主题 | **双主题可切换** |
 | D16 | 编辑器实现 | **Monaco Editor** |
-| D17 | 多任务 | 任务切换器，后台并行 |
+| ~~D17~~ | ~~多任务~~ | ~~任务切换器，后台并行~~ → **已由 D24 取代**：并行仍成立，但 agent 分两道，切换器按道分组，见 §1.1 |
 | **D18** | **阶段条显示** | **PC：里程碑门为主、中间阶段折叠成段；移动端：只显示当前阶段，全览开弹层** |
 | **D19** | **人机写冲突** | **agent 运行时编辑器锁定为只读**，idle 时才可编辑（R2 由此关闭） |
 | **D20** | **视觉参考** | **Claude 风格**——简约明了，暖中性底色 + 克制的强调色 |
 | **D21** | **运行中发言** | **如实叫「插话 / 纠偏」**，不伪装成排队；另给「打断」按钮走 abort |
 | **D22** | **密度取舍** | **Claude 的色，IDE 的密度**——配色/圆角/留白学 Claude，字号行高按工具走 |
 | **D23** | **第一批边界** | **只做 §8 的 1–5 步**：先把形态立起来验证，确认后再做 6–9 |
+| **D24** | **agent 分层** | **一个项目可并行多个 agent，但分两道**：探索道（数量不限、隔离、可弃、产出**不进**受控产物集）/ 正式道（每个「段声明」至多 1 个、产出**即**受控产物集、**只有它能提门**） |
+| **D25** | **隔离方式** | **worktree 式副本隔离只用于探索道**；正式道直接在受控产物集上工作，不隔离 |
+| **D26** | **闸口语义** | **闸口是选举，不是合并**——基线之间没有合并代数。探索成果必须先「**采纳**」进正式道，再由正式道提门 |
+
+> D24–D26 是 2026-08-18 关于「一个项目如何走完全部里程碑」讨论的收敛结果，模型展开见 **§1.1**，前端落地见 **§3.7**。
+
+### 1.1 agent 分层模型（D24–D26 展开）
+
+#### 1.1.1 问题
+
+`Claude Code` 式的做法是「一个仓库开很多 agent，各自 worktree，最后 merge 回主干」。这套在 Synthia 上**直接照搬会塌**，因为终点不是 merge，是**过门建基线**：
+
+- 基线（`baseline`）是**被审批签字的一组产物版本的快照**，`memberRevisionIds` + `manifestHash` 一起构成不可分割的整体
+- 两条 worktree 各自改了 RTL，**没有任何合并算法**能把两个已签字的快照合成第三个仍然「被签过字」的快照——签字是对**那一组具体版本**的签字
+- 所以 worktree 模型的收敛动作（merge）在这里**不存在**
+
+竞品对照：Claude Code / Cursor / Devin 这类都停在「代码合并」层，没有签字-基线概念，因此 merge 就是终点；航天/汽车侧的 PLM/ALM（Windchill、Polarion、Codebeamer）有基线概念，但把并行探索完全挡在受控库之外——工程师在本地随便玩，**受控库里永远只有一条线**。Synthia 要的是两者都要：探索的自由 + 受控的单线。D24 就是这个折中。
+
+#### 1.1.2 两个词
+
+| 词 | 含义 | 落到数据上 |
+|---|---|---|
+| **前提**（premise） | 这个 agent 是**从哪个基线出发**工作的 | `fromBaselineId` |
+| **主张**（claim） | 这个 agent 打算**把哪个门推过去** | `targetGate` |
+
+**核心不变量**：
+
+> 一个 agent 的产出，**只有在它的前提仍是 active 基线时**，才允许提交到门。
+
+前提被别人换掉（`baseline.state` 从 `active` 变成 `superseded`）→ 这个 agent 的工作**过期**，必须 rebase（换前提重跑）或作废。这是整套并行模型唯一的强制约束，其余都是 UI 约定。
+
+#### 1.1.3 两条道
+
+| | 探索道 exploratory | 正式道 formal |
+|---|---|---|
+| 数量 | 不限 | **每个（前提, 主张）至多 1 个** |
+| 工作区 | **副本隔离**（worktree 式，D25） | 直接在受控产物集上 |
+| 产出去向 | 隔离区，**不进** artifact/revision 受控链 | **就是** artifact/revision 受控链 |
+| 能否提门 | **否** | 是 |
+| 结束方式 | 被**采纳** / 被丢弃 | 过门 / 被驳回 / 前提过期 |
+| 对应 `run_class` | `exploratory` | `gate_check` / `formal` |
+
+> 领域层已经在说这套话了：`core/src/domain/enums.ts:70` 的 `RunClass = "exploratory" | "gate_check" | "formal"`。D24 只是把它从「工具运行的分级」提升为「agent 的分道」。
+
+#### 1.1.4 采纳（adopt）——两道之间唯一的通道
+
+探索道 → 正式道**不是 merge，是复制**：
+
+1. 人选中某个探索 agent 的产出
+2. 把它选中的文件，以**新候选版本**（`POST .../artifacts/:aid/revisions`，走 D12 的 revision 链）写入正式道
+3. 作者是**人**（`created_by = identity.actorId`），理由字段写明「采纳自 agent `<id>`」
+4. 探索 agent 落到终态 `adopted`，其余竞争者落 `discarded`
+
+采纳是**人的动作**，不是自动的。理由：这是唯一把非受控内容送进受控链的入口，必须有人签名。
+
+#### 1.1.5 三种冲突形态与处置
+
+| 形态 | 场景 | 处置 |
+|---|---|---|
+| **A. 同段竞争** | 两个 agent 都想推 G4 | 探索道随便并行；正式道抢占——第二个只能建成探索道，或等第一个终结 |
+| **B. 前提过期** | agent 从 B1 出发，期间 B1 被 B1' 取代 | 提门时**拒绝**（前提非 active）；UI 提示「基线已更新，[重新对齐] [作废]」 |
+| **C. 跨段并行** | 一个推 G3、一个推 G4 | 允许，但 G4 的前提必须是 G3 已产出的基线；G3 若被驳回，下游 agent 自动落入形态 B |
+
+**不做的事**：不做基线合并、不做三路 diff 自动融合、不做「两个 agent 各批一半」。
+
+#### 1.1.6 已知后端缺口（实现前必须处理）
+
+按当前 `core/` 源码核实，这四项都还不成立：
+
+| # | 缺口 | 证据 | 影响 |
+|---|---|---|---|
+| **B1** | agent 会话**完全不落 Core**，只活在 Runtime 的 `AgentState` | `core/src/api/task-proxy.ts` 全程转发不落库 | `premise` / `claim` 没有存放处，跨会话不可查 |
+| **B2** | `process_instance.current_gate` 写死 `'G0'` 后**再无任何代码路径更新它** | 建库时一次写入，全仓无 UPDATE | 项目里程碑**不能**读这个字段，只能从 `GET .../baselines` 反推 |
+| **B3** | `baseline` 同时有 `(project_id, kind) WHERE state='active'` 唯一索引**和**无条件 append-only 触发器 | `0002_approval_slice_hardening.sql:57-62` / `:79-80`；触发器函数 `0001_d1_hardening.sql:42-47` 无列豁免 | **换基线当前物理上做不到**——旧行改不成 `superseded`，新行插不进去。根因：`superseded_by_baseline_id` 挂在**旧行**上指向前方，append-only 要求方向反过来（新行上放 `supersedes_baseline_id`） |
+| **B4** | `POST /tasks` 只校验 `project_id` 存在，**不查同项目是否已有活跃 agent** | `runtime/server.ts` 创建分支 | D24「正式道至多 1 个」**无处强制** |
+
+> B3 是这四项里唯一的**结构性**缺陷：不修，项目连第二个里程碑都建不起来，D24 之上的一切都是空谈。修法是一次迁移（反转列方向 + 给触发器加列豁免），不在本 spec 范围，另立切片。
+
+
 
 ---
 
@@ -66,10 +147,10 @@
 | 区域 | 职责 | 数据源 |
 |---|---|---|
 | 顶栏 | 项目名、阶段进度、任务切换、主题、用户 | `GET /projects/:id` + `GET .../tasks` + `GET .../gate-submissions` |
-| 左栏 | 产物导航，三种视图可切 | `GET .../artifacts` + `GET .../artifacts/:id/revisions` + **`GET .../tasks/:runId` 的 `docs[]`**（path/phase 只在这里） |
+| 左栏 | 产物导航，三种视图可切 | `GET .../artifacts` + `GET .../artifacts/:id/revisions` + **`GET .../tasks/:agentId` 的 `docs[]`**（path/phase 只在这里） |
 | 中栏上 | Monaco 编辑器 | `GET .../artifacts/:aid/revisions/:rid/content` |
 | 中栏下 | 工具运行与证据面板 | `GET .../jobs` + `GET .../jobs/:jid/evidence` + `?name=` 取内容 |
-| 右栏 | 对话流 + 就地审批 | SSE `GET .../tasks/:runId/stream` + `POST .../message` |
+| 右栏 | 对话流 + 就地审批 | SSE `GET .../tasks/:agentId/stream` + `POST .../message` |
 
 > ⚠️ 左栏的关键依赖：`artifact` 对象只有 `id / artifact_type / created_at`，**没有 path 和 phase**。三种视图的分组键必须从 task 详情的 `docs[]`（`TaskDocRef`）取，需把两边按 artifact id 关联。
 
@@ -96,7 +177,7 @@ PC 端分三段，里程碑门为锚点：
 - 移动端（<768px）：顶栏只渲染一行 `③ RTL 编写 · 进行中 · 8/15`，点击开全屏弹层看完整阶段图
 - 节点五态 `done / running / waiting / pending / failed`，沿用 `tasks.ts:88` 的 `deriveStageChain`
 - 点击阶段节点 → 左栏切「阶段视图」并定位到该阶段产物组
-- 任务切换器：列出 `GET .../tasks` 的全部 run，切换后对话流与阶段条同步换源，其他 run 后台继续
+- 任务切换器：列出 `GET .../tasks` 的全部 agent，切换后对话流与阶段条同步换源，其他 agent 后台继续
 
 ### 3.2 左栏 · 文件树（D10）
 
@@ -119,7 +200,7 @@ PC 端分三段，里程碑门为锚点：
   | 状态 | 条件 | 顶部提示 |
   |---|---|---|
   | 只读·已批准 | revision 已批准 | `v3 · 已批准 · 只读` |
-  | 只读·agent 运行中 | 当前 run 非终态 **(D19)** | `agent 正在工作，暂不可编辑` |
+  | 只读·agent 运行中 | 当前 agent 非终态 **(D19)** | `agent 正在工作，暂不可编辑` |
   | 可编辑 | 候选 revision 且 agent idle | 改动后出现 `[保存为 v4]` |
 - **保存**：`POST /api/v1/projects/:id/artifacts/:aid/revisions`
   - 必带 **`Idempotency-Key` 请求头**
@@ -154,7 +235,7 @@ PC 端分三段，里程碑门为锚点：
   | idle / 终态 | `说点什么…` | `POST .../message` → 触发新一轮 `session.prompt`，走 SSE 拿结果 |
   | running | `插一句（当前步骤结束后生效）` | `POST .../message` → `session.steer(text)`，同步返回，下一个工具调用结束后生效 |
   - 插话发出后在对话流里渲染为一条带 `↗ 纠偏` 标记的消息，视觉上与普通用户消息区分
-  - running 时另给 `⏹ 打断` 按钮 → `POST .../tasks/:runId/abort`
+  - running 时另给 `⏹ 打断` 按钮 → `POST .../tasks/:agentId/abort`
   - **不使用"排队"措辞**——steer 不保证按顺序逐条送达
 
 ### 3.6 跨项目待办列表（D8）
@@ -164,6 +245,79 @@ PC 端分三段，里程碑门为锚点：
 - 每条：项目名 · 门 · 待审产物数 · 等待时长
 - 点击 → `/projects/:id?sub=<subId>`，落地即打开该审批
 - 项目数上百时此方案会退化 → 届时向后端提聚合端点（见 R6）
+
+### 3.7 双道在各区的体现（D24–D26）
+
+**治理原则：正式道是主视图，探索道是叠加层。**
+
+页面**默认永远显示正式道**——文件树、编辑器、阶段条、审批卡，全都只反映受控产物集。探索道不是另一个页面，是套在同一个三栏上的一层「对比态」。类比：主分支视图 vs `与分支对比` 模式。
+
+这条原则的收益是**几乎不需要新组件**——已有各区加一层状态即可。
+
+#### 3.7.1 各区改动
+
+| 区域 | 正式态（默认） | 探索叠加态 | 改动量 |
+|---|---|---|---|
+| **StageRail** | 数据源从「当前 agent」改为**项目级**（由 `GET .../baselines` 推导，见 B2） | 不变——探索 agent **不影响**阶段条 | 中：换数据源 |
+| **TaskSwitcher** | 扁平列表 | **两段式分组**：`正式` 段（0–1 条，置顶，带前提/主张）+ `探索` 段（N 条，带来源前提） | 中：分组 + 副标题 |
+| **FileTree** | 受控产物 + 状态点（§3.2） | 每个文件追加 diff 角标 `~M` 改动 / `+A` 新增；未改动的文件淡化 | 小：多一个角标位 |
+| **CodeEditor** | 单文件视图 | **默认进 Monaco 原生 diff**（左=正式道当前版，右=探索产出）——D16 已引入的能力，直接复用 | 小：切 `createDiffEditor` |
+| **VersionBar** | `v3 · 已批准 · 只读` | `探索 agent a1b2c3d4 · 基于 B1` + **`[采纳为 v4]`** 按钮 | 小：多一种状态 |
+| **ChatFeed** | 正常对话 | 顶部常驻警示条：`这是探索 agent，产出不进受控链，需采纳后才能提门` | 小：一个条 |
+| **ApprovalCard** | 正常显示 | **永不出现**——探索 agent 没有提门能力（D24） | 零：条件渲染 |
+| **EvidencePanel** | jobs 列表 | 不变（探索 agent 的 job 也是真 job，照常显示） | 零 |
+
+#### 3.7.2 对比态形态
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│ ◂ UART控制器  ①━━G1━━━◆━━G3━━━━━◆ ○G4  [探索 a1b2c3d4▾] ☀ 👤│
+├──────────────┬──────────────────────────────┬──────────────────┤
+│ 文件树        │ uart_tx.v   探索 a1b2c3d4·基于B1│ ⚠ 探索 agent    │
+│ [路径▾]      │              [采纳为 v4] [丢弃] │   产出不进受控链  │
+│              │ ── 正式 v3 ──┊── 探索产出 ──── │   需采纳后提门    │
+│ 📁 rtl/      │  12 state<=IDLE┊12 state<=IDLE  │ ────────────────│
+│   uart_tx.v ~M│ 13 -          ┊13 +reg [1:0] p;│ 🤖 换成两级同步  │
+│   uart_rx.v   │ 14  always @( ┊14  always @(   │    器，亚稳态更稳│
+│   baud_gen.v +A│                              │                  │
+│ 📁 tb/       │                              │ 💬 说点什么… [↑]│
+│   uart_tb.sv  │ ─────────────────────────────│                  │
+│              │ ▸ vivado synth   ✅  11.8s   │                  │
+└──────────────┴──────────────────────────────┴──────────────────┘
+   淡化=未改动         Monaco 原生 diff             无审批卡
+```
+
+#### 3.7.3 「采纳」与「过门」必须视觉可辨
+
+两个按钮语义完全不同，绝不能长得像：
+
+| | `[采纳为 v4]` | `[✓ 批准并建立 B2 里程碑]` |
+|---|---|---|
+| 语义 | 把非受控内容**复制**进受控链 | 给一组受控版本**签字** |
+| 后果 | 产生新候选版本，仍需走门 | 建立基线，**不可撤销** |
+| 位置 | 编辑器 VersionBar | 对话流审批卡 |
+| 样式 | 次级按钮（`variant="secondary"`） | 主按钮 + 后果文案（§3.5 已定） |
+| 权限 | 有写权限即可 | 需 `core:approve` |
+
+#### 3.7.4 前提过期的表达（冲突形态 B）
+
+agent 的前提基线被取代时，**不静默失败**：
+
+- TaskSwitcher 中该条置灰，副标题变 `前提已过期（B1 → B1'）`
+- 打开时编辑器顶部出现橙色条：`此 agent 基于 B1，项目已推进到 B1'。[重新对齐] [作废]`
+- 提门按钮禁用，tooltip 写明原因
+- 后端应在提门时同样拒绝（§1.1.2 不变量）——**前端提示不能替代后端校验**
+
+#### 3.7.5 新增纯函数模块
+
+沿用 D14「UI 全推、`domain/` 保留纯逻辑」的分工，三个新模块都不 import vue、不碰 DOM：
+
+```
+web/src/domain/milestone.ts     baselines[] → 项目里程碑进度（绕开 B2 的死字段）
+web/src/domain/agent-lanes.ts   agents[] → { formal, exploratory[] }，含前提过期判定
+web/src/domain/tree-overlay.ts  正式产物集 + 探索产出 → 带 diff 角标的树
+```
+
 
 ---
 
@@ -263,6 +417,9 @@ web/src/style.css                       1605行重写
 web/src/domain/process-profile.ts    阶段 profile（数据驱动阶段条 + 分段规则）
 web/src/domain/file-tree.ts          artifact + TaskDocRef → 三种视图树（纯函数）
 web/src/domain/theme.ts              主题状态与持久化
+web/src/domain/milestone.ts          baselines[] → 项目里程碑进度（§3.7.5，第三批）
+web/src/domain/agent-lanes.ts        agents[] → 正式/探索分道 + 前提过期判定（§3.7.5，第三批）
+web/src/domain/tree-overlay.ts       正式 + 探索 → 带 diff 角标的树（§3.7.5，第三批）
 
 web/src/views/ProjectView.vue        三栏主页面（编排）
 web/src/views/ProjectsView.vue       项目列表
@@ -303,11 +460,11 @@ dompurify       ^3      markdown 输出净化
 | 工具运行 | `GET .../jobs?limit=` | `id/operation/runClass/state/startTime/endTime/errorCode` |
 | 证据清单 | `GET .../jobs/:jid/evidence` | **非终态 job → 404** |
 | 证据内容 | `GET .../jobs/:jid/evidence/content?name=<name>` | query 参数，非路径段 |
-| run 列表 | `GET .../tasks` | `run_id/status/current_stage/awaiting_gate/created_at` |
-| run 详情 | `GET .../tasks/:runId` | **`docs[]` 是 path/phase 的唯一来源** |
-| SSE 流 | `GET .../tasks/:runId/stream` | 5 种事件 `status / part / delta / done / reset`，支持 `Last-Event-ID`，15s 心跳 |
-| 发消息 | `POST .../tasks/:runId/message` | idle→`session.prompt`；running→**`session.steer`（非排队）** |
-| 打断 | `POST .../tasks/:runId/abort` | |
+| agent 列表 | `GET .../tasks` | `agent_id/status/current_stage/awaiting_gate/created_at` |
+| agent 详情 | `GET .../tasks/:agentId` | **`docs[]` 是 path/phase 的唯一来源** |
+| SSE 流 | `GET .../tasks/:agentId/stream` | 5 种事件 `status / part / delta / done / reset`，支持 `Last-Event-ID`，15s 心跳 |
+| 发消息 | `POST .../tasks/:agentId/message` | idle→`session.prompt`；running→**`session.steer`（非排队）** |
+| 打断 | `POST .../tasks/:agentId/abort` | |
 | 门提交 | `GET .../gate-submissions?state=` · `GET .../gate-submissions/:subId` | |
 | 批准 / 驳回 | `POST .../gate-submissions/:subId/approve` · `/reject` | 需 `core:approve` 权限；里程碑门 approve 必填 `baseline_id` |
 | 提交 / 撤回 | `POST .../gate-submissions/:subId/submit` · `/withdraw` | 初稿未提及，实际存在 |
@@ -328,7 +485,9 @@ dompurify       ^3      markdown 输出净化
 | R4 | Monaco 体积 ~300KB（gzip ~80KB） | Vite 动态 import，仅打开文件时加载 |
 | R5 | 嵌入宿主软件的技术形态未定（iframe / web component / 直接编译） | 第一轮不做特殊设计，但**颜色全走变量层**、**不假设自己占满视口** |
 | R6 | `/inbox` 无聚合端点，项目多时 N 次请求退化 | 第一批不做 `/inbox`（D23）。做时先 N 次请求，项目数上百再提后端端点 |
-| R7 | 左栏三视图依赖 `TaskDocRef`，若项目无 run 则 path/phase 缺失 | 无 run 时「路径/阶段」视图降级提示，「产物类型」视图仍可用 |
+| R7 | 左栏三视图依赖 `TaskDocRef`，若项目无 agent 则 path/phase 缺失 | 无 agent 时「路径/阶段」视图降级提示，「产物类型」视图仍可用 |
+| **R8** | **§3.7 全部依赖 §1.1.6 的四项后端缺口**，其中 B3（基线换代物理上不可能）是硬阻塞 | 第三批**不得早于** B3 迁移落地。B1/B4 可先在前端用约定兜（前提/主张存 agent 的 `task` 文本、正式道唯一性靠 UI 不给入口），但**必须标注为临时** |
+| **R9** | 探索 agent 的隔离区（D25）后端尚无对应存储——`.runs/` 只存会话状态，不存产物副本 | 第三批前需定：探索产出走「不挂 artifact 的游离 revision」还是「Runtime 侧文件区」。前者能复用现有 revision 链，后者要新端点 |
 
 **明确不做（第一轮）**：阶段模板选择、项目创建向导、Skill 进化提案界面、交付摘要导出、全局搜索。
 
@@ -341,7 +500,7 @@ dompurify       ^3      markdown 输出净化
 | 步 | 内容 | 验收 |
 |---|---|---|
 | 1 | 主题系统 + 基础组件 + 三栏骨架 | 双主题可切，三栏可拖拽调宽，色板满足 AA |
-| 2 | 顶栏：项目名 + 阶段条（数据驱动 + 分段折叠）+ 任务切换 | 阶段状态正确反映真实 run；PC 分段、移动端弹层各自正确 |
+| 2 | 顶栏：项目名 + 阶段条（数据驱动 + 分段折叠）+ 任务切换 | 阶段状态正确反映真实 agent；PC 分段、移动端弹层各自正确 |
 | 3 | 左栏：文件树三视图 | 三种视图分组正确，状态点正确，artifact↔TaskDocRef 关联正确 |
 | 4 | 中栏：Monaco 只读 + 版本下拉 + markdown 预览 | 点树上文件能正确打开并高亮；agent 运行时锁定只读 |
 | 5 | 右栏：对话流 + SSE 流式 + 插话/打断 | 与 v3 同等流式体验，回合制正确，steer 与 abort 语义正确 |
@@ -357,4 +516,16 @@ dompurify       ^3      markdown 输出净化
 | 8 | 编辑器写入（Idempotency-Key、乐观锁、409 冲突 UI） |
 | 9 | 项目列表页 + `/inbox` |
 
-每步跑通 `bun test` + `vue-tsc --noEmit`。
+### 第三批——agent 分层（D24–D26 / §3.7）
+
+⚠️ **前置条件：§1.1.6 的 B3 迁移必须先落地**（否则项目建不出第二个里程碑，整批无意义）。
+
+| 步 | 内容 | 验收 |
+|---|---|---|
+| 10 | `domain/milestone.ts` + StageRail 换项目级数据源 | 阶段条不再随 agent 切换而变；里程碑从 `baselines` 正确推导 |
+| 11 | `domain/agent-lanes.ts` + TaskSwitcher 两段式分组 | 正式/探索正确分道；前提过期条目正确置灰 |
+| 12 | `domain/tree-overlay.ts` + FileTree diff 角标 + 编辑器 diff 态 | 探索 agent 打开即进 diff；未改动文件淡化 |
+| 13 | 采纳流程（`[采纳为 v4]` → 新候选版本，理由写明来源 agent） | 采纳后产出进受控链、作者为人、探索 agent 落 `adopted` |
+
+每步跑通 `bun test` + `vue-tsc --noEmit`（**分两条命令跑，不要用管道**——管道会把 `vue-tsc` 的退出码吃掉）。
+
