@@ -16,10 +16,12 @@ import { api } from "../main.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
   abortAgent,
+  adoptSideTask,
   approveGateSubmission,
   confirmImportSnapshot,
   copyHistoricalMaterial,
   createImportSnapshot,
+  createSideTask,
   createTask,
   denyImportSnapshot,
   getGateSubmission,
@@ -27,6 +29,10 @@ import {
   getJobEvidenceContent,
   getProject,
   getRevisionContent,
+  getSideTask,
+  getSideTaskDiff,
+  getSideTaskEvents,
+  getSideTaskResult,
   getTask,
   getWorkspaceFile,
   getWorkspaceTree,
@@ -34,6 +40,7 @@ import {
   listGateSubmissions,
   listImportSnapshots,
   listRevisions,
+  listSideTasks,
   listTasks,
   putWorkspaceFile,
   registerWorkspace,
@@ -44,20 +51,35 @@ import {
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
 import type { ApproveRequest } from "../api/index.ts";
 import type {
+  AdoptSideTaskRequest,
   Artifact,
   ArtifactRevision,
   CopyHistoricalMaterialRequest,
   CreateImportSnapshotRequest,
+  CreateSideTaskRequest,
   GateSubmissionDetail,
   HistoricalMaterialSearchResult,
   HistoricalMaterialSnapshot,
   ProjectDetail,
+  SideTaskAdoptionResult,
+  SideTaskConversationEvent,
+  SideTaskDiff,
+  SideTaskResult,
+  SideTaskSummary,
   TaskAgentDetail,
   TaskAgentSummary,
   TaskDocRef,
   WorkspaceTree,
 } from "../api/types.ts";
-import { createPoller, deriveStageChain, isTerminalStatus, type Poller } from "../domain/tasks.ts";
+import {
+  createPoller,
+  deriveStageChain,
+  isTerminalStatus,
+  prepareTaskAbortAttempt,
+  resolveMainTaskId,
+  type Poller,
+  type TaskAbortAttempt,
+} from "../domain/tasks.ts";
 import { auditToParts, type SynthiaPart, type SynthiaTextPart } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
 import {
@@ -89,8 +111,19 @@ import { resolveTheme, toggleTheme, type Theme } from "../domain/theme.ts";
 import { processVersionText, projectType, projectTypeText } from "../domain/project.ts";
 import {
   HISTORICAL_MATERIALS_FEATURE_ENABLED,
+  SIDE_TASKS_FEATURE_ENABLED,
   shouldShowHistoricalMaterials,
+  shouldShowSideTasks,
 } from "../domain/feature-flags.ts";
+import {
+  canInspectSideTaskResult,
+  prepareSideTaskAdoptionAttempt,
+  prepareSideTaskCreateAttempt,
+  shouldPollSideTasks,
+  sideTaskErrorText,
+  type SideTaskAdoptionAttempt,
+  type SideTaskCreateAttempt,
+} from "../domain/side-tasks.ts";
 import type {
   ApprovalCardProps,
   ChatComposerMode,
@@ -112,6 +145,7 @@ import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
 import HistoricalMaterialsPanel from "../components/materials/HistoricalMaterialsPanel.vue";
+import SideTasksPanel from "../components/tasks/SideTasksPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -127,8 +161,15 @@ const historicalMaterialsEnabled = computed(() => shouldShowHistoricalMaterials(
   HISTORICAL_MATERIALS_FEATURE_ENABLED,
   project.value?.project_type,
 ));
+const sideTasksEnabled = computed(() => shouldShowSideTasks(
+  SIDE_TASKS_FEATURE_ENABLED,
+  project.value?.project_type,
+));
 const agents = ref<readonly TaskAgentSummary[]>([]);
-const currentAgentId = ref<string | null>(typeof route.query.run === "string" ? route.query.run : null);
+const initialRequestedAgentId = typeof route.query.run === "string" ? route.query.run : null;
+// Query ids stay untrusted until the main-task list has been loaded.
+const currentAgentId = ref<string | null>(null);
+let initialRunSelectionPending = true;
 /**
  * 用户在任务切换器点了「开始新对话」：composerMode 应强制走 new-task，直到真的
  * 建出新 agent 为止。必须是独立于 currentAgentId 的标记——下面 refresh() 一发现
@@ -160,6 +201,33 @@ const materialsNotice = ref<string | null>(null);
 let materialsRequestSerial = 0;
 let materialsNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 
+// ─────────────────────────────────────────────────────────────────────
+// P3 探索任务（按需加载；与主 Agent/SSE/审批状态完全隔离）
+// ─────────────────────────────────────────────────────────────────────
+
+const sideTasksOpen = ref(false);
+const sideTasks = ref<readonly SideTaskSummary[]>([]);
+const selectedSideTaskId = ref<string | null>(null);
+const selectedSideTask = ref<SideTaskSummary | null>(null);
+const selectedSideTaskEvents = ref<readonly SideTaskConversationEvent[]>([]);
+const selectedSideTaskResult = ref<SideTaskResult | null>(null);
+const selectedSideTaskDiff = ref<SideTaskDiff | null>(null);
+const sideTasksLoading = ref(false);
+const sideTaskDetailLoading = ref(false);
+const sideTasksOperating = ref(false);
+const sideTaskMessaging = ref(false);
+const sideTaskMessageText = ref("");
+const sideTaskMessageError = ref<string | null>(null);
+const sideTasksError = ref<string | null>(null);
+const sideTasksNotice = ref<string | null>(null);
+let sideTasksRequestSerial = 0;
+let sideTaskDetailSerial = 0;
+let sideTasksNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
+let sideTaskPoller: Poller | null = null;
+let sideTaskCreateAttempt: SideTaskCreateAttempt | null = null;
+let sideTaskAdoptionAttempt: SideTaskAdoptionAttempt | null = null;
+let sideTaskMessageAttempt: { readonly taskId: string; readonly text: string; readonly key: string } | null = null;
+
 const loading = ref(true);
 const loadErrorText = ref<string | null>(null);
 
@@ -180,11 +248,13 @@ async function loadArtifactsAndRevisions(): Promise<void> {
  * 这时整页仍应照常显示 DB 里的产物，只是没有「改动/登记」这层语义。为此把工作区置空
  * 而不是保留上一次的结果——留着会让树上出现盘上已经不存在的行。
  */
-async function loadWorkspace(): Promise<void> {
+async function loadWorkspace(): Promise<boolean> {
   try {
     workspace.value = await getWorkspaceTree(api, projectId);
+    return true;
   } catch {
     workspace.value = null;
+    return false;
   }
 }
 
@@ -194,8 +264,19 @@ async function refresh(): Promise<void> {
   refreshing = true;
   try {
     const [taskList] = await Promise.all([listTasks(api, projectId), loadArtifactsAndRevisions(), loadWorkspace()]);
-    agents.value = [...taskList.agents].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    if (!currentAgentId.value && !forceNewTask.value && agents.value.length > 0) currentAgentId.value = agents.value[0]!.agent_id;
+    agents.value = [...taskList.agents]
+      .filter((task) => task.kind !== "side")
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    const resolvingInitialRun = initialRunSelectionPending;
+    const preferredTaskId = resolvingInitialRun ? initialRequestedAgentId : currentAgentId.value;
+    currentAgentId.value = forceNewTask.value ? null : resolveMainTaskId(preferredTaskId, agents.value);
+    initialRunSelectionPending = false;
+    if (resolvingInitialRun && initialRequestedAgentId !== currentAgentId.value) {
+      const query = { ...route.query };
+      if (currentAgentId.value) query.run = currentAgentId.value;
+      else delete query.run;
+      void router.replace({ query });
+    }
     detail.value = currentAgentId.value ? await getTask(api, projectId, currentAgentId.value) : null;
     loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
@@ -261,6 +342,7 @@ async function loadMaterials(): Promise<void> {
 
 function openMaterials(): void {
   if (!historicalMaterialsEnabled.value) return;
+  closeSideTasks();
   materialsOpen.value = true;
   if (materialSnapshots.value.length === 0 && !materialsLoading.value && !materialsError.value) void loadMaterials();
 }
@@ -355,6 +437,278 @@ async function onCopyMaterials(snapshotId: string, body: CopyHistoricalMaterialR
   }
 }
 
+const sideTaskParent = computed<TaskAgentSummary | null>(() => {
+  const isMainTerminal = (status: string): boolean =>
+    isTerminalStatus(status) || status === "cancelled" || status === "aborted";
+  const current = agents.value.find((task) => task.agent_id === currentAgentId.value);
+  if (current && current.kind !== "side" && !isMainTerminal(current.status)) return current;
+  return agents.value.find((task) => task.kind !== "side" && !isMainTerminal(task.status)) ?? null;
+});
+
+const sideTaskBaseCommit = computed<string | null>(() =>
+  workspace.value?.head_commit ?? sideTaskParent.value?.base_commit ?? null,
+);
+
+function clearSideTasksNoticeLater(): void {
+  if (sideTasksNoticeTimer !== null) window.clearTimeout(sideTasksNoticeTimer);
+  sideTasksNoticeTimer = window.setTimeout(() => {
+    sideTasksNotice.value = null;
+    sideTasksNoticeTimer = null;
+  }, 5200);
+}
+
+async function loadSideTaskDetail(taskId: string): Promise<boolean> {
+  const serial = ++sideTaskDetailSerial;
+  sideTaskDetailLoading.value = true;
+  const changedTask = selectedSideTaskId.value !== taskId;
+  selectedSideTaskId.value = taskId;
+  if (changedTask) {
+    selectedSideTask.value = null;
+    selectedSideTaskEvents.value = [];
+    selectedSideTaskResult.value = null;
+    selectedSideTaskDiff.value = null;
+  }
+  try {
+    const [task, conversation] = await Promise.all([
+      getSideTask(api, projectId, taskId),
+      getSideTaskEvents(api, projectId, taskId),
+    ]);
+    if (serial !== sideTaskDetailSerial || selectedSideTaskId.value !== taskId) return false;
+    if (conversation.task_id !== taskId) throw new Error("Core 返回了其他探索任务的对话事件");
+    selectedSideTask.value = task;
+    selectedSideTaskEvents.value = conversation.events;
+    if (canInspectSideTaskResult(task)) {
+      const [result, diff] = await Promise.all([
+        getSideTaskResult(api, projectId, taskId),
+        getSideTaskDiff(api, projectId, taskId),
+      ]);
+      if (serial !== sideTaskDetailSerial || selectedSideTaskId.value !== taskId) return false;
+      selectedSideTaskResult.value = result;
+      selectedSideTaskDiff.value = diff;
+    } else {
+      selectedSideTaskResult.value = null;
+      selectedSideTaskDiff.value = null;
+    }
+    return true;
+  } catch (err) {
+    if (serial !== sideTaskDetailSerial) return false;
+    if (changedTask) {
+      selectedSideTask.value = null;
+      selectedSideTaskEvents.value = [];
+      selectedSideTaskResult.value = null;
+      selectedSideTaskDiff.value = null;
+    }
+    sideTasksError.value = sideTaskErrorText(err, "加载");
+    return false;
+  } finally {
+    if (serial === sideTaskDetailSerial) sideTaskDetailLoading.value = false;
+  }
+}
+
+async function loadSideTasks(preferredTaskId?: string): Promise<boolean> {
+  if (!sideTasksEnabled.value) return false;
+  const serial = ++sideTasksRequestSerial;
+  sideTasksLoading.value = true;
+  sideTasksError.value = null;
+  try {
+    const tasks = await listSideTasks(api, projectId);
+    if (serial !== sideTasksRequestSerial) return false;
+    sideTasks.value = [...tasks].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    const selectedId = preferredTaskId && tasks.some((task) => task.task_id === preferredTaskId)
+      ? preferredTaskId
+      : selectedSideTaskId.value && tasks.some((task) => task.task_id === selectedSideTaskId.value)
+        ? selectedSideTaskId.value
+        : tasks[0]?.task_id ?? null;
+    if (selectedId) return await loadSideTaskDetail(selectedId);
+    else {
+      selectedSideTaskId.value = null;
+      selectedSideTask.value = null;
+      selectedSideTaskEvents.value = [];
+      selectedSideTaskResult.value = null;
+      selectedSideTaskDiff.value = null;
+    }
+    return true;
+  } catch (err) {
+    if (serial !== sideTasksRequestSerial) return false;
+    // Keep the last trustworthy snapshot visible after a transient refresh failure.
+    sideTasksError.value = sideTaskErrorText(err, "加载");
+    return false;
+  } finally {
+    if (serial === sideTasksRequestSerial) sideTasksLoading.value = false;
+  }
+}
+
+function stopSideTaskPolling(): void {
+  sideTaskPoller?.stop();
+  sideTaskPoller = null;
+}
+
+function syncSideTaskPolling(): void {
+  stopSideTaskPolling();
+  if (!shouldPollSideTasks(sideTasksOpen.value, sideTasks.value)) return;
+  sideTaskPoller = createPoller(() => {
+    if (!shouldPollSideTasks(sideTasksOpen.value, sideTasks.value)) return false;
+    if (
+      !sideTasksLoading.value
+      && !sideTaskDetailLoading.value
+      && !sideTasksOperating.value
+      && !sideTaskMessaging.value
+    ) {
+      void loadSideTasks(selectedSideTaskId.value ?? undefined);
+    }
+  }, 3000);
+}
+
+watch(
+  () => [sideTasksOpen.value, shouldPollSideTasks(sideTasksOpen.value, sideTasks.value)] as const,
+  syncSideTaskPolling,
+  { flush: "post" },
+);
+
+function openSideTasks(): void {
+  if (!sideTasksEnabled.value) return;
+  closeMaterials();
+  recordsOpen.value = false;
+  sideTasksOpen.value = true;
+  if (sideTasks.value.length === 0 && !sideTasksLoading.value) void loadSideTasks();
+}
+
+function closeSideTasks(): void {
+  sideTasksOpen.value = false;
+  stopSideTaskPolling();
+  sideTaskCreateAttempt = null;
+  sideTaskAdoptionAttempt = null;
+  sideTaskMessageAttempt = null;
+  sideTaskMessageText.value = "";
+  sideTaskMessageError.value = null;
+}
+
+function onSelectSideTask(taskId: string): void {
+  sideTasksError.value = null;
+  sideTaskAdoptionAttempt = null;
+  sideTaskMessageAttempt = null;
+  sideTaskMessageText.value = "";
+  sideTaskMessageError.value = null;
+  void loadSideTaskDetail(taskId);
+}
+
+function onCancelSideTaskCreate(): void {
+  sideTaskCreateAttempt = null;
+}
+
+async function onCreateSideTask(request: CreateSideTaskRequest): Promise<void> {
+  if (sideTasksOperating.value) return;
+  const attempt = prepareSideTaskCreateAttempt(
+    sideTaskCreateAttempt,
+    request,
+    () => crypto.randomUUID(),
+  );
+  sideTaskCreateAttempt = attempt;
+  sideTasksOperating.value = true;
+  sideTasksError.value = null;
+  sideTasksNotice.value = null;
+  let created: SideTaskSummary;
+  try {
+    created = await createSideTask(api, projectId, attempt.request, attempt.idempotencyKey);
+  } catch (err) {
+    // POST 失败时保留完整请求体和幂等键，原样重试。
+    sideTasksError.value = sideTaskErrorText(err, "创建");
+    sideTasksOperating.value = false;
+    return;
+  }
+
+  // POST 已明确成功，此后的读取失败不能再表述为“创建失败”。
+  sideTaskCreateAttempt = null;
+  sideTasksNotice.value = "探索任务已在独立副本中创建；运行和结果不会改变主 Agent 或正式阶段。";
+  try {
+    const refreshed = await loadSideTasks(created.task_id);
+    if (!refreshed) {
+      sideTasksNotice.value = "探索任务已创建，但最新状态刷新失败；可点击刷新继续查看，不会重复创建。";
+    }
+    clearSideTasksNoticeLater();
+  } catch {
+    sideTasksError.value = "探索任务已创建，但最新状态刷新失败；请手动刷新继续查看。";
+  } finally {
+    sideTasksOperating.value = false;
+  }
+}
+
+async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
+  const taskId = selectedSideTaskId.value;
+  if (!taskId || sideTasksOperating.value) return;
+  const attempt = prepareSideTaskAdoptionAttempt(sideTaskAdoptionAttempt, taskId, request);
+  sideTaskAdoptionAttempt = attempt;
+  sideTasksOperating.value = true;
+  sideTasksError.value = null;
+  sideTasksNotice.value = null;
+  let adopted: SideTaskAdoptionResult;
+  try {
+    adopted = await adoptSideTask(
+      api,
+      projectId,
+      taskId,
+      attempt.request,
+      attempt.idempotencyKey,
+    );
+  } catch (err) {
+    // POST 失败时保留完整请求体、adoption_id 和幂等键，原样重试。
+    sideTasksError.value = sideTaskErrorText(err, "采纳");
+    sideTasksOperating.value = false;
+    return;
+  }
+
+  // POST 已明确成功，此后的读取失败不能再表述为“采纳失败”。
+  sideTaskAdoptionAttempt = null;
+  sideTasksNotice.value = `已人工采纳 ${adopted.adopted_paths.length} 个文件为候选修订；未选文件仍留在探索结果中。`;
+  try {
+    // 采纳只刷新 side task、产物与工作区；不触发主任务详情、SSE 或审批同步。
+    const [sideRefreshed, artifactsRefresh, workspaceRefreshed] = await Promise.all([
+      loadSideTasks(taskId),
+      loadArtifactsAndRevisions().then(() => true, () => false),
+      loadWorkspace(),
+    ]);
+    if (!sideRefreshed || !artifactsRefresh || !workspaceRefreshed) {
+      sideTasksError.value = "采纳已成功，但部分页面数据刷新失败；请手动刷新确认最新候选修订。";
+    }
+    clearSideTasksNoticeLater();
+  } catch {
+    sideTasksError.value = "采纳已成功，但部分页面数据刷新失败；请手动刷新确认最新候选修订。";
+  } finally {
+    sideTasksOperating.value = false;
+  }
+}
+
+async function onSendSideTaskMessage(textInput: string): Promise<void> {
+  const taskId = selectedSideTaskId.value;
+  const task = selectedSideTask.value;
+  const text = textInput.trim();
+  if (!taskId || !task || !text || sideTaskMessaging.value) return;
+  if (task.status !== "running" && task.status !== "awaiting_user") {
+    sideTaskMessageError.value = "当前探索任务已结束，不能继续补充消息。";
+    return;
+  }
+  const attempt = sideTaskMessageAttempt?.taskId === taskId && sideTaskMessageAttempt.text === text
+    ? sideTaskMessageAttempt
+    : { taskId, text, key: crypto.randomUUID() };
+  sideTaskMessageAttempt = attempt;
+  sideTaskMessaging.value = true;
+  sideTaskMessageError.value = null;
+  try {
+    await sendMessage(api, projectId, taskId, attempt.text, attempt.key);
+    sideTaskMessageAttempt = null;
+    sideTaskMessageText.value = "";
+    sideTasksNotice.value = task.status === "awaiting_user"
+      ? "补充信息已发送，探索任务将继续在隔离副本中运行。"
+      : "纠偏信息已发送给当前探索任务。";
+    await loadSideTasks(taskId);
+    clearSideTasksNoticeLater();
+  } catch (err) {
+    sideTaskMessageError.value = humanizeDecisionError(err, "发送").text;
+  } finally {
+    sideTaskMessaging.value = false;
+  }
+}
+
 onMounted(async () => {
   try {
     project.value = await getProject(api, projectId);
@@ -381,6 +735,11 @@ onBeforeUnmount(() => {
   streamHandle = null;
   if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
   materialsNoticeTimer = null;
+  if (sideTasksNoticeTimer !== null) window.clearTimeout(sideTasksNoticeTimer);
+  sideTasksNoticeTimer = null;
+  stopSideTaskPolling();
+  sideTasksRequestSerial += 1;
+  sideTaskDetailSerial += 1;
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -816,6 +1175,7 @@ const focusStageId = ref<string | null>(null);
 
 function onSelectAgent(agentId: string): void {
   if (agentId === currentAgentId.value) return;
+  if (resolveMainTaskId(agentId, agents.value) !== agentId) return;
   currentAgentId.value = agentId;
   detail.value = null;
   openArtifactId.value = null;
@@ -833,7 +1193,7 @@ function onSelectAgent(agentId: string): void {
  */
 function onNewAgent(): void {
   if (projectType(project.value ?? {}) === "engineering" && agents.value.length > 0) {
-    sendError.value = "工程项目当前只允许一个主 Agent；探索任务隔离将在后续版本开放。";
+    sendError.value = "工程项目只有一个主 Agent；需要并行试验时，请使用顶部的“探索任务”入口。";
     return;
   }
   currentAgentId.value = null;
@@ -894,6 +1254,15 @@ const composerMode = computed<ChatComposerMode>(() => {
 const canAbort = computed(() => detail.value?.status === "running");
 const sending = ref(false);
 const sendError = ref<string | null>(null);
+let createMainTaskAttempt: { readonly text: string; readonly key: string } | null = null;
+let mainTaskMessageAttempt: { readonly taskId: string; readonly text: string; readonly key: string } | null = null;
+let mainTaskAbortAttempt: TaskAbortAttempt | null = null;
+
+watch(currentAgentId, (agentId) => {
+  if (mainTaskAbortAttempt && mainTaskAbortAttempt.taskId !== agentId) {
+    mainTaskAbortAttempt = null;
+  }
+});
 
 async function onSend(text: string): Promise<void> {
   if (sending.value) return;
@@ -902,14 +1271,25 @@ async function onSend(text: string): Promise<void> {
   try {
     if (composerMode.value === "new-task") {
       if (projectType(project.value ?? {}) === "engineering" && agents.value.length > 0) {
-        sendError.value = "工程项目当前只允许一个主 Agent；探索任务隔离将在后续版本开放。";
+        sendError.value = "工程项目只有一个主 Agent；需要并行试验时，请使用顶部的“探索任务”入口。";
         return;
       }
-      const { agentId } = await createTask(api, projectId, { task: text, mode: "agent" }, crypto.randomUUID());
+      const attempt = createMainTaskAttempt?.text === text
+        ? createMainTaskAttempt
+        : { text, key: crypto.randomUUID() };
+      createMainTaskAttempt = attempt;
+      const { agentId } = await createTask(api, projectId, { task: attempt.text, mode: "agent" }, attempt.key);
+      createMainTaskAttempt = null;
       currentAgentId.value = agentId;
       forceNewTask.value = false;
     } else if (currentAgentId.value) {
-      await sendMessage(api, projectId, currentAgentId.value, text);
+      const attempt = mainTaskMessageAttempt?.taskId === currentAgentId.value
+        && mainTaskMessageAttempt.text === text
+        ? mainTaskMessageAttempt
+        : { taskId: currentAgentId.value, text, key: crypto.randomUUID() };
+      mainTaskMessageAttempt = attempt;
+      await sendMessage(api, projectId, attempt.taskId, attempt.text, attempt.key);
+      mainTaskMessageAttempt = null;
     }
     await refresh();
   } catch (err) {
@@ -924,7 +1304,10 @@ async function onAbort(): Promise<void> {
   sending.value = true;
   sendError.value = null;
   try {
-    await abortAgent(api, projectId, currentAgentId.value);
+    const attempt = prepareTaskAbortAttempt(mainTaskAbortAttempt, currentAgentId.value);
+    mainTaskAbortAttempt = attempt;
+    await abortAgent(api, projectId, attempt.taskId, attempt.idempotencyKey);
+    mainTaskAbortAttempt = null;
     await refresh();
   } catch (err) {
     sendError.value = humanizeLoadError(err);
@@ -944,6 +1327,7 @@ const recordEntryContent = ref<Record<string, RecordEntryContentState>>({});
 const recordJobs = computed(() => (detail.value ? buildRecordJobs(detail.value) : []));
 
 function onOpenRecords(jobId: string | null): void {
+  closeSideTasks();
   recordsFocusJobId.value = jobId;
   recordsOpen.value = true;
 }
@@ -1168,7 +1552,11 @@ const topBarProps = computed<TopBarProps>(() => ({
   stageEmptyText: stageEmptyText.value,
   currentAgent: currentAgent.value,
   agents: agents.value,
-  allowNewAgent: projectType(project.value ?? {}) === "free" || agents.value.length === 0,
+  allowNewAgent: projectType(project.value ?? {}) === "free" || !agents.value.some((task) => (
+    !isTerminalStatus(task.status)
+    && task.status !== "cancelled"
+    && task.status !== "aborted"
+  )),
   theme: theme.value,
   treeDrawerOpen: treeDrawerOpen.value,
   chatOverlayOpen: chatOverlayOpen.value,
@@ -1296,16 +1684,28 @@ function onToggleChatOverlay(): void {
       <span>{{ projectTypeLabel }}</span>
       <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
       <span v-if="project.target_part">器件：{{ project.target_part }}</span>
-      <button
-        v-if="historicalMaterialsEnabled"
-        type="button"
-        class="project-view-materials-button"
-        :aria-expanded="materialsOpen"
-        @click="materialsOpen ? closeMaterials() : openMaterials()"
-      >
-        历史资料
-        <span v-if="materialSnapshots.length > 0" class="project-view-materials-count">{{ materialSnapshots.length }}</span>
-      </button>
+      <div v-if="sideTasksEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
+        <button
+          v-if="sideTasksEnabled"
+          type="button"
+          class="project-view-side-tasks-button"
+          :aria-expanded="sideTasksOpen"
+          @click="sideTasksOpen ? closeSideTasks() : openSideTasks()"
+        >
+          探索任务
+          <span v-if="sideTasks.length > 0" class="project-view-materials-count">{{ sideTasks.length }}</span>
+        </button>
+        <button
+          v-if="historicalMaterialsEnabled"
+          type="button"
+          class="project-view-materials-button"
+          :aria-expanded="materialsOpen"
+          @click="materialsOpen ? closeMaterials() : openMaterials()"
+        >
+          历史资料
+          <span v-if="materialSnapshots.length > 0" class="project-view-materials-count">{{ materialSnapshots.length }}</span>
+        </button>
+      </div>
     </div>
 
     <div v-if="loadErrorText" class="project-view-error">{{ loadErrorText }}</div>
@@ -1405,6 +1805,38 @@ function onToggleChatOverlay(): void {
         />
       </div>
     </Transition>
+
+    <Transition name="project-view-veil-fade">
+      <div v-if="sideTasksEnabled && sideTasksOpen" class="project-view-veil project-view-veil-end" @click.self="closeSideTasks">
+        <SideTasksPanel
+          :open="sideTasksOpen"
+          :tasks="sideTasks"
+          :selected-task-id="selectedSideTaskId"
+          :selected-task="selectedSideTask"
+          :result="selectedSideTaskResult"
+          :diff="selectedSideTaskDiff"
+          :events="selectedSideTaskEvents"
+          :parent-task-id="sideTaskParent?.task_id ?? sideTaskParent?.agent_id ?? null"
+          :base-commit="sideTaskBaseCommit"
+          :loading="sideTasksLoading"
+          :detail-loading="sideTaskDetailLoading"
+          :operating="sideTasksOperating"
+          :messaging="sideTaskMessaging"
+          :message-text="sideTaskMessageText"
+          :message-error="sideTaskMessageError"
+          :error="sideTasksError"
+          :notice="sideTasksNotice"
+          @close="closeSideTasks"
+          @refresh="loadSideTasks()"
+          @select-task="onSelectSideTask"
+          @create="onCreateSideTask"
+          @cancel-create="onCancelSideTaskCreate"
+          @adopt="onAdoptSideTask"
+          @update:message-text="sideTaskMessageText = $event"
+          @send-message="onSendSideTaskMessage"
+        />
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1437,11 +1869,18 @@ function onToggleChatOverlay(): void {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.project-view-materials-button {
+.project-view-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.project-view-materials-button,
+.project-view-side-tasks-button {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  margin-left: auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: transparent;
@@ -1451,7 +1890,8 @@ function onToggleChatOverlay(): void {
   font-size: var(--font-size-sm);
 }
 
-.project-view-materials-button:hover {
+.project-view-materials-button:hover,
+.project-view-side-tasks-button:hover {
   background: var(--accent-subtle);
 }
 

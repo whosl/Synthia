@@ -17,7 +17,9 @@ import {
   MOCK_LEGACY_PROJECT,
   MOCK_PROCESS_VERSIONS,
   MOCK_PROJECT,
+  MOCK_PROJECT_HEAD_COMMIT,
   MOCK_REVISIONS,
+  MOCK_SIDE_TASK_CONTENTS,
   IMPLEMENT_NARRATION,
   IMPLEMENT_NARRATION_TEXT,
   mockJobEvidenceContent,
@@ -25,6 +27,7 @@ import {
   mockAgents,
   mockState,
   persistCreatedMockProjects,
+  persistMockP3State,
 } from "./data.ts";
 import type {
   Artifact,
@@ -39,22 +42,36 @@ import type {
   ProcessInstance,
   Project,
   ProjectDetail,
+  SideTaskAdoptionResult,
+  SideTaskConversationEvent,
+  SideTaskDiffFile,
+  SideTaskSummary,
 } from "../api/types.ts";
 import {
   DEFAULT_HISTORICAL_COPY_ARTIFACT_TYPE,
   isHistoricalCopyArtifactType,
   parseMaterialImportPayload,
 } from "../domain/historical-materials.ts";
+import {
+  SIDE_TASK_AUTHORIZATION_KEYS,
+  SIDE_TASK_READ_PATHS,
+  normalizeSideTaskWritePath,
+} from "../domain/side-tasks.ts";
 import { sha256Bytes } from "../util/sha256.ts";
 
 /** 假装有网络：让 loading 态真的能被看见，而不是同步瞬间填满。 */
 const LATENCY_MS = 80;
 /** SSE 每块文本的间隔（打字机手感）。 */
 const DELTA_INTERVAL_MS = 700;
+const SIDE_TASK_READ_PATH_SET = new Set<string>(SIDE_TASK_READ_PATHS);
 /** 浏览器验收可用同名本地值或 `?mockProcessVersions=error` 验证 UI fail closed。 */
 export const MOCK_PROCESS_VERSIONS_MODE_KEY = "synthia.mock.process-versions-mode";
 /** `error` makes the P2 library endpoint return 503 for browser fail-closed QA. */
 export const MOCK_IMPORT_SNAPSHOTS_MODE_KEY = "synthia.mock.import-snapshots-mode";
+/** `error`/`off` disables P3 writes while preserving existing side-task reads. */
+export const MOCK_SIDE_TASKS_MODE_KEY = "synthia.mock.side-tasks-mode";
+/** `error` makes only legacy/main task message delivery return 503 for retry UX QA. */
+export const MOCK_TASK_MESSAGES_MODE_KEY = "synthia.mock.task-messages-mode";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -81,6 +98,34 @@ function importSnapshotsMode(): string | null {
     return typeof globalThis.localStorage === "undefined"
       ? null
       : globalThis.localStorage.getItem(MOCK_IMPORT_SNAPSHOTS_MODE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function sideTasksMode(): string | null {
+  try {
+    const queryMode = typeof globalThis.location === "undefined"
+      ? null
+      : new URLSearchParams(globalThis.location.search).get("mockSideTasks");
+    if (queryMode) return queryMode;
+    return typeof globalThis.localStorage === "undefined"
+      ? null
+      : globalThis.localStorage.getItem(MOCK_SIDE_TASKS_MODE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function taskMessagesMode(): string | null {
+  try {
+    const queryMode = typeof globalThis.location === "undefined"
+      ? null
+      : new URLSearchParams(globalThis.location.search).get("mockTaskMessages");
+    if (queryMode) return queryMode;
+    return typeof globalThis.localStorage === "undefined"
+      ? null
+      : globalThis.localStorage.getItem(MOCK_TASK_MESSAGES_MODE_KEY);
   } catch {
     return null;
   }
@@ -579,6 +624,384 @@ function copyMockImportSnapshot(projectId: string, snapshotId: string, body: unk
   return ok(result);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// P3 side-task mock
+// ─────────────────────────────────────────────────────────────────────
+
+function sideTasks(projectId: string): SideTaskSummary[] {
+  return mockState.sideTasks[projectId] ?? (mockState.sideTasks[projectId] = []);
+}
+
+function findSideTask(projectId: string, taskId: string): SideTaskSummary | null {
+  return sideTasks(projectId).find((task) => task.task_id === taskId) ?? null;
+}
+
+function appendMockSideTaskEvent(
+  taskId: string,
+  eventKind: SideTaskConversationEvent["event_kind"],
+  payload: Readonly<Record<string, unknown>>,
+  actorType: "human" | "service",
+  actorId: string,
+  createdAt = new Date().toISOString(),
+): SideTaskConversationEvent {
+  const events = mockState.sideTaskEvents[taskId] ?? (mockState.sideTaskEvents[taskId] = []);
+  const sequence = (events.at(-1)?.sequence ?? 0) + 1;
+  const event: SideTaskConversationEvent = {
+    id: `te-mock-${mockDigest(`${taskId}\0${sequence}\0${eventKind}`).slice(0, 32)}`,
+    sequence,
+    event_kind: eventKind,
+    payload,
+    payload_hash: mockDigest(JSON.stringify(payload)),
+    actor_type: actorType,
+    actor_id: actorId,
+    created_at: createdAt,
+  };
+  events.push(event);
+  return event;
+}
+
+function ensureMockSideTaskEvents(task: SideTaskSummary): SideTaskConversationEvent[] {
+  const existing = mockState.sideTaskEvents[task.task_id];
+  if (existing) return existing;
+  appendMockSideTaskEvent(
+    task.task_id,
+    "user_message",
+    { text: task.objective, source: "side_task_objective" },
+    "human",
+    "mock-user",
+    task.created_at,
+  );
+  if (task.status === "succeeded") {
+    appendMockSideTaskEvent(
+      task.task_id,
+      "assistant_message",
+      { text: mockState.sideTaskResults[task.task_id]?.summary ?? "探索完成。" },
+      "service",
+      "mock-runtime",
+      task.finished_at ?? task.updated_at,
+    );
+    appendMockSideTaskEvent(
+      task.task_id,
+      "status",
+      { status: "succeeded" },
+      "service",
+      "mock-runtime",
+      task.finished_at ?? task.updated_at,
+    );
+  } else if (task.status === "fail_closed") {
+    appendMockSideTaskEvent(
+      task.task_id,
+      "status",
+      { status: "fail_closed", reason: task.failure_reason },
+      "service",
+      "mock-runtime",
+      task.updated_at,
+    );
+  }
+  return mockState.sideTaskEvents[task.task_id]!;
+}
+
+function advanceCreatedMockSideTasks(projectId: string): void {
+  let touched = false;
+  for (const task of sideTasks(projectId)) {
+    if (!task.task_id.startsWith("side-") || MOCK_SIDE_TASK_CONTENTS[task.task_id]) continue;
+    const count = (mockState.sideTaskPollCounts[task.task_id] ?? 0) + 1;
+    mockState.sideTaskPollCounts[task.task_id] = count;
+    touched = true;
+    const index = sideTasks(projectId).findIndex((candidate) => candidate.task_id === task.task_id);
+    if (index < 0) continue;
+    if (task.status === "queued" && count >= 2) {
+      sideTasks(projectId)[index] = { ...task, status: "running", updated_at: new Date().toISOString() };
+      appendMockSideTaskEvent(task.task_id, "status", { status: "running" }, "service", "mock-runtime");
+    } else if (task.status === "running" && count >= 3) {
+      sideTasks(projectId)[index] = { ...task, status: "awaiting_user", updated_at: new Date().toISOString() };
+      appendMockSideTaskEvent(
+        task.task_id,
+        "assistant_message",
+        { text: "请确认更看重时序余量，还是保持当前接口零拍延迟？" },
+        "service",
+        "mock-runtime",
+      );
+      appendMockSideTaskEvent(task.task_id, "status", { status: "awaiting_user" }, "service", "mock-runtime");
+    }
+  }
+  if (touched) persistMockP3State();
+}
+
+function createMockSideTask(projectId: string, body: unknown, idempotencyKey: string | null): Response {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "validation", "探索任务请求必须是对象");
+  if (!idempotencyKey) return fail(400, "IDEMPOTENCY_KEY_REQUIRED", "探索任务写请求必须带 Idempotency-Key");
+  const request = body as Record<string, unknown>;
+  if (request.kind !== "side") return fail(400, "validation", "kind 必须是 side");
+  const operationKey = `${projectId}\0${idempotencyKey}`;
+  const requestHash = mockDigest(JSON.stringify(request));
+  const previous = mockState.sideTaskCreateOperations[operationKey];
+  if (previous) {
+    return previous.requestHash === requestHash
+      ? ok(previous.result, 201)
+      : fail(409, "IDEMPOTENCY_KEY_REUSED", "同一幂等键不能用于不同探索任务请求");
+  }
+  const parentTaskId = typeof request.parent_task_id === "string" ? request.parent_task_id : "";
+  const parent = mockAgents().find((agent) => (agent.task_id ?? agent.agent_id) === parentTaskId && agent.kind !== "side");
+  if (!parent || ["succeeded", "failed", "cancelled"].includes(parent.status)) {
+    return fail(409, "SIDE_TASK_PARENT_NOT_ACTIVE", "父主任务不存在或已进入终态");
+  }
+  const objective = typeof request.objective === "string" ? request.objective.trim() : "";
+  const baseCommit = typeof request.base_commit === "string" ? request.base_commit : "";
+  const scope = request.authorization_scope;
+  if (!objective || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(baseCommit)) {
+    return fail(400, "validation", "objective 与可信 base_commit 必填");
+  }
+  if (baseCommit.toLowerCase() !== (mockState.projectHeadCommits[projectId] ?? MOCK_PROJECT_HEAD_COMMIT)) {
+    return fail(409, "SIDE_TASK_BASE_CHANGED", "项目 HEAD 已变化，请刷新后创建");
+  }
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return fail(400, "validation", "authorization_scope 无效");
+  const scopeRecord = scope as Record<string, unknown>;
+  const unsupportedScopeKeys = Object.keys(scopeRecord).filter((key) => !SIDE_TASK_AUTHORIZATION_KEYS.has(key));
+  const readPaths = Array.isArray(scopeRecord.read_paths) && scopeRecord.read_paths.every((path) => typeof path === "string")
+    ? scopeRecord.read_paths as string[]
+    : [];
+  const rawWritePaths = Array.isArray(scopeRecord.write_paths) && scopeRecord.write_paths.every((path) => typeof path === "string")
+    ? scopeRecord.write_paths as string[]
+    : [];
+  const writePaths = rawWritePaths.map(normalizeSideTaskWritePath);
+  if (
+    unsupportedScopeKeys.length > 0 ||
+    scopeRecord.schema !== "task-scope.v1" ||
+    scopeRecord.workspace !== "isolated" ||
+    readPaths.length !== SIDE_TASK_READ_PATHS.length ||
+    readPaths.some((path) => !SIDE_TASK_READ_PATH_SET.has(path)) ||
+    new Set(readPaths).size !== SIDE_TASK_READ_PATHS.length ||
+    !Array.isArray(scopeRecord.run_classes) ||
+    scopeRecord.run_classes.length !== 1 ||
+    scopeRecord.run_classes[0] !== "exploratory" ||
+    scopeRecord.can_submit_gates !== false ||
+    scopeRecord.can_create_milestones !== false ||
+    scopeRecord.can_start_formal_runs !== false ||
+    rawWritePaths.length === 0 ||
+    rawWritePaths.length > 32 ||
+    writePaths.some((path) => path === null) ||
+    new Set(writePaths).size !== writePaths.length
+  ) {
+    return fail(400, "validation", "authorization_scope 必须是精确探索授权");
+  }
+  const normalizedWritePaths = (writePaths as string[]).sort();
+  const now = new Date().toISOString();
+  const taskId = `side-${crypto.randomUUID().slice(0, 12)}`;
+  const created: SideTaskSummary = {
+    task_id: taskId,
+    project_id: projectId,
+    kind: "side",
+    parent_task_id: parentTaskId,
+    workspace_id: `ws-${taskId}`,
+    objective,
+    status: "queued",
+    input_hash: mockDigest(JSON.stringify(request)),
+    output_hash: null,
+    adoption_state: "pending",
+    authorization_scope: {
+      schema: "task-scope.v1",
+      workspace: "isolated",
+      read_paths: [...SIDE_TASK_READ_PATHS],
+      write_paths: normalizedWritePaths,
+      run_classes: ["exploratory"],
+      can_submit_gates: false,
+      can_create_milestones: false,
+      can_start_formal_runs: false,
+    },
+    base_commit: baseCommit.toLowerCase(),
+    base_manifest_hash: mockDigest(`${projectId}:${baseCommit}`),
+    workspace_state: "active",
+    created_at: now,
+    updated_at: now,
+    finished_at: null,
+    failure_reason: null,
+  };
+  sideTasks(projectId).unshift(created);
+  ensureMockSideTaskEvents(created);
+  mockState.sideTaskPollCounts[taskId] = 0;
+  mockState.sideTaskCreateOperations[operationKey] = { requestHash, result: created };
+  persistMockP3State();
+  return ok(created, 201);
+}
+
+function messageMockSideTask(
+  projectId: string,
+  taskId: string,
+  body: unknown,
+  idempotencyKey: string | null,
+): Response {
+  const task = findSideTask(projectId, taskId);
+  const text = body && typeof body === "object" && !Array.isArray(body)
+    && typeof (body as { text?: unknown }).text === "string"
+    ? (body as { text: string }).text.trim()
+    : "";
+  if (!task || !text) return fail(400, "validation", "探索消息不能为空");
+  if (!idempotencyKey) return fail(400, "IDEMPOTENCY_KEY_REQUIRED", "探索消息必须带 Idempotency-Key");
+  const operationKey = `${projectId}\0${taskId}\0${idempotencyKey}`;
+  const requestHash = mockDigest(JSON.stringify({ text }));
+  const previous = mockState.sideTaskMessageOperations[operationKey];
+  if (previous) {
+    return previous.requestHash === requestHash
+      ? ok(previous.result)
+      : fail(409, "IDEMPOTENCY_KEY_REUSED", "同一幂等键不能发送不同探索消息");
+  }
+  if (task.status !== "running" && task.status !== "awaiting_user") {
+    return fail(409, "SIDE_TASK_NOT_CONVERSATIONAL", "探索任务已经结束");
+  }
+  appendMockSideTaskEvent(taskId, "user_message", { text }, "human", "mock-user");
+  appendMockSideTaskEvent(taskId, "status", { status: "running" }, "service", "mock-runtime");
+  appendMockSideTaskEvent(
+    taskId,
+    "assistant_message",
+    { text: "已收到补充信息。我会据此继续探索；如仍需选择，会再次等待你确认。" },
+    "service",
+    "mock-runtime",
+  );
+  appendMockSideTaskEvent(taskId, "status", { status: "awaiting_user" }, "service", "mock-runtime");
+  const index = sideTasks(projectId).findIndex((candidate) => candidate.task_id === taskId);
+  sideTasks(projectId)[index] = { ...task, status: "awaiting_user", updated_at: new Date().toISOString() };
+  const result = { accepted: true as const, status: "running" as const };
+  mockState.sideTaskMessageOperations[operationKey] = { requestHash, result };
+  persistMockP3State();
+  return ok(result);
+}
+
+function canonicalSideAdoptionRequest(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  return mockDigest(JSON.stringify(body));
+}
+
+function adoptMockSideTask(
+  projectId: string,
+  taskId: string,
+  body: unknown,
+  idempotencyKey: string | null,
+): Response {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "validation", "采纳请求必须是对象");
+  const request = body as Record<string, unknown>;
+  const adoptionId = typeof request.adoption_id === "string" ? request.adoption_id : "";
+  const resultId = typeof request.result_id === "string" ? request.result_id : "";
+  const previewHash = typeof request.preview_hash === "string" ? request.preview_hash : "";
+  const reason = typeof request.reason === "string" ? request.reason.trim() : "";
+  const files = Array.isArray(request.files) ? request.files : [];
+  if (!idempotencyKey || !adoptionId || !resultId || !previewHash || !reason || files.length === 0) {
+    return fail(400, "validation", "采纳必须包含幂等键、标识、结果、预览、理由和文件");
+  }
+  const operationKey = `${projectId}\0${taskId}\0${idempotencyKey}`;
+  const requestHash = canonicalSideAdoptionRequest(body)!;
+  const previous = mockState.sideTaskAdoptions[operationKey];
+  if (previous) {
+    return previous.requestHash === requestHash
+      ? ok(previous.result, 201)
+      : fail(409, "IDEMPOTENCY_KEY_REUSED", "同一幂等键不能用于不同采纳请求");
+  }
+  const task = findSideTask(projectId, taskId);
+  const result = mockState.sideTaskResults[taskId];
+  const diff = mockState.sideTaskDiffs[taskId];
+  if (!task || !result || !diff || task.status !== "succeeded") return fail(404, "not_found", "可采纳结果不存在");
+  if (result.result_id !== resultId || diff.preview_hash !== previewHash) {
+    return fail(409, "SIDE_TASK_PREVIEW_CHANGED", "差异预览已经变化");
+  }
+
+  const selected: SideTaskDiffFile[] = [];
+  for (const raw of files) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(400, "validation", "文件选择无效");
+    const row = raw as Record<string, unknown>;
+    const file = diff.files.find((candidate) => candidate.path === row.path);
+    if (
+      !file ||
+      row.expected_base_hash !== file.base_hash ||
+      row.expected_proposed_hash !== file.result_hash ||
+      row.expected_target_hash !== file.current_target_hash
+    ) {
+      return fail(409, "SIDE_TASK_FILE_PREVIEW_CHANGED", "文件哈希已变化，本次未采纳任何文件");
+    }
+    selected.push(file);
+  }
+  if (new Set(selected.map((file) => file.path)).size !== selected.length) return fail(400, "validation", "文件不能重复选择");
+  const blocked = selected.find((file) => file.adopted || file.conflict_reason !== null);
+  if (blocked) {
+    return fail(409, blocked.adopted ? "SIDE_TASK_FILE_ALREADY_ADOPTED" : "SIDE_TASK_TARGET_CONFLICT", "任一文件冲突时整批不写入");
+  }
+  const candidateContents = new Map<string, string>();
+  for (const file of selected) {
+    const content = MOCK_SIDE_TASK_CONTENTS[taskId]?.[file.path];
+    const sealedFile = result.files.find((candidate) => candidate.path === file.path);
+    if (
+      content === undefined ||
+      sealedFile?.result_hash !== file.result_hash ||
+      mockDigest(content) !== file.result_hash
+    ) {
+      return fail(500, "SIDE_TASK_RESULT_CORRUPT", "探索结果正文与密封哈希不一致");
+    }
+    candidateContents.set(file.path, content);
+  }
+
+  const before = mockState.projectHeadCommits[projectId] ?? MOCK_PROJECT_HEAD_COMMIT;
+  const after = mockDigest(`${before}:${adoptionId}`).slice(0, 40);
+
+  // 采纳后的选中文件成为项目候选修订；未选文件不进入项目读模型。
+  const now = new Date().toISOString();
+  const importedArtifacts = mockState.importArtifacts[projectId] ?? (mockState.importArtifacts[projectId] = []);
+  for (const file of selected) {
+    const existingArtifact = projectArtifacts(projectId).find((artifact) =>
+      artifactRevisions(projectId, artifact.id).some((revision) => revision.content_location === file.path),
+    );
+    const artifactId = existingArtifact?.id ?? `side-${projectId}-${mockDigest(file.path).slice(0, 24)}`;
+    if (!existingArtifact) {
+      const artifactType = file.path.startsWith("rtl/")
+        ? "RTL_SOURCE_SET"
+        : file.path.startsWith("tb/")
+          ? "TB_SOURCE_SET"
+          : file.path.startsWith("prj/constr/")
+            ? "XDC_CANDIDATE"
+            : "KNOWLEDGE_ENTRY";
+      importedArtifacts.push({ id: artifactId, artifact_type: artifactType, created_at: now });
+    }
+    const revisions = mockState.importRevisions[artifactId] ?? (mockState.importRevisions[artifactId] = []);
+    const fixtureVersions = artifactRevisions(projectId, artifactId).filter((revision) => !revisions.includes(revision));
+    const version = [...fixtureVersions, ...revisions].reduce((max, revision) => Math.max(max, revision.version), 0) + 1;
+    const revisionId = `side_rev_${mockDigest(`${adoptionId}\0${file.path}`).slice(0, 48)}`;
+    revisions.push({
+      id: revisionId,
+      version,
+      state: "candidate",
+      content_hash: file.result_hash,
+      content_location: file.path,
+      title: `采纳自探索任务 ${taskId}`,
+      created_at: now,
+    });
+    mockState.importRevisionContent[revisionId] = candidateContents.get(file.path)!;
+  }
+  mockState.projectHeadCommits[projectId] = after;
+  const adoptedPaths = selected.map((file) => file.path);
+  mockState.sideTaskDiffs[taskId] = {
+    ...diff,
+    preview_hash: mockDigest(`${diff.preview_hash}:${adoptionId}`),
+    files: diff.files.map((file) => adoptedPaths.includes(file.path) ? { ...file, adopted: true } : file),
+  };
+  const at = sideTasks(projectId).findIndex((candidate) => candidate.task_id === taskId);
+  const adoptedCount = mockState.sideTaskDiffs[taskId]!.files.filter((file) => file.adopted).length;
+  sideTasks(projectId)[at] = {
+    ...task,
+    adoption_state: adoptedCount === diff.files.length ? "adopted" : "partially_adopted",
+    updated_at: new Date().toISOString(),
+  };
+  const response: SideTaskAdoptionResult = {
+    adoption_id: adoptionId,
+    task_id: taskId,
+    result_id: resultId,
+    status: "applied",
+    adopted_paths: adoptedPaths,
+    project_commit_before: before,
+    project_commit_after: after,
+  };
+  mockState.sideTaskAdoptions[operationKey] = { requestHash, result: response };
+  persistMockP3State();
+  return ok(response, 201);
+}
+
 function sseFrame(event: string, id: number, data: unknown): string {
   return `event: ${event}\nid: ${id}\ndata: ${JSON.stringify(data)}\n\n`;
 }
@@ -716,6 +1139,16 @@ async function route(
 
   if (rest[0] === "gate-submissions" && rest.length === 1 && method === "GET") return ok([]);
 
+  // /projects/:id/workspace/tree — P3 创建副本必须拿到可信项目 HEAD。
+  if (rest[0] === "workspace" && rest.length === 2 && rest[1] === "tree" && method === "GET") {
+    return ok({
+      project_id: projectId,
+      files: [],
+      pending_count: 0,
+      head_commit: mockState.projectHeadCommits[projectId] ?? MOCK_PROJECT_HEAD_COMMIT,
+    });
+  }
+
   // /projects/:id/artifacts[/:aid/revisions[/:rid/content]]
   if (rest[0] === "artifacts") {
     if (rest.length === 1 && method === "GET") return ok(projectArtifacts(projectId));
@@ -734,14 +1167,67 @@ async function route(
 
   // /projects/:id/tasks[/:agentId[/message|abort|stream]]
   if (rest[0] === "tasks") {
+    const sideRequest = Boolean(body && typeof body === "object" && !Array.isArray(body) && (body as { kind?: unknown }).kind === "side");
+    const sideTaskId = rest.length >= 2 ? rest[1]! : null;
+    const knownSideTask = sideTaskId ? findSideTask(projectId, sideTaskId) : null;
+    const sideListRequest = rest.length === 1 && method === "GET" && searchParams.get("kind") === "side";
+    const sideTaskWritesDisabled = sideTasksMode() === "error" || sideTasksMode() === "off";
+    const sideWriteRequest = method === "POST" && (
+      sideRequest
+      || rest[2] === "adoptions"
+      || (knownSideTask !== null && rest[2] === "message")
+    );
+    if (sideWriteRequest && sideTaskWritesDisabled) {
+      return fail(503, "SIDE_TASKS_UNAVAILABLE", "Core 探索任务写入能力暂不可用");
+    }
     if (rest.length === 1) {
-      if (method === "GET") return ok({ agents: fixtureProject ? mockAgents() : [] });
+      if (method === "GET") {
+        advanceCreatedMockSideTasks(projectId);
+        return sideListRequest
+          ? ok({ tasks: sideTasks(projectId) })
+          : ok({ agents: fixtureProject ? mockAgents() : [], tasks: sideTasks(projectId) });
+      }
       if (method === "POST") {
+        if (sideRequest) return createMockSideTask(projectId, body, headers.get("idempotency-key"));
         if (!fixtureProject) return fail(501, "mock_unsupported", "新建项目的离线 Agent 尚未实现");
         // mock 不真的开新 run：把指令回显到当前活动 run 上，并说明这是离线模式。
         const text = String((body as { task?: unknown } | null)?.task ?? "");
         mockState.extraUserMessages.push({ agentId: LIVE_AGENT_ID, text, ts: new Date().toISOString() });
         return ok({ agentId: LIVE_AGENT_ID });
+      }
+      return null;
+    }
+    if (knownSideTask) {
+      if (rest.length === 2 && method === "GET") return ok(knownSideTask);
+      if (rest.length === 3 && rest[2] === "events" && method === "GET") {
+        const rawAfter = searchParams.get("after") ?? "0";
+        if (!/^\d+$/.test(rawAfter)) return fail(400, "validation", "after 必须是非负整数");
+        const after = Number(rawAfter);
+        const events = ensureMockSideTaskEvents(knownSideTask).filter((event) => event.sequence > after).slice(0, 500);
+        return ok({
+          task_id: knownSideTask.task_id,
+          events,
+          next_after: events.at(-1)?.sequence ?? after,
+        });
+      }
+      if (rest.length === 3 && rest[2] === "message" && method === "POST") {
+        return messageMockSideTask(
+          projectId,
+          knownSideTask.task_id,
+          body,
+          headers.get("idempotency-key"),
+        );
+      }
+      if (rest.length === 3 && rest[2] === "result" && method === "GET") {
+        const result = mockState.sideTaskResults[knownSideTask.task_id];
+        return result ? ok(result) : fail(409, "SIDE_TASK_RESULT_NOT_READY", "探索结果尚未密封");
+      }
+      if (rest.length === 3 && rest[2] === "diff" && method === "GET") {
+        const diff = mockState.sideTaskDiffs[knownSideTask.task_id];
+        return diff ? ok(diff) : fail(409, "SIDE_TASK_RESULT_NOT_READY", "探索差异尚未生成");
+      }
+      if (rest.length === 3 && rest[2] === "adoptions" && method === "POST") {
+        return adoptMockSideTask(projectId, knownSideTask.task_id, body, headers.get("idempotency-key"));
       }
       return null;
     }
@@ -753,12 +1239,18 @@ async function route(
     }
     if (rest.length === 3 && rest[2] === "stream" && method === "GET") return liveStream(agentId, signal);
     if (rest.length === 3 && rest[2] === "message" && method === "POST") {
+      if (taskMessagesMode() === "error") {
+        return fail(503, "TASK_MESSAGE_UNAVAILABLE", "Core 主对话消息投递暂不可用");
+      }
       const text = String((body as { text?: unknown } | null)?.text ?? "");
       mockState.extraUserMessages.push({ agentId, text, ts: new Date().toISOString() });
       const status = mockAgentDetail(agentId)?.status ?? "idle";
       return ok({ steered: status === "running", status });
     }
     if (rest.length === 3 && rest[2] === "abort" && method === "POST") {
+      if (!headers.get("idempotency-key")) {
+        return fail(400, "validation", "Idempotency-Key header is required for writes");
+      }
       mockState.agentBDone = true;
       return ok({ aborted: true, status: "interrupted" });
     }

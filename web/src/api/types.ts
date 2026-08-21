@@ -309,6 +309,8 @@ export interface WorkspaceTree {
   readonly files: readonly WorkspaceTreeFile[];
   /** dirty + untracked 的条数，也就是顶栏「工作区有 N 个改动」里的 N。 */
   readonly pending_count: number;
+  /** P3 创建探索副本时必须绑定的项目当前 Git HEAD。旧 Core 可暂时省略。 */
+  readonly head_commit?: string | null;
 }
 
 /**
@@ -382,10 +384,15 @@ export interface CreateTaskResult {
 /** GET /projects/:id/tasks 列表项。 */
 export interface TaskAgentSummary {
   readonly agent_id: string;
+  /** P3 Core-owned task identity；兼容窗口内与 agent_id 相同。 */
+  readonly task_id?: string;
   readonly project_id: string;
+  readonly kind?: "main" | "side";
   readonly status: string;
   readonly current_stage: string | null;
   readonly awaiting_gate: string | null;
+  /** 任务创建时冻结的输入提交；可作为 side task 的可信 base_commit。 */
+  readonly base_commit?: string | null;
   readonly created_at: string;
 }
 
@@ -438,6 +445,176 @@ export interface TaskAgentDetail extends TaskAgentSummary {
   readonly audit: readonly TaskAuditEvent[];
   readonly evidence: readonly TaskEvidenceSummary[];
   readonly reason?: string | null;
+}
+
+// ─── P3 独立探索任务 / 临时工作区 / 正式采纳 ───────────────────────────────
+
+export type SideTaskStatus =
+  | "queued"
+  | "running"
+  | "awaiting_user"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "fail_closed";
+
+export type SideTaskAdoptionState =
+  | "pending"
+  | "available"
+  | "partially_adopted"
+  | "adopted"
+  | "discarded";
+
+export type SideTaskWorkspaceState =
+  | "provisioning"
+  | "active"
+  | "sealed"
+  | "failed"
+  | "released";
+
+export type SideTaskChangeKind = "added" | "modified";
+
+/** task-scope.v1 第一切片固定能力；Web 不允许提交 glob 或升级运行类别。 */
+export interface SideTaskAuthorizationScope {
+  readonly schema: "task-scope.v1";
+  readonly workspace: "isolated";
+  readonly read_paths: readonly string[];
+  readonly write_paths: readonly string[];
+  readonly run_classes: readonly ["exploratory"];
+  readonly can_submit_gates: false;
+  readonly can_create_milestones: false;
+  readonly can_start_formal_runs: false;
+}
+
+/** POST /projects/:projectId/tasks 的 side task 请求。 */
+export interface CreateSideTaskRequest {
+  readonly kind: "side";
+  readonly parent_task_id: string;
+  readonly objective: string;
+  readonly base_commit: string;
+  readonly authorization_scope: SideTaskAuthorizationScope;
+}
+
+/** Core-owned side task summary/detail；字段缺失时 Web 领域解析器会拒绝整条响应。 */
+export interface SideTaskSummary {
+  readonly task_id: string;
+  readonly project_id: string;
+  readonly kind: "side";
+  readonly parent_task_id: string;
+  readonly workspace_id: string;
+  readonly objective: string;
+  readonly status: SideTaskStatus;
+  readonly input_hash: string;
+  readonly output_hash: string | null;
+  readonly adoption_state: SideTaskAdoptionState;
+  readonly authorization_scope: SideTaskAuthorizationScope;
+  readonly base_commit: string | null;
+  readonly base_manifest_hash: string | null;
+  readonly workspace_state: SideTaskWorkspaceState | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly finished_at: string | null;
+  readonly failure_reason: string | null;
+}
+
+export type SideTaskConversationEventKind =
+  | "user_message"
+  | "assistant_message"
+  | "tool_call"
+  | "tool_result"
+  | "status";
+
+/** Core-owned append-only conversation fact for a main or side task. */
+export interface SideTaskConversationEvent {
+  readonly id: string;
+  readonly sequence: number;
+  readonly event_kind: SideTaskConversationEventKind;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly payload_hash: string;
+  readonly actor_type: "human" | "service";
+  readonly actor_id: string;
+  readonly created_at: string;
+}
+
+export interface SideTaskConversationPage {
+  readonly task_id: string;
+  readonly events: readonly SideTaskConversationEvent[];
+  readonly next_after: number;
+}
+
+export interface SideTaskTestResult {
+  readonly name: string;
+  readonly status: "passed" | "failed" | "skipped" | "unknown";
+  readonly detail: string | null;
+}
+
+export interface SideTaskResultFile {
+  readonly path: string;
+  readonly change_kind: SideTaskChangeKind;
+  readonly base_hash: string | null;
+  readonly result_hash: string;
+  readonly size_bytes: number;
+}
+
+export interface SideTaskResult {
+  readonly result_id: string;
+  readonly task_id: string;
+  readonly workspace_id: string;
+  readonly base_commit: string;
+  readonly result_commit: string;
+  readonly summary: string;
+  readonly tests: readonly SideTaskTestResult[];
+  readonly files: readonly SideTaskResultFile[];
+  readonly output_hash: string;
+  readonly created_at: string | null;
+}
+
+export interface SideTaskDiffFile {
+  readonly path: string;
+  readonly change_kind: SideTaskChangeKind;
+  readonly base_hash: string | null;
+  readonly result_hash: string;
+  readonly current_target_hash: string | null;
+  readonly diff: string;
+  readonly conflict_reason: string | null;
+  /** 已被先前人工采纳的路径不可再次选择。 */
+  readonly adopted: boolean;
+}
+
+export interface SideTaskDiff {
+  readonly task_id: string;
+  readonly result_id: string;
+  readonly preview_hash: string;
+  readonly files: readonly SideTaskDiffFile[];
+}
+
+export interface SideTaskAdoptionSelection {
+  readonly path: string;
+  /** 预览时 Core 返回的 side 基线哈希；added 文件必须为 null。 */
+  readonly expected_base_hash: string | null;
+  /** 预览时 Core 返回的候选结果哈希。 */
+  readonly expected_proposed_hash: string;
+  /** 预览时主工作区该路径的哈希；文件不存在时为 null。 */
+  readonly expected_target_hash: string | null;
+}
+
+/** POST /tasks/:taskId/adoptions；选择、预览哈希与理由均进入幂等请求体。 */
+export interface AdoptSideTaskRequest {
+  readonly adoption_id: string;
+  readonly result_id: string;
+  readonly files: readonly SideTaskAdoptionSelection[];
+  readonly preview_hash: string;
+  readonly reason: string;
+}
+
+export interface SideTaskAdoptionResult {
+  readonly adoption_id: string;
+  readonly task_id: string;
+  readonly result_id: string;
+  readonly status: "applied" | "conflicted" | "failed";
+  readonly adopted_paths: readonly string[];
+  readonly project_commit_before: string | null;
+  readonly project_commit_after: string | null;
 }
 
 /** POST .../message 响应 data（runtime 已改流式，agent 回复不再随此响应返回，走 SSE）。 */

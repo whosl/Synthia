@@ -9,12 +9,18 @@ import {
   listProcessVersions,
   listProjects,
   listTasks,
+  sendMessage,
 } from "../src/api/index.ts";
 import {
+  LIVE_AGENT_ID,
   MOCK_CREATED_PROJECTS_STORAGE_KEY,
   parseStoredMockProjects,
 } from "../src/mock/data.ts";
-import { MOCK_PROCESS_VERSIONS_MODE_KEY, mockApiFetch } from "../src/mock/server.ts";
+import {
+  MOCK_PROCESS_VERSIONS_MODE_KEY,
+  MOCK_TASK_MESSAGES_MODE_KEY,
+  mockApiFetch,
+} from "../src/mock/server.ts";
 
 const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const response = await mockApiFetch(input, init);
@@ -73,6 +79,26 @@ test("mock 可模拟 Core 流程注册表失败", async () => {
       status: 503,
       code: "process_registry_unavailable",
     });
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  }
+});
+
+test("mock 可单独模拟主对话消息失败，供幂等重试和草稿恢复验收", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const fakeStorage: Storage = {
+    length: 1,
+    clear: () => {},
+    getItem: (key) => key === MOCK_TASK_MESSAGES_MODE_KEY ? "error" : null,
+    key: () => MOCK_TASK_MESSAGES_MODE_KEY,
+    removeItem: () => {},
+    setItem: () => {},
+  };
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: fakeStorage });
+  try {
+    await expect(sendMessage(client, "p1", LIVE_AGENT_ID, "保留这段草稿", "message-retry-key"))
+      .rejects.toMatchObject({ status: 503, code: "TASK_MESSAGE_UNAVAILABLE" });
   } finally {
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
     else delete (globalThis as { localStorage?: Storage }).localStorage;

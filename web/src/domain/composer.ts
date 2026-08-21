@@ -66,6 +66,22 @@ export function canSendText(text: string, sending: boolean): boolean {
   return text.trim().length > 0 && !sending;
 }
 
+/**
+ * ChatComposer submits optimistically and clears its local field immediately.
+ * When the parent later reports a failed write, restore the exact submitted
+ * text only if the user has not already placed a new draft in the field.
+ * This lets ProjectView retry the frozen body + idempotency key without making
+ * the user reconstruct their message or overwriting newer input.
+ */
+export function restoreFailedSendDraft(
+  currentDraft: string,
+  pendingText: string | null,
+  sendError: string | null,
+): string {
+  if (sendError === null || pendingText === null || currentDraft.length > 0) return currentDraft;
+  return pendingText;
+}
+
 // ─── 插话消息在对话流里的配对识别（纯展示层推导，不改变 parts 顺序/内容）──────
 
 /**

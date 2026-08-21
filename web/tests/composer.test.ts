@@ -10,6 +10,7 @@ import {
   canSendText,
   composerPlaceholder,
   judgeComposer,
+  restoreFailedSendDraft,
 } from "../src/domain/composer.ts";
 import type { SynthiaGatePart, SynthiaNotePart, SynthiaPart, SynthiaTextPart } from "../src/domain/parts.ts";
 
@@ -74,6 +75,19 @@ describe("canSendText", () => {
 
   test("发送中禁止重复提交，即使有内容", () => {
     expect(canSendText("继续", true)).toBe(false);
+  });
+});
+
+describe("restoreFailedSendDraft", () => {
+  test("失败后恢复刚提交的原文，成功时保持乐观清空", () => {
+    expect(restoreFailedSendDraft("", "保持零拍延迟", "发送失败")).toBe("保持零拍延迟");
+    expect(restoreFailedSendDraft("", "保持零拍延迟", null)).toBe("");
+  });
+
+  test("用户已有新草稿时不覆盖，且没有待提交内容时不恢复", () => {
+    expect(restoreFailedSendDraft("改成优先时序", "保持零拍延迟", "发送失败"))
+      .toBe("改成优先时序");
+    expect(restoreFailedSendDraft("", null, "发送失败")).toBe("");
   });
 });
 

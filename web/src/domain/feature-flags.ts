@@ -9,10 +9,22 @@ export const HISTORICAL_MATERIALS_FEATURE_ENABLED = parseExplicitFeatureFlag(
   import.meta.env.VITE_FEATURE_HISTORICAL_MATERIALS,
 );
 
+export const SIDE_TASKS_FEATURE_ENABLED = parseExplicitFeatureFlag(
+  import.meta.env.VITE_FEATURE_SIDE_TASKS,
+);
+
 /** 历史资料库同时受发布开关和工程项目类型约束。 */
 export function shouldShowHistoricalMaterials(
   featureEnabled: boolean,
   type: ProjectType | string | null | undefined,
 ): boolean {
   return featureEnabled && type === "engineering";
+}
+
+/** 探索任务对自由/工程项目都可见；未知旧类型仍 fail closed。 */
+export function shouldShowSideTasks(
+  featureEnabled: boolean,
+  type: ProjectType | string | null | undefined,
+): boolean {
+  return featureEnabled && (type === "engineering" || type === "free");
 }

@@ -9,7 +9,7 @@
  */
 
 import { GATE_REVIEW_NAMES, type GateId } from "./gates.ts";
-import type { TaskAuditEvent } from "../api/types.ts";
+import type { TaskAgentSummary, TaskAuditEvent } from "../api/types.ts";
 
 // ─── 阶段链 ──────────────────────────────────────────────────────────
 
@@ -144,6 +144,39 @@ export function shortAgentId(agentId: string): string {
       ? agentId.slice("run-".length)
       : agentId;
   return rest.length > 8 ? `${rest.slice(0, 8)}…` : rest;
+}
+
+/**
+ * Resolve a main-workbench task only after the project task list is trusted.
+ * Side-task ids (including a forged `?run=` deep link) are never returned.
+ */
+export function resolveMainTaskId(
+  preferredTaskId: string | null,
+  tasks: readonly TaskAgentSummary[],
+): string | null {
+  const mainTasks = tasks.filter((task) => task.kind !== "side");
+  if (preferredTaskId && mainTasks.some((task) => task.agent_id === preferredTaskId)) {
+    return preferredTaskId;
+  }
+  return mainTasks[0]?.agent_id ?? null;
+}
+
+export interface TaskAbortAttempt {
+  readonly taskId: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Freeze one abort attempt across transport failures. Selecting another task
+ * replaces the attempt; callers clear it only after a successful response.
+ */
+export function prepareTaskAbortAttempt(
+  previous: TaskAbortAttempt | null,
+  taskId: string,
+  createKey: () => string = () => crypto.randomUUID(),
+): TaskAbortAttempt {
+  if (previous?.taskId === taskId) return previous;
+  return { taskId, idempotencyKey: createKey() };
 }
 
 // ─── audit 事件中文叙述 ────────────────────────────────────────────────

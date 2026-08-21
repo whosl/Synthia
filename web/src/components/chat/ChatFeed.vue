@@ -12,7 +12,7 @@
  *   「查看改动」走 `open-diff`，同样交给中栏 Monaco，流内不渲染行级 diff。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { buildChatRenderItems } from "../../domain/composer.ts";
+import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
 import type { GatePartState } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
 import Badge from "../ui/Badge.vue";
@@ -57,14 +57,25 @@ function onOpenApprovalDoc(artifactId: string, revisionId: string): void {
 
 // ─── 输入草稿：ChatFeed 持有，示例任务「一键填入」需要能写回输入框 ────────
 const draft = ref("");
+let pendingSendText: string | null = null;
 
 function fillExample(task: string): void {
   draft.value = task;
 }
 
 function onComposerSend(text: string): void {
+  pendingSendText = text;
   emit("send", text);
 }
+
+watch(
+  () => [props.sending, props.sendError] as const,
+  ([sending, sendError]) => {
+    if (sending || pendingSendText === null) return;
+    draft.value = restoreFailedSendDraft(draft.value, pendingSendText, sendError);
+    pendingSendText = null;
+  },
+);
 
 // ─── 自动滚到底；用户手动上滚后不强拉，给「回到最新」按钮 ─────────────────
 const scrollEl = ref<HTMLElement | null>(null);

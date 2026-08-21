@@ -8,6 +8,8 @@ import type {
   Artifact,
   ArtifactRevision,
   Baseline,
+  AdoptSideTaskRequest,
+  CreateSideTaskRequest,
   CreateProjectRequest,
   CreateProjectResult,
   CopyProjectAsEngineeringRequest,
@@ -31,6 +33,11 @@ import type {
   ProcessVersion,
   RevisionContent,
   SendMessageResult,
+  SideTaskAdoptionResult,
+  SideTaskConversationPage,
+  SideTaskDiff,
+  SideTaskResult,
+  SideTaskSummary,
   TaskAgentDetail,
   TaskAgentList,
   WorkspaceFileContent,
@@ -38,6 +45,14 @@ import type {
   WorkspaceTree,
   WorkspaceWriteResult,
 } from "./types.ts";
+import {
+  parseSideTask,
+  parseSideTaskAdoptionResult,
+  parseSideTaskConversationPage,
+  parseSideTaskDiff,
+  parseSideTaskList,
+  parseSideTaskResult,
+} from "../domain/side-tasks.ts";
 
 const V1 = "/api/v1";
 
@@ -284,12 +299,80 @@ export function createTask(client: ApiClient, projectId: string, body: CreateTas
 
 /** 项目任务列表（Core 已按 project 过滤）。 */
 export function listTasks(client: ApiClient, projectId: string): Promise<TaskAgentList> {
-  return client<TaskAgentList>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`);
+  return client<TaskAgentList>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`).then((response) => ({
+    agents: response.agents.filter((task) => task.kind !== "side"),
+  }));
 }
 
 /** 任务详情（Core 校验 project 归属，不匹配 404）。 */
 export function getTask(client: ApiClient, projectId: string, agentId: string): Promise<TaskAgentDetail> {
   return client<TaskAgentDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}`);
+}
+
+// ─── P3 独立探索任务（Core-owned；不进入主 TaskSwitcher / SSE）──────────────
+
+export function createSideTask(
+  client: ApiClient,
+  projectId: string,
+  body: CreateSideTaskRequest,
+  idempotencyKey: string,
+): Promise<SideTaskSummary> {
+  return client<unknown>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  }).then(parseSideTask);
+}
+
+export function listSideTasks(client: ApiClient, projectId: string): Promise<SideTaskSummary[]> {
+  return client<unknown>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks?kind=side`).then(parseSideTaskList);
+}
+
+export function getSideTask(client: ApiClient, projectId: string, taskId: string): Promise<SideTaskSummary> {
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+  ).then(parseSideTask);
+}
+
+export function getSideTaskEvents(
+  client: ApiClient,
+  projectId: string,
+  taskId: string,
+  after = 0,
+): Promise<SideTaskConversationPage> {
+  const normalizedAfter = Number.isSafeInteger(after) && after >= 0 ? after : 0;
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/events?after=${normalizedAfter}`,
+  ).then(parseSideTaskConversationPage);
+}
+
+export function getSideTaskResult(client: ApiClient, projectId: string, taskId: string): Promise<SideTaskResult> {
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/result`,
+  ).then(parseSideTaskResult);
+}
+
+export function getSideTaskDiff(client: ApiClient, projectId: string, taskId: string): Promise<SideTaskDiff> {
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/diff`,
+  ).then(parseSideTaskDiff);
+}
+
+export function adoptSideTask(
+  client: ApiClient,
+  projectId: string,
+  taskId: string,
+  body: AdoptSideTaskRequest,
+  idempotencyKey: string,
+): Promise<SideTaskAdoptionResult> {
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/adoptions`,
+    {
+      method: "POST",
+      body,
+      headers: { "idempotency-key": idempotencyKey },
+    },
+  ).then(parseSideTaskAdoptionResult);
 }
 
 // ─── 自由 Agent 对话（spec 001-agent-freedom：发消息/纠偏/终止）────────────────
@@ -303,10 +386,15 @@ export function sendMessage(
   projectId: string,
   agentId: string,
   text: string,
+  idempotencyKey?: string,
 ): Promise<SendMessageResult> {
   return client<SendMessageResult>(
     `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/message`,
-    { method: "POST", body: { text } },
+    {
+      method: "POST",
+      body: { text },
+      ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
+    },
   );
 }
 
@@ -315,10 +403,15 @@ export function abortAgent(
   client: ApiClient,
   projectId: string,
   agentId: string,
+  idempotencyKey: string,
 ): Promise<AbortAgentResult> {
   return client<AbortAgentResult>(
     `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/abort`,
-    { method: "POST" },
+    {
+      method: "POST",
+      body: {},
+      headers: { "idempotency-key": idempotencyKey },
+    },
   );
 }
 

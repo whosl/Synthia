@@ -37,10 +37,24 @@ import type {
   TaskAgentDetail,
   TaskAgentSummary,
   HistoricalMaterialSnapshot,
+  SideTaskAdoptionResult,
+  SideTaskConversationEvent,
+  SideTaskDiff,
+  SideTaskResult,
+  SideTaskSummary,
 } from "../api/types.ts";
 import { VIVADO_FIXTURE } from "./vivado-fixture.ts";
 import { DOC_INTAKE, DOC_BEHAVIOR, DOC_ARCH, DOC_REG } from "./docs.ts";
 import { CONTENT_SHA } from "./content-hashes.ts";
+import {
+  isSafeSideTaskWritePath,
+  parseSideTaskAdoptionResult,
+  parseSideTaskConversationPage,
+  parseSideTaskDiff,
+  parseSideTaskList,
+  parseSideTaskResult,
+} from "../domain/side-tasks.ts";
+import { sha256Bytes } from "../util/sha256.ts";
 
 const FX = VIVADO_FIXTURE as {
   toolchain: { vivadoVersion: string; vivadoPatch: string; part: string; toolchainProfileHash: string; capabilityMapVersion: string };
@@ -51,9 +65,12 @@ const FX = VIVADO_FIXTURE as {
 };
 
 export const PROJECT_ID = "p1";
+export const MOCK_PROJECT_HEAD_COMMIT = "1".repeat(40);
 const TASK_TEXT = "做一个 8 位 PWM 发生器：占空比可配，复位低有效，跑通仿真并出码流。";
 
 export const MOCK_CREATED_PROJECTS_STORAGE_KEY = "synthia.mock.created-projects.v1";
+export const MOCK_P3_STATE_STORAGE_KEY = "synthia.mock.p3-state.v1";
+const MOCK_P3_STATE_VERSION = 1;
 
 function isStoredProject(value: unknown): value is ProjectDetail {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -88,6 +105,269 @@ function browserStorage(): Storage | null {
 function restoredCreatedProjects(): ProjectDetail[] {
   const storage = browserStorage();
   return storage ? parseStoredMockProjects(storage.getItem(MOCK_CREATED_PROJECTS_STORAGE_KEY)) : [];
+}
+
+interface StoredMockOperation<T> {
+  readonly requestHash: string;
+  readonly result: T;
+}
+
+/**
+ * Reloadable P3-only mock facts. The envelope version is deliberately separate
+ * from the storage key so schema mistakes fail closed instead of partially
+ * hydrating an inconsistent task/adoption graph.
+ */
+export interface StoredMockP3State {
+  readonly sideTasks: Record<string, SideTaskSummary[]>;
+  readonly sideTaskResults: Record<string, SideTaskResult>;
+  readonly sideTaskDiffs: Record<string, SideTaskDiff>;
+  readonly sideTaskAdoptions: Record<string, StoredMockOperation<SideTaskAdoptionResult>>;
+  readonly sideTaskCreateOperations: Record<string, StoredMockOperation<SideTaskSummary>>;
+  readonly sideTaskEvents: Record<string, SideTaskConversationEvent[]>;
+  readonly sideTaskMessageOperations: Record<string, StoredMockOperation<{ readonly accepted: true; readonly status: "running" }>>;
+  readonly sideTaskPollCounts: Record<string, number>;
+  readonly projectHeadCommits: Record<string, string>;
+  /** Only artifacts/revisions created by a side-task adoption are stored. */
+  readonly adoptionArtifacts: Record<string, Artifact[]>;
+  readonly adoptionRevisions: Record<string, ArtifactRevision[]>;
+  readonly adoptionRevisionContent: Record<string, string>;
+}
+
+interface StoredMockP3Envelope {
+  readonly version: typeof MOCK_P3_STATE_VERSION;
+  readonly state: StoredMockP3State;
+}
+
+const HASH_RE = /^[0-9a-f]{64}$/i;
+const COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+function storedObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function storedIsoTime(value: unknown, label: string): string {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${label} must be an ISO timestamp`);
+  }
+  return value;
+}
+
+function parseStoredSideTasks(value: unknown): Record<string, SideTaskSummary[]> {
+  const record = storedObject(value, "sideTasks");
+  return Object.fromEntries(Object.entries(record).map(([projectId, rows]) => {
+    const tasks = parseSideTaskList(rows);
+    if (tasks.some((task) => task.project_id !== projectId)) {
+      throw new Error("stored side task belongs to another project");
+    }
+    return [projectId, tasks];
+  }));
+}
+
+function parseStoredSideTaskResults(value: unknown): Record<string, SideTaskResult> {
+  const record = storedObject(value, "sideTaskResults");
+  return Object.fromEntries(Object.entries(record).map(([taskId, row]) => {
+    const result = parseSideTaskResult(row);
+    if (result.task_id !== taskId) throw new Error("stored side-task result id mismatch");
+    return [taskId, result];
+  }));
+}
+
+function parseStoredSideTaskDiffs(value: unknown): Record<string, SideTaskDiff> {
+  const record = storedObject(value, "sideTaskDiffs");
+  return Object.fromEntries(Object.entries(record).map(([taskId, row]) => {
+    const diff = parseSideTaskDiff(row);
+    if (diff.task_id !== taskId) throw new Error("stored side-task diff id mismatch");
+    return [taskId, diff];
+  }));
+}
+
+function parseStoredOperations<T>(
+  value: unknown,
+  label: string,
+  parseResult: (value: unknown) => T,
+): Record<string, StoredMockOperation<T>> {
+  const record = storedObject(value, label);
+  return Object.fromEntries(Object.entries(record).map(([key, raw]) => {
+    const operation = storedObject(raw, `${label}.${key}`);
+    if (typeof operation.requestHash !== "string" || !HASH_RE.test(operation.requestHash)) {
+      throw new Error(`${label}.${key}.requestHash must be a digest`);
+    }
+    return [key, { requestHash: operation.requestHash.toLowerCase(), result: parseResult(operation.result) }];
+  }));
+}
+
+function parseStoredEvents(value: unknown): Record<string, SideTaskConversationEvent[]> {
+  const record = storedObject(value, "sideTaskEvents");
+  return Object.fromEntries(Object.entries(record).map(([taskId, raw]) => {
+    if (!Array.isArray(raw)) throw new Error(`sideTaskEvents.${taskId} must be an array`);
+    const page = parseSideTaskConversationPage({
+      task_id: taskId,
+      events: raw,
+      next_after: raw.length > 0
+        ? storedObject(raw.at(-1), `sideTaskEvents.${taskId}.last`).sequence
+        : 0,
+    });
+    return [taskId, [...page.events]];
+  }));
+}
+
+function parseStoredCounts(value: unknown): Record<string, number> {
+  const record = storedObject(value, "sideTaskPollCounts");
+  return Object.fromEntries(Object.entries(record).map(([taskId, count]) => {
+    if (!Number.isSafeInteger(count) || (count as number) < 0) {
+      throw new Error(`sideTaskPollCounts.${taskId} must be a non-negative integer`);
+    }
+    return [taskId, count as number];
+  }));
+}
+
+function parseStoredCommits(value: unknown): Record<string, string> {
+  const record = storedObject(value, "projectHeadCommits");
+  return Object.fromEntries(Object.entries(record).map(([projectId, commit]) => {
+    if (typeof commit !== "string" || !COMMIT_RE.test(commit)) {
+      throw new Error(`projectHeadCommits.${projectId} must be a commit`);
+    }
+    return [projectId, commit.toLowerCase()];
+  }));
+}
+
+function parseStoredArtifacts(value: unknown): Record<string, Artifact[]> {
+  const record = storedObject(value, "adoptionArtifacts");
+  return Object.fromEntries(Object.entries(record).map(([projectId, raw]) => {
+    if (!Array.isArray(raw)) throw new Error(`adoptionArtifacts.${projectId} must be an array`);
+    const artifacts = raw.map((value, index): Artifact => {
+      const row = storedObject(value, `adoptionArtifacts.${projectId}.${index}`);
+      if (typeof row.id !== "string" || !row.id.startsWith("side-") || typeof row.artifact_type !== "string") {
+        throw new Error("stored adoption artifact is invalid");
+      }
+      return {
+        id: row.id,
+        artifact_type: row.artifact_type,
+        created_at: storedIsoTime(row.created_at, "adoption artifact created_at"),
+      };
+    });
+    if (new Set(artifacts.map((artifact) => artifact.id)).size !== artifacts.length) {
+      throw new Error("stored adoption artifacts contain duplicate ids");
+    }
+    return [projectId, artifacts];
+  }));
+}
+
+function parseStoredRevisions(value: unknown): Record<string, ArtifactRevision[]> {
+  const record = storedObject(value, "adoptionRevisions");
+  return Object.fromEntries(Object.entries(record).map(([artifactId, raw]) => {
+    if (!Array.isArray(raw)) throw new Error(`adoptionRevisions.${artifactId} must be an array`);
+    const revisions = raw.map((value, index): ArtifactRevision => {
+      const row = storedObject(value, `adoptionRevisions.${artifactId}.${index}`);
+      if (
+        typeof row.id !== "string" || !row.id.startsWith("side_rev_") ||
+        !Number.isSafeInteger(row.version) || (row.version as number) <= 0 ||
+        row.state !== "candidate" ||
+        typeof row.content_hash !== "string" || !HASH_RE.test(row.content_hash) ||
+        typeof row.content_location !== "string" || !isSafeSideTaskWritePath(row.content_location) ||
+        (row.title !== undefined && row.title !== null && typeof row.title !== "string")
+      ) {
+        throw new Error("stored adoption revision is invalid");
+      }
+      return {
+        id: row.id,
+        version: row.version as number,
+        state: "candidate",
+        content_hash: row.content_hash.toLowerCase(),
+        content_location: row.content_location,
+        title: row.title as string | null | undefined,
+        created_at: storedIsoTime(row.created_at, "adoption revision created_at"),
+      };
+    });
+    if (new Set(revisions.map((revision) => revision.id)).size !== revisions.length) {
+      throw new Error("stored adoption revisions contain duplicate ids");
+    }
+    return [artifactId, revisions];
+  }));
+}
+
+function parseStoredRevisionContent(value: unknown): Record<string, string> {
+  const record = storedObject(value, "adoptionRevisionContent");
+  return Object.fromEntries(Object.entries(record).map(([revisionId, content]) => {
+    if (!revisionId.startsWith("side_rev_") || typeof content !== "string" || new TextEncoder().encode(content).byteLength > 1024 * 1024) {
+      throw new Error("stored adoption revision content is invalid");
+    }
+    return [revisionId, content];
+  }));
+}
+
+/** Parse a simulated browser-reload snapshot; any malformed field rejects the whole graph. */
+export function parseStoredMockP3State(raw: string | null): StoredMockP3State | null {
+  if (!raw) return null;
+  try {
+    const envelope = storedObject(JSON.parse(raw) as unknown, "P3 mock envelope");
+    if (envelope.version !== MOCK_P3_STATE_VERSION) return null;
+    const state = storedObject(envelope.state, "P3 mock state");
+    const parsed: StoredMockP3State = {
+      sideTasks: parseStoredSideTasks(state.sideTasks),
+      sideTaskResults: parseStoredSideTaskResults(state.sideTaskResults),
+      sideTaskDiffs: parseStoredSideTaskDiffs(state.sideTaskDiffs),
+      sideTaskAdoptions: parseStoredOperations(
+        state.sideTaskAdoptions,
+        "sideTaskAdoptions",
+        parseSideTaskAdoptionResult,
+      ),
+      sideTaskCreateOperations: parseStoredOperations(
+        state.sideTaskCreateOperations,
+        "sideTaskCreateOperations",
+        (value) => parseSideTaskList([value])[0]!,
+      ),
+      sideTaskEvents: parseStoredEvents(state.sideTaskEvents),
+      sideTaskMessageOperations: parseStoredOperations(
+        state.sideTaskMessageOperations,
+        "sideTaskMessageOperations",
+        (value) => {
+          const result = storedObject(value, "side-task message result");
+          if (result.accepted !== true || result.status !== "running") {
+            throw new Error("stored side-task message result is invalid");
+          }
+          return { accepted: true as const, status: "running" as const };
+        },
+      ),
+      sideTaskPollCounts: parseStoredCounts(state.sideTaskPollCounts),
+      projectHeadCommits: parseStoredCommits(state.projectHeadCommits),
+      adoptionArtifacts: parseStoredArtifacts(state.adoptionArtifacts),
+      adoptionRevisions: parseStoredRevisions(state.adoptionRevisions),
+      adoptionRevisionContent: parseStoredRevisionContent(state.adoptionRevisionContent),
+    };
+
+    const knownTasks = new Set(Object.values(parsed.sideTasks).flat().map((task) => task.task_id));
+    for (const [taskId, result] of Object.entries(parsed.sideTaskResults)) {
+      if (!knownTasks.has(taskId) || result.task_id !== taskId) throw new Error("orphaned side-task result");
+    }
+    for (const [taskId, diff] of Object.entries(parsed.sideTaskDiffs)) {
+      if (!knownTasks.has(taskId) || !parsed.sideTaskResults[taskId] || diff.result_id !== parsed.sideTaskResults[taskId]!.result_id) {
+        throw new Error("orphaned side-task diff");
+      }
+    }
+    for (const taskId of Object.keys(parsed.sideTaskEvents)) {
+      if (!knownTasks.has(taskId)) throw new Error("orphaned side-task events");
+    }
+    for (const revisions of Object.values(parsed.adoptionRevisions)) {
+      for (const revision of revisions) {
+        const content = parsed.adoptionRevisionContent[revision.id];
+        if (content === undefined || sha256Bytes(new TextEncoder().encode(content)) !== revision.content_hash) {
+          throw new Error("stored adoption content does not match its sealed hash");
+        }
+      }
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function restoredMockP3State(): StoredMockP3State | null {
+  const storage = browserStorage();
+  return storage ? parseStoredMockP3State(storage.getItem(MOCK_P3_STATE_STORAGE_KEY)) : null;
 }
 
 export const MOCK_PROCESS_VERSIONS: readonly ProcessVersion[] = [
@@ -510,12 +790,255 @@ export const MOCK_IMPORT_SNAPSHOTS: readonly HistoricalMaterialSnapshot[] = [
   },
 ];
 
+// ─────────────────────────────────────────────────────────────────────
+// P3 探索任务（独立于主 Agent；只有人工采纳才改变项目读模型）
+// ─────────────────────────────────────────────────────────────────────
+
+const SIDE_SCOPE = {
+  schema: "task-scope.v1",
+  workspace: "isolated",
+  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+  write_paths: ["rtl/pwm_gen.v", "tb/pwm_gen_explore_tb.sv", "doc/arch/exploration.md"],
+  run_classes: ["exploratory"],
+  can_submit_gates: false,
+  can_create_milestones: false,
+  can_start_formal_runs: false,
+} as const;
+
+const SIDE_SUCCEEDED_ID = "side-pipeline-compare";
+
+const SIDE_RTL_CONTENT = `module pwm_gen (
+  input  logic       clk,
+  input  logic       rst_n,
+  input  logic [7:0] duty,
+  output logic       pwm_out
+);
+  logic [7:0] counter;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      counter <= '0;
+      pwm_out <= 1'b0;
+    end else begin
+      counter <= counter + 1'b1;
+      pwm_out <= counter < duty;
+    end
+  end
+endmodule
+`;
+
+const SIDE_TB_CONTENT = `module pwm_gen_explore_tb;
+  logic clk = 1'b0;
+  logic rst_n = 1'b0;
+  logic [7:0] duty = 8'd64;
+  logic pwm_out;
+
+  always #5 clk = ~clk;
+  pwm_gen dut (.*);
+
+  initial begin
+    repeat (2) @(posedge clk);
+    rst_n = 1'b1;
+    repeat (256) @(posedge clk);
+    $finish;
+  end
+endmodule
+`;
+
+const SIDE_DOC_CONTENT = `# 流水线探索记录
+
+## 权衡
+
+一级流水线改善关键路径，但输出增加一拍延迟。组合方案保持零拍延迟，适合当前较低目标频率。
+
+## 建议
+
+暂时只采纳探索性 testbench；RTL 方案待主线接口时序确认后再决定。
+`;
+
+const SIDE_RTL_HASH = sha256Bytes(new TextEncoder().encode(SIDE_RTL_CONTENT));
+const SIDE_TB_HASH = sha256Bytes(new TextEncoder().encode(SIDE_TB_CONTENT));
+const SIDE_DOC_HASH = sha256Bytes(new TextEncoder().encode(SIDE_DOC_CONTENT));
+
+/** Full candidate bytes sealed by the mock result; adoption stores these, never a diff snippet. */
+export const MOCK_SIDE_TASK_CONTENTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  [SIDE_SUCCEEDED_ID]: {
+    "rtl/pwm_gen.v": SIDE_RTL_CONTENT,
+    "tb/pwm_gen_explore_tb.sv": SIDE_TB_CONTENT,
+    "doc/arch/exploration.md": SIDE_DOC_CONTENT,
+  },
+};
+
+export const MOCK_SIDE_TASKS: readonly SideTaskSummary[] = [
+  {
+    task_id: "side-counter-width",
+    project_id: PROJECT_ID,
+    kind: "side",
+    parent_task_id: AGENT_B,
+    workspace_id: "ws-side-counter-width",
+    objective: "比较 8 位与 10 位计数器对资源和时序的影响",
+    status: "running",
+    input_hash: "a".repeat(64),
+    output_hash: null,
+    adoption_state: "pending",
+    authorization_scope: {
+      schema: "task-scope.v1",
+      workspace: "isolated",
+      read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+      write_paths: ["rtl/pwm_gen.v"],
+      run_classes: ["exploratory"],
+      can_submit_gates: false,
+      can_create_milestones: false,
+      can_start_formal_runs: false,
+    },
+    base_commit: MOCK_PROJECT_HEAD_COMMIT,
+    base_manifest_hash: "2".repeat(64),
+    workspace_state: "active",
+    created_at: "2026-08-21T03:20:00.000Z",
+    updated_at: "2026-08-21T03:23:00.000Z",
+    finished_at: null,
+    failure_reason: null,
+  },
+  {
+    task_id: SIDE_SUCCEEDED_ID,
+    project_id: PROJECT_ID,
+    kind: "side",
+    parent_task_id: AGENT_B,
+    workspace_id: "ws-side-pipeline-compare",
+    objective: "比较组合比较器与一级流水线实现，并补充探索性测试",
+    status: "succeeded",
+    input_hash: "b".repeat(64),
+    output_hash: "c".repeat(64),
+    adoption_state: "available",
+    authorization_scope: SIDE_SCOPE,
+    base_commit: MOCK_PROJECT_HEAD_COMMIT,
+    base_manifest_hash: "2".repeat(64),
+    workspace_state: "sealed",
+    created_at: "2026-08-21T02:15:00.000Z",
+    updated_at: "2026-08-21T02:22:00.000Z",
+    finished_at: "2026-08-21T02:22:00.000Z",
+    failure_reason: null,
+  },
+  {
+    task_id: "side-invalid-constraint",
+    project_id: PROJECT_ID,
+    kind: "side",
+    parent_task_id: AGENT_B,
+    workspace_id: "ws-side-invalid-constraint",
+    objective: "尝试替换正式时序约束（应安全停止）",
+    status: "fail_closed",
+    input_hash: "d".repeat(64),
+    output_hash: null,
+    adoption_state: "pending",
+    authorization_scope: {
+      schema: "task-scope.v1",
+      workspace: "isolated",
+      read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+      write_paths: ["prj/constr/top.xdc"],
+      run_classes: ["exploratory"],
+      can_submit_gates: false,
+      can_create_milestones: false,
+      can_start_formal_runs: false,
+    },
+    base_commit: MOCK_PROJECT_HEAD_COMMIT,
+    base_manifest_hash: "2".repeat(64),
+    workspace_state: "failed",
+    created_at: "2026-08-21T01:40:00.000Z",
+    updated_at: "2026-08-21T01:41:00.000Z",
+    finished_at: "2026-08-21T01:41:00.000Z",
+    failure_reason: "探索任务请求了授权范围外的写入，Core 已拒绝并保留审计事实。",
+  },
+];
+
+export const MOCK_SIDE_TASK_RESULTS: Readonly<Record<string, SideTaskResult>> = {
+  [SIDE_SUCCEEDED_ID]: {
+    result_id: "result-pipeline-compare",
+    task_id: SIDE_SUCCEEDED_ID,
+    workspace_id: "ws-side-pipeline-compare",
+    base_commit: MOCK_PROJECT_HEAD_COMMIT,
+    result_commit: "3".repeat(40),
+    summary: "流水线方案改善了关键路径；新增一份探索性 testbench，并记录结构权衡。主工作区尚未发生变化。",
+    tests: [
+      { name: "bun run check", status: "passed", detail: null },
+      { name: "Vivado xsim exploratory", status: "passed", detail: "64/64 个占空比采样通过" },
+    ],
+    files: [
+      {
+        path: "rtl/pwm_gen.v",
+        change_kind: "modified",
+        base_hash: "4".repeat(64),
+        result_hash: SIDE_RTL_HASH,
+        size_bytes: new TextEncoder().encode(SIDE_RTL_CONTENT).byteLength,
+      },
+      {
+        path: "tb/pwm_gen_explore_tb.sv",
+        change_kind: "added",
+        base_hash: null,
+        result_hash: SIDE_TB_HASH,
+        size_bytes: new TextEncoder().encode(SIDE_TB_CONTENT).byteLength,
+      },
+      {
+        path: "doc/arch/exploration.md",
+        change_kind: "modified",
+        base_hash: "7".repeat(64),
+        result_hash: SIDE_DOC_HASH,
+        size_bytes: new TextEncoder().encode(SIDE_DOC_CONTENT).byteLength,
+      },
+    ],
+    output_hash: "c".repeat(64),
+    created_at: "2026-08-21T02:22:00.000Z",
+  },
+};
+
+export const MOCK_SIDE_TASK_DIFFS: Readonly<Record<string, SideTaskDiff>> = {
+  [SIDE_SUCCEEDED_ID]: {
+    task_id: SIDE_SUCCEEDED_ID,
+    result_id: "result-pipeline-compare",
+    preview_hash: "9".repeat(64),
+    files: [
+      {
+        path: "rtl/pwm_gen.v",
+        change_kind: "modified",
+        base_hash: "4".repeat(64),
+        result_hash: SIDE_RTL_HASH,
+        current_target_hash: "f".repeat(64),
+        diff: "@@ -18,3 +18,5 @@\n-assign pwm_out = counter < duty;\n+always_ff @(posedge clk)\n+  pwm_out <= counter < duty;",
+        conflict_reason: "主工作区中的 rtl/pwm_gen.v 已在探索任务启动后变化。",
+        adopted: false,
+      },
+      {
+        path: "tb/pwm_gen_explore_tb.sv",
+        change_kind: "added",
+        base_hash: null,
+        result_hash: SIDE_TB_HASH,
+        current_target_hash: null,
+        diff: "@@ -0,0 +1,5 @@\n+module pwm_gen_explore_tb;\n+  // exploratory coverage\n+endmodule",
+        conflict_reason: null,
+        adopted: false,
+      },
+      {
+        path: "doc/arch/exploration.md",
+        change_kind: "modified",
+        base_hash: "7".repeat(64),
+        result_hash: SIDE_DOC_HASH,
+        current_target_hash: "7".repeat(64),
+        diff: "@@ -3,2 +3,4 @@\n ## 权衡\n+一级流水线改善关键路径，但输出增加一拍延迟。",
+        conflict_reason: null,
+        adopted: false,
+      },
+    ],
+  },
+};
+
 const SUMMARY_A: TaskAgentSummary = {
   agent_id: AGENT_A,
+  task_id: AGENT_A,
   project_id: PROJECT_ID,
+  kind: "main",
   status: "succeeded",
   current_stage: "implement",
   awaiting_gate: null,
+  base_commit: MOCK_PROJECT_HEAD_COMMIT,
   created_at: "2026-08-16T03:12:00.000Z",
 };
 
@@ -530,10 +1053,13 @@ const DETAIL_A: TaskAgentDetail = {
 
 const SUMMARY_B_RUNNING: TaskAgentSummary = {
   agent_id: AGENT_B,
+  task_id: AGENT_B,
   project_id: PROJECT_ID,
+  kind: "main",
   status: "running",
   current_stage: "implement",
   awaiting_gate: null,
+  base_commit: MOCK_PROJECT_HEAD_COMMIT,
   created_at: "2026-08-17T14:03:00.000Z",
 };
 
@@ -561,6 +1087,8 @@ const DETAIL_B_DONE: TaskAgentDetail = {
  * 可变的 mock 运行态：新 run 起初是 running，SSE 脚本播完后翻成 succeeded
  * （前端轮询随即拉到完整 audit + 码流成功卡）。
  */
+const restoredP3 = restoredMockP3State();
+
 export const mockState = {
   agentBDone: false,
   /** 通过 mock POST /projects 新建的项目；持久化后整页刷新仍可打开。 */
@@ -570,20 +1098,114 @@ export const mockState = {
   /** P2 快照按 projectId 隔离；资料默认不跨项目共享。 */
   importSnapshots: { [PROJECT_ID]: [...MOCK_IMPORT_SNAPSHOTS] } as Record<string, HistoricalMaterialSnapshot[]>,
   /** 历史资料复制后真实落入 Mock 产物/修订读模型，供工作台刷新与 v2 验证。 */
-  importArtifacts: {} as Record<string, Artifact[]>,
-  importRevisions: {} as Record<string, ArtifactRevision[]>,
-  importRevisionContent: {} as Record<string, string>,
+  importArtifacts: restoredP3?.adoptionArtifacts ?? {} as Record<string, Artifact[]>,
+  importRevisions: restoredP3?.adoptionRevisions ?? {} as Record<string, ArtifactRevision[]>,
+  importRevisionContent: restoredP3?.adoptionRevisionContent ?? {} as Record<string, string>,
   /** copy 写操作按 HTTP 幂等键缓存；同键异体 fail closed。 */
   importCopyOperations: {} as Record<string, {
     readonly requestHash: string;
     readonly result: CopyHistoricalMaterialResult;
   }>,
+  /** P3 任务事实、密封结果与 diff 均按 project/task 隔离。 */
+  sideTasks: restoredP3?.sideTasks ?? { [PROJECT_ID]: MOCK_SIDE_TASKS.map((task) => ({ ...task })) } as Record<string, SideTaskSummary[]>,
+  sideTaskResults: restoredP3?.sideTaskResults ?? Object.fromEntries(
+    Object.entries(MOCK_SIDE_TASK_RESULTS).map(([taskId, result]) => [taskId, { ...result, files: [...result.files], tests: [...result.tests] }]),
+  ) as Record<string, SideTaskResult>,
+  sideTaskDiffs: restoredP3?.sideTaskDiffs ?? Object.fromEntries(
+    Object.entries(MOCK_SIDE_TASK_DIFFS).map(([taskId, diff]) => [taskId, { ...diff, files: diff.files.map((file) => ({ ...file })) }]),
+  ) as Record<string, SideTaskDiff>,
+  sideTaskAdoptions: restoredP3?.sideTaskAdoptions ?? {} as Record<string, {
+    readonly requestHash: string;
+    readonly result: SideTaskAdoptionResult;
+  }>,
+  sideTaskCreateOperations: restoredP3?.sideTaskCreateOperations ?? {} as Record<string, {
+    readonly requestHash: string;
+    readonly result: SideTaskSummary;
+  }>,
+  sideTaskEvents: restoredP3?.sideTaskEvents ?? {} as Record<string, SideTaskConversationEvent[]>,
+  sideTaskMessageOperations: restoredP3?.sideTaskMessageOperations ?? {} as Record<string, {
+    readonly requestHash: string;
+    readonly result: { readonly accepted: true; readonly status: "running" };
+  }>,
+  sideTaskPollCounts: restoredP3?.sideTaskPollCounts ?? {} as Record<string, number>,
+  projectHeadCommits: restoredP3?.projectHeadCommits ?? { [PROJECT_ID]: MOCK_PROJECT_HEAD_COMMIT } as Record<string, string>,
 };
 
 export function persistCreatedMockProjects(): void {
   const storage = browserStorage();
   if (!storage) return;
   storage.setItem(MOCK_CREATED_PROJECTS_STORAGE_KEY, JSON.stringify(mockState.createdProjects));
+}
+
+function persistedAdoptionArtifacts(): Record<string, Artifact[]> {
+  return Object.fromEntries(Object.entries(mockState.importArtifacts).flatMap(([projectId, artifacts]) => {
+    const adopted = artifacts.filter((artifact) => artifact.id.startsWith("side-"));
+    return adopted.length > 0 ? [[projectId, adopted.map((artifact) => ({ ...artifact }))]] : [];
+  }));
+}
+
+function persistedAdoptionRevisions(): Record<string, ArtifactRevision[]> {
+  return Object.fromEntries(Object.entries(mockState.importRevisions).flatMap(([artifactId, revisions]) => {
+    const adopted = revisions.filter((revision) => revision.id.startsWith("side_rev_"));
+    return adopted.length > 0 ? [[artifactId, adopted.map((revision) => ({ ...revision }))]] : [];
+  }));
+}
+
+function p3StateEnvelope(): StoredMockP3Envelope {
+  const adoptionRevisions = persistedAdoptionRevisions();
+  const revisionIds = new Set(Object.values(adoptionRevisions).flat().map((revision) => revision.id));
+  return {
+    version: MOCK_P3_STATE_VERSION,
+    state: {
+      sideTasks: mockState.sideTasks,
+      sideTaskResults: mockState.sideTaskResults,
+      sideTaskDiffs: mockState.sideTaskDiffs,
+      sideTaskAdoptions: mockState.sideTaskAdoptions,
+      sideTaskCreateOperations: mockState.sideTaskCreateOperations,
+      sideTaskEvents: mockState.sideTaskEvents,
+      sideTaskMessageOperations: mockState.sideTaskMessageOperations,
+      sideTaskPollCounts: mockState.sideTaskPollCounts,
+      projectHeadCommits: mockState.projectHeadCommits,
+      adoptionArtifacts: persistedAdoptionArtifacts(),
+      adoptionRevisions,
+      adoptionRevisionContent: Object.fromEntries(
+        Object.entries(mockState.importRevisionContent).filter(([revisionId]) => revisionIds.has(revisionId)),
+      ),
+    },
+  };
+}
+
+/** Persist the coherent P3 graph after each successful mock write/state transition. */
+export function persistMockP3State(): void {
+  const storage = browserStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(MOCK_P3_STATE_STORAGE_KEY, JSON.stringify(p3StateEnvelope()));
+  } catch {
+    // Mock persistence must never turn an otherwise valid API response into a failure.
+  }
+}
+
+/**
+ * Apply the same validated snapshot that a fresh page module load consumes.
+ * Exported so tests can simulate a full reload without relying on module-cache tricks.
+ */
+export function restorePersistedMockP3State(): boolean {
+  const restored = restoredMockP3State();
+  if (!restored) return false;
+  mockState.sideTasks = restored.sideTasks;
+  mockState.sideTaskResults = restored.sideTaskResults;
+  mockState.sideTaskDiffs = restored.sideTaskDiffs;
+  mockState.sideTaskAdoptions = restored.sideTaskAdoptions;
+  mockState.sideTaskCreateOperations = restored.sideTaskCreateOperations;
+  mockState.sideTaskEvents = restored.sideTaskEvents;
+  mockState.sideTaskMessageOperations = restored.sideTaskMessageOperations;
+  mockState.sideTaskPollCounts = restored.sideTaskPollCounts;
+  mockState.projectHeadCommits = restored.projectHeadCommits;
+  mockState.importArtifacts = restored.adoptionArtifacts;
+  mockState.importRevisions = restored.adoptionRevisions;
+  mockState.importRevisionContent = restored.adoptionRevisionContent;
+  return true;
 }
 
 export const LIVE_AGENT_ID = AGENT_B;
