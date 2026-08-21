@@ -159,3 +159,5 @@ export type ActorType = "human" | "agent" | "connector" | "system" | "service";
 // ── Data classification (Q-006 decision: reserved, formal level TBD) ──────────
 
 export type DataClassification = "D1" | "D2" | "D3" | "D4" | "UNCLASSIFIED";
+
+export type ProjectType = "free" | "engineering";

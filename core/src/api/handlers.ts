@@ -43,6 +43,7 @@ import {
   conflictApiError,
   forbiddenError,
   internalError,
+  isPgUniqueViolation,
   notFoundError,
   validationError,
 } from "./errors.ts";
@@ -54,6 +55,9 @@ import {
   type SourceInput,
 } from "./connector-port.ts";
 import type { RuntimeClient } from "./task-proxy.ts";
+import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
+import { ensureWorkspace, readAtLocation } from "../workspace/store.ts";
+import { freezeBaselineContent } from "../workspace/archive.ts";
 
 // ─── shared request context ──────────────────────────────────────────────────
 
@@ -62,6 +66,11 @@ export interface RequestContext {
   readonly identity: AuthenticatedIdentity;
   readonly method: string;
   readonly url: URL;
+  /**
+   * 原始 Request。仅 SSE 透传使用（需要 `last-event-id` 请求头与客户端断连的
+   * abort signal，二者都无法从解析后的字段还原）；其余处理器请用上面的字段。
+   */
+  readonly request: Request;
   readonly params: Record<string, string>;
   /** Parsed JSON body (POST only); null for GET. */
   readonly body: unknown;
@@ -80,14 +89,18 @@ export interface HandlerResult {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+//
+// 下面几个 helper 除了本文件，还被 `workspace-handlers.ts` 复用（工作区那几条也要
+// 走同一套幂等/事务/outbox 语义）。它们导出**只是为了那个兄弟模块**，不是给外部用的
+// 公共 API——handlers.ts 是处理器内核，workspace-handlers.ts 是它的一部分，只是分了文件。
 
 /** Bridge a TransactionClient to the `Client` type expected by CRUD repository
  *  functions. Runtime-safe: those functions only call `.query()`. */
-function asClient(tx: TransactionClient): Client {
+export function asClient(tx: TransactionClient): Client {
   return tx as unknown as Client;
 }
 
-function asObject(value: unknown): Record<string, unknown> {
+export function asObject(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw validationError("request body must be a JSON object");
   }
@@ -100,10 +113,17 @@ function requireString(obj: Record<string, unknown>, key: string): string {
   return v;
 }
 
-function optionalString(obj: Record<string, unknown>, key: string, fallback: string): string {
+export function optionalString(obj: Record<string, unknown>, key: string, fallback: string): string {
   const v = obj[key];
   if (v === undefined || v === null) return fallback;
   if (typeof v !== "string") throw validationError(`field '${key}' must be a string`);
+  return v;
+}
+
+function optionalNullableString(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj[key];
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v !== "string") throw validationError(`field '${key}' must be a string or null`);
   return v;
 }
 
@@ -126,11 +146,101 @@ function optionalObject(obj: Record<string, unknown>, key: string): unknown {
 /** Enum vocabularies mirrored from the DB (validated at the API boundary so an
  *  illegal value never reaches a PG constraint and surfaces as a 500 leak). */
 const CLASSIFICATION_VALUES: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
+const PROJECT_TYPE_VALUES: Record<string, true> = { free: true, engineering: true };
 const GATE_VALUES: Record<string, true> = { G0: true, G1: true, G2: true, G3: true, G4: true, G5: true, G6: true, G7: true, G8: true, G9: true };
 const TRACE_STATE_VALUES: Record<string, true> = { candidate: true, in_review: true, approved: true, rejected: true, review_required: true, superseded: true, invalidated: true };
 
+const GJB_REF_V1 = {
+  id: "GJB_REF_V1",
+  version: "GJB_REF_V1",
+  name: "GJB 参考流程 v1",
+  status: "active",
+} as const;
+
+const LEGACY_COMPAT = {
+  id: "LEGACY_COMPAT",
+  version: "LEGACY_COMPAT",
+  name: "兼容旧流程",
+  status: "retired",
+} as const;
+
+interface ProjectProcessBindingRow {
+  readonly project_type: string;
+  readonly process_profile_id: string | null;
+}
+
+async function requireProjectProcessBinding(
+  tx: TransactionClient,
+  projectId: string,
+): Promise<ProjectProcessBindingRow> {
+  const { rows } = await tx.query(
+    "SELECT project_type, process_profile_id FROM project WHERE id = $1",
+    [projectId],
+  );
+  const project = rows[0] as ProjectProcessBindingRow | undefined;
+  if (!project) throw notFoundError(`project not found: ${projectId}`);
+  return project;
+}
+
+/**
+ * Return the profile that every process-bound child row must use for a modern
+ * engineering project. Free and LEGACY_COMPAT projects deliberately retain
+ * their pre-P1 defaults and are not tightened by this compatibility bridge.
+ */
+function frozenModernProcessProfile(project: ProjectProcessBindingRow): string | null {
+  if (project.project_type !== "engineering" || project.process_profile_id === LEGACY_COMPAT.id) {
+    return null;
+  }
+  if (typeof project.process_profile_id !== "string" || project.process_profile_id.trim().length === 0) {
+    throw conflictApiError("PROJECT_PROCESS_PROFILE_INVALID", {
+      projectType: project.project_type,
+      processProfileId: project.process_profile_id,
+    });
+  }
+  return project.process_profile_id;
+}
+
+function resolveGateProfileVersion(
+  body: Record<string, unknown>,
+  frozenProfile: string | null,
+): string {
+  const gateProfile = optionalString(body, "gate_profile_version", frozenProfile ?? "flow-v1");
+  if (frozenProfile !== null && gateProfile !== frozenProfile) {
+    throw conflictApiError("PROCESS_PROFILE_IMMUTABLE", {
+      expected: frozenProfile,
+      received: gateProfile,
+    });
+  }
+  return gateProfile;
+}
+
+function assertFrozenGateProfile(
+  frozenProfile: string | null,
+  actual: unknown,
+  resource: "process_instance" | "configuration_snapshot",
+): void {
+  if (frozenProfile !== null && actual !== frozenProfile) {
+    throw conflictApiError("PROCESS_PROFILE_IMMUTABLE", {
+      resource,
+      expected: frozenProfile,
+      received: actual,
+    });
+  }
+}
+
+/** Every field whose presence makes a project-create request part of the new
+ * project/process contract. A compatibility request must omit all of them. */
+const MODERN_PROJECT_PROCESS_FIELDS = [
+  "project_type",
+  "process_version_id",
+  "process_profile_id",
+  "process_profile",
+  "process_profile_version",
+  "process_profile_name",
+] as const;
+
 /** Maximum inline revision content (1 MiB, measured in UTF-8 bytes). */
-const MAX_CONTENT_BYTES = 1024 * 1024;
+export const MAX_CONTENT_BYTES = 1024 * 1024;
 
 function requireEnum(value: unknown, key: string, valid: Record<string, true>): string {
   if (typeof value !== "string" || !(value in valid)) {
@@ -140,7 +250,7 @@ function requireEnum(value: unknown, key: string, valid: Record<string, true>): 
 }
 
 /** Verify a project exists; throws 404 (not a validation error) if missing. */
-async function requireProject(tx: TransactionClient, projectId: string): Promise<void> {
+export async function requireProject(tx: TransactionClient, projectId: string): Promise<void> {
   const { rows } = await tx.query("SELECT 1 FROM project WHERE id = $1", [projectId]);
   if (rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
 }
@@ -151,7 +261,7 @@ async function requireProject(tx: TransactionClient, projectId: string): Promise
  * On same-key replay the stored response is returned; same-key-different-hash
  * raises a 409 conflict.
  */
-async function runIdempotent<T>(
+export async function runIdempotent<T>(
   ctx: RequestContext,
   operation: string,
   projectId: string,
@@ -210,10 +320,16 @@ function mapServiceError(err: unknown): ApiError {
     // remaining invariant failures are payload/state validation issues
     return validationError(msg);
   }
+  // Approving a milestone gate whose (project_id, kind) already has an active
+  // baseline trips `baseline_unique_active_project_kind`. Without this branch the
+  // 23505 falls through to internalError below and the client sees a 500 — and
+  // because callers `throw mapServiceError(err)`, it never reaches the router's
+  // own isPgUniqueViolation branch (router.ts), which is dead code for approve.
+  if (isPgUniqueViolation(err)) return conflictApiError("ACTIVE_BASELINE_CONFLICT", null, false);
   return internalError(err instanceof Error ? err.message : "unknown service error");
 }
 
-function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { type: string; id: string }, eventType: string, payload: unknown): Promise<number> {
+export function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { type: string; id: string }, eventType: string, payload: unknown): Promise<number> {
   return appendOutboxEventInTx(tx, {
     eventId: randomUUID(),
     aggregateType: aggregate.type,
@@ -233,17 +349,75 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
   const body = asObject(ctx.body);
   const id = requireString(body, "id");
   const name = requireString(body, "name");
+  // 项目 id 同时是磁盘上的工作区目录名，所以在建库之前就要挡住不能当目录名的 id，
+  // 而不是等到第一次写文件时才失败——那时项目已经建好了，工作区却永远建不出来。
+  validateProjectId(id);
 
   const dataClassification = optionalString(body, "data_classification", "D1");
   requireEnum(dataClassification, "data_classification", CLASSIFICATION_VALUES);
+  const legacyCompatibility = MODERN_PROJECT_PROCESS_FIELDS.every((field) => body[field] === undefined);
+  const projectType = optionalString(body, "project_type", legacyCompatibility ? "engineering" : "free");
+  requireEnum(projectType, "project_type", PROJECT_TYPE_VALUES);
+  // These are frozen server-owned snapshots, not selection aliases. Silently
+  // ignoring a client-supplied value could turn a malformed modern request into
+  // a LEGACY_COMPAT project or conceal a conflicting version/name.
+  if (body.process_profile_version !== undefined || body.process_profile_name !== undefined) {
+    throw validationError("process_profile_version and process_profile_name are read-only");
+  }
+  const suppliedProfiles = [body.process_profile_id, body.process_profile, body.process_version_id]
+    .filter((value) => value !== undefined && value !== null)
+    .map((value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw validationError("field 'process_profile_id' must be a non-empty string");
+      }
+      return value.trim();
+    });
+  if (new Set(suppliedProfiles).size > 1) {
+    throw validationError("process profile fields must identify the same version");
+  }
+  const requestedProfile = suppliedProfiles[0] ?? (legacyCompatibility ? LEGACY_COMPAT.id : undefined);
+  // The device is optional for both project types at creation time. Formal
+  // engineering runs will validate that it has been filled in later; creation
+  // must not silently invent a device for a project that does not have one.
+  const requestedTargetPart = optionalNullableString(body, "target_part");
+  // Keep the historical default only for the legacy request shape. New
+  // explicit free/engineering projects remain genuinely nullable.
+  const targetPart = requestedTargetPart ?? (legacyCompatibility ? "xc7vx690tffg1761-2" : null);
+
+  if (projectType === "engineering" && !requestedProfile) {
+    throw validationError("engineering projects require process_profile_id");
+  }
+  if (projectType === "free" && requestedProfile) {
+    throw validationError("free projects cannot select a process profile");
+  }
+  if (!legacyCompatibility && requestedProfile && requestedProfile !== GJB_REF_V1.id) {
+    throw validationError("process_profile_id must reference a supported active process version");
+  }
 
   const { result } = await runIdempotent(ctx, "create_project", id, async (tx) => {
+    let profile: { id: string; version: string; name: string } | null = null;
+    if (requestedProfile) {
+      const expectedProfile = legacyCompatibility ? LEGACY_COMPAT : GJB_REF_V1;
+      const profileResult = await tx.query(
+        `SELECT id, version, name FROM process_version
+          WHERE id = $1 AND profile_id = $1 AND version = $2
+            AND name = $3 AND status = $4`,
+        [requestedProfile, expectedProfile.version, expectedProfile.name, expectedProfile.status],
+      );
+      profile = profileResult.rows[0] as { id: string; version: string; name: string } | undefined ?? null;
+      if (!profile) throw validationError("process_profile_id must reference an active process version");
+    }
+    // Workspace creation is part of a successful project create. Keep the
+    // idempotency slot and project/outbox writes uncommitted until it succeeds;
+    // otherwise a filesystem error would return 500 while permanently storing
+    // a successful response for the same key.
+    await ensureWorkspace(id);
     // Detect a prior create of the same id with DIFFERENT content. A same-id
     // request must either replay the identical project (idempotent) or surface
     // a stable 409 conflict — never silently 201 with a different payload.
     const insertResult = await tx.query(
-      `INSERT INTO project (id, name, scope, data_classification, standard_version, target_part, toolchain_profile_ref, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'active')
+      `INSERT INTO project (id, name, scope, data_classification, standard_version, target_part, toolchain_profile_ref, project_type, process_version_id, process_profile_id, process_profile_version, process_profile_name, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active')
        ON CONFLICT (id) DO NOTHING
        RETURNING id`,
       [
@@ -252,14 +426,19 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         optionalString(body, "scope", ""),
         dataClassification,
         optionalString(body, "standard_version", "GB/T 33781-2017"),
-        optionalString(body, "target_part", "xc7vx690tffg1761-2"),
+        targetPart,
         (body.toolchain_profile_ref ?? null) as string | null,
+        projectType,
+        requestedProfile ?? null,
+        requestedProfile ?? null,
+        profile?.version ?? null,
+        profile?.name ?? null,
       ],
     );
     if (insertResult.rows.length === 0) {
       // Row already exists; reject if the new payload differs from the stored one.
       const existing = await tx.query(
-        "SELECT name, scope, data_classification, standard_version, target_part, toolchain_profile_ref, status FROM project WHERE id = $1",
+        "SELECT name, scope, data_classification, standard_version, target_part, toolchain_profile_ref, project_type, process_version_id, process_profile_id, process_profile_version, process_profile_name, status FROM project WHERE id = $1",
         [id],
       );
       const row = existing.rows[0] as Record<string, unknown> | undefined;
@@ -269,11 +448,55 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         row.scope === optionalString(body, "scope", "") &&
         row.data_classification === dataClassification &&
         row.standard_version === optionalString(body, "standard_version", "GB/T 33781-2017") &&
-        row.target_part === optionalString(body, "target_part", "xc7vx690tffg1761-2") &&
-        row.toolchain_profile_ref === ((body.toolchain_profile_ref ?? null) as string | null);
+        row.target_part === targetPart &&
+        row.toolchain_profile_ref === ((body.toolchain_profile_ref ?? null) as string | null) &&
+        row.project_type === projectType &&
+        row.process_version_id === (requestedProfile ?? null) &&
+        row.process_profile_id === (requestedProfile ?? null);
       if (!same) throw conflictApiError("PROJECT_ALREADY_EXISTS_DIFFERENT_PAYLOAD", { id });
       // Same payload: idempotent — return the stored project, no new outbox event.
-      return { id, name: row.name as string, status: row.status as string };
+      const existingProcess = await tx.query(
+        `SELECT id, gate_profile_version, current_gate, created_at
+           FROM process_instance WHERE project_id = $1 ORDER BY created_at`,
+        [id],
+      );
+      return {
+        id,
+        name: row.name as string,
+        status: row.status as string,
+        project_type: row.project_type,
+        process_profile_id: row.process_profile_id,
+        process_profile_version: row.process_profile_version,
+        process_profile_name: row.process_profile_name,
+        process_version_id: row.process_version_id,
+        target_part: row.target_part,
+        process_instances: existingProcess.rows,
+      };
+    }
+    let createdProcessInstances: unknown[] = [];
+    if (projectType === "engineering" && !legacyCompatibility) {
+      const pi = `pi_${id}_G0`;
+      const processInsert = await tx.query(
+        `INSERT INTO process_instance (id, project_id, gate_profile_version, current_gate)
+         VALUES ($1,$2,$3,'G0') ON CONFLICT DO NOTHING
+         RETURNING id, gate_profile_version, current_gate, created_at`,
+        [pi, id, requestedProfile],
+      );
+      if (processInsert.rows.length !== 1) {
+        throw conflictApiError("PROCESS_INSTANCE_ID_CONFLICT", { id: pi, projectId: id });
+      }
+      createdProcessInstances = processInsert.rows;
+      await appendOutboxEventInTx(tx, {
+        eventId: randomUUID(),
+        aggregateType: "process_instance",
+        aggregateId: pi,
+        eventType: "process.created",
+        projectId: id,
+        payload: { id: pi, projectId: id, gateProfile: requestedProfile, currentGate: "G0" },
+        correlationId: ctx.correlationId,
+        causationId: null,
+        classification: ctx.classification,
+      });
     }
     await appendOutboxEventInTx(tx, {
       eventId: randomUUID(),
@@ -281,12 +504,251 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
       aggregateId: id,
       eventType: "project.created",
       projectId: id,
-      payload: { id, name },
+      payload: { id, name, project_type: projectType, process_profile_id: requestedProfile ?? null },
       correlationId: ctx.correlationId,
       causationId: null,
       classification: ctx.classification,
     });
-    return { id, name, status: "active" };
+    return {
+      id,
+      name,
+      status: "active",
+      project_type: projectType,
+      process_version_id: requestedProfile ?? null,
+      process_profile_id: requestedProfile ?? null,
+      process_profile_version: profile?.version ?? null,
+      process_profile_name: profile?.name ?? null,
+      target_part: targetPart,
+      process_instances: createdProcessInstances,
+    };
+  });
+
+  return { status: 201, data: result };
+}
+
+/**
+ * POST /projects/:projectId/copy-as-engineering
+ *
+ * P1 formalization is intentionally narrow: it creates a new
+ * engineering+GJB_REF_V1 project, copies only project-level configuration, and
+ * records an immutable source relation. The target gets a fresh empty workspace
+ * and G0 instance; artifacts, revisions, roles, historical process state and
+ * source workspace bytes remain with the source project (their copy semantics
+ * belong to P2).
+ */
+export async function copyProjectAsEngineering(ctx: RequestContext): Promise<HandlerResult> {
+  const sourceProjectId = ctx.params.projectId!;
+  const body = asObject(ctx.body);
+  const id = requireString(body, "id");
+  const name = requireString(body, "name");
+  validateProjectId(id);
+  if (id === sourceProjectId) {
+    throw validationError("copy target id must differ from source project id");
+  }
+
+  for (const field of [
+    ...MODERN_PROJECT_PROCESS_FIELDS,
+    "scope",
+    "data_classification",
+    "standard_version",
+    "toolchain_profile_ref",
+  ]) {
+    if (body[field] !== undefined) {
+      throw validationError(`field '${field}' is derived by copy-as-engineering and cannot be supplied`);
+    }
+  }
+  const hasTargetPartOverride = body.target_part !== undefined;
+  const requestedTargetPart = optionalNullableString(body, "target_part");
+
+  const { result } = await runIdempotent(ctx, "copy_project_as_engineering", sourceProjectId, async (tx) => {
+    const sourceResult = await tx.query(
+      `SELECT id, scope, data_classification, standard_version, target_part,
+              toolchain_profile_ref, project_type, process_version_id,
+              process_profile_id, process_profile_version, process_profile_name
+         FROM project WHERE id = $1 FOR UPDATE`,
+      [sourceProjectId],
+    );
+    const source = sourceResult.rows[0] as Record<string, unknown> | undefined;
+    if (!source) throw notFoundError(`project not found: ${sourceProjectId}`);
+
+    const freeSource =
+      source.project_type === "free" &&
+      source.process_version_id === null &&
+      source.process_profile_id === null &&
+      source.process_profile_version === null &&
+      source.process_profile_name === null;
+    const legacySource =
+      source.project_type === "engineering" &&
+      source.process_version_id === LEGACY_COMPAT.id &&
+      source.process_profile_id === LEGACY_COMPAT.id &&
+      source.process_profile_version === LEGACY_COMPAT.version &&
+      source.process_profile_name === LEGACY_COMPAT.name;
+    if (!freeSource && !legacySource) {
+      throw conflictApiError("PROJECT_COPY_SOURCE_NOT_ELIGIBLE", {
+        sourceProjectId,
+        projectType: source.project_type,
+        processVersionId: source.process_version_id,
+      });
+    }
+
+    const profileResult = await tx.query(
+      `SELECT id, version, name FROM process_version
+        WHERE id = $1 AND profile_id = $1 AND version = $2
+          AND name = $3 AND status = $4`,
+      [GJB_REF_V1.id, GJB_REF_V1.version, GJB_REF_V1.name, GJB_REF_V1.status],
+    );
+    const profile = profileResult.rows[0] as { id: string; version: string; name: string } | undefined;
+    if (!profile) throw validationError("GJB_REF_V1 is not an active supported process version");
+
+    const targetPart = hasTargetPartOverride ? requestedTargetPart : (source.target_part as string | null);
+    await ensureWorkspace(id);
+    const insertResult = await tx.query(
+      `INSERT INTO project (
+         id, name, scope, data_classification, standard_version, target_part,
+         toolchain_profile_ref, project_type, process_version_id,
+         process_profile_id, process_profile_version, process_profile_name, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'engineering',$8,$8,$9,$10,'active')
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
+      [
+        id,
+        name,
+        source.scope,
+        source.data_classification,
+        source.standard_version,
+        targetPart,
+        source.toolchain_profile_ref,
+        profile.id,
+        profile.version,
+        profile.name,
+      ],
+    );
+
+    if (insertResult.rows.length === 0) {
+      const existingResult = await tx.query(
+        `SELECT id, name, scope, data_classification, standard_version, target_part,
+                toolchain_profile_ref, status, project_type, process_version_id,
+                process_profile_id, process_profile_version, process_profile_name
+           FROM project WHERE id = $1`,
+        [id],
+      );
+      const existing = existingResult.rows[0] as Record<string, unknown> | undefined;
+      const relationResult = await tx.query(
+        `SELECT source_project_id, target_project_id, relation_kind,
+                created_by_type, created_by, created_at
+           FROM project_source_relation WHERE target_project_id = $1`,
+        [id],
+      );
+      const relation = relationResult.rows[0] as Record<string, unknown> | undefined;
+      const processResult = await tx.query(
+        `SELECT id, gate_profile_version, current_gate, created_at
+           FROM process_instance WHERE project_id = $1 ORDER BY created_at, id`,
+        [id],
+      );
+      const process = processResult.rows[0] as Record<string, unknown> | undefined;
+      const same =
+        existing?.name === name &&
+        existing.scope === source.scope &&
+        existing.data_classification === source.data_classification &&
+        existing.standard_version === source.standard_version &&
+        existing.target_part === targetPart &&
+        existing.toolchain_profile_ref === source.toolchain_profile_ref &&
+        existing.status === "active" &&
+        existing.project_type === "engineering" &&
+        existing.process_version_id === GJB_REF_V1.id &&
+        existing.process_profile_id === GJB_REF_V1.id &&
+        existing.process_profile_version === GJB_REF_V1.version &&
+        existing.process_profile_name === GJB_REF_V1.name &&
+        relation?.source_project_id === sourceProjectId &&
+        relation?.target_project_id === id &&
+        relation?.relation_kind === "copied_as_engineering" &&
+        processResult.rows.length === 1 &&
+        process?.id === `pi_${id}_G0` &&
+        process?.gate_profile_version === GJB_REF_V1.id &&
+        process?.current_gate === "G0";
+      if (!same) throw conflictApiError("PROJECT_ALREADY_EXISTS_DIFFERENT_PAYLOAD", { id });
+      return {
+        ...existing,
+        process_instances: processResult.rows,
+        source_relation: relation,
+        workspace_content_copied: false,
+      };
+    }
+
+    const processId = `pi_${id}_G0`;
+    const processInsert = await tx.query(
+      `INSERT INTO process_instance (id, project_id, gate_profile_version, current_gate)
+       VALUES ($1,$2,$3,'G0') ON CONFLICT DO NOTHING
+       RETURNING id, gate_profile_version, current_gate, created_at`,
+      [processId, id, GJB_REF_V1.id],
+    );
+    if (processInsert.rows.length !== 1) {
+      throw conflictApiError("PROCESS_INSTANCE_ID_CONFLICT", { id: processId, projectId: id });
+    }
+    const relationInsert = await tx.query(
+      `INSERT INTO project_source_relation (
+         target_project_id, source_project_id, relation_kind, created_by_type, created_by
+       ) VALUES ($1,$2,'copied_as_engineering',$3,$4)
+       RETURNING source_project_id, target_project_id, relation_kind,
+                 created_by_type, created_by, created_at`,
+      [id, sourceProjectId, ctx.identity.actorType, ctx.identity.actorId],
+    );
+    const relation = relationInsert.rows[0];
+
+    await appendOutboxEventInTx(tx, {
+      eventId: randomUUID(),
+      aggregateType: "process_instance",
+      aggregateId: processId,
+      eventType: "process.created",
+      projectId: id,
+      payload: { id: processId, projectId: id, gateProfile: GJB_REF_V1.id, currentGate: "G0" },
+      correlationId: ctx.correlationId,
+      causationId: null,
+      classification: ctx.classification,
+    });
+    await appendOutboxEventInTx(tx, {
+      eventId: randomUUID(),
+      aggregateType: "project",
+      aggregateId: id,
+      eventType: "project.created",
+      projectId: id,
+      payload: {
+        id,
+        name,
+        project_type: "engineering",
+        process_profile_id: GJB_REF_V1.id,
+        source_project_id: sourceProjectId,
+      },
+      correlationId: ctx.correlationId,
+      causationId: null,
+      classification: ctx.classification,
+    });
+    await appendOutboxEventInTx(tx, {
+      eventId: randomUUID(),
+      aggregateType: "project_source_relation",
+      aggregateId: id,
+      eventType: "project.copied_as_engineering",
+      projectId: id,
+      payload: { sourceProjectId, targetProjectId: id, workspaceContentCopied: false },
+      correlationId: ctx.correlationId,
+      causationId: null,
+      classification: ctx.classification,
+    });
+
+    return {
+      id,
+      name,
+      status: "active",
+      project_type: "engineering",
+      process_version_id: profile.id,
+      process_profile_id: profile.id,
+      process_profile_version: profile.version,
+      process_profile_name: profile.name,
+      target_part: targetPart,
+      process_instances: processInsert.rows,
+      source_relation: relation,
+      workspace_content_copied: false,
+    };
   });
 
   return { status: 201, data: result };
@@ -296,7 +758,9 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const { rows } = await ctx.pool.query(
     `SELECT id, name, scope, data_classification, standard_version, target_part,
-            toolchain_profile_ref, status, created_at
+            toolchain_profile_ref, status, created_at, project_type,
+            process_profile_id, process_profile_version, process_profile_name,
+            process_version_id
        FROM project WHERE id = $1`,
     [projectId],
   );
@@ -306,9 +770,19 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
        FROM process_instance WHERE project_id = $1 ORDER BY created_at`,
     [projectId],
   );
+  const relationRows = await ctx.pool.query(
+    `SELECT source_project_id, target_project_id, relation_kind,
+            created_by_type, created_by, created_at
+       FROM project_source_relation WHERE target_project_id = $1`,
+    [projectId],
+  );
   return {
     status: 200,
-    data: { ...rows[0], process_instances: procRows.rows },
+    data: {
+      ...rows[0],
+      process_instances: procRows.rows,
+      source_relation: relationRows.rows[0] ?? null,
+    },
   };
 }
 
@@ -318,8 +792,37 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
  */
 export async function getProjects(ctx: RequestContext): Promise<HandlerResult> {
   const { rows } = await ctx.pool.query(
-    `SELECT id, name, status, data_classification, created_at
+    `SELECT id, name, status, data_classification, created_at, project_type,
+            target_part, process_profile_id, process_profile_version, process_profile_name,
+            process_version_id
        FROM project ORDER BY created_at DESC`,
+  );
+  const processRows = rows.length === 0 ? { rows: [] } : await ctx.pool.query(
+    `SELECT id, project_id, gate_profile_version, current_gate, created_at
+       FROM process_instance WHERE project_id = ANY($1::text[]) ORDER BY created_at`,
+    [rows.map((row) => row.id)],
+  );
+  const grouped = new Map<string, unknown[]>();
+  for (const process of processRows.rows) {
+    const list = grouped.get(process.project_id) ?? [];
+    const { project_id: _projectId, ...publicProcess } = process;
+    list.push(publicProcess);
+    grouped.set(process.project_id, list);
+  }
+  return { status: 200, data: rows.map((row) => ({ ...row, process_instances: grouped.get(row.id) ?? [] })) };
+}
+
+/** GET /process-versions — active process versions available for engineering projects. */
+export async function getProcessVersions(ctx: RequestContext): Promise<HandlerResult> {
+  const { rows } = await ctx.pool.query(
+    `SELECT id, profile_id, version, name, status,
+            id AS process_profile_id, version AS process_profile_version,
+            name AS process_profile_name
+       FROM process_version
+      WHERE id = $1 AND profile_id = $1 AND version = $2
+        AND name = $3 AND status = $4
+      ORDER BY id`,
+    [GJB_REF_V1.id, GJB_REF_V1.version, GJB_REF_V1.name, GJB_REF_V1.status],
   );
   return { status: 200, data: rows };
 }
@@ -330,9 +833,10 @@ export async function createProcessInstance(ctx: RequestContext): Promise<Handle
   const id = requireString(body, "id");
 
   const { result } = await runIdempotent(ctx, "create_process_instance", projectId, async (tx) => {
-    await requireProject(tx, projectId);
-    const gateProfile = optionalString(body, "gate_profile_version", "flow-v1");
+    const project = await requireProjectProcessBinding(tx, projectId);
+    const gateProfile = resolveGateProfileVersion(body, frozenModernProcessProfile(project));
     const currentGate = optionalString(body, "current_gate", "G0");
+    requireEnum(currentGate, "current_gate", GATE_VALUES);
     await tx.query(
       `INSERT INTO process_instance (id, project_id, gate_profile_version, current_gate)
        VALUES ($1,$2,$3,$4)`,
@@ -376,10 +880,16 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
   const artifactId = ctx.params.artifactId!;
   const body = asObject(ctx.body);
   const id = requireString(body, "id");
+  // version 可省略：省略时由服务端在事务里取「当前最大版本 + 1」。这是自由 agent
+  // 能出第二版的前提——客户端不可能安全地自己算下一版（读到写之间会有竞争），
+  // 以前写死 1 导致同一产物第二次登记必然撞 `UNIQUE (artifact_id, version)`。
   const versionNum = body.version;
-  if (typeof versionNum !== "number" || !Number.isInteger(versionNum) || versionNum < 1) {
-    throw validationError("field 'version' must be a positive integer");
-  }
+  const versionRequested: number | null = versionNum === undefined || versionNum === null ? null : (() => {
+    if (typeof versionNum !== "number" || !Number.isInteger(versionNum) || versionNum < 1) {
+      throw validationError("field 'version' must be a positive integer");
+    }
+    return versionNum;
+  })();
   // Content may be supplied inline. When present, the server computes content_hash
   // (a client-supplied content_hash that disagrees is a 400) and content_location
   // defaults to db://artifact_revision/<id>. When absent, content_hash is required
@@ -422,20 +932,25 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
       ],
     );
 
+    // 这条 upsert 会把 artifact 行锁到事务结束，所以下面读到的 MAX(version) 在本事务
+    // 里是稳定的：同一 artifact 的并发登记会阻塞在各自的 upsert 上，依次拿到 n、n+1。
+    const currentMaxResult = await tx.query(
+      "SELECT COALESCE(MAX(version), 0)::int AS max FROM artifact_revision WHERE artifact_id = $1",
+      [artifactId],
+    );
+    const currentMax = (currentMaxResult.rows[0] as { max: number } | undefined)?.max ?? 0;
+
     // Optional optimistic concurrency: expected_version = current max artifact version.
     if (body.expected_version !== undefined && body.expected_version !== null) {
       if (typeof body.expected_version !== "number" || !Number.isInteger(body.expected_version)) {
         throw validationError("field 'expected_version' must be an integer");
       }
-      const maxResult = await tx.query(
-        "SELECT COALESCE(MAX(version), 0)::int AS max FROM artifact_revision WHERE artifact_id = $1",
-        [artifactId],
-      );
-      const current = (maxResult.rows[0] as { max: number } | undefined)?.max ?? 0;
-      if (current !== body.expected_version) {
-        throw conflictApiError("REVISION_VERSION_CONFLICT", { artifactId, current, expected: body.expected_version });
+      if (currentMax !== body.expected_version) {
+        throw conflictApiError("REVISION_VERSION_CONFLICT", { artifactId, current: currentMax, expected: body.expected_version });
       }
     }
+
+    const versionNum = versionRequested ?? currentMax + 1;
 
     const revRow = {
       id,
@@ -516,21 +1031,49 @@ export async function getRevisions(ctx: RequestContext): Promise<HandlerResult> 
 
 /**
  * GET /projects/:projectId/artifacts/:artifactId/revisions/:revId/content —
- * return the inline content + its hash for a revision (core:read). 404 when the
- * revision is absent or carries no inline content (content lives out-of-band,
- * addressed by content_location).
+ * return a revision's content + its hash (core:read).
+ *
+ * 内容按 `content_location` 的 scheme 分派：`git://<sha>/<path>` 从项目工作区的
+ * git 对象里取（读出来**复核 sha256**，对不上说明历史被改写/对象损坏，报 500 而不是
+ * 悄悄返回坏内容）；其余（`db://…`）读 `content` 列。git 对象取不到时回落到 DB 里的
+ * 归档副本——已批准修订进基线时会把正文冻回来，正是为这一刻准备的。
+ *
+ * 响应体 `{ content, content_hash }` 不变，前端读路径零改动。
  */
 export async function getRevisionContent(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const artifactId = ctx.params.artifactId!;
   const revId = ctx.params.revId!;
   const { rows } = await ctx.pool.query(
-    `SELECT content, content_hash FROM artifact_revision
+    `SELECT content, content_hash, content_location FROM artifact_revision
       WHERE id = $1 AND project_id = $2 AND artifact_id = $3`,
     [revId, projectId, artifactId],
   );
   if (rows.length === 0) throw notFoundError(`revision not found: ${revId}`);
-  const row = rows[0] as { content: string | null; content_hash: string };
+  const row = rows[0] as { content: string | null; content_hash: string; content_location: string };
+
+  if (parseGitLocation(row.content_location)) {
+    const fromGit = await readAtLocation(projectId, row.content_location);
+    if (fromGit !== null) {
+      const actual = sha256Hex(fromGit);
+      if (actual !== row.content_hash) {
+        throw new ApiError("internal", 500, "CONTENT_HASH_MISMATCH", false, {
+          revisionId: revId,
+          expected: row.content_hash,
+          actual,
+          contentLocation: row.content_location,
+        });
+      }
+      return { status: 200, data: { content: fromGit, content_hash: row.content_hash } };
+    }
+    // git 里读不到：只有归档副本能救场，否则如实报缺内容。
+    if (row.content === null) {
+      throw notFoundError(`revision content unavailable in git and no archived copy: ${revId}`, {
+        contentLocation: row.content_location,
+      });
+    }
+  }
+
   if (row.content === null) throw notFoundError(`revision has no inline content: ${revId}`);
   return { status: 200, data: { content: row.content, content_hash: row.content_hash } };
 }
@@ -545,7 +1088,8 @@ export async function createSnapshotHandler(ctx: RequestContext): Promise<Handle
   if (memberRevisionIds.length === 0) throw validationError("field 'member_revision_ids' must be a non-empty array");
 
   const { result } = await runIdempotent(ctx, "create_snapshot", projectId, async (tx) => {
-    await requireProject(tx, projectId);
+    const project = await requireProjectProcessBinding(tx, projectId);
+    const gateProfileVersion = resolveGateProfileVersion(body, frozenModernProcessProfile(project));
 
     // Resolve member content hashes from the committed revisions (freeze binding).
     const revResult = await tx.query(
@@ -564,7 +1108,7 @@ export async function createSnapshotHandler(ctx: RequestContext): Promise<Handle
       projectId,
       memberRevisionIds,
       traceRelationIds,
-      gateProfileVersion: optionalString(body, "gate_profile_version", "flow-v1"),
+      gateProfileVersion,
       toolModelPolicyHash: requireString(body, "tool_model_policy_hash"),
       manifestHash,
       createdBy: ctx.identity.actorId,
@@ -587,12 +1131,23 @@ export async function createGateSubmissionHandler(ctx: RequestContext): Promise<
   const snapshotId = requireString(body, "snapshot_id");
 
   const { result } = await runIdempotent(ctx, "create_gate_submission", projectId, async (tx) => {
-    await requireProject(tx, projectId);
+    const project = await requireProjectProcessBinding(tx, projectId);
+    const frozenProfile = frozenModernProcessProfile(project);
     // Validate FK targets belong to this project (fail closed, 404/400).
-    const pi = await tx.query("SELECT 1 FROM process_instance WHERE id = $1 AND project_id = $2", [processInstanceId, projectId]);
+    const pi = await tx.query(
+      "SELECT gate_profile_version FROM process_instance WHERE id = $1 AND project_id = $2",
+      [processInstanceId, projectId],
+    );
     if (pi.rows.length === 0) throw notFoundError(`process_instance not found: ${processInstanceId}`);
-    const snap = await tx.query("SELECT 1 FROM configuration_snapshot WHERE id = $1 AND project_id = $2", [snapshotId, projectId]);
+    const snap = await tx.query(
+      "SELECT gate_profile_version FROM configuration_snapshot WHERE id = $1 AND project_id = $2",
+      [snapshotId, projectId],
+    );
     if (snap.rows.length === 0) throw notFoundError(`snapshot not found: ${snapshotId}`);
+    const processInstance = pi.rows[0] as { gate_profile_version: string };
+    const snapshot = snap.rows[0] as { gate_profile_version: string };
+    assertFrozenGateProfile(frozenProfile, processInstance.gate_profile_version, "process_instance");
+    assertFrozenGateProfile(frozenProfile, snapshot.gate_profile_version, "configuration_snapshot");
 
     await createSubmission(asClient(tx), {
       id,
@@ -800,14 +1355,29 @@ export async function approveGateHandler(ctx: RequestContext): Promise<HandlerRe
   };
 
   const conn = await ctx.pool.connect();
+  let result: Awaited<ReturnType<typeof approveGateSubmission>>;
   try {
-    const result = await withTransaction(conn as unknown as TransactionClient, (tx) => approveGateSubmission(tx, input));
-    return { status: 200, data: result };
+    result = await withTransaction(conn as unknown as TransactionClient, (tx) => approveGateSubmission(tx, input));
   } catch (err) {
     throw mapServiceError(err);
   } finally {
     conn.release();
   }
+
+  // 事务外冻结：把进了基线的那版正文从 git 固化进 DB 作归档冗余。失败只记日志——
+  // 归档是冗余，git 仍是权威，审批本身已经提交，不该因为一次文件 IO 而被判失败。
+  if (result.baselineId) {
+    try {
+      const outcome = await freezeBaselineContent(ctx.pool, result.baselineId);
+      // 只有「声称在 git 里却取不回来」才告警——老修订本来就没在 git 里，属正常。
+      if (outcome.failed.length > 0) {
+        console.warn("[synthia-api] baseline content freeze could not read git content:", result.baselineId, outcome.failed);
+      }
+    } catch (err) {
+      console.error("[synthia-api] baseline content freeze failed:", result.baselineId, err);
+    }
+  }
+  return { status: 200, data: result };
 }
 
 /**

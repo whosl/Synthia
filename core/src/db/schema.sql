@@ -24,17 +24,112 @@ DO $$ BEGIN CREATE TYPE data_classification AS ENUM ('UNCLASSIFIED','D1','D2','D
 
 -- ── project & process ─────────────────────────────────────────────────────────
 
+CREATE TABLE IF NOT EXISTS process_definition (
+    id text PRIMARY KEY,
+    name text NOT NULL,
+    description text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS process_version (
+    id text PRIMARY KEY,
+    profile_id text NOT NULL REFERENCES process_definition(id),
+    version text NOT NULL,
+    name text NOT NULL,
+    status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (profile_id, version)
+);
+
+INSERT INTO process_definition(id,name,description) VALUES ('GJB_REF_V1','GJB 参考流程 v1','GJB 参考流程，首版开放 G0-G4') ON CONFLICT (id) DO NOTHING;
+INSERT INTO process_definition(id,name,description) VALUES ('LEGACY_COMPAT','兼容旧流程','仅用于标记迁移前项目和旧 API 请求') ON CONFLICT (id) DO NOTHING;
+INSERT INTO process_version(id,profile_id,version,name,status) VALUES ('GJB_REF_V1','GJB_REF_V1','GJB_REF_V1','GJB 参考流程 v1','active') ON CONFLICT (id) DO NOTHING;
+INSERT INTO process_version(id,profile_id,version,name,status) VALUES ('LEGACY_COMPAT','LEGACY_COMPAT','LEGACY_COMPAT','兼容旧流程','retired') ON CONFLICT (id) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION synthia_reject_process_version_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'process version is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.id IS DISTINCT FROM NEW.id
+     OR OLD.profile_id IS DISTINCT FROM NEW.profile_id
+     OR OLD.version IS DISTINCT FROM NEW.version
+     OR OLD.name IS DISTINCT FROM NEW.name
+     OR OLD.created_at IS DISTINCT FROM NEW.created_at
+     OR (OLD.status = 'retired' AND NEW.status IS DISTINCT FROM 'retired') THEN
+    RAISE EXCEPTION 'process version is immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS process_version_immutable ON process_version;
+CREATE TRIGGER process_version_immutable BEFORE UPDATE OR DELETE ON process_version
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_process_version_mutation();
+
 CREATE TABLE IF NOT EXISTS project (
     id              text PRIMARY KEY,
     name            text NOT NULL,
     scope           text NOT NULL DEFAULT '',
     data_classification data_classification NOT NULL DEFAULT 'D1',
     standard_version text NOT NULL DEFAULT 'GB/T 33781-2017',
-    target_part     text NOT NULL DEFAULT 'xc7vx690tffg1761-2',
+    target_part     text,
+    -- Defaults preserve the old API/direct-insert shape as an explicitly
+    -- labelled compatibility project. Modern creation always writes these
+    -- columns, including explicit NULL process fields for free projects.
+    project_type    text NOT NULL DEFAULT 'engineering' CHECK (project_type IN ('free','engineering')),
+    process_version_id text DEFAULT 'LEGACY_COMPAT' REFERENCES process_version(id),
+    process_profile_id text DEFAULT 'LEGACY_COMPAT',
+    process_profile_version text DEFAULT 'LEGACY_COMPAT',
+    process_profile_name text DEFAULT '兼容旧流程',
     toolchain_profile_ref text,
     created_at      timestamptz NOT NULL DEFAULT now(),
-    status          text NOT NULL DEFAULT 'active'
+    status          text NOT NULL DEFAULT 'active',
+    CONSTRAINT project_process_binding_check CHECK (
+      (
+        project_type = 'free'
+        AND process_version_id IS NULL
+        AND process_profile_id IS NULL
+        AND process_profile_version IS NULL
+        AND process_profile_name IS NULL
+      )
+      OR
+      (
+        project_type = 'engineering'
+        AND process_version_id IS NOT NULL
+        AND process_profile_id IS NOT NULL
+        AND process_profile_version IS NOT NULL
+        AND process_profile_name IS NOT NULL
+        AND (
+          (
+            process_version_id = 'GJB_REF_V1'
+            AND process_profile_id = 'GJB_REF_V1'
+            AND process_profile_version = 'GJB_REF_V1'
+            AND process_profile_name = 'GJB 参考流程 v1'
+          )
+          OR
+          (
+            process_version_id = 'LEGACY_COMPAT'
+            AND process_profile_id = 'LEGACY_COMPAT'
+            AND process_profile_version = 'LEGACY_COMPAT'
+            AND process_profile_name = '兼容旧流程'
+          )
+        )
+      )
+    )
 );
+
+CREATE TABLE IF NOT EXISTS project_source_relation (
+    target_project_id text PRIMARY KEY REFERENCES project(id),
+    source_project_id text NOT NULL REFERENCES project(id),
+    relation_kind text NOT NULL CHECK (relation_kind = 'copied_as_engineering'),
+    created_by_type actor_type NOT NULL,
+    created_by text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (source_project_id <> target_project_id)
+);
+CREATE INDEX IF NOT EXISTS project_source_relation_source_idx
+  ON project_source_relation(source_project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS process_instance (
     id                  text PRIMARY KEY,
@@ -43,6 +138,23 @@ CREATE TABLE IF NOT EXISTS process_instance (
     current_gate        gate_id NOT NULL DEFAULT 'G0',
     created_at          timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE OR REPLACE FUNCTION synthia_reject_process_profile_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.project_type IS DISTINCT FROM NEW.project_type
+     OR OLD.process_version_id IS DISTINCT FROM NEW.process_version_id
+     OR OLD.process_profile_id IS DISTINCT FROM NEW.process_profile_id
+     OR OLD.process_profile_version IS DISTINCT FROM NEW.process_profile_version
+     OR OLD.process_profile_name IS DISTINCT FROM NEW.process_profile_name THEN
+    RAISE EXCEPTION 'project process profile is immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS project_process_profile_immutable ON project;
+CREATE TRIGGER project_process_profile_immutable BEFORE UPDATE ON project
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_process_profile_change();
 
 CREATE TABLE IF NOT EXISTS role_assignment (
     id          text PRIMARY KEY,
@@ -306,6 +418,10 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS project_source_relation_append_only ON project_source_relation;
+CREATE TRIGGER project_source_relation_append_only BEFORE UPDATE OR DELETE ON project_source_relation
+  FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
+
 DROP TRIGGER IF EXISTS approval_record_append_only ON approval_record;
 CREATE TRIGGER approval_record_append_only BEFORE UPDATE OR DELETE ON approval_record
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
@@ -358,3 +474,17 @@ CREATE TABLE IF NOT EXISTS auth_token (
     created_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_auth_token_user ON auth_token (user_id);
+
+-- schema.sql is a complete fresh-install snapshot through 0007. Recording the
+-- represented migration baseline prevents a later migrate() run from treating
+-- explicit free projects as pre-0006 legacy rows.
+INSERT INTO schema_migrations(version) VALUES
+  ('0000_initial_schema'),
+  ('0001_d1_hardening'),
+  ('0002_approval_slice_hardening'),
+  ('0003_identity_and_api'),
+  ('0004_tool_run_evidence'),
+  ('0005_revision_content'),
+  ('0006_project_type_process_version'),
+  ('0007_project_profile_constraints')
+ON CONFLICT (version) DO NOTHING;

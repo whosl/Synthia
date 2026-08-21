@@ -4,6 +4,8 @@ import { appendOutboxEvent, withTransaction, type TransactionClient } from "../s
 
 const migration = readFileSync(new URL("../src/db/migrations/0001_d1_hardening.sql", import.meta.url), "utf8");
 const initialMigration = readFileSync(new URL("../src/db/migrations/0000_initial_schema.sql", import.meta.url), "utf8");
+const projectHardeningMigration = readFileSync(new URL("../src/db/migrations/0007_project_profile_constraints.sql", import.meta.url), "utf8");
+const freshSchema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
 describe("PostgreSQL D1 contracts", () => {
   test("initial numbered migration creates fresh core schema", () => {
     expect(initialMigration).toContain("CREATE TABLE IF NOT EXISTS project");
@@ -16,6 +18,44 @@ describe("PostgreSQL D1 contracts", () => {
     expect(migration).toContain("COMMIT;");
     expect(migration).toContain("IF NOT EXISTS");
     expect(migration).toContain("ON CONFLICT (version) DO NOTHING");
+  });
+  test("fresh schema records every migration represented by the snapshot", () => {
+    for (const version of [
+      "0000_initial_schema",
+      "0001_d1_hardening",
+      "0002_approval_slice_hardening",
+      "0003_identity_and_api",
+      "0004_tool_run_evidence",
+      "0005_revision_content",
+      "0006_project_type_process_version",
+      "0007_project_profile_constraints",
+    ]) {
+      expect(freshSchema).toContain(`('${version}')`);
+    }
+  });
+  test("numbered migrations preserve fresh-schema ownership constraints and lookup indexes", () => {
+    for (const foreignKey of [
+      "tool_run_project_id_fkey",
+      "evidence_project_id_fkey",
+      "trace_relation_project_id_fkey",
+    ]) {
+      expect(projectHardeningMigration).toContain(foreignKey);
+    }
+    for (const index of [
+      "idx_revision_artifact",
+      "idx_revision_project_state",
+      "idx_submission_project_gate",
+      "idx_approval_submission",
+      "idx_baseline_project_kind",
+      "idx_toolrun_project",
+      "idx_evidence_run",
+      "idx_trace_source",
+      "idx_trace_target",
+      "idx_trace_search",
+    ]) {
+      expect(projectHardeningMigration).toContain(index);
+      expect(freshSchema).toContain(index);
+    }
   });
   test("migration append-only table names are guarded", () => {
     expect(migration).toContain("to_regclass('public.baseline')");

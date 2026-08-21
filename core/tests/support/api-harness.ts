@@ -9,6 +9,9 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Client, Pool } from "pg";
 import { sha256Hex } from "../../src/hashing.ts";
 import { startSynthiaServer, type SynthiaServer } from "../../src/api/server.ts";
@@ -16,6 +19,7 @@ import { applyMigrations } from "./approval-harness.ts";
 
 /** Domain tables wiped per test (identity tables are intentionally NOT here). */
 const DOMAIN_TABLES = [
+  "project_source_relation",
   "baseline",
   "approved_gate_result",
   "approval_record",
@@ -110,6 +114,10 @@ export interface ApiHarness {
   pool: Pool;
   client: Client;
   ids: BootstrapIdentities;
+  /** 本次测试的工作区根目录（临时目录，teardown 时删除）。 */
+  workspacesDir: string;
+  /** setup 之前的 SYNTHIA_WORKSPACES_DIR，teardown 时还原。 */
+  previousWorkspacesDir: string | undefined;
 }
 
 export async function setupApiHarness(connectionString: string): Promise<ApiHarness> {
@@ -122,17 +130,25 @@ export async function setupApiHarness(connectionString: string): Promise<ApiHarn
   const ids = await bootstrapIdentities(client);
   await truncateDomainTables(client);
 
+  // 建项目会在磁盘上建真实工作区；不隔离的话测试会往 ~/.synthia/workspaces 里堆垃圾。
+  const previousWorkspacesDir = process.env.SYNTHIA_WORKSPACES_DIR;
+  const workspacesDir = await mkdtemp(join(tmpdir(), "synthia-test-ws-"));
+  process.env.SYNTHIA_WORKSPACES_DIR = workspacesDir;
+
   const pool = new Pool({ connectionString, max: 4 });
   const server = startSynthiaServer(pool, { port: 0 });
   const baseUrl = `http://${server.hostname}:${server.port}`;
 
-  return { server, baseUrl, pool, client, ids };
+  return { server, baseUrl, pool, client, ids, workspacesDir, previousWorkspacesDir };
 }
 
 export async function teardownApiHarness(harness: ApiHarness): Promise<void> {
   harness.server.stop();
   await harness.pool.end();
   await harness.client.end();
+  if (harness.previousWorkspacesDir === undefined) delete process.env.SYNTHIA_WORKSPACES_DIR;
+  else process.env.SYNTHIA_WORKSPACES_DIR = harness.previousWorkspacesDir;
+  await rm(harness.workspacesDir, { recursive: true, force: true });
 }
 
 export interface ApiCallOpts {

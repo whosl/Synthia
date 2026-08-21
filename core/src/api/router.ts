@@ -26,9 +26,11 @@ import {
   validationError,
 } from "./errors.ts";
 import type { HandlerResult, RequestContext } from "./handlers.ts";
+import { WorkspaceError } from "../workspace/paths.ts";
 import {
   approveGateHandler,
   assignRole,
+  copyProjectAsEngineering,
   createGateSubmissionHandler,
   createProcessInstance,
   createProject,
@@ -45,6 +47,7 @@ import {
   getJobStatusHandler,
   getProject,
   getProjects,
+  getProcessVersions,
   getRevision,
   getRevisionContent,
   getRevisions,
@@ -63,11 +66,24 @@ import {
   sendTaskMessageHandler,
   streamTaskHandler,
 } from "./task-proxy.ts";
+import {
+  getWorkspaceFileHandler,
+  getWorkspaceTreeHandler,
+  putWorkspaceFileHandler,
+  registerWorkspaceHandler,
+  writeWorkspaceFilesHandler,
+} from "./workspace-handlers.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
 
 type Handler = (ctx: RequestContext) => Promise<HandlerResult | Response>;
+
+/** 文件头写的「coarse three-tier scope guard」的那三层。
+ *  之前 `RequiredScope` 只被引用、从没被声明过（tsc TS2304）——因为纯类型位置会被
+ *  转译器擦掉，运行时不报错，于是一直没人发现；代价是下面 30 多条路由的 scope
+ *  字面量实际上没被校验过。 */
+type RequiredScope = "core:read" | "core:write" | "core:approve";
 
 interface RouteMatch {
   readonly handler: Handler;
@@ -117,6 +133,7 @@ export async function routeApi(request: Request, pool: Pool, connector?: Connect
     identity,
     method: request.method,
     url,
+    request,
     params: {},
     body,
     correlationId,
@@ -170,6 +187,9 @@ function resolveClassification(header: string | null, body: unknown): string {
 /** Match method + path segments to a handler. Returns null if no match. */
 function matchRoute(ctx: RequestContext): RouteMatch | null {
   const segments = ctx.url.pathname.slice(API_PREFIX.length).split("/").filter(Boolean);
+  if (segments.length === 1 && segments[0] === "process-versions" && ctx.method === "GET") {
+    return { handler: getProcessVersions, params: {}, requiredScope: "core:read" };
+  }
   if (segments.length === 0 || segments[0] !== "projects") return null;
   const method = ctx.method;
 
@@ -192,6 +212,9 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       switch (tail) {
         case "baselines":
           if (method === "GET") return { handler: getBaselines, params, requiredScope: "core:read" };
+          break;
+        case "copy-as-engineering":
+          if (method === "POST") return { handler: copyProjectAsEngineering, params, requiredScope: "core:write" };
           break;
         case "events":
           if (method === "GET") return { handler: getEvents, params, requiredScope: "core:read" };
@@ -284,6 +307,26 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       }
     }
 
+    // /projects/:projectId/workspace/{tree|file|register|files} — 真实磁盘工作区
+    if (segments.length === 4 && segments[2] === "workspace") {
+      const params = { projectId };
+      switch (segments[3]) {
+        case "tree":
+          if (method === "GET") return { handler: getWorkspaceTreeHandler, params, requiredScope: "core:read" };
+          break;
+        case "file":
+          if (method === "GET") return { handler: getWorkspaceFileHandler, params, requiredScope: "core:read" };
+          if (method === "PUT") return { handler: putWorkspaceFileHandler, params, requiredScope: "core:write" };
+          break;
+        case "files":
+          if (method === "POST") return { handler: writeWorkspaceFilesHandler, params, requiredScope: "core:write" };
+          break;
+        case "register":
+          if (method === "POST") return { handler: registerWorkspaceHandler, params, requiredScope: "core:write" };
+          break;
+      }
+    }
+
     // /projects/:projectId/gate-submissions/:subId/approve
     if (segments.length === 5 && segments[2] === "gate-submissions" && segments[4] === "approve" && method === "POST") {
       return { handler: approveGateHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:approve" };
@@ -322,10 +365,33 @@ function forbiddenErrorWithRequired(scope: RequiredScope): ApiError {
 /** Map an unknown thrown value to the ApiError surfaced to the client. */
 function toApiError(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
+  if (err instanceof WorkspaceError) return workspaceApiError(err);
   if (isPgUniqueViolation(err)) return conflictApiError("RESOURCE_CONFLICT", null, true);
   // Real diagnostic goes only to the server log; the client gets a fixed message.
   console.error("[synthia-api] internal error:", err);
   return INTERNAL_ERROR;
+}
+
+/**
+ * 工作区错误的消息是**给人看的操作指引**（「这些文件有未登记的人工改动…」），
+ * 与 `INTERNAL_ERROR` 的固定措辞不同，要原样透出去；这不泄露内部实现，路径与
+ * RULE-25 条款本来就是用户可见契约。只有 git 命令失败例外——那里面可能带机器上
+ * 的绝对路径与 git 内部输出，只记日志。
+ */
+function workspaceApiError(err: WorkspaceError): ApiError {
+  switch (err.code) {
+    case "WORKSPACE_PATH_INVALID":
+      return validationError(err.message, err.details);
+    case "WORKSPACE_FILE_NOT_FOUND":
+      return notFoundError(err.message, err.details);
+    case "WORKSPACE_FILE_DIRTY":
+      return conflictApiError(err.message, err.details, false);
+    case "CONTENT_HASH_MISMATCH":
+      return new ApiError("internal", 500, err.message, false, err.details);
+    default:
+      console.error("[synthia-api] workspace git error:", err);
+      return INTERNAL_ERROR;
+  }
 }
 
 function toErrorStatus(err: unknown): number {

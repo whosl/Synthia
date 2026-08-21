@@ -5,8 +5,9 @@
  * (runtime/server.ts) WITHOUT persistencing task truth. Core's role is:
  *   1. project ownership validation (project exists, process instance belongs
  *      to the project, the agent's project_id matches the path);
- *   2. lazy default process instance provisioning (one project → one G0→G9
- *      main flow, materialized as process_instance "pi-default:<projectId>");
+ *   2. project-aware task routing. Free projects never acquire a process
+ *      instance; engineering projects reuse or provision one whose frozen
+ *      profile matches the project binding;
  *   3. envelope + error-model translation between Runtime's error vocabulary
  *      and Core's stable {@link ApiError} model.
  *
@@ -43,6 +44,7 @@ import type { HandlerResult, RequestContext } from "./handlers.ts";
 // ─── Runtime task shapes (mirror runtime/server.ts contract) ─────────────────
 
 export type RuntimeTaskStatus =
+  | "idle"
   | "running"
   | "awaiting_approval"
   | "succeeded"
@@ -116,11 +118,18 @@ export interface RuntimeClient {
   /** POST /tasks — asynchronously start a loop agent. */
   createTask(body: {
     project_id: string;
-    process_instance_id: string;
+    /** Omitted for free-project sessions. */
+    process_instance_id?: string;
     task: string;
     part?: string;
     /** "agent" = free-agent session only (do not start the pipeline loop). */
     mode?: "agent";
+    /** Frozen project execution context, copied from Core's project row. */
+    project_type?: string;
+    process_version_id?: string | null;
+    process_profile_id?: string | null;
+    process_profile_name?: string | null;
+    process_profile_version?: string | null;
   }): Promise<RuntimeCreateResponse>;
   /** GET /tasks — list agents filtered by project. */
   listTasks(projectId: string): Promise<RuntimeListResponse>;
@@ -134,8 +143,15 @@ export interface RuntimeClient {
    * GET /tasks/:agentId/stream — open the SSE event stream and return the raw
    * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
    * RuntimeClientError when the Runtime is unreachable (→ 503).
+   *
+   * `lastEventId` / `from` are forwarded verbatim so resume-after-reconnect and
+   * turn-scoped replay work end to end — without them every reconnect re-dumps
+   * the whole retained window (measured: ~227 KB).
    */
-  streamTask(agentId: string, init?: { signal?: AbortSignal }): Promise<Response>;
+  streamTask(
+    agentId: string,
+    init?: { signal?: AbortSignal; lastEventId?: string | null; from?: string | null },
+  ): Promise<Response>;
 }
 
 /**
@@ -235,9 +251,15 @@ export class HttpRuntimeClient implements RuntimeClient {
 
   async createTask(body: {
     project_id: string;
-    process_instance_id: string;
+    process_instance_id?: string;
     task: string;
     part?: string;
+    mode?: "agent";
+    project_type?: string;
+    process_version_id?: string | null;
+    process_profile_id?: string | null;
+    process_profile_name?: string | null;
+    process_profile_version?: string | null;
   }): Promise<RuntimeCreateResponse> {
     return this.request<RuntimeCreateResponse>("POST", "/tasks", body);
   }
@@ -260,15 +282,24 @@ export class HttpRuntimeClient implements RuntimeClient {
     return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/abort`);
   }
 
-  async streamTask(agentId: string, init?: { signal?: AbortSignal }): Promise<Response> {
+  async streamTask(
+    agentId: string,
+    init?: { signal?: AbortSignal; lastEventId?: string | null; from?: string | null },
+  ): Promise<Response> {
     // SSE pass-through must NOT go through request(): no buffering, no
     // read-then-parse, no timeout — the body is handed to the caller as-is.
     let response: Response;
+    const url = new URL(`${this.baseUrl.replace(/\/+$/, "")}/tasks/${encodeURIComponent(agentId)}/stream`);
+    if (init?.from) url.searchParams.set("from", init.from);
     try {
-      response = await fetch(
-        `${this.baseUrl.replace(/\/+$/, "")}/tasks/${encodeURIComponent(agentId)}/stream`,
-        { method: "GET", signal: init?.signal, headers: { accept: "text/event-stream" } },
-      );
+      response = await fetch(url, {
+        method: "GET",
+        signal: init?.signal,
+        headers: {
+          accept: "text/event-stream",
+          ...(init?.lastEventId ? { "last-event-id": init.lastEventId } : {}),
+        },
+      });
     } catch (err) {
       const aborted = err instanceof Error && err.name === "AbortError";
       throw new RuntimeClientError(503, aborted ? "runtime stream closed" : "runtime unreachable", {
@@ -357,45 +388,200 @@ function firstRowId(rows: unknown[]): string {
 }
 
 /**
- * Resolve the process instance for a task POST. When the caller supplies a
- * `process_instance_id`, it MUST belong to the project (else 404). When
- * omitted, lazily provision the project's single default main-flow instance
- * ("pi-default:<projectId>") — idempotent + concurrency-safe via ON CONFLICT.
- * Returns the resolved process instance id.
- *
- * Note: process_instance.id is a GLOBAL text PRIMARY KEY (schema.sql:40), so a
- * bare literal "pi-default" would collide across projects. The project-scoped
- * deterministic suffix keeps it unique-per-project while remaining stable for
- * idempotent re-provisioning.
+ * The fields below are the immutable project context that Core owns and
+ * Runtime must not infer from missing request values.  A null profile is valid
+ * only for a free project; an engineering project with no frozen profile is a
+ * corrupt/legacy record and is rejected rather than silently assigned GJB.
  */
-async function resolveProcessInstance(tx: TransactionClient, projectId: string, explicitId: string | null): Promise<string> {
-  const projectRow = await tx.query("SELECT 1 FROM project WHERE id = $1", [projectId]);
-  if (projectRow.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+interface ProjectTaskContext {
+  readonly projectType: "free" | "engineering";
+  /** Project-canonical FPGA part; null means the project has not selected one. */
+  readonly targetPart: string | null;
+  /** Historical rows retain the old request mode during the compatibility window. */
+  readonly legacyCompatibility: boolean;
+  readonly processVersionId: string | null;
+  readonly processProfileId: string | null;
+  readonly processProfileName: string | null;
+  readonly processProfileVersion: string | null;
+}
 
-  if (explicitId) {
-    const { rows } = await tx.query("SELECT 1 FROM process_instance WHERE id = $1 AND project_id = $2", [explicitId, projectId]);
-    if (rows.length === 0) throw notFoundError(`process instance not found or not in project: ${explicitId}`);
-    return explicitId;
+interface ResolvedTaskContext extends ProjectTaskContext {
+  readonly processInstanceId: string | undefined;
+}
+
+const GJB_REF_V1_BINDING = {
+  id: "GJB_REF_V1",
+  version: "GJB_REF_V1",
+  name: "GJB 参考流程 v1",
+} as const;
+
+const LEGACY_COMPAT_BINDING = {
+  id: "LEGACY_COMPAT",
+  version: "LEGACY_COMPAT",
+  name: "兼容旧流程",
+} as const;
+
+/**
+ * Read the project binding once, then resolve its task process.  Keeping this
+ * in the same transaction as the idempotency claim means a concurrent first
+ * task cannot create two engineering G0 instances.
+ */
+async function resolveProcessInstance(
+  tx: TransactionClient,
+  projectId: string,
+  explicitId: string | null,
+): Promise<ResolvedTaskContext> {
+  const projectResult = await tx.query(
+    `SELECT project_type, target_part, process_version_id, process_profile_id,
+            process_profile_version, process_profile_name
+       FROM project WHERE id = $1 FOR UPDATE`,
+    [projectId],
+  );
+  if (projectResult.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+
+  const row = projectResult.rows[0] as {
+    project_type?: unknown;
+    target_part?: unknown;
+    process_version_id?: unknown;
+    process_profile_id?: unknown;
+    process_profile_version?: unknown;
+    process_profile_name?: unknown;
+  };
+  const projectType = row.project_type === "free"
+    ? "free"
+    : row.project_type === "engineering"
+      ? "engineering"
+      : null;
+  if (!projectType) throw validationError("project has an unsupported project_type", { projectId, projectType: row.project_type });
+
+  const processVersionId = typeof row.process_version_id === "string" && row.process_version_id.length > 0
+    ? row.process_version_id
+    : null;
+  const processProfileId = typeof row.process_profile_id === "string" && row.process_profile_id.length > 0
+    ? row.process_profile_id
+    : null;
+  const processProfileVersion = typeof row.process_profile_version === "string" && row.process_profile_version.length > 0
+    ? row.process_profile_version
+    : null;
+  const processProfileName = typeof row.process_profile_name === "string" && row.process_profile_name.length > 0
+    ? row.process_profile_name
+    : null;
+  const targetPart = typeof row.target_part === "string" && row.target_part.trim().length > 0
+    ? row.target_part.trim()
+    : null;
+
+  if (projectType === "free") {
+    if (processVersionId || processProfileId || processProfileVersion || processProfileName) {
+      throw conflictApiError("FREE_PROJECT_PROCESS_PROFILE_CONFLICT", { projectId });
+    }
+    if (explicitId) {
+      throw validationError("free projects cannot use a process_instance_id", { projectId });
+    }
+    return {
+      projectType,
+      targetPart,
+      legacyCompatibility: false,
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+      processInstanceId: undefined,
+    };
   }
 
-  // Lazily provision / reuse the project's default main-flow instance. First
-  // reuse any existing instance for the project; only when none exists do we
-  // create the deterministic default ("pi-default:<projectId>"). The ON CONFLICT
-  // guard keeps concurrent first-time POSTs for the same project from racing —
-  // both attempt the insert, exactly one wins, then the SELECT returns the
-  // single surviving row.
-  const existing = await tx.query("SELECT id FROM process_instance WHERE project_id = $1 ORDER BY created_at LIMIT 1", [projectId]);
-  if (existing.rows.length > 0) return firstRowId(existing.rows);
+  const modernBinding =
+    processVersionId === GJB_REF_V1_BINDING.id &&
+    processProfileId === GJB_REF_V1_BINDING.id &&
+    processProfileVersion === GJB_REF_V1_BINDING.version &&
+    processProfileName === GJB_REF_V1_BINDING.name;
+  const legacyBinding =
+    processVersionId === LEGACY_COMPAT_BINDING.id &&
+    processProfileId === LEGACY_COMPAT_BINDING.id &&
+    processProfileVersion === LEGACY_COMPAT_BINDING.version &&
+    processProfileName === LEGACY_COMPAT_BINDING.name;
+  if (!modernBinding && !legacyBinding) {
+    throw conflictApiError("PROJECT_PROCESS_BINDING_INVALID", {
+      projectId,
+      processVersionId,
+      processProfileId,
+      processProfileVersion,
+      processProfileName,
+    });
+  }
+  const frozenProfile = modernBinding ? GJB_REF_V1_BINDING.id : LEGACY_COMPAT_BINDING.id;
 
+  const context: ProjectTaskContext = {
+    projectType,
+    targetPart,
+    legacyCompatibility: legacyBinding,
+    processVersionId,
+    processProfileId,
+    processProfileName,
+    processProfileVersion,
+  };
+
+  if (explicitId) {
+    const { rows } = await tx.query(
+      "SELECT id, gate_profile_version FROM process_instance WHERE id = $1 AND project_id = $2",
+      [explicitId, projectId],
+    );
+    if (rows.length === 0) throw notFoundError(`process instance not found or not in project: ${explicitId}`);
+    validateInstanceProfile(rows[0] as { gate_profile_version?: unknown }, frozenProfile, projectId, explicitId);
+    return { ...context, processInstanceId: explicitId };
+  }
+
+  const existing = await tx.query(
+    "SELECT id, gate_profile_version FROM process_instance WHERE project_id = $1 ORDER BY created_at, id",
+    [projectId],
+  );
+  // A non-legacy engineering project must never silently pick an instance
+  // frozen to a different profile. Check every existing row before selecting
+  // the first one, so a corrupted second row cannot be hidden by ordering.
+  for (const candidate of existing.rows) {
+    validateInstanceProfile(candidate as { gate_profile_version?: unknown }, frozenProfile, projectId, firstRowId([candidate]));
+  }
+  if (existing.rows.length > 0) {
+    return { ...context, processInstanceId: firstRowId(existing.rows) };
+  }
+
+  // The id is deterministic and the project row is locked above. ON CONFLICT
+  // remains necessary for deployments where another writer already inserted
+  // the same id before this transaction acquired its lock.
   const defaultId = `pi-default:${projectId}`;
   await tx.query(
     `INSERT INTO process_instance (id, project_id, gate_profile_version, current_gate)
-     VALUES ($1,$2,'flow-v1','G0')
+     VALUES ($1,$2,$3,'G0')
      ON CONFLICT (id) DO NOTHING`,
-    [defaultId, projectId],
+    [defaultId, projectId, frozenProfile],
   );
-  const { rows } = await tx.query("SELECT id FROM process_instance WHERE project_id = $1 ORDER BY created_at LIMIT 1", [projectId]);
-  return firstRowId(rows);
+  const { rows } = await tx.query(
+    "SELECT id, gate_profile_version FROM process_instance WHERE project_id = $1 ORDER BY created_at, id",
+    [projectId],
+  );
+  if (rows.length === 0) throw internalError("PROCESS_INSTANCE_UNEXPECTED_STATE");
+  for (const candidate of rows) {
+    validateInstanceProfile(candidate as { gate_profile_version?: unknown }, frozenProfile, projectId, firstRowId([candidate]));
+  }
+  return { ...context, processInstanceId: firstRowId(rows) };
+}
+
+function validateInstanceProfile(
+  row: { gate_profile_version?: unknown },
+  frozenProfile: string,
+  projectId: string,
+  processInstanceId: string,
+): void {
+  const actual = typeof row.gate_profile_version === "string" ? row.gate_profile_version : null;
+  // LEGACY_COMPAT intentionally preserves the historical instance's profile;
+  // old projects predate the frozen binding and may still contain `flow-v1`.
+  if (frozenProfile !== "LEGACY_COMPAT" && actual !== frozenProfile) {
+    throw conflictApiError("PROCESS_PROFILE_IMMUTABLE", {
+      projectId,
+      processInstanceId,
+      expected: frozenProfile,
+      received: actual,
+    });
+  }
 }
 
 // ─── idempotent forward ──────────────────────────────────────────────────────
@@ -457,34 +643,60 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
  * POST /projects/:projectId/tasks — start a Runtime loop agent for this project.
  *
  * Body: `{ task, part? }` (and optionally an explicit `process_instance_id`,
- * which MUST belong to the project). Core lazily provisions the default main-
- * flow process instance when none is supplied, then forwards to the Runtime's
- * POST /tasks with `project_id` + `process_instance_id` injected. The forwarded
- * response `{ agent_id }` is translated to `{ agentId }` and stored idempotently so
- * a same-key replay returns the original agentId without re-contacting the
- * Runtime. Core emits a `task.forwarded` outbox event (observability only —
- * task truth lives in the Runtime).
+ * which MUST belong to the project). Core resolves the immutable project
+ * context before forwarding: free projects use the Runtime free-agent mode and
+ * carry no process instance; engineering projects use the frozen profile and a
+ * matching (or newly provisioned) process instance. The forwarded response
+ * `{ agent_id }` is translated to `{ agentId }` and stored idempotently so a
+ * same-key replay returns the original agentId without re-contacting Runtime.
+ * Core emits a `task.forwarded` outbox event (observability only — task truth
+ * lives in Runtime).
  */
 export async function createTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const runtime = requireRuntime(ctx);
   const body = asObject(ctx.body);
   const task = requireString(body, "task");
-  const part = nullableString(body, "part");
-  const mode = nullableString(body, "mode");
+  const requestedPart = nullableString(body, "part");
+  const part = requestedPart && requestedPart.trim().length > 0 ? requestedPart.trim() : null;
+  // Validate the legacy hint but never let it override Core-owned project facts.
+  nullableString(body, "mode");
   const explicitPi = nullableString(body, "process_instance_id");
 
   const result = await runIdempotent<{ agentId: string }>(ctx, "create_task", projectId, async (tx) => {
-    const processInstanceId = await resolveProcessInstance(tx, projectId, explicitPi);
+    const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
 
     let response: RuntimeCreateResponse;
     try {
+      if (taskContext.projectType === "engineering") {
+        const existing = await runtime.listTasks(projectId);
+        if ((existing.agents ?? []).some((agent) => agent.project_id === projectId)) {
+          throw conflictApiError("ENGINEERING_MAIN_AGENT_EXISTS", {
+            projectId,
+            message: "engineering projects allow one formal main agent until isolated side tasks are available",
+          });
+        }
+      }
+      const effectivePart = part ?? taskContext.targetPart;
       response = await runtime.createTask({
         project_id: projectId,
-        process_instance_id: processInstanceId,
         task,
-        part: part ?? undefined,
-        ...(mode === "agent" ? { mode: "agent" } : {}),
+        // An explicit task part is a deliberate one-off override. Otherwise
+        // use the project's canonical target; when both are absent, omit the
+        // field so Runtime cannot silently select a hardware default.
+        ...(effectivePart ? { part: effectivePart } : {}),
+        ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
+        // The project row, rather than an arbitrary request mode, is the
+        // authority for execution mode. This prevents an engineering task
+        // from bypassing its formal mainline by sending mode="agent".
+        ...(taskContext.projectType === "free" || taskContext.legacyCompatibility
+          ? { mode: "agent" as const }
+          : {}),
+        project_type: taskContext.projectType,
+        ...(taskContext.processVersionId ? { process_version_id: taskContext.processVersionId } : {}),
+        ...(taskContext.processProfileId ? { process_profile_id: taskContext.processProfileId } : {}),
+        ...(taskContext.processProfileName ? { process_profile_name: taskContext.processProfileName } : {}),
+        ...(taskContext.processProfileVersion ? { process_profile_version: taskContext.processProfileVersion } : {}),
       });
     } catch (err) {
       throw mapRuntimeError(err);
@@ -493,7 +705,9 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
     await outboxEvent(tx, ctx, { type: "task", id: response.agent_id }, "task.forwarded", {
       agentId: response.agent_id,
       projectId,
-      processInstanceId,
+      ...(taskContext.processInstanceId ? { processInstanceId: taskContext.processInstanceId } : {}),
+      projectType: taskContext.projectType,
+      ...(taskContext.processProfileId ? { processProfileId: taskContext.processProfileId } : {}),
     });
     return { agentId: response.agent_id };
   });
@@ -626,7 +840,14 @@ export async function streamTaskHandler(ctx: RequestContext): Promise<Response> 
 
   let upstream: Response;
   try {
-    upstream = await runtime.streamTask(agentId);
+    // Forward the resume cursor + replay scope, and tie the upstream request to
+    // the client connection so a browser disconnect tears down the Runtime
+    // subscription instead of leaking it.
+    upstream = await runtime.streamTask(agentId, {
+      signal: ctx.request.signal,
+      lastEventId: ctx.request.headers.get("last-event-id"),
+      from: ctx.url.searchParams.get("from"),
+    });
   } catch (err) {
     throw mapRuntimeError(err);
   }

@@ -46,7 +46,7 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "";
 interface StoredAgent {
   agentId: string;
   projectId: string;
-  processInstanceId: string;
+  processInstanceId?: string;
   task: string;
   part?: string;
   status: RuntimeAgentDetail["status"];
@@ -68,7 +68,18 @@ class FakeRuntimeClient implements RuntimeClient {
   unreachable = false;
   createCount = 0;
   /** Captures the last forwarded createTask body. */
-  lastCreate: { project_id: string; process_instance_id: string; task: string; part?: string } | null = null;
+  lastCreate: {
+    project_id: string;
+    process_instance_id?: string;
+    task: string;
+    part?: string;
+    mode?: "agent";
+    project_type?: string;
+    process_version_id?: string | null;
+    process_profile_id?: string | null;
+    process_profile_name?: string | null;
+    process_profile_version?: string | null;
+  } | null = null;
 
   reset(): void {
     this.agents.clear();
@@ -81,9 +92,15 @@ class FakeRuntimeClient implements RuntimeClient {
 
   async createTask(body: {
     project_id: string;
-    process_instance_id: string;
+    process_instance_id?: string;
     task: string;
     part?: string;
+    mode?: "agent";
+    project_type?: string;
+    process_version_id?: string | null;
+    process_profile_id?: string | null;
+    process_profile_name?: string | null;
+    process_profile_version?: string | null;
   }): Promise<RuntimeCreateResponse> {
     this.createCount += 1;
     this.lastCreate = body;
@@ -227,6 +244,22 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     return id;
   }
 
+  async function createEngineeringProject(pid?: string): Promise<string> {
+    const id = pid ?? `eng_${randomUUID()}`;
+    await client.query(
+      `INSERT INTO project(
+         id,name,project_type,process_version_id,process_profile_id,process_profile_version,process_profile_name
+       ) VALUES ($1,$2,'engineering','GJB_REF_V1','GJB_REF_V1','GJB_REF_V1','GJB 参考流程 v1')`,
+      [id, `Engineering ${id}`],
+    );
+    await client.query(
+      `INSERT INTO process_instance(id,project_id,gate_profile_version,current_gate)
+       VALUES ($1,$2,'GJB_REF_V1','G0')`,
+      [`pi_${id}_G0`, id],
+    );
+    return id;
+  }
+
   async function seedProcessInstance(projectId: string, pid?: string): Promise<string> {
     const id = pid ?? `pi_${randomUUID()}`;
     await client.query("INSERT INTO process_instance (id, project_id, gate_profile_version) VALUES ($1,$2,'flow-v1')", [id, projectId]);
@@ -250,12 +283,13 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     expect(typeof data.agentId).toBe("string");
     expect((data.agentId as string).startsWith("agent-")).toBe(true);
 
-    // Default process instance lazily provisioned (pi-default:<projectId>).
+    // Legacy-shaped rows are explicitly labelled with the compatibility
+    // profile when their historical default process instance is provisioned.
     const piRow = await client.query("SELECT id, gate_profile_version, current_gate FROM process_instance WHERE project_id = $1", [projectId]);
     expect(piRow.rows.length).toBe(1);
     const pi = piRow.rows[0] as Record<string, unknown>;
     expect(pi.id).toBe(`pi-default:${projectId}`);
-    expect(pi.gate_profile_version).toBe("flow-v1");
+    expect(pi.gate_profile_version).toBe("LEGACY_COMPAT");
     expect(pi.current_gate).toBe("G0");
 
     // The forwarded body injected project_id + process_instance_id.
@@ -301,6 +335,169 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     expect(piRow.rows.length).toBe(1);
     expect((piRow.rows[0] as Record<string, unknown>).id).toBe(existingPi);
     expect(fake.lastCreate!.process_instance_id).toBe(existingPi);
+  });
+
+  test("POST /tasks routes exact free, modern engineering, and LEGACY_COMPAT bindings distinctly", async () => {
+    const freeId = `free_${randomUUID()}`;
+    await client.query(
+      `INSERT INTO project(
+         id,name,project_type,process_version_id,process_profile_id,process_profile_version,process_profile_name
+       ) VALUES ($1,$2,'free',NULL,NULL,NULL,NULL)`,
+      [freeId, `Free ${freeId}`],
+    );
+    const free = await callApi(`/api/v1/projects/${freeId}/tasks`, {
+      method: "POST",
+      token: ids.humanToken,
+      headers: { "idempotency-key": `free-${randomUUID()}` },
+      body: { task: "free agent" },
+    });
+    expect(free.status).toBe(201);
+    expect(fake.lastCreate).toMatchObject({
+      project_id: freeId,
+      project_type: "free",
+      mode: "agent",
+    });
+    expect(fake.lastCreate!.process_instance_id).toBeUndefined();
+    expect(fake.lastCreate!.process_profile_id).toBeUndefined();
+
+    fake.reset();
+    const modernId = await createEngineeringProject();
+    const modern = await callApi(`/api/v1/projects/${modernId}/tasks`, {
+      method: "POST",
+      token: ids.humanToken,
+      headers: { "idempotency-key": `modern-${randomUUID()}` },
+      body: { task: "governed mainline", mode: "agent" },
+    });
+    expect(modern.status).toBe(201);
+    expect(fake.lastCreate).toMatchObject({
+      project_id: modernId,
+      project_type: "engineering",
+      process_version_id: "GJB_REF_V1",
+      process_profile_id: "GJB_REF_V1",
+      process_profile_version: "GJB_REF_V1",
+      process_profile_name: "GJB 参考流程 v1",
+    });
+    expect(fake.lastCreate!.mode).toBeUndefined();
+
+    fake.reset();
+    const legacyId = await createProject();
+    const legacy = await callApi(`/api/v1/projects/${legacyId}/tasks`, {
+      method: "POST",
+      token: ids.humanToken,
+      headers: { "idempotency-key": `legacy-${randomUUID()}` },
+      body: { task: "compatibility path" },
+    });
+    expect(legacy.status).toBe(201);
+    expect(fake.lastCreate).toMatchObject({
+      project_id: legacyId,
+      project_type: "engineering",
+      process_version_id: "LEGACY_COMPAT",
+      process_profile_id: "LEGACY_COMPAT",
+      process_profile_version: "LEGACY_COMPAT",
+      process_profile_name: "兼容旧流程",
+      mode: "agent",
+    });
+  });
+
+  test("POST /tasks rejects partial, mismatched, and unsupported stored bindings before Runtime", async () => {
+    await client.query("ALTER TABLE project DROP CONSTRAINT project_process_binding_check");
+    try {
+      await client.query(
+        "INSERT INTO process_definition(id,name) VALUES ('OTHER_FLOW','Other flow') ON CONFLICT DO NOTHING",
+      );
+      await client.query(
+        `INSERT INTO process_version(id,profile_id,version,name,status)
+         VALUES ('OTHER_FLOW_V1','OTHER_FLOW','v1','Other flow v1','active') ON CONFLICT DO NOTHING`,
+      );
+      const rows = [
+        {
+          id: `partial_${randomUUID()}`,
+          values: ["GJB_REF_V1", "GJB_REF_V1", null, "GJB 参考流程 v1"],
+        },
+        {
+          id: `mismatch_${randomUUID()}`,
+          values: ["GJB_REF_V1", "LEGACY_COMPAT", "GJB_REF_V1", "GJB 参考流程 v1"],
+        },
+        {
+          id: `other_${randomUUID()}`,
+          values: ["OTHER_FLOW_V1", "OTHER_FLOW_V1", "v1", "Other flow v1"],
+        },
+      ];
+      for (const row of rows) {
+        await client.query(
+          `INSERT INTO project(
+             id,name,project_type,process_version_id,process_profile_id,process_profile_version,process_profile_name
+           ) VALUES ($1,$2,'engineering',$3,$4,$5,$6)`,
+          [row.id, `Corrupt ${row.id}`, ...row.values],
+        );
+        const response = await callApi(`/api/v1/projects/${row.id}/tasks`, {
+          method: "POST",
+          token: ids.humanToken,
+          headers: { "idempotency-key": `corrupt-${randomUUID()}` },
+          body: { task: "must fail closed" },
+        });
+        expect(response.status).toBe(409);
+        expect(envelopeError(response.json).message).toContain("PROJECT_PROCESS_BINDING_INVALID");
+      }
+      expect(fake.createCount).toBe(0);
+    } finally {
+      await client.query("DELETE FROM project WHERE id LIKE 'partial_%' OR id LIKE 'mismatch_%' OR id LIKE 'other_%'");
+      await client.query(
+        `ALTER TABLE project ADD CONSTRAINT project_process_binding_check CHECK (
+          (
+            project_type = 'free'
+            AND process_version_id IS NULL
+            AND process_profile_id IS NULL
+            AND process_profile_version IS NULL
+            AND process_profile_name IS NULL
+          )
+          OR
+          (
+            project_type = 'engineering'
+            AND process_version_id IS NOT NULL
+            AND process_profile_id IS NOT NULL
+            AND process_profile_version IS NOT NULL
+            AND process_profile_name IS NOT NULL
+            AND (
+              (
+                process_version_id = 'GJB_REF_V1'
+                AND process_profile_id = 'GJB_REF_V1'
+                AND process_profile_version = 'GJB_REF_V1'
+                AND process_profile_name = 'GJB 参考流程 v1'
+              )
+              OR
+              (
+                process_version_id = 'LEGACY_COMPAT'
+                AND process_profile_id = 'LEGACY_COMPAT'
+                AND process_profile_version = 'LEGACY_COMPAT'
+                AND process_profile_name = '兼容旧流程'
+              )
+            )
+          )
+        )`,
+      );
+    }
+  });
+
+  test("POST /tasks: engineering project rejects a second formal main agent", async () => {
+    const projectId = await createEngineeringProject();
+    const first = await callApi(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      token: ids.humanToken,
+      headers: { "idempotency-key": `first-${randomUUID()}` },
+      body: { task: "first formal main agent" },
+    });
+    expect(first.status).toBe(201);
+
+    const second = await callApi(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      token: ids.humanToken,
+      headers: { "idempotency-key": `second-${randomUUID()}` },
+      body: { task: "second formal main agent" },
+    });
+    expect(second.status).toBe(409);
+    expect(envelopeError(second.json).message).toContain("ENGINEERING_MAIN_AGENT_EXISTS");
+    expect(fake.createCount).toBe(1);
   });
 
   test("POST /tasks: explicit process_instance_id not in project → 404", async () => {

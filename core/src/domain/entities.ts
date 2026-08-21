@@ -14,6 +14,7 @@ import type {
   BaselineKind,
   BaselineState,
   DataClassification,
+  ProjectType,
   GateId,
   GateSubmissionState,
   RunClass,
@@ -29,7 +30,12 @@ export interface Project {
   scope: string;
   dataClassification: DataClassification;
   standardVersion: string;       // e.g. "GB/T 33781-2017"
-  targetPart: string;            // e.g. "xc7vx690tffg1761-2" (Q-002)
+  targetPart: string | null;     // e.g. "xc7vx690tffg1761-2" (Q-002)
+  projectType?: ProjectType;
+  processVersionId?: string | null;
+  processProfileId?: string | null;
+  processProfileVersion?: string | null;
+  processProfileName?: string | null;
   toolchainProfileRef: string | null;
   createdAt: string;             // ISO 8601
   status: "active" | "archived";
@@ -41,6 +47,14 @@ export interface ProcessInstance {
   gateProfileVersion: string;
   currentGate: GateId;
   createdAt: string;
+}
+
+export interface ProcessVersion {
+  id: string;
+  profileId: string;
+  version: string;
+  name: string;
+  status: "active" | "retired";
 }
 
 export interface RoleAssignment {
