@@ -14,11 +14,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Client, Pool } from "pg";
 import { sha256Hex } from "../../src/hashing.ts";
-import { startSynthiaServer, type SynthiaServer } from "../../src/api/server.ts";
+import {
+  startSynthiaServer,
+  type SynthiaServer,
+  type SynthiaServerOptions,
+} from "../../src/api/server.ts";
 import { applyMigrations } from "./approval-harness.ts";
 
 /** Domain tables wiped per test (identity tables are intentionally NOT here). */
 const DOMAIN_TABLES = [
+  "import_audit_event",
+  "import_source_relation",
+  "import_file_entry",
+  "import_source",
+  "import_snapshot",
   "project_source_relation",
   "baseline",
   "approved_gate_result",
@@ -120,7 +129,14 @@ export interface ApiHarness {
   previousWorkspacesDir: string | undefined;
 }
 
-export async function setupApiHarness(connectionString: string): Promise<ApiHarness> {
+export interface ApiHarnessOptions {
+  readonly features?: SynthiaServerOptions["features"];
+}
+
+export async function setupApiHarness(
+  connectionString: string,
+  options: ApiHarnessOptions = {},
+): Promise<ApiHarness> {
   const { Client: PgClient, Pool } = await import("pg");
   const client = new PgClient({ connectionString }) as Client;
   // Dynamic import mirrors approval-slice.test.ts: the module must parse even
@@ -136,7 +152,7 @@ export async function setupApiHarness(connectionString: string): Promise<ApiHarn
   process.env.SYNTHIA_WORKSPACES_DIR = workspacesDir;
 
   const pool = new Pool({ connectionString, max: 4 });
-  const server = startSynthiaServer(pool, { port: 0 });
+  const server = startSynthiaServer(pool, { port: 0, features: options.features });
   const baseUrl = `http://${server.hostname}:${server.port}`;
 
   return { server, baseUrl, pool, client, ids, workspacesDir, previousWorkspacesDir };

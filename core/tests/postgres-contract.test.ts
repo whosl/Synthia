@@ -29,6 +29,7 @@ describe("PostgreSQL D1 contracts", () => {
       "0005_revision_content",
       "0006_project_type_process_version",
       "0007_project_profile_constraints",
+      "0008_import_snapshots",
     ]) {
       expect(freshSchema).toContain(`('${version}')`);
     }

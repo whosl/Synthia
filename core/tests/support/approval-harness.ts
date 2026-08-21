@@ -21,6 +21,11 @@ const MIGRATIONS_PATH = join(__dirname, "..", "..", "src", "db", "migrations");
 
 /** Tables touched by the approval slice, in FK-safe order for truncation. */
 const SLICE_TABLES = [
+  "import_audit_event",
+  "import_source_relation",
+  "import_file_entry",
+  "import_source",
+  "import_snapshot",
   "project_source_relation",
   "baseline",
   "approved_gate_result",
