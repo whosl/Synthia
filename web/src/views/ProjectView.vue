@@ -17,8 +17,13 @@ import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
   abortAgent,
   approveGateSubmission,
+  confirmImportSnapshot,
+  copyHistoricalMaterial,
+  createImportSnapshot,
   createTask,
+  denyImportSnapshot,
   getGateSubmission,
+  getImportSnapshot,
   getJobEvidenceContent,
   getProject,
   getRevisionContent,
@@ -27,11 +32,13 @@ import {
   getWorkspaceTree,
   listArtifacts,
   listGateSubmissions,
+  listImportSnapshots,
   listRevisions,
   listTasks,
   putWorkspaceFile,
   registerWorkspace,
   rejectGateSubmission,
+  searchHistoricalMaterials,
   sendMessage,
 } from "../api/index.ts";
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
@@ -39,7 +46,11 @@ import type { ApproveRequest } from "../api/index.ts";
 import type {
   Artifact,
   ArtifactRevision,
+  CopyHistoricalMaterialRequest,
+  CreateImportSnapshotRequest,
   GateSubmissionDetail,
+  HistoricalMaterialSearchResult,
+  HistoricalMaterialSnapshot,
   ProjectDetail,
   TaskAgentDetail,
   TaskAgentSummary,
@@ -76,6 +87,10 @@ import { buildFileTreeEntries, workspaceEntryPath } from "../domain/file-tree.ts
 import { deriveReadonlyReason } from "../domain/editor-state.ts";
 import { resolveTheme, toggleTheme, type Theme } from "../domain/theme.ts";
 import { processVersionText, projectType, projectTypeText } from "../domain/project.ts";
+import {
+  HISTORICAL_MATERIALS_FEATURE_ENABLED,
+  shouldShowHistoricalMaterials,
+} from "../domain/feature-flags.ts";
 import type {
   ApprovalCardProps,
   ChatComposerMode,
@@ -96,6 +111,7 @@ import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
+import HistoricalMaterialsPanel from "../components/materials/HistoricalMaterialsPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -107,6 +123,10 @@ const projectId = String(route.params.id);
 // ─────────────────────────────────────────────────────────────────────
 
 const project = ref<ProjectDetail | null>(null);
+const historicalMaterialsEnabled = computed(() => shouldShowHistoricalMaterials(
+  HISTORICAL_MATERIALS_FEATURE_ENABLED,
+  project.value?.project_type,
+));
 const agents = ref<readonly TaskAgentSummary[]>([]);
 const currentAgentId = ref<string | null>(typeof route.query.run === "string" ? route.query.run : null);
 /**
@@ -121,6 +141,24 @@ const artifacts = ref<readonly Artifact[]>([]);
 const revisionsByArtifact = ref<Record<string, readonly ArtifactRevision[]>>({});
 /** 磁盘工作区快照（`GET workspace/tree`）；项目还没建出工作区时为 null。 */
 const workspace = ref<WorkspaceTree | null>(null);
+
+// ─────────────────────────────────────────────────────────────────────
+// P2 历史资料库（按需加载；资料端点不可用时只在抽屉内 fail closed）
+// ─────────────────────────────────────────────────────────────────────
+
+const materialsOpen = ref(false);
+const materialSnapshots = ref<readonly HistoricalMaterialSnapshot[]>([]);
+const materialSelectedId = ref<string | null>(null);
+const materialSelected = ref<HistoricalMaterialSnapshot | null>(null);
+const materialSearchResults = ref<readonly HistoricalMaterialSearchResult[]>([]);
+const materialSearchQuery = ref("");
+const materialsLoading = ref(false);
+const materialsSearching = ref(false);
+const materialsOperating = ref(false);
+const materialsError = ref<string | null>(null);
+const materialsNotice = ref<string | null>(null);
+let materialsRequestSerial = 0;
+let materialsNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 const loading = ref(true);
 const loadErrorText = ref<string | null>(null);
@@ -169,6 +207,154 @@ async function refresh(): Promise<void> {
   }
 }
 
+function clearMaterialsNoticeLater(): void {
+  if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
+  materialsNoticeTimer = window.setTimeout(() => {
+    materialsNotice.value = null;
+    materialsNoticeTimer = null;
+  }, 4200);
+}
+
+/** 资料操作没有后台自动重试；错误文案必须给手动重试出口，不能声称正在重试。 */
+function humanizeMaterialsError(err: unknown): string {
+  return humanizeDecisionError(err, "资料操作").text;
+}
+
+async function loadMaterialDetail(snapshotId: string): Promise<void> {
+  const serial = materialsRequestSerial;
+  materialSelectedId.value = snapshotId;
+  try {
+    const detail = await getImportSnapshot(api, projectId, snapshotId);
+    if (serial !== materialsRequestSerial || materialSelectedId.value !== snapshotId) return;
+    materialSelected.value = detail;
+  } catch (err) {
+    if (serial !== materialsRequestSerial) return;
+    materialSelected.value = null;
+    materialsError.value = humanizeMaterialsError(err);
+  }
+}
+
+async function loadMaterials(): Promise<void> {
+  if (!historicalMaterialsEnabled.value) return;
+  const serial = ++materialsRequestSerial;
+  materialsLoading.value = true;
+  materialsError.value = null;
+  try {
+    const snapshots = await listImportSnapshots(api, projectId);
+    if (serial !== materialsRequestSerial) return;
+    materialSnapshots.value = snapshots;
+    const selectedId = materialSelectedId.value && snapshots.some((snapshot) => snapshot.id === materialSelectedId.value)
+      ? materialSelectedId.value
+      : snapshots[0]?.id ?? null;
+    materialSelectedId.value = selectedId;
+    materialSelected.value = null;
+    if (selectedId) await loadMaterialDetail(selectedId);
+  } catch (err) {
+    if (serial !== materialsRequestSerial) return;
+    materialSnapshots.value = [];
+    materialSelected.value = null;
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    if (serial === materialsRequestSerial) materialsLoading.value = false;
+  }
+}
+
+function openMaterials(): void {
+  if (!historicalMaterialsEnabled.value) return;
+  materialsOpen.value = true;
+  if (materialSnapshots.value.length === 0 && !materialsLoading.value && !materialsError.value) void loadMaterials();
+}
+
+function closeMaterials(): void {
+  materialsOpen.value = false;
+}
+
+function onSelectMaterialSnapshot(snapshotId: string): void {
+  materialsError.value = null;
+  void loadMaterialDetail(snapshotId);
+}
+
+async function onSearchMaterials(query: string): Promise<void> {
+  materialSearchQuery.value = query;
+  materialsSearching.value = true;
+  materialsError.value = null;
+  try {
+    materialSearchResults.value = await searchHistoricalMaterials(api, projectId, query);
+  } catch (err) {
+    materialSearchResults.value = [];
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    materialsSearching.value = false;
+  }
+}
+
+async function onImportMaterials(body: CreateImportSnapshotRequest): Promise<void> {
+  if (materialsOperating.value) return;
+  materialsOperating.value = true;
+  materialsError.value = null;
+  materialsNotice.value = null;
+  try {
+    const created = await createImportSnapshot(api, projectId, body, crypto.randomUUID());
+    materialSelectedId.value = created.id;
+    materialsNotice.value = "资料已导入，当前处于待确认状态；确认前不会进入 Agent 默认上下文。";
+    await loadMaterials();
+    clearMaterialsNoticeLater();
+  } catch (err) {
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    materialsOperating.value = false;
+  }
+}
+
+async function onConfirmMaterials(snapshotId: string): Promise<void> {
+  if (materialsOperating.value) return;
+  materialsOperating.value = true;
+  materialsError.value = null;
+  try {
+    await confirmImportSnapshot(api, projectId, snapshotId, crypto.randomUUID());
+    materialsNotice.value = "资料已确认；只有仍有效的文件会进入默认检索。";
+    await loadMaterials();
+    clearMaterialsNoticeLater();
+  } catch (err) {
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    materialsOperating.value = false;
+  }
+}
+
+async function onDenyMaterials(snapshotId: string, reason: string): Promise<void> {
+  if (materialsOperating.value) return;
+  materialsOperating.value = true;
+  materialsError.value = null;
+  try {
+    await denyImportSnapshot(api, projectId, snapshotId, reason ? { reason } : {}, crypto.randomUUID());
+    materialsNotice.value = "资料已否决，不会进入 Agent 默认上下文。";
+    await loadMaterials();
+    clearMaterialsNoticeLater();
+  } catch (err) {
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    materialsOperating.value = false;
+  }
+}
+
+async function onCopyMaterials(snapshotId: string, body: CopyHistoricalMaterialRequest): Promise<void> {
+  if (materialsOperating.value) return;
+  materialsOperating.value = true;
+  materialsError.value = null;
+  try {
+    const result = await copyHistoricalMaterial(api, projectId, snapshotId, body, crypto.randomUUID());
+    materialsNotice.value = `已复制 ${result.revisions.length} 个文件为当前项目候选修订；确认状态不会被继承。`;
+    // 候选修订已经改变左栏事实，顺手刷新工作区/产物，但不关闭资料抽屉。
+    await refresh();
+    clearMaterialsNoticeLater();
+  } catch (err) {
+    materialsError.value = humanizeMaterialsError(err);
+  } finally {
+    materialsOperating.value = false;
+  }
+}
+
 onMounted(async () => {
   try {
     project.value = await getProject(api, projectId);
@@ -193,6 +379,8 @@ onBeforeUnmount(() => {
   poller = null;
   streamHandle?.close();
   streamHandle = null;
+  if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
+  materialsNoticeTimer = null;
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1032,6 +1220,21 @@ const recordsPanelProps = computed<RecordsPanelProps>(() => ({
   entryContent: recordEntryContent.value,
 }));
 
+const historicalMaterialsProps = computed(() => ({
+  open: materialsOpen.value,
+  snapshots: materialSnapshots.value,
+  selectedSnapshotId: materialSelectedId.value,
+  selectedSnapshot: materialSelected.value,
+  searchResults: materialSearchResults.value,
+  searchQuery: materialSearchQuery.value,
+  loading: materialsLoading.value,
+  searching: materialsSearching.value,
+  operating: materialsOperating.value,
+  error: materialsError.value,
+  notice: materialsNotice.value,
+  projectEligible: project.value?.project_type === "engineering",
+}));
+
 function onOpenFile(artifactId: string): void {
   openFile(artifactId);
 }
@@ -1093,6 +1296,16 @@ function onToggleChatOverlay(): void {
       <span>{{ projectTypeLabel }}</span>
       <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
       <span v-if="project.target_part">器件：{{ project.target_part }}</span>
+      <button
+        v-if="historicalMaterialsEnabled"
+        type="button"
+        class="project-view-materials-button"
+        :aria-expanded="materialsOpen"
+        @click="materialsOpen ? closeMaterials() : openMaterials()"
+      >
+        历史资料
+        <span v-if="materialSnapshots.length > 0" class="project-view-materials-count">{{ materialSnapshots.length }}</span>
+      </button>
     </div>
 
     <div v-if="loadErrorText" class="project-view-error">{{ loadErrorText }}</div>
@@ -1176,6 +1389,22 @@ function onToggleChatOverlay(): void {
         </div>
       </div>
     </Transition>
+
+    <Transition name="project-view-veil-fade">
+      <div v-if="historicalMaterialsEnabled && materialsOpen" class="project-view-veil project-view-veil-end" @click.self="closeMaterials">
+        <HistoricalMaterialsPanel
+          v-bind="historicalMaterialsProps"
+          @close="closeMaterials"
+          @refresh="loadMaterials"
+          @select-snapshot="onSelectMaterialSnapshot"
+          @search="onSearchMaterials"
+          @import="onImportMaterials"
+          @confirm="onConfirmMaterials"
+          @deny="onDenyMaterials"
+          @copy="onCopyMaterials"
+        />
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1198,6 +1427,7 @@ function onToggleChatOverlay(): void {
 
 .project-view-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
   min-height: 28px;
@@ -1205,6 +1435,29 @@ function onToggleChatOverlay(): void {
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.project-view-materials-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 2px var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.project-view-materials-button:hover {
+  background: var(--accent-subtle);
+}
+
+.project-view-materials-count {
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .project-view-error {

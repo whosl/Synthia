@@ -301,8 +301,8 @@ export const EXAMPLE_TASKS: readonly string[] = [
   "审查项目现有 RTL 源代码，指出时序与命名问题并给出修改建议",
 ];
 
-/** 批准/驳回/发送等决策动作失败 → 人话。 */
-export type DecisionAction = "批准" | "驳回" | "发送";
+/** 批准/驳回/发送/资料操作等写动作失败 → 人话。 */
+export type DecisionAction = "批准" | "驳回" | "发送" | "资料操作";
 
 export interface DecisionFailure {
   /** 人话原因（主页面展示，不含英文错误码/关联号）。 */
