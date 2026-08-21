@@ -82,6 +82,8 @@ export interface RequestContext {
   readonly connector?: ConnectorPort;
   /** Runtime client for the task-workbench slice; undefined when not configured (task endpoints → 503). */
   readonly runtimeClient?: RuntimeClient;
+  /** Service actor uid that is allowed to call back for Core-owned Runtime tasks. */
+  readonly runtimeActorId: string;
   /** Explicitly resolved Core capabilities. Missing flags are fail-closed. */
   readonly featureFlags?: Readonly<CoreFeatureFlags>;
 }
@@ -1616,14 +1618,14 @@ function validateSourceList(obj: Record<string, unknown>, key: string): SourceIn
 }
 
 /** Resolve the Connector port or fail closed (503) when none is configured. */
-function requireConnector(ctx: RequestContext): ConnectorPort {
+export function requireConnector(ctx: RequestContext): ConnectorPort {
   if (!ctx.connector) throw capabilityUnavailableError("connector not configured");
   return ctx.connector;
 }
 
 /** Map a Connector failure to a stable API error: drift/lease/capability → 503,
  *  not-found/evidence-missing → 404, anything else → 503 (retryable). */
-function mapConnectorError(err: unknown): ApiError {
+export function mapConnectorError(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
   if (err instanceof ConnectorError) {
     if (err.code in CONNECTOR_NOT_FOUND_CODES) return notFoundError(`connector: ${err.code}`);

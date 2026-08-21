@@ -79,6 +79,7 @@ class FakeRuntimeClient implements RuntimeClient {
     process_profile_id?: string | null;
     process_profile_name?: string | null;
     process_profile_version?: string | null;
+    input_hash?: string;
   } | null = null;
 
   reset(): void {
@@ -101,6 +102,7 @@ class FakeRuntimeClient implements RuntimeClient {
     process_profile_id?: string | null;
     process_profile_name?: string | null;
     process_profile_version?: string | null;
+    input_hash?: string;
   }): Promise<RuntimeCreateResponse> {
     this.createCount += 1;
     this.lastCreate = body;
@@ -110,6 +112,7 @@ class FakeRuntimeClient implements RuntimeClient {
     const detail: RuntimeAgentDetail = {
       agent_id: agentId,
       project_id: body.project_id,
+      kind: "main",
       status: "running",
       current_stage: "intake",
       docs: [
@@ -129,6 +132,19 @@ class FakeRuntimeClient implements RuntimeClient {
     return { agent_id: agentId };
   }
 
+  async startTask(agentId: string): Promise<{ started: boolean; status: "running" }> {
+    const run = this.agents.get(agentId);
+    if (!run) {
+      throw new RuntimeClientError(404, `agent not found: ${agentId}`, {
+        code: "AGENT_NOT_FOUND",
+        retryable: false,
+      });
+    }
+    run.status = "running";
+    run.detail = { ...run.detail, status: "running" };
+    return { started: true, status: "running" };
+  }
+
   async listTasks(projectId: string): Promise<RuntimeListResponse> {
     const agents = [...this.agents.values()]
       .filter((r) => r.projectId === projectId)
@@ -136,6 +152,7 @@ class FakeRuntimeClient implements RuntimeClient {
         agent_id: r.agentId,
         project_id: r.projectId,
         status: r.status,
+        kind: "main" as const,
         current_stage: r.detail.current_stage,
         awaiting_gate: r.detail.awaiting_gate,
         created_at: "2026-01-01T00:00:00Z",
@@ -192,7 +209,11 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     await truncateDomainTables(client);
     pool = new PgPool({ connectionString: DATABASE_URL, max: 4 }) as unknown as Pool;
     fake = new FakeRuntimeClient();
-    server = startSynthiaServer(pool, { port: 0, runtimeClient: fake });
+    server = startSynthiaServer(pool, {
+      port: 0,
+      runtimeClient: fake,
+      runtimeActorId: ids.serviceUid,
+    });
     baseUrl = `http://${server.hostname}:${server.port}`;
   });
 
@@ -768,7 +789,7 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
   test("service token (core:write + core:read) can POST", async () => {
     const projectId = await createProject();
     const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks`, {
-      method: "POST", token: ids.serviceToken, headers: { "idempotency-key": `idem-${randomUUID()}` }, body: { task: "服务身份创建任务" },
+      method: "POST", token: ids.genericServiceToken, headers: { "idempotency-key": `idem-${randomUUID()}` }, body: { task: "服务身份创建任务" },
     });
     expect(status).toBe(201);
     expect(typeof envelopeData(json).agentId).toBe("string");

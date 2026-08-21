@@ -8,6 +8,8 @@
 
 export interface CoreFeatureFlags {
   readonly historicalMaterials: boolean;
+  /** P3 side-task workspaces and adoption writes. */
+  readonly sideTasks: boolean;
 }
 
 export interface CoreFeatureFlagOptions {
@@ -19,6 +21,7 @@ export interface CoreFeatureFlagOptions {
 
 export const DISABLED_CORE_FEATURE_FLAGS: CoreFeatureFlags = Object.freeze({
   historicalMaterials: false,
+  sideTasks: false,
 });
 
 /** Parse a boolean environment flag without accepting ambiguous spellings. */
@@ -39,5 +42,13 @@ export function resolveCoreFeatureFlags(options: CoreFeatureFlagOptions = {}): C
     "SYNTHIA_FEATURE_HISTORICAL_MATERIALS",
     (options.env ?? process.env).SYNTHIA_FEATURE_HISTORICAL_MATERIALS,
   );
-  return Object.freeze({ historicalMaterials });
+  const injectedSideTasks = options.features?.sideTasks;
+  if (injectedSideTasks !== undefined && typeof injectedSideTasks !== "boolean") {
+    throw new TypeError("features.sideTasks must be a boolean");
+  }
+  const sideTasks = injectedSideTasks ?? parseBooleanFeatureFlag(
+    "SYNTHIA_FEATURE_SIDE_TASKS",
+    (options.env ?? process.env).SYNTHIA_FEATURE_SIDE_TASKS,
+  );
+  return Object.freeze({ historicalMaterials, sideTasks });
 }

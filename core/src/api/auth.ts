@@ -79,10 +79,24 @@ export async function authenticate(pool: Pool, authorization: string | null): Pr
     throw unauthorizedError("identity actor type not permitted for API access");
   }
 
+  const scopes = [...new Set(row.scope ?? [])].sort();
+  // Task-runtime credentials are capabilities, not ordinary Core service
+  // tokens.  Keeping this invariant at the authentication boundary prevents
+  // a historically provisioned combined token from bypassing the task-bound
+  // routes through generic workspace, governance, or job endpoints.  The
+  // Set normalization makes the result independent of database array order;
+  // any distinct companion scope still invalidates the capability token.
+  if (
+    scopes.includes("core:task-runtime")
+    && (scopes.length !== 1 || scopes[0] !== "core:task-runtime")
+  ) {
+    throw unauthorizedError("task runtime token scope is invalid");
+  }
+
   return {
     actorType: row.actor_type as IdentityActorType,
     actorId: row.uid,
     userId: row.user_id,
-    scopes: row.scope ?? [],
+    scopes,
   };
 }

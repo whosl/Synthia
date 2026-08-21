@@ -2,25 +2,29 @@
  * Synthia Core API — Runtime task proxy (UI-2 task workbench slice)
  *
  * Core forwards task lifecycle requests to the Runtime HTTP service
- * (runtime/server.ts) WITHOUT persistencing task truth. Core's role is:
+ * (runtime/server.ts). Legacy tasks remain Runtime-owned; P3 tasks are first
+ * persisted as Core facts. Core's role is:
  *   1. project ownership validation (project exists, process instance belongs
  *      to the project, the agent's project_id matches the path);
  *   2. project-aware task routing. Free projects never acquire a process
  *      instance; engineering projects reuse or provision one whose frozen
  *      profile matches the project binding;
  *   3. envelope + error-model translation between Runtime's error vocabulary
- *      and Core's stable {@link ApiError} model.
+ *      and Core's stable {@link ApiError} model;
+ *   4. compatibility reads that merge old Runtime-only mains with Core-owned
+ *      tasks without treating Runtime's side-task cache as task truth.
  *
  * The Runtime client is an injectable port so tests drive an in-process fake
  * against a real PostgreSQL instance; production builds an HttpRuntimeClient
  * from `SYNTHIA_RUNTIME_URL` (default http://127.0.0.1:8790). When the client
- * is absent or the Runtime is unreachable, task endpoints surface 503
- * capability_unavailable (retryable), mirroring the Connector slice's behavior.
+ * is absent or unreachable, Runtime-dependent writes and legacy-only reads
+ * surface 503 capability_unavailable; persisted Core task reads remain usable.
  *
- * Idempotency: POST /projects/:id/tasks requires an Idempotency-Key and stores
- * the forwarded Runtime response in `idempotency_records` (same table, same
- * semantics as every other write) so a same-key replay returns the original
- * agentId WITHOUT re-contacting the Runtime.
+ * Idempotency: POST /projects/:id/tasks requires an Idempotency-Key. The legacy
+ * path stores the forwarded Runtime response and replays it without another
+ * Runtime call. P3 stores Core task facts plus the stable Runtime registration
+ * request; every same-key replay deliberately retries the idempotent
+ * register/bind/start sequence so a failure after the Core commit can recover.
  */
 
 import {
@@ -30,7 +34,9 @@ import {
   withTransaction,
   type TransactionClient,
 } from "../db/repository.ts";
-import { canonicalRequestHash } from "../hashing.ts";
+import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
+import { headSha } from "../workspace/git.ts";
+import { ensureWorkspace, readTreeAt } from "../workspace/store.ts";
 import {
   ApiError,
   capabilityUnavailableError,
@@ -39,16 +45,23 @@ import {
   notFoundError,
   validationError,
 } from "./errors.ts";
-import type { HandlerResult, RequestContext } from "./handlers.ts";
+import {
+  runIdempotent as runCoreIdempotent,
+  type HandlerResult,
+  type RequestContext,
+} from "./handlers.ts";
 
 // ─── Runtime task shapes (mirror runtime/server.ts contract) ─────────────────
 
 export type RuntimeTaskStatus =
+  | "queued"
   | "idle"
   | "running"
+  | "awaiting_user"
   | "awaiting_approval"
   | "succeeded"
   | "failed"
+  | "cancelled"
   | "fail_closed";
 
 /** A doc/artifact registered by the Runtime against Core. */
@@ -85,6 +98,9 @@ export interface RuntimeAgentSummary {
   readonly current_stage?: string;
   readonly awaiting_gate?: string;
   readonly created_at?: string;
+  readonly kind?: "main" | "side";
+  readonly parent_task_id?: string | null;
+  readonly workspace_id?: string | null;
 }
 
 export interface RuntimeAgentDetail {
@@ -97,6 +113,9 @@ export interface RuntimeAgentDetail {
   readonly audit?: readonly RuntimeAuditEntry[];
   readonly evidence?: readonly RuntimeEvidenceEntry[];
   readonly reason?: string;
+  readonly kind?: "main" | "side";
+  readonly parent_task_id?: string | null;
+  readonly workspace_id?: string | null;
 }
 
 export interface RuntimeListResponse {
@@ -107,6 +126,12 @@ export interface RuntimeCreateResponse {
   readonly agent_id: string;
 }
 
+export interface RuntimeStartResponse {
+  readonly started: boolean;
+  readonly status: RuntimeTaskStatus;
+  readonly reason?: string;
+}
+
 // ─── Runtime client port ─────────────────────────────────────────────────────
 
 /**
@@ -115,7 +140,7 @@ export interface RuntimeCreateResponse {
  * API errors. Absence of a client (Runtime not configured) → 503.
  */
 export interface RuntimeClient {
-  /** POST /tasks — asynchronously start a loop agent. */
+  /** POST /tasks — create legacy work or idempotently register a P3 task. */
   createTask(body: {
     project_id: string;
     /** Omitted for free-project sessions. */
@@ -130,15 +155,25 @@ export interface RuntimeClient {
     process_profile_id?: string | null;
     process_profile_name?: string | null;
     process_profile_version?: string | null;
+    /** P3 Core-owned identity. Runtime must reuse this id idempotently. */
+    task_id?: string;
+    task_kind?: "main" | "side";
+    parent_task_id?: string;
+    workspace_id?: string;
+    authorization_scope?: Readonly<Record<string, unknown>>;
+    /** Core-computed immutable task input identity (lowercase SHA-256). */
+    input_hash?: string;
   }): Promise<RuntimeCreateResponse>;
+  /** POST /tasks/:agentId/start — start any registered Core-owned task. */
+  startTask(agentId: string): Promise<RuntimeStartResponse>;
   /** GET /tasks — list agents filtered by project. */
   listTasks(projectId: string): Promise<RuntimeListResponse>;
   /** GET /tasks/:agentId — fetch a single agent's detail. */
   getTask(agentId: string): Promise<RuntimeAgentDetail>;
   /** POST /tasks/:agentId/message — free-agent conversation (prompt/steer). */
-  sendMessage(agentId: string, text: string): Promise<unknown>;
+  sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown>;
   /** POST /tasks/:agentId/abort — abort the free-agent session. */
-  abortTask(agentId: string): Promise<unknown>;
+  abortTask(agentId: string, idempotencyKey?: string): Promise<unknown>;
   /**
    * GET /tasks/:agentId/stream — open the SSE event stream and return the raw
    * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
@@ -197,15 +232,22 @@ export class HttpRuntimeClient implements RuntimeClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUNTIME_TIMEOUT_MS;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, opts?: { timeoutMs?: number }): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts?: { timeoutMs?: number; headers?: Readonly<Record<string, string>> },
+  ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? this.timeoutMs);
     let response: Response;
     try {
+      const headers = new Headers(opts?.headers);
+      if (body !== undefined) headers.set("content-type", "application/json");
       response = await fetch(`${this.baseUrl.replace(/\/+$/, "")}${path}`, {
         method,
         signal: controller.signal,
-        headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+        headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
@@ -260,8 +302,21 @@ export class HttpRuntimeClient implements RuntimeClient {
     process_profile_id?: string | null;
     process_profile_name?: string | null;
     process_profile_version?: string | null;
+    task_id?: string;
+    task_kind?: "main" | "side";
+    parent_task_id?: string;
+    workspace_id?: string;
+    authorization_scope?: Readonly<Record<string, unknown>>;
+    input_hash?: string;
   }): Promise<RuntimeCreateResponse> {
     return this.request<RuntimeCreateResponse>("POST", "/tasks", body);
+  }
+
+  async startTask(agentId: string): Promise<RuntimeStartResponse> {
+    return this.request<RuntimeStartResponse>(
+      "POST",
+      `/tasks/${encodeURIComponent(agentId)}/start`,
+    );
   }
 
   async listTasks(projectId: string): Promise<RuntimeListResponse> {
@@ -272,14 +327,27 @@ export class HttpRuntimeClient implements RuntimeClient {
     return this.request<RuntimeAgentDetail>("GET", `/tasks/${encodeURIComponent(agentId)}`);
   }
 
-  async sendMessage(agentId: string, text: string): Promise<unknown> {
+  async sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown> {
     // A free-agent turn (context + tool calls + generation) takes minutes,
     // not seconds — never the 15s control-path timeout.
-    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/message`, { text }, { timeoutMs: 10 * 60_000 });
+    return this.request(
+      "POST",
+      `/tasks/${encodeURIComponent(agentId)}/message`,
+      { text },
+      {
+        timeoutMs: 10 * 60_000,
+        ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
+      },
+    );
   }
 
-  async abortTask(agentId: string): Promise<unknown> {
-    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/abort`);
+  async abortTask(agentId: string, idempotencyKey?: string): Promise<unknown> {
+    return this.request(
+      "POST",
+      `/tasks/${encodeURIComponent(agentId)}/abort`,
+      undefined,
+      idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : undefined,
+    );
   }
 
   async streamTask(
@@ -339,13 +407,32 @@ export function createRuntimeClientFromEnv(opts: RuntimeEnvOptions = {}): Runtim
 // ─── handler helpers ─────────────────────────────────────────────────────────
 
 /** Resolve the Runtime client or fail closed (503) when none is configured. Mirrors requireConnector. */
-function requireRuntime(ctx: RequestContext): RuntimeClient {
+export function requireRuntime(ctx: RequestContext): RuntimeClient {
   if (!ctx.runtimeClient) throw capabilityUnavailableError("runtime not configured");
   return ctx.runtimeClient;
 }
 
+/** Resolve the configured callback uid against Core's active service identities. */
+export async function requireConfiguredRuntimeActor(
+  ctx: RequestContext,
+  client: Pick<TransactionClient, "query">,
+): Promise<void> {
+  const { rows } = await client.query(
+    `SELECT 1
+       FROM user_account
+      WHERE uid=$1 AND actor_type='service' AND status='active'
+      LIMIT 1`,
+    [ctx.runtimeActorId],
+  );
+  if (rows.length === 0) {
+    throw capabilityUnavailableError(
+      "SYNTHIA_RUNTIME_ACTOR_ID does not name an active service identity",
+    );
+  }
+}
+
 /** Map a Runtime failure to a stable API error. */
-function mapRuntimeError(err: unknown): ApiError {
+export function mapRuntimeError(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
   if (err instanceof RuntimeClientError) {
     // Runtime 404 → Core not_found; Runtime 400 → Core validation; 409 → conflict;
@@ -393,7 +480,7 @@ function firstRowId(rows: unknown[]): string {
  * only for a free project; an engineering project with no frozen profile is a
  * corrupt/legacy record and is rejected rather than silently assigned GJB.
  */
-interface ProjectTaskContext {
+export interface ProjectTaskContext {
   readonly projectType: "free" | "engineering";
   /** Project-canonical FPGA part; null means the project has not selected one. */
   readonly targetPart: string | null;
@@ -405,7 +492,7 @@ interface ProjectTaskContext {
   readonly processProfileVersion: string | null;
 }
 
-interface ResolvedTaskContext extends ProjectTaskContext {
+export interface ResolvedTaskContext extends ProjectTaskContext {
   readonly processInstanceId: string | undefined;
 }
 
@@ -426,7 +513,7 @@ const LEGACY_COMPAT_BINDING = {
  * in the same transaction as the idempotency claim means a concurrent first
  * task cannot create two engineering G0 instances.
  */
-async function resolveProcessInstance(
+export async function resolveProcessInstance(
   tx: TransactionClient,
   projectId: string,
   explicitId: string | null,
@@ -637,6 +724,609 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
   });
 }
 
+// ─── P3 Core-owned task facts ───────────────────────────────────────────────
+
+const ACTIVE_MAIN_TASK_STATES = [
+  "queued",
+  "running",
+  "awaiting_user",
+] as const;
+
+const MAIN_AUTHORIZATION_SCOPE = Object.freeze({
+  schema: "task-scope.v1",
+  workspace: "project",
+  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+  write_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+  run_classes: ["exploratory", "gate_check", "formal"],
+  can_submit_gates: true,
+  can_create_milestones: true,
+  can_start_formal_runs: true,
+});
+
+interface CoreTaskRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly project_type: "free" | "engineering";
+  readonly kind: "main" | "side";
+  readonly parent_task_id: string | null;
+  readonly workspace_id: string | null;
+  readonly runtime_agent_id: string | null;
+  readonly runtime_actor_id: string;
+  readonly objective: string;
+  readonly authorization_scope: Readonly<Record<string, unknown>>;
+  readonly status: RuntimeTaskStatus;
+  readonly input_hash: string;
+  readonly output_hash: string | null;
+  readonly adoption_state: string;
+  readonly current_stage: string | null;
+  readonly awaiting_gate: string | null;
+  readonly runtime_snapshot: unknown;
+  readonly created_at: Date | string;
+  readonly updated_at: Date | string;
+  readonly finished_at: Date | string | null;
+  readonly workspace_state?: string | null;
+  readonly base_commit?: string | null;
+  readonly base_manifest_hash?: string | null;
+  readonly head_commit?: string | null;
+}
+
+function p3Enabled(ctx: RequestContext): boolean {
+  return ctx.featureFlags?.sideTasks === true;
+}
+
+function stableTaskId(ctx: RequestContext, projectId: string, kind: "main" | "side"): string {
+  if (!ctx.idempotencyKey) throw validationError("Idempotency-Key header is required for writes");
+  const digest = canonicalRequestHash({
+    schema: "task-id.v1",
+    projectId,
+    kind,
+    actorType: ctx.identity.actorType,
+    actorId: ctx.identity.actorId,
+    idempotencyKey: ctx.idempotencyKey,
+  });
+  return `task-${digest.slice(0, 32)}`;
+}
+
+function baseManifestHash(files: readonly { path: string; contentHash: string; content: string }[]): string {
+  const canonical = [...files]
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+    .map((file) => `${file.path}\0${file.contentHash}\0${Buffer.byteLength(file.content, "utf8")}\n`)
+    .join("");
+  return sha256Hex(canonical);
+}
+
+function asRuntimeSnapshot(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function taskSummary(row: CoreTaskRow): RuntimeAgentSummary & Record<string, unknown> {
+  return {
+    agent_id: row.id,
+    task_id: row.id,
+    project_id: row.project_id,
+    kind: row.kind,
+    parent_task_id: row.parent_task_id,
+    workspace_id: row.workspace_id,
+    objective: row.objective,
+    task: row.objective,
+    goal: row.objective,
+    status: row.status as RuntimeTaskStatus,
+    current_stage: row.current_stage ?? undefined,
+    awaiting_gate: row.awaiting_gate ?? undefined,
+    input_hash: row.input_hash,
+    output_hash: row.output_hash,
+    adoption_state: row.adoption_state,
+    authorization_scope: row.authorization_scope,
+    base_commit: row.base_commit ?? null,
+    base_manifest_hash: row.base_manifest_hash ?? null,
+    workspace_state: row.workspace_state ?? null,
+    head_commit: row.head_commit ?? null,
+    created_at: iso(row.created_at),
+    updated_at: iso(row.updated_at),
+    finished_at: row.finished_at ? iso(row.finished_at) : null,
+  };
+}
+
+function taskDetail(row: CoreTaskRow): RuntimeAgentDetail & Record<string, unknown> {
+  const snapshot = asRuntimeSnapshot(row.runtime_snapshot);
+  return {
+    ...snapshot,
+    ...taskSummary(row),
+    agent_id: row.id,
+    project_id: row.project_id,
+    kind: row.kind,
+    parent_task_id: row.parent_task_id,
+    workspace_id: row.workspace_id,
+    status: row.status as RuntimeTaskStatus,
+    docs: Array.isArray(snapshot.docs) ? snapshot.docs as RuntimeDocRef[] : [],
+    audit: Array.isArray(snapshot.audit) ? snapshot.audit as RuntimeAuditEntry[] : [],
+    evidence: Array.isArray(snapshot.evidence) ? snapshot.evidence as RuntimeEvidenceEntry[] : [],
+  };
+}
+
+function iso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+/** Only an explicit Runtime main may use the legacy compatibility path. */
+function isReadableRuntimeMain(
+  value: unknown,
+  projectId: string,
+  expectedAgentId?: string,
+): value is RuntimeAgentSummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.agent_id === "string"
+    && row.agent_id.length > 0
+    && row.project_id === projectId
+    && (expectedAgentId === undefined || row.agent_id === expectedAgentId)
+    && row.kind === "main";
+}
+
+function asReadableRuntimeMain<T extends RuntimeAgentSummary>(task: T): T & { kind: "main" } {
+  return { ...task, kind: "main" };
+}
+
+function isTerminalRuntimeTaskStatus(value: unknown): boolean {
+  return value === "succeeded"
+    || value === "failed"
+    || value === "cancelled"
+    || value === "fail_closed";
+}
+
+interface CoreTaskIdentityRow {
+  readonly id: string;
+  readonly runtime_agent_id: string | null;
+  readonly runtime_actor_id: string | null;
+  readonly kind: "main" | "side";
+  readonly status: RuntimeTaskStatus;
+}
+
+async function findActiveRuntimeOnlyMain(
+  runtime: RuntimeClient,
+  projectId: string,
+  coreTasks: readonly CoreTaskIdentityRow[],
+): Promise<RuntimeAgentSummary | null> {
+  let listed: RuntimeListResponse;
+  try {
+    listed = await runtime.listTasks(projectId);
+  } catch (error) {
+    throw mapRuntimeError(error);
+  }
+  if (!Array.isArray(listed?.agents)) {
+    throw capabilityUnavailableError("runtime task list is malformed");
+  }
+
+  // Core facts win even when Runtime still retains a stale handle for a task
+  // Core has already marked terminal. Everything else must be an explicit
+  // Runtime main; side or missing/unknown kinds cannot block or become the
+  // engineering mainline through this compatibility check.
+  const coreIdentities = new Set<string>();
+  for (const task of coreTasks) {
+    coreIdentities.add(task.id);
+    if (task.runtime_agent_id) coreIdentities.add(task.runtime_agent_id);
+  }
+  return listed.agents.find((candidate) => (
+    isReadableRuntimeMain(candidate, projectId)
+    && !coreIdentities.has(candidate.agent_id)
+    && !isTerminalRuntimeTaskStatus(candidate.status)
+  )) ?? null;
+}
+
+async function requireCoreOwnedTask(
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+): Promise<CoreTaskRow> {
+  const { rows } = await ctx.pool.query(
+    "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2",
+    [taskId, projectId],
+  );
+  const row = rows[0] as CoreTaskRow | undefined;
+  if (!row) throw notFoundError(`task not found: ${taskId}`);
+  return row;
+}
+
+async function findCoreOwnedTask(
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+): Promise<CoreTaskRow | null> {
+  const { rows } = await ctx.pool.query(
+    "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2",
+    [taskId, projectId],
+  );
+  return rows[0] as CoreTaskRow | undefined ?? null;
+}
+
+/**
+ * Project-scoped task reads require both a globally readable identity and a
+ * current project role.  The router enforces the global scope; this helper is
+ * the tenant boundary.  Return 404 for a missing role so callers cannot use a
+ * task route to probe another project's existence.  Platform administrators
+ * retain their cross-project read capability.
+ */
+async function requireProjectReadable(ctx: RequestContext, projectId: string): Promise<void> {
+  const project = await ctx.pool.query("SELECT id FROM project WHERE id=$1", [projectId]);
+  if (project.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+  if (ctx.identity.scopes.includes("core:admin")) return;
+  const access = await ctx.pool.query(
+    "SELECT 1 FROM role_assignment WHERE project_id=$1 AND actor_type=$2 AND actor_id=$3 LIMIT 1",
+    [projectId, ctx.identity.actorType, ctx.identity.actorId],
+  );
+  if (access.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+}
+
+/**
+ * Re-check mutable write eligibility in one short transaction immediately
+ * before a task write may reach Runtime or mutate Core facts.  Access is
+ * checked before project status so an unassigned caller cannot distinguish an
+ * inactive project from a missing one.  Platform administrators bypass only
+ * the role lookup; inactive projects remain read-only for every identity.
+ */
+async function findCoreOwnedTaskForWrite(
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+): Promise<CoreTaskRow | null> {
+  const conn = await ctx.pool.connect();
+  try {
+    return await withTransaction(
+      conn as unknown as TransactionClient,
+      (tx) => findCoreOwnedTaskForWriteTx(ctx, tx, projectId, taskId),
+    );
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * Transaction-scoped variant used by idempotent Core-owned writes. Project and
+ * role rows are locked for the transaction so a completed replay cannot race
+ * an archive or access revocation between authorization and its fact write.
+ */
+async function findCoreOwnedTaskForWriteTx(
+  ctx: RequestContext,
+  tx: TransactionClient,
+  projectId: string,
+  taskId: string,
+): Promise<CoreTaskRow | null> {
+  const project = await tx.query(
+    "SELECT status FROM project WHERE id=$1 FOR SHARE",
+    [projectId],
+  );
+  const projectRow = project.rows[0] as { status?: unknown } | undefined;
+  if (!projectRow) throw notFoundError(`project not found: ${projectId}`);
+  if (!ctx.identity.scopes.includes("core:admin")) {
+    const access = await tx.query(
+      `SELECT 1 FROM role_assignment
+        WHERE project_id=$1 AND actor_type=$2 AND actor_id=$3
+        LIMIT 1 FOR SHARE`,
+      [projectId, ctx.identity.actorType, ctx.identity.actorId],
+    );
+    if (access.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+  }
+  if (projectRow.status !== "active") {
+    throw conflictApiError("PROJECT_NOT_ACTIVE", { projectId });
+  }
+  const task = await tx.query(
+    "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2 FOR UPDATE",
+    [taskId, projectId],
+  );
+  return task.rows[0] as CoreTaskRow | undefined ?? null;
+}
+
+function requireCoreTaskMessageable(task: CoreTaskRow): void {
+  if (task.status !== "running" && task.status !== "awaiting_user") {
+    throw conflictApiError("CORE_TASK_NOT_MESSAGEABLE", {
+      taskId: task.id,
+      status: task.status,
+    });
+  }
+}
+
+async function appendConversationEventRecord(
+  client: TransactionClient,
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+  eventId: string,
+  eventKind: string,
+  payload: unknown,
+): Promise<void> {
+  const payloadHash = canonicalRequestHash(payload);
+  const inserted = await client.query(
+    `WITH locked AS (
+       SELECT id FROM agent_task WHERE id=$1 AND project_id=$2 FOR UPDATE
+     ), next_sequence AS (
+       SELECT COALESCE(MAX(sequence),0)+1 AS value
+         FROM task_conversation_event
+        WHERE task_id=$1 AND EXISTS (SELECT 1 FROM locked)
+     )
+     INSERT INTO task_conversation_event
+       (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id)
+     SELECT $3,$2,$1,value,$4,$5::jsonb,$6,$7,$8 FROM next_sequence
+     RETURNING id`,
+    [
+      taskId,
+      projectId,
+      eventId,
+      eventKind,
+      JSON.stringify(payload),
+      payloadHash,
+      ctx.identity.actorType,
+      ctx.identity.actorId,
+    ],
+  );
+  if (inserted.rows.length === 0) throw notFoundError(`task not found: ${taskId}`);
+}
+
+type RuntimeCreateTaskBody = Parameters<RuntimeClient["createTask"]>[0];
+
+interface CoreMainCreateRecord {
+  readonly taskId: string;
+  readonly inputHash: string;
+  readonly runtimeRequest: RuntimeCreateTaskBody;
+  /** All Core-owned tasks use Runtime's explicit start barrier. */
+  readonly requiresExplicitStart: boolean;
+}
+
+async function bindCoreTaskToRuntime(
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+  runtimeAgentId: string,
+): Promise<void> {
+  const bound = await ctx.pool.query(
+    `UPDATE agent_task
+        SET runtime_agent_id=$3,runtime_actor_id=$4,updated_at=now()
+      WHERE id=$1 AND project_id=$2
+        AND (runtime_agent_id IS NULL OR runtime_agent_id=$3)
+        AND runtime_actor_id=$4
+      RETURNING id`,
+    [taskId, projectId, runtimeAgentId, ctx.runtimeActorId],
+  );
+  if (bound.rows.length > 0) return;
+
+  const current = await findCoreOwnedTask(ctx, projectId, taskId);
+  if (!current) throw notFoundError(`task not found: ${taskId}`);
+  throw conflictApiError("RUNTIME_TASK_BINDING_CONFLICT", {
+    taskId,
+    expected: current.runtime_agent_id,
+    received: runtimeAgentId,
+    expectedActor: current.runtime_actor_id,
+    receivedActor: ctx.runtimeActorId,
+  });
+}
+
+async function markRegisteredMainReady(
+  ctx: RequestContext,
+  projectId: string,
+  taskId: string,
+  status: "running" | "awaiting_user",
+): Promise<void> {
+  // Runtime may have already written a more advanced status event. Only fill
+  // the original queued state; never move a callback-owned fact backwards.
+  await ctx.pool.query(
+    `UPDATE agent_task
+        SET status=$3,
+            current_stage=CASE WHEN $3='running' THEN COALESCE(current_stage,'intake') ELSE current_stage END,
+            runtime_snapshot=runtime_snapshot || $4::jsonb,
+            updated_at=now()
+      WHERE id=$1 AND project_id=$2 AND status='queued'`,
+    [
+      taskId,
+      projectId,
+      status,
+      JSON.stringify({
+        agent_id: taskId,
+        project_id: projectId,
+        kind: "main",
+        status,
+        ...(status === "running" ? { current_stage: "intake" } : {}),
+      }),
+    ],
+  );
+}
+
+async function createCoreOwnedMainTask(
+  ctx: RequestContext,
+  projectId: string,
+  task: string,
+  part: string | null,
+  explicitPi: string | null,
+): Promise<HandlerResult> {
+  const runtime = requireRuntime(ctx);
+  const taskId = stableTaskId(ctx, projectId, "main");
+
+  const { result } = await runCoreIdempotent<CoreMainCreateRecord>(ctx, "create_core_task", projectId, async (tx) => {
+    await requireConfiguredRuntimeActor(ctx, tx);
+    const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
+    if (taskContext.projectType === "engineering") {
+      const existing = await tx.query(
+        `SELECT id,runtime_agent_id,runtime_actor_id,kind,status
+           FROM agent_task
+          WHERE project_id = $1`,
+        [projectId],
+      );
+      const coreTasks = existing.rows as CoreTaskIdentityRow[];
+      const activeCoreMain = coreTasks.find((candidate) => (
+        candidate.kind === "main"
+        && (ACTIVE_MAIN_TASK_STATES as readonly string[]).includes(candidate.status)
+      ));
+      if (activeCoreMain) {
+        throw conflictApiError("ENGINEERING_MAIN_AGENT_EXISTS", {
+          projectId,
+          taskId: activeCoreMain.id,
+          source: "core",
+        });
+      }
+
+      // resolveProcessInstance holds the project row FOR UPDATE, so all Core
+      // main-task creates for this project serialize around this bounded
+      // Runtime read and the subsequent insert. This cannot lock an old
+      // client that still writes Runtime directly; rollout must stop those old
+      // writers before enabling P3. Runtime uncertainty therefore fails closed.
+      const activeLegacyMain = await findActiveRuntimeOnlyMain(runtime, projectId, coreTasks);
+      if (activeLegacyMain) {
+        throw conflictApiError("ENGINEERING_MAIN_AGENT_EXISTS", {
+          projectId,
+          taskId: activeLegacyMain.agent_id,
+          source: "runtime_legacy",
+        });
+      }
+    }
+
+    const controlledDir = await ensureWorkspace(projectId);
+    const baseCommit = await headSha(controlledDir);
+    if (!baseCommit) throw internalError("TASK_WORKSPACE_HEAD_MISSING");
+    const tree = await readTreeAt(projectId, baseCommit);
+    const manifestHash = baseManifestHash(tree.files);
+    const inputHash = canonicalRequestHash({
+      schema: "task-input.v1",
+      projectId,
+      kind: "main",
+      objective: task,
+      baseCommit,
+      baseManifestHash: manifestHash,
+      authorizationScope: MAIN_AUTHORIZATION_SCOPE,
+    });
+    const now = new Date().toISOString();
+
+    await tx.query(
+      `INSERT INTO agent_task
+       (id,project_id,project_type,kind,parent_task_id,workspace_id,process_instance_id,
+          runtime_actor_id,objective,authorization_scope,status,input_hash,adoption_state,
+          created_by_type,created_by,created_at,updated_at)
+       VALUES ($1,$2,$3,'main',NULL,NULL,$4,$5,$6,$7::jsonb,'queued',$8,'not_applicable',$9,$10,$11,$11)`,
+      [
+        taskId,
+        projectId,
+        taskContext.projectType,
+        taskContext.processInstanceId ?? null,
+        ctx.runtimeActorId,
+        task,
+        JSON.stringify(MAIN_AUTHORIZATION_SCOPE),
+        inputHash,
+        ctx.identity.actorType,
+        ctx.identity.actorId,
+        now,
+      ],
+    );
+    await tx.query(
+      `INSERT INTO task_conversation_event
+         (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id,created_at)
+       VALUES ($1,$2,$3,1,'user_message',$4::jsonb,$5,$6,$7,$8)`,
+      [
+        `te-${canonicalRequestHash({ taskId, task }).slice(0, 40)}`,
+        projectId,
+        taskId,
+        JSON.stringify({ text: task, source: "main_task_objective" }),
+        canonicalRequestHash({ text: task, source: "main_task_objective" }),
+        ctx.identity.actorType,
+        ctx.identity.actorId,
+        now,
+      ],
+    );
+
+    await outboxEvent(tx, ctx, { type: "task", id: taskId }, "task.created", {
+      taskId,
+      projectId,
+      kind: "main",
+      inputHash,
+    });
+    const effectivePart = part ?? taskContext.targetPart;
+    return {
+      taskId,
+      inputHash,
+      requiresExplicitStart: true,
+      runtimeRequest: {
+        task_id: taskId,
+        task_kind: "main",
+        authorization_scope: MAIN_AUTHORIZATION_SCOPE,
+        input_hash: inputHash,
+        project_id: projectId,
+        task,
+        ...(effectivePart ? { part: effectivePart } : {}),
+        ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
+        ...(taskContext.projectType === "free" || taskContext.legacyCompatibility
+          ? { mode: "agent" as const }
+          : {}),
+        project_type: taskContext.projectType,
+        ...(taskContext.processVersionId ? { process_version_id: taskContext.processVersionId } : {}),
+        ...(taskContext.processProfileId ? { process_profile_id: taskContext.processProfileId } : {}),
+        ...(taskContext.processProfileName ? { process_profile_name: taskContext.processProfileName } : {}),
+        ...(taskContext.processProfileVersion ? { process_profile_version: taskContext.processProfileVersion } : {}),
+      },
+    };
+  });
+
+  // The transaction above is the durable boundary. Replays deliberately drive
+  // these idempotent Runtime operations again, repairing a previous request
+  // that committed Core facts but lost contact during create, bind, or start.
+  let created: RuntimeCreateResponse;
+  try {
+    created = await runtime.createTask(result.runtimeRequest);
+  } catch (error) {
+    throw mapRuntimeError(error);
+  }
+  if (created.agent_id !== result.taskId) {
+    throw conflictApiError("RUNTIME_TASK_ID_MISMATCH", {
+      expected: result.taskId,
+      received: created.agent_id,
+    });
+  }
+  await bindCoreTaskToRuntime(ctx, projectId, result.taskId, created.agent_id);
+
+  let started: RuntimeStartResponse;
+  try {
+    started = await runtime.startTask(created.agent_id);
+  } catch (error) {
+    throw mapRuntimeError(error);
+  }
+  if (!started.started && started.reason !== "already_started") {
+    throw conflictApiError("RUNTIME_TASK_NOT_RUNNING", {
+      taskId: result.taskId,
+      status: started.status,
+      reason: started.reason ?? null,
+    });
+  }
+  if (started.status === "failed" || started.status === "fail_closed" || started.status === "cancelled") {
+    const terminal = started.status === "cancelled" ? "cancelled" : started.status;
+    await ctx.pool.query(
+      `UPDATE agent_task
+          SET status=$3,finished_at=now(),updated_at=now(),
+              runtime_snapshot=runtime_snapshot || $4::jsonb
+        WHERE id=$1 AND project_id=$2 AND status IN ('queued','running','awaiting_user')`,
+      [
+        result.taskId,
+        projectId,
+        terminal,
+        JSON.stringify({ status: terminal, reason: "Runtime reports an already-started terminal task" }),
+      ],
+    );
+  }
+  if (started.status === "running") {
+    await markRegisteredMainReady(ctx, projectId, result.taskId, "running");
+  }
+
+  const persisted = await requireCoreOwnedTask(ctx, projectId, result.taskId);
+  return {
+    status: 201,
+    data: {
+      agentId: result.taskId,
+      task_id: result.taskId,
+      kind: "main" as const,
+      parent_task_id: null,
+      workspace_id: null,
+      status: persisted.status,
+      input_hash: result.inputHash,
+    },
+  };
+}
+
 // ─── handlers ────────────────────────────────────────────────────────────────
 
 /**
@@ -646,11 +1336,13 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
  * which MUST belong to the project). Core resolves the immutable project
  * context before forwarding: free projects use the Runtime free-agent mode and
  * carry no process instance; engineering projects use the frozen profile and a
- * matching (or newly provisioned) process instance. The forwarded response
- * `{ agent_id }` is translated to `{ agentId }` and stored idempotently so a
- * same-key replay returns the original agentId without re-contacting Runtime.
- * Core emits a `task.forwarded` outbox event (observability only — task truth
- * lives in Runtime).
+ * matching (or newly provisioned) process instance. With P3 disabled, the
+ * forwarded `{ agent_id }` is translated to `{ agentId }`, stored idempotently,
+ * and replayed without re-contacting Runtime; task truth remains in Runtime and
+ * Core emits `task.forwarded` for observability. With P3 enabled, Core first
+ * commits the task/event/outbox facts, then runs idempotent Runtime
+ * register/bind/start; a same-key replay repeats that sequence to repair a
+ * failure after the Core commit.
  */
 export async function createTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
@@ -662,6 +1354,10 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
   // Validate the legacy hint but never let it override Core-owned project facts.
   nullableString(body, "mode");
   const explicitPi = nullableString(body, "process_instance_id");
+
+  if (p3Enabled(ctx)) {
+    return createCoreOwnedMainTask(ctx, projectId, task, part, explicitPi);
+  }
 
   const result = await runIdempotent<{ agentId: string }>(ctx, "create_task", projectId, async (tx) => {
     const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
@@ -718,39 +1414,92 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
 /**
  * GET /projects/:projectId/tasks — list task agents for this project.
  *
- * Core forwards to Runtime GET /tasks and filters to agents whose project_id
- * matches the path. The Runtime is the authority for task state.
+ * Core-owned rows are authoritative and remain readable without Runtime.
+ * Runtime contributes only legacy main tasks, with Core identities winning
+ * deduplication. Runtime-only side tasks are deliberately not surfaced.
  */
 export async function listTasksHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
-  const runtime = requireRuntime(ctx);
-
-  // Validate the project exists (cheap ownership guard before forwarding).
-  const projectRow = await ctx.pool.query("SELECT 1 FROM project WHERE id = $1", [projectId]);
-  if (projectRow.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
+  await requireProjectReadable(ctx, projectId);
+  const { rows } = await ctx.pool.query(
+    `SELECT t.*,w.state AS workspace_state,w.base_commit,w.base_manifest_hash,w.head_commit
+       FROM agent_task t
+       LEFT JOIN task_workspace w
+         ON w.id=t.workspace_id AND w.task_id=t.id AND w.project_id=t.project_id
+      WHERE t.project_id=$1
+      ORDER BY t.created_at DESC,t.id DESC`,
+    [projectId],
+  );
+  const coreRows = rows as CoreTaskRow[];
+  const coreAgents = coreRows.map(taskSummary);
 
   let list: RuntimeListResponse;
   try {
-    list = await runtime.listTasks(projectId);
+    list = await requireRuntime(ctx).listTasks(projectId);
   } catch (err) {
+    // Persisted Core facts remain readable while Runtime is unavailable. If
+    // there are no Core facts, fail closed because legacy task truth cannot be
+    // distinguished from an empty project without consulting Runtime.
+    if (coreAgents.length > 0) return { status: 200, data: { agents: coreAgents } };
     throw mapRuntimeError(err);
   }
-  const agents = (list.agents ?? []).filter((r) => r.project_id === projectId);
-  return { status: 200, data: { agents } };
+  if (!Array.isArray(list?.agents)) {
+    if (coreAgents.length > 0) return { status: 200, data: { agents: coreAgents } };
+    throw capabilityUnavailableError("runtime task list is malformed");
+  }
+
+  const seenAgentIds = new Set<string>();
+  for (const row of coreRows) {
+    seenAgentIds.add(row.id);
+    if (row.runtime_agent_id) seenAgentIds.add(row.runtime_agent_id);
+  }
+  const legacyMainAgents: Array<RuntimeAgentSummary & { kind: "main" }> = [];
+  for (const candidate of list.agents) {
+    if (!isReadableRuntimeMain(candidate, projectId) || seenAgentIds.has(candidate.agent_id)) continue;
+    seenAgentIds.add(candidate.agent_id);
+    legacyMainAgents.push(asReadableRuntimeMain(candidate));
+  }
+  return { status: 200, data: { agents: [...coreAgents, ...legacyMainAgents] } };
 }
 
 /**
  * GET /projects/:projectId/tasks/:agentId — fetch a single task agent's detail.
  *
- * Core forwards to Runtime GET /tasks/:agentId; the returned agent's project_id
- * MUST match the path project_id (else 404 — never surface another project's
- * agent). docs entries are passed through verbatim, including artifact_id +
- * revision_id so the frontend can render revision content via Core's content
- * endpoint without a reverse lookup.
+ * Core facts win. A Core miss falls back to Runtime only for a legacy main;
+ * project/id mismatches, Runtime-only sides, and unknown kinds return 404.
+ * Runtime transport failure remains 503 because Core cannot prove whether an
+ * unpersisted legacy main exists.
  */
 export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const agentId = ctx.params.agentId!;
+  await requireProjectReadable(ctx, projectId);
+  const { rows } = await ctx.pool.query(
+    "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2",
+    [agentId, projectId],
+  );
+  const row = rows[0] as CoreTaskRow | undefined;
+  if (row) {
+    const detail = taskDetail(row);
+    if (row.kind === "side" && row.workspace_id) {
+      const workspace = await ctx.pool.query(
+        `SELECT state,base_commit,base_manifest_hash,head_commit
+           FROM task_workspace WHERE id=$1 AND task_id=$2 AND project_id=$3`,
+        [row.workspace_id, row.id, projectId],
+      );
+      const workspaceRow = workspace.rows[0] as Record<string, unknown> | undefined;
+      if (workspaceRow) {
+        Object.assign(detail, {
+          workspace_state: workspaceRow.state,
+          base_commit: workspaceRow.base_commit,
+          base_manifest_hash: workspaceRow.base_manifest_hash,
+          head_commit: workspaceRow.head_commit,
+          workspace_label: `探索副本 ${row.workspace_id.slice(-8)}`,
+        });
+      }
+    }
+    return { status: 200, data: detail };
+  }
   const runtime = requireRuntime(ctx);
 
   let detail: RuntimeAgentDetail;
@@ -759,8 +1508,10 @@ export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult
   } catch (err) {
     throw mapRuntimeError(err);
   }
-  if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
-  return { status: 200, data: detail };
+  if (!isReadableRuntimeMain(detail, projectId, agentId)) {
+    throw notFoundError(`task not found: ${agentId}`);
+  }
+  return { status: 200, data: asReadableRuntimeMain(detail) };
 }
 
 /**
@@ -771,9 +1522,85 @@ export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult
 export async function sendTaskMessageHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const agentId = ctx.params.agentId!;
+  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId);
   const runtime = requireRuntime(ctx);
   const body = asObject(ctx.body);
   const text = requireString(body, "text");
+
+  if (coreTask) {
+    if (coreTask.kind === "side" && !p3Enabled(ctx)) {
+      throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+    }
+    const task = coreTask;
+    const write = await runCoreIdempotent<{
+      readonly taskId: string;
+      readonly runtimeAgentId: string;
+      readonly runtimeIdempotencyKey: string;
+      readonly eventId: string;
+    }>(
+      ctx,
+      `send_core_task_message:${task.id}`,
+      projectId,
+      async (tx) => {
+        const current = await findCoreOwnedTaskForWriteTx(ctx, tx, projectId, task.id);
+        if (!current) throw notFoundError(`task not found: ${task.id}`);
+        if (current.kind === "side" && !p3Enabled(ctx)) {
+          throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+        }
+        requireCoreTaskMessageable(current);
+        const dispatchHash = canonicalRequestHash({
+          schema: "task-message-dispatch.v1",
+          projectId,
+          taskId: current.id,
+          actorType: ctx.identity.actorType,
+          actorId: ctx.identity.actorId,
+          idempotencyKey: ctx.idempotencyKey,
+        });
+        const eventId = `te-${dispatchHash.slice(0, 40)}`;
+        await appendConversationEventRecord(
+          tx,
+          ctx,
+          projectId,
+          current.id,
+          eventId,
+          "user_message",
+          { text },
+        );
+        return {
+          taskId: current.id,
+          runtimeAgentId: current.runtime_agent_id ?? current.id,
+          // Core's public idempotency scope includes the actor and project.
+          // Namespace the downstream key so two actors may safely choose the
+          // same client key without colliding in Runtime's per-agent store.
+          runtimeIdempotencyKey: `core-message-${dispatchHash.slice(0, 48)}`,
+          eventId,
+        };
+      },
+      async (tx) => {
+        const current = await findCoreOwnedTaskForWriteTx(ctx, tx, projectId, task.id);
+        if (!current) throw notFoundError(`task not found: ${task.id}`);
+        if (current.kind === "side" && !p3Enabled(ctx)) {
+          throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+        }
+        requireCoreTaskMessageable(current);
+      },
+    );
+
+    // The Core transaction is the durable boundary. Same-key replays keep the
+    // single user_message fact but deliberately re-drive Runtime delivery. The
+    // forwarded key lets Runtime distinguish a repair from a second prompt,
+    // including the response-lost-after-acceptance window.
+    try {
+      const reply = await runtime.sendMessage(
+        write.result.runtimeAgentId,
+        text,
+        write.result.runtimeIdempotencyKey,
+      );
+      return { status: 200, data: reply };
+    } catch (err) {
+      throw mapRuntimeError(err);
+    }
+  }
 
   let detail: RuntimeAgentDetail;
   try {
@@ -795,8 +1622,83 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
 export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const agentId = ctx.params.agentId!;
-  const runtime = requireRuntime(ctx);
+  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId);
 
+  if (coreTask) {
+    if (coreTask.kind === "side" && !p3Enabled(ctx)) {
+      throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+    }
+    if (!ctx.idempotencyKey) {
+      throw validationError("Idempotency-Key header is required for writes");
+    }
+    const runtime = requireRuntime(ctx);
+    const task = coreTask;
+    const dispatchHash = canonicalRequestHash({
+      schema: "task-abort-dispatch.v1",
+      projectId,
+      taskId: task.id,
+      actorType: ctx.identity.actorType,
+      actorId: ctx.identity.actorId,
+      idempotencyKey: ctx.idempotencyKey,
+    });
+    const downstreamKey = `core-abort-${dispatchHash.slice(0, 48)}`;
+    const write = await runCoreIdempotent<{
+      readonly response: unknown;
+    }>(
+      ctx,
+      `abort_core_task:${task.id}`,
+      projectId,
+      async (tx) => {
+        const current = await findCoreOwnedTaskForWriteTx(ctx, tx, projectId, task.id);
+        if (!current) throw notFoundError(`task not found: ${task.id}`);
+        if (current.kind === "side" && !p3Enabled(ctx)) {
+          throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+        }
+
+        let response: unknown;
+        try {
+          response = await runtime.abortTask(
+            current.runtime_agent_id ?? current.id,
+            downstreamKey,
+          );
+        } catch (err) {
+          throw mapRuntimeError(err);
+        }
+
+        const cancelled = await tx.query(
+          `UPDATE agent_task
+              SET status='cancelled',finished_at=now(),updated_at=now(),
+                  adoption_state=CASE WHEN kind='side' THEN 'discarded' ELSE adoption_state END
+            WHERE id=$1 AND project_id=$2
+              AND status IN ('queued','running','awaiting_user')
+            RETURNING id`,
+          [current.id, projectId],
+        );
+        if (cancelled.rows.length > 0) {
+          await appendConversationEventRecord(
+            tx,
+            ctx,
+            projectId,
+            current.id,
+            `te-${dispatchHash.slice(0, 40)}`,
+            "status",
+            { status: "cancelled" },
+          );
+        }
+        return { response };
+      },
+      async (tx) => {
+        const current = await findCoreOwnedTaskForWriteTx(ctx, tx, projectId, task.id);
+        if (!current) throw notFoundError(`task not found: ${task.id}`);
+        if (current.kind === "side" && !p3Enabled(ctx)) {
+          throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
+        }
+      },
+    );
+    return { status: 200, data: write.result.response };
+  }
+
+  const runtime = requireRuntime(ctx);
   let detail: RuntimeAgentDetail;
   try {
     detail = await runtime.getTask(agentId);
@@ -806,7 +1708,17 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
   if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
 
   try {
-    const result = await runtime.abortTask(agentId);
+    const legacyDownstreamKey = ctx.idempotencyKey
+      ? `core-legacy-abort-${canonicalRequestHash({
+          schema: "legacy-task-abort-dispatch.v1",
+          projectId,
+          agentId,
+          actorType: ctx.identity.actorType,
+          actorId: ctx.identity.actorId,
+          idempotencyKey: ctx.idempotencyKey,
+        }).slice(0, 41)}`
+      : undefined;
+    const result = await runtime.abortTask(agentId, legacyDownstreamKey);
     return { status: 200, data: result };
   } catch (err) {
     throw mapRuntimeError(err);
@@ -828,7 +1740,32 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
 export async function streamTaskHandler(ctx: RequestContext): Promise<Response> {
   const projectId = ctx.params.projectId!;
   const agentId = ctx.params.agentId!;
+  await requireProjectReadable(ctx, projectId);
   const runtime = requireRuntime(ctx);
+
+  const coreTask = await findCoreOwnedTask(ctx, projectId, agentId);
+  if (coreTask) {
+    const task = coreTask;
+    let upstream: Response;
+    try {
+      upstream = await runtime.streamTask(task.runtime_agent_id ?? task.id, {
+        signal: ctx.request.signal,
+        lastEventId: ctx.request.headers.get("last-event-id"),
+        from: ctx.url.searchParams.get("from"),
+      });
+    } catch (err) {
+      throw mapRuntimeError(err);
+    }
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
 
   let detail: RuntimeAgentDetail;
   try {

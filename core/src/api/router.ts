@@ -3,7 +3,7 @@
  *
  * Parses the request, authenticates via Bearer token, parses the JSON body
  * (parse failure → 400 validation), matches the method+path to a handler,
- * enforces a coarse three-tier scope guard (read/write/approve), and wraps the
+ * enforces a coarse route scope guard, and wraps the
  * handler result in the unified envelope. Unknown paths → 404.
  *
  * Internal-error hardening: any unexpected error returns a fixed "internal
@@ -86,17 +86,33 @@ import {
   listImportSnapshotsHandler,
   searchImportSnapshotsHandler,
 } from "./import-handlers.ts";
+import {
+  adoptSideTaskHandler,
+  appendTaskEventHandler,
+  createSideTaskHandler,
+  finalizeSideTaskResultHandler,
+  getSideTaskDiffHandler,
+  getSideTaskJobEvidenceContentHandler,
+  getSideTaskJobEvidenceHandler,
+  getSideTaskJobStatusHandler,
+  getSideTaskResultHandler,
+  getSideTaskWorkspaceFileHandler,
+  getSideTaskWorkspaceTreeHandler,
+  getTaskEventsHandler,
+  submitSideTaskJobHandler,
+  writeSideTaskWorkspaceFilesHandler,
+} from "./side-task-handlers.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
 
 type Handler = (ctx: RequestContext) => Promise<HandlerResult | Response>;
 
-/** 文件头写的「coarse three-tier scope guard」的那三层。
+/** 文件头写的 coarse route scope guard。
  *  之前 `RequiredScope` 只被引用、从没被声明过（tsc TS2304）——因为纯类型位置会被
  *  转译器擦掉，运行时不报错，于是一直没人发现；代价是下面 30 多条路由的 scope
  *  字面量实际上没被校验过。 */
-type RequiredScope = "core:read" | "core:write" | "core:approve";
+type RequiredScope = "core:read" | "core:write" | "core:approve" | "core:task-runtime";
 
 interface RouteMatch {
   readonly handler: Handler;
@@ -111,6 +127,7 @@ export async function routeApi(
   connector?: ConnectorPort,
   runtimeClient?: RuntimeClient,
   featureFlags: Readonly<CoreFeatureFlags> = DISABLED_CORE_FEATURE_FLAGS,
+  runtimeActorId = "synthia-runtime",
 ): Promise<Response> {
   const url = new URL(request.url);
   const correlationId = resolveCorrelationId(request.headers.get("x-correlation-id"));
@@ -160,6 +177,7 @@ export async function routeApi(
     classification,
     connector,
     runtimeClient,
+    runtimeActorId,
     featureFlags,
   };
 
@@ -168,7 +186,7 @@ export async function routeApi(
     return jsonBody(404, errorEnvelope(notFoundError(`unknown path: ${request.method} ${url.pathname}`), correlationId));
   }
 
-  // Coarse three-tier scope guard (B4). Project-level ACL is a later slice;
+  // Coarse route scope guard (B4). Project-level ACL is a later slice;
   // the first slice runs inside the trusted intranet domain.
   if (!identity.scopes.includes(match.requiredScope)) {
     return jsonBody(403, errorEnvelope(forbiddenErrorWithRequired(match.requiredScope), correlationId));
@@ -268,7 +286,16 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
           if (method === "GET") return { handler: listJobsHandler, params, requiredScope: "core:read" };
           break;
         case "tasks":
-          if (method === "POST") return { handler: createTaskHandler, params, requiredScope: "core:write" };
+          if (method === "POST") {
+            const body = ctx.body && typeof ctx.body === "object" && !Array.isArray(ctx.body)
+              ? ctx.body as Record<string, unknown>
+              : {};
+            return {
+              handler: body.kind === "side" ? createSideTaskHandler : createTaskHandler,
+              params,
+              requiredScope: "core:write",
+            };
+          }
           if (method === "GET") return { handler: listTasksHandler, params, requiredScope: "core:read" };
           break;
       }
@@ -304,6 +331,62 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // GET /projects/:projectId/tasks/:agentId
     if (segments.length === 4 && segments[2] === "tasks" && method === "GET") {
       return { handler: getTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // P3 Core-owned task facts and sealed side-task results.
+    if (segments.length === 5 && segments[2] === "tasks") {
+      const params = { projectId, taskId: segments[3]! };
+      if (segments[4] === "events") {
+        if (method === "GET") return { handler: getTaskEventsHandler, params, requiredScope: "core:read" };
+        if (method === "POST") return { handler: appendTaskEventHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (segments[4] === "result") {
+        if (method === "GET") return { handler: getSideTaskResultHandler, params, requiredScope: "core:read" };
+        if (method === "POST") return { handler: finalizeSideTaskResultHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (segments[4] === "diff" && method === "GET") {
+        return { handler: getSideTaskDiffHandler, params, requiredScope: "core:read" };
+      }
+      if (segments[4] === "adoptions" && method === "POST") {
+        return { handler: adoptSideTaskHandler, params, requiredScope: "core:write" };
+      }
+      if (segments[4] === "jobs" && method === "POST") {
+        return { handler: submitSideTaskJobHandler, params, requiredScope: "core:task-runtime" };
+      }
+    }
+
+    // Runtime-only task-scoped job polling and evidence.  These routes never
+    // grant the task token access to the generic project job surface.
+    if (segments.length >= 6 && segments[2] === "tasks" && segments[4] === "jobs") {
+      const params = { projectId, taskId: segments[3]!, jobId: segments[5]! };
+      if (segments.length === 6 && method === "GET") {
+        return { handler: getSideTaskJobStatusHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (segments.length === 7 && segments[6] === "evidence" && method === "GET") {
+        return { handler: getSideTaskJobEvidenceHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (
+        segments.length === 8
+        && segments[6] === "evidence"
+        && segments[7] === "content"
+        && method === "GET"
+      ) {
+        return { handler: getSideTaskJobEvidenceContentHandler, params, requiredScope: "core:task-runtime" };
+      }
+    }
+
+    // Runtime-only task-scoped isolated workspace.
+    if (segments.length === 6 && segments[2] === "tasks" && segments[4] === "workspace") {
+      const params = { projectId, taskId: segments[3]! };
+      if (segments[5] === "tree" && method === "GET") {
+        return { handler: getSideTaskWorkspaceTreeHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (segments[5] === "file" && method === "GET") {
+        return { handler: getSideTaskWorkspaceFileHandler, params, requiredScope: "core:task-runtime" };
+      }
+      if (segments[5] === "files" && method === "POST") {
+        return { handler: writeSideTaskWorkspaceFilesHandler, params, requiredScope: "core:task-runtime" };
+      }
     }
 
     // POST /projects/:projectId/tasks/:agentId/message | /abort (free-agent conversation)

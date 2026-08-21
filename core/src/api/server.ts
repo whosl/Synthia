@@ -44,14 +44,23 @@ export interface SynthiaServerOptions {
    */
   readonly runtimeClient?: RuntimeClient;
   /**
-   * Explicit Core feature overrides. Historical-material writes default off;
-   * when omitted, SYNTHIA_FEATURE_HISTORICAL_MATERIALS is parsed strictly.
+   * Authenticated service uid expected on Runtime task callbacks. Defaults to
+   * SYNTHIA_RUNTIME_ACTOR_ID, then `synthia-runtime`.
+   */
+  readonly runtimeActorId?: string;
+  /**
+   * Explicit Core feature overrides. P2/P3 writes default off; when omitted,
+   * SYNTHIA_FEATURE_HISTORICAL_MATERIALS and SYNTHIA_FEATURE_SIDE_TASKS are
+   * parsed strictly.
    */
   readonly features?: Readonly<Partial<CoreFeatureFlags>>;
 }
 
 export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}): SynthiaServer {
   const runtimeClient = opts.runtimeClient ?? createRuntimeClientFromEnv();
+  const runtimeActorId = resolveRuntimeActorId(
+    opts.runtimeActorId ?? process.env.SYNTHIA_RUNTIME_ACTOR_ID,
+  );
   const featureFlags = resolveCoreFeatureFlags({ features: opts.features });
   const server = Bun.serve({
     port: opts.port ?? 0,
@@ -60,11 +69,30 @@ export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}):
     // 推理静默期会超过它而被掐断，浏览器于是陷入 ~10 秒一次的重连回放循环，
     // 流式输出永远渲染不出来。放到 Bun 上限，保活由 Runtime 的心跳负责。
     idleTimeout: 255,
-    fetch: (request: Request) => routeApi(request, pool, opts.connector, runtimeClient, featureFlags),
+    fetch: (request: Request) => routeApi(
+      request,
+      pool,
+      opts.connector,
+      runtimeClient,
+      featureFlags,
+      runtimeActorId,
+    ),
   });
   return {
     port: server.port,
     hostname: server.hostname,
     stop: () => server.stop(true),
   };
+}
+
+function resolveRuntimeActorId(raw: string | undefined): string {
+  const actorId = (raw ?? "synthia-runtime").trim();
+  if (
+    actorId.length === 0
+    || actorId.length > 255
+    || /[\u0000-\u001f\u007f]/.test(actorId)
+  ) {
+    throw new TypeError("SYNTHIA_RUNTIME_ACTOR_ID must be a non-empty service uid");
+  }
+  return actorId;
 }

@@ -10,6 +10,7 @@
  * Job endpoints answer 503 capability_unavailable.
  * Historical-material writes require SYNTHIA_FEATURE_HISTORICAL_MATERIALS=1
  * (or true); unset/0/false keeps the capability read-only.
+ * Side-task workspace/adoption writes require SYNTHIA_FEATURE_SIDE_TASKS=1.
  */
 import { Pool } from "pg";
 import { startSynthiaServer } from "../src/api/server.ts";
@@ -32,5 +33,6 @@ const server = startSynthiaServer(pool, {
 });
 console.log(
   `[core] api listening on :${server.port} connector=${connector ? "configured" : "unavailable"}`
-  + ` historical_materials=${features.historicalMaterials ? "enabled" : "disabled"}`,
+  + ` historical_materials=${features.historicalMaterials ? "enabled" : "disabled"}`
+  + ` side_tasks=${features.sideTasks ? "enabled" : "disabled"}`,
 );

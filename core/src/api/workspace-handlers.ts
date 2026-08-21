@@ -32,6 +32,7 @@ import {
   formatGitLocation,
   isRegisterablePath,
   parseGitLocation,
+  projectWorkspaceDir,
   validateWorkspacePath,
   WorkspaceError,
 } from "../workspace/paths.ts";
@@ -46,6 +47,7 @@ import {
   type CommitAuthor,
   type TreeSnapshot,
 } from "../workspace/store.ts";
+import { headSha } from "../workspace/git.ts";
 import { notFoundError, validationError } from "./errors.ts";
 import {
   asClient,
@@ -172,6 +174,7 @@ export async function getWorkspaceTreeHandler(ctx: RequestContext): Promise<Hand
     status: 200,
     data: {
       project_id: projectId,
+      head_commit: await headSha(projectWorkspaceDir(projectId)),
       files,
       pending_count: files.filter((f) => f.status === "dirty" || f.status === "untracked").length,
     },
@@ -246,7 +249,7 @@ export async function putWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
 
 // ─── 共用：让 DB 追上某个 commit 的树 ────────────────────────────────────────
 
-interface RegisteredFile {
+export interface RegisteredFile {
   readonly path: string;
   readonly artifact_id: string;
   readonly revision_id: string;
@@ -254,12 +257,12 @@ interface RegisteredFile {
   readonly content_hash: string;
 }
 
-interface SkippedFile {
+export interface SkippedFile {
   readonly path: string;
   readonly reason: "not_utf8" | "too_large" | "invalid_path";
 }
 
-interface ReconcileOptions {
+export interface ReconcileOptions {
   readonly changeReason: string;
   /** 新建 artifact 时的类型覆盖；空串表示按目录推断。 */
   readonly artifactTypeOverride: string;
@@ -267,7 +270,7 @@ interface ReconcileOptions {
   readonly onlyPaths?: readonly string[];
 }
 
-interface ReconcileResult {
+export interface ReconcileResult {
   readonly registered: RegisteredFile[];
   /** 字节与该产物最新一版完全相同、因而没出新版的文件——连同它指向的那一版。
    *  只回路径的话，调用方（agent 重发同样内容、web 刷新树）就无从知道「那是哪一版」。 */
@@ -283,7 +286,7 @@ interface ReconcileResult {
  * commit 的 changed 列表**——这才是重试自愈的来源：commit 成功而 DB 写失败时，重试
  * 那次的 `changed` 是空的，只有从树出发才补得回来。
  */
-async function reconcileIntoRevisions(
+export async function reconcileIntoRevisions(
   tx: TransactionClient,
   ctx: RequestContext,
   projectId: string,
