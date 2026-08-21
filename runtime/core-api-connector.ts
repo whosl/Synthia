@@ -7,7 +7,7 @@
  * which persists ToolRun/evidence, adjudicates run_class, and proxies the
  * Connector on its own.
  *
- * Contract (see SYNTHIA-RUNTIME-CORE-CONTRACT):
+ * Generic contract (see SYNTHIA-RUNTIME-CORE-CONTRACT):
  *   POST /api/v1/projects/:id/jobs            → 201 {data:{jobId,runClass,state}}
  *   GET  /api/v1/projects/:id/jobs/:jobId     → 200 {data:{jobId,state,errorCode?,outputSha256?}}
  *   GET  /api/v1/projects/:id/jobs/:jobId/evidence
@@ -77,6 +77,13 @@ export interface CoreApiConnectorOptions {
   readonly baseUrl: string;
   readonly token: string;
   readonly projectId: string;
+  /**
+   * Optional Core-owned side-task binding. Both fields must be supplied
+   * together. Submission, status, and evidence all remain on the task-scoped
+   * route surface when this binding is present.
+   */
+  readonly taskId?: string;
+  readonly workspaceId?: string;
   readonly connectorId?: string;
   /** Inject fetch (tests). Defaults to the global fetch. */
   readonly fetchImpl?: typeof fetch;
@@ -100,7 +107,19 @@ export interface CoreApiConfig {
 export function resolveCoreApiConfig(env: Record<string, string | undefined>): CoreApiConfig {
   const token = env.SYNTHIA_CORE_TOKEN;
   if (!token || !token.trim()) {
-    throw new Error("--via-core requires SYNTHIA_CORE_TOKEN (Core service token with core:read/core:write scopes)");
+    throw new Error("--via-core requires SYNTHIA_CORE_TOKEN (ordinary Core service token without core:task-runtime)");
+  }
+  const baseUrl = (env.SYNTHIA_CORE_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
+  return { baseUrl, token };
+}
+
+/** Resolve the dedicated singleton-scope credential for task-bound calls. */
+export function resolveTaskRuntimeApiConfig(
+  env: Record<string, string | undefined>,
+): CoreApiConfig {
+  const token = env.SYNTHIA_TASK_RUNTIME_TOKEN;
+  if (!token || !token.trim()) {
+    throw new Error("task-bound Core access requires SYNTHIA_TASK_RUNTIME_TOKEN (singleton core:task-runtime scope)");
   }
   const baseUrl = (env.SYNTHIA_CORE_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
   return { baseUrl, token };
@@ -117,6 +136,8 @@ export class CoreApiConnector implements LoopConnector {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly projectId: string;
+  private readonly taskId?: string;
+  private readonly workspaceId?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly pollIntervalMs: number;
   private readonly maxPollMs: number;
@@ -125,10 +146,17 @@ export class CoreApiConnector implements LoopConnector {
   private readonly sleeper: (ms: number) => Promise<void>;
 
   constructor(opts: CoreApiConnectorOptions) {
+    if ((opts.taskId === undefined) !== (opts.workspaceId === undefined)) {
+      throw new TypeError("taskId and workspaceId must be supplied together");
+    }
     this.id = opts.connectorId ?? "core-api";
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.projectId = opts.projectId;
+    if (opts.taskId !== undefined && opts.workspaceId !== undefined) {
+      this.taskId = requireTaskBindingIdentifier("taskId", opts.taskId);
+      this.workspaceId = requireTaskBindingIdentifier("workspaceId", opts.workspaceId);
+    }
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.maxPollMs = opts.maxPollMs ?? DEFAULT_MAX_POLL_MS;
@@ -148,9 +176,12 @@ export class CoreApiConnector implements LoopConnector {
     const idempotencyKey = `job-${randomUUID()}`;
     const body = buildSubmitBody(submission);
 
+    const submitPath = this.taskId === undefined
+      ? `/api/v1/projects/${this.projectId}/jobs`
+      : `/api/v1/projects/${this.projectId}/tasks/${this.taskId}/jobs`;
     const submitted = (await this.request(
       "POST",
-      `/api/v1/projects/${this.projectId}/jobs`,
+      submitPath,
       body,
       idempotencyKey,
     )) as { jobId: string; runClass: string; state: string };
@@ -163,7 +194,7 @@ export class CoreApiConnector implements LoopConnector {
     try {
       const ev = (await this.request(
         "GET",
-        `/api/v1/projects/${this.projectId}/jobs/${jobId}/evidence`,
+        `${this.jobPath(jobId)}/evidence`,
       )) as { jobId: string; entries: EvidenceManifest["entries"] };
       evidence = { jobId, entries: ev.entries ?? [] };
     } catch (e) {
@@ -183,7 +214,7 @@ export class CoreApiConnector implements LoopConnector {
   async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
     const data = (await this.request(
       "GET",
-      `/api/v1/projects/${this.projectId}/jobs/${jobId}/evidence/content?name=${encodeURIComponent(name)}`,
+      `${this.jobPath(jobId)}/evidence/content?name=${encodeURIComponent(name)}`,
     )) as { name: string; content: string; sha256: string; truncated: boolean; mediaType: string };
     return {
       content: data.content,
@@ -202,7 +233,7 @@ export class CoreApiConnector implements LoopConnector {
     while (this.clock() < deadline) {
       const data = (await this.request(
         "GET",
-        `/api/v1/projects/${this.projectId}/jobs/${jobId}`,
+        this.jobPath(jobId),
       )) as { jobId: string; state: string; errorCode?: string; outputSha256?: string };
       last = { state: data.state, ...(data.errorCode ? { errorCode: data.errorCode } : {}) };
       if (TERMINAL_STATES.has(data.state)) return last;
@@ -262,11 +293,22 @@ export class CoreApiConnector implements LoopConnector {
 
   private buildInit(method: "GET" | "POST", body?: unknown, idempotencyKey?: string): RequestInit {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    if (this.taskId !== undefined && this.workspaceId !== undefined) {
+      headers["X-Synthia-Task-Id"] = this.taskId;
+      headers["X-Synthia-Workspace-Id"] = this.workspaceId;
+    }
     if (method === "POST") {
       headers["Content-Type"] = "application/json";
       if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     }
     return { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) };
+  }
+
+  private jobPath(jobId: string): string {
+    const projectJobs = `/api/v1/projects/${this.projectId}/jobs/${jobId}`;
+    return this.taskId === undefined
+      ? projectJobs
+      : `/api/v1/projects/${this.projectId}/tasks/${this.taskId}/jobs/${jobId}`;
   }
 }
 
@@ -278,6 +320,19 @@ function defaultSleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, ms);
   return promise;
+}
+
+function requireTaskBindingIdentifier(field: string, value: string): string {
+  if (
+    value.length === 0 ||
+    value.length > 160 ||
+    value === "." ||
+    value === ".." ||
+    !/^[A-Za-z0-9._:-]+$/.test(value)
+  ) {
+    throw new TypeError(`${field} is not a valid Core task binding identifier`);
+  }
+  return value;
 }
 
 function jobStateToResultStatus(state: string): VivadoResult["status"] {

@@ -10,6 +10,11 @@
  */
 
 import type { ArtifactType, GateId, GovernanceClient, LoopConnector } from "./types.ts";
+import type {
+  RuntimeTaskKind,
+  TaskAuthorizationScope,
+  TaskWorkspaceClient,
+} from "./task-workspace-client.ts";
 
 /** JSON Schema 子集（OpenAI tool `parameters` 格式）。 */
 export type ToolParameters = Record<string, unknown>;
@@ -17,6 +22,14 @@ export type ToolParameters = Record<string, unknown>;
 /** 工具执行上下文：注入治理能力（Core）与 Connector。工具内不得绕过 Core 直连 Worker。 */
 export interface ToolExecContext {
   readonly projectId: string;
+  /** Core-issued task identity. Legacy sessions omit these fields. */
+  readonly taskId?: string;
+  readonly taskKind?: RuntimeTaskKind;
+  readonly parentTaskId?: string;
+  readonly workspaceId?: string;
+  readonly authorization?: TaskAuthorizationScope;
+  /** Narrow isolated-workspace capability. Present for side tasks only. */
+  readonly workspace?: TaskWorkspaceClient;
   /** Core 治理客户端（登记候选制品/快照/门禁）。 */
   readonly governance: GovernanceClient;
   /** Connector（经 Core 提交 Vivado Job）。无可用时为 null（工具须 fail-closed）。 */
@@ -161,10 +174,20 @@ export interface PromptStreamOptions {
   onReasoningStart?: (partId: string) => void;
   /** 思维链增量（追加到该 part）。 */
   onReasoningDelta?: (partId: string, text: string) => void;
-  /** 工具开始执行（tool part 创建，state=running）。 */
-  onToolStart?: (callId: string, name: string, args: string) => void;
-  /** 工具执行结束（同一 part 转 done/error）。 */
-  onToolEnd?: (callId: string, ok: boolean, result: string) => void;
+  /** 工具开始执行（tool part 创建，state=running）；fullArgs 供持久化完整事实。 */
+  onToolStart?: (
+    callId: string,
+    name: string,
+    args: string,
+    fullArgs?: string,
+  ) => void | Promise<void>;
+  /** 工具执行结束（同一 part 转 done/error）；fullResult 供持久化完整事实。 */
+  onToolEnd?: (
+    callId: string,
+    ok: boolean,
+    result: string,
+    fullResult?: string,
+  ) => void | Promise<void>;
 }
 
 /** 会话状态机。 */

@@ -28,7 +28,8 @@
  * reached directly.
  *
  * --via-core env: SYNTHIA_CORE_URL (default http://127.0.0.1:8787) and
- * SYNTHIA_CORE_TOKEN (REQUIRED — Core service token with core:read/core:write).
+ * SYNTHIA_CORE_TOKEN (REQUIRED — ordinary Core service token with read/write;
+ * it must not carry core:task-runtime).
  */
 
 // Bun snapshots proxy env at startup; JS deletion is best-effort.

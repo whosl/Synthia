@@ -14,9 +14,18 @@
 import { readFile } from "node:fs/promises";
 import { createEnvironmentCloudflareRemoteConnector } from "../connector/http.ts";
 import type { ConnectorEndpoint } from "../connector/remote.ts";
-import { CoreApiConnector, resolveCoreApiConfig } from "./core-api-connector.ts";
+import {
+  CoreApiConnector,
+  resolveCoreApiConfig,
+  resolveTaskRuntimeApiConfig,
+} from "./core-api-connector.ts";
 import { CoreGovernanceClient } from "./governance-client.ts";
 import { RemoteVivadoConnector } from "./remote-connector.ts";
+import {
+  CoreTaskConversationClient,
+  CoreTaskWorkspaceClient,
+  type TaskAuthorizationScope,
+} from "./task-workspace-client.ts";
 import type { ArtifactFile, DocGeneration, LoopModel, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -125,17 +134,68 @@ export async function buildRemoteConnector(projectId: string): Promise<RemoteViv
   return new RemoteVivadoConnector({ clientFactory, connectorId: endpoint.connector_id, projectId, onLifecycle: (e) => process.stderr.write(`[runtime] lifecycle/${e.action} ${e.result} ${e.detail ?? ""}\n`) });
 }
 
-export function buildCoreApiConnector(projectId: string): CoreApiConnector {
-  // Throws if SYNTHIA_CORE_TOKEN is missing → main().catch exits 2 with fatal.
-  const cfg = resolveCoreApiConfig(process.env);
+export interface CoreApiTaskJobBinding {
+  readonly taskId: string;
+  readonly workspaceId: string;
+}
+
+export function buildCoreApiConnector(
+  projectId: string,
+  taskBinding?: CoreApiTaskJobBinding,
+  env: Record<string, string | undefined> = process.env,
+): CoreApiConnector {
+  const cfg = taskBinding === undefined
+    ? resolveCoreApiConfig(env)
+    : resolveTaskRuntimeApiConfig(env);
   return new CoreApiConnector({
-    baseUrl: cfg.baseUrl, token: cfg.token, projectId,
+    baseUrl: cfg.baseUrl,
+    token: cfg.token,
+    projectId,
+    ...(taskBinding ?? {}),
   });
 }
 
-export function buildCoreGovernanceClient(projectId: string, processInstanceId: string): CoreGovernanceClient {
-  const cfg = resolveCoreApiConfig(process.env);
+export function buildCoreGovernanceClient(
+  projectId: string,
+  processInstanceId: string,
+  env: Record<string, string | undefined> = process.env,
+): CoreGovernanceClient {
+  const cfg = resolveCoreApiConfig(env);
   return new CoreGovernanceClient({
     baseUrl: cfg.baseUrl, token: cfg.token, projectId, processInstanceId,
+  });
+}
+
+/** Build the event-only callback used by a Core-owned main task. */
+export function buildCoreTaskConversationClient(
+  projectId: string,
+  taskId: string,
+  env: Record<string, string | undefined> = process.env,
+): CoreTaskConversationClient {
+  const cfg = resolveTaskRuntimeApiConfig(env);
+  return new CoreTaskConversationClient({
+    baseUrl: cfg.baseUrl,
+    token: cfg.token,
+    projectId,
+    taskId,
+  });
+}
+
+/** Build the narrow workspace capability used by a single Core-owned side task. */
+export function buildCoreTaskWorkspaceClient(
+  projectId: string,
+  taskId: string,
+  workspaceId: string,
+  authorization: TaskAuthorizationScope,
+  env: Record<string, string | undefined> = process.env,
+): CoreTaskWorkspaceClient {
+  const cfg = resolveTaskRuntimeApiConfig(env);
+  return new CoreTaskWorkspaceClient({
+    baseUrl: cfg.baseUrl,
+    token: cfg.token,
+    projectId,
+    taskId,
+    workspaceId,
+    authorization,
   });
 }

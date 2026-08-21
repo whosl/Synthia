@@ -23,6 +23,13 @@ export type StreamEvent =
   | { type: "done"; seq: number; reply: string; status: string; ts: string }
   | { type: "reset"; seq: number; reason: string };
 
+/** Preserve each event variant while removing the hub-owned sequence field. */
+type StreamEventInput = StreamEvent extends infer Event
+  ? Event extends { readonly seq: number }
+    ? Omit<Event, "seq">
+    : never
+  : never;
+
 /** part 事件载荷：流式文本 / 思维链 part（二者形态一致，只差 kind）。 */
 export interface StreamTextPart {
   /** `text` = Agent 回复正文；`reasoning` = 思维链（思考过程）。 */
@@ -106,7 +113,7 @@ export class StreamHub {
   }
 
   /** 发布事件（seq 自增）；返回带 seq 的完整事件。 */
-  emit(event: Omit<StreamEvent, "seq">): StreamEvent {
+  emit(event: StreamEventInput): StreamEvent {
     const hub = this.hub;
     const full = { ...event, seq: ++hub.seq } as StreamEvent;
     hub.events.push(full);

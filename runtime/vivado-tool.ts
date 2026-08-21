@@ -93,9 +93,28 @@ async function resolveSources(
   const resolved: ResolvedSource[] = [];
   const failures: SourceFailure[] = [];
   for (const ref of refs) {
-    let file;
+    let file: {
+      path: string;
+      content: string;
+      contentHash: string;
+      registered: boolean;
+      revisionId: string | null;
+      version: number | null;
+      commit: string | null;
+    };
     try {
-      file = await ctx.governance.readWorkspaceFile(ref.path);
+      if (ctx.taskKind === "side") {
+        if (!ctx.workspace) throw new Error("Core-issued task workspace capability is missing");
+        const isolated = await ctx.workspace.readFile(ref.path);
+        file = {
+          ...isolated,
+          registered: false,
+          revisionId: null,
+          version: null,
+        };
+      } else {
+        file = await ctx.governance.readWorkspaceFile(ref.path);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       failures.push({ path: ref.path, reason: msg });

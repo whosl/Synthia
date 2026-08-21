@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   newAgentId,
   agentStatePath,
+  agentMessageIdempotencyPath,
   createAgentState,
   saveAgentState,
   loadAgentState,
+  loadMessageIdempotencyRecords,
+  saveMessageIdempotencyRecords,
   listAgents,
   deleteAgent,
   STAGE_ORDER,
@@ -17,7 +20,8 @@ import {
   withGateDecision,
 } from "./agent-state.ts";
 import type { AgentState, RegisteredRevision } from "./types.ts";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 describe("agent-state persistence", () => {
   test("newAgentId generates agent-<uuid> format", () => {
@@ -60,6 +64,66 @@ describe("agent-state persistence", () => {
     expect(agents).toContain("r-list-2");
     await deleteAgent("r-list-1");
     await deleteAgent("r-list-2");
+  });
+
+  test("message idempotency ledgers persist separately and never appear as agents", async () => {
+    const agentId = "r-message-ledger";
+    await saveAgentState(createAgentState({
+      agentId,
+      task: "message ledger",
+      part: "p",
+      projectId: "p1",
+    }));
+    await saveMessageIdempotencyRecords(agentId, {
+      "message-key": {
+        fingerprint: "a".repeat(64),
+        state: "completed",
+        status: 200,
+        body: { accepted: true, status: "running" },
+        createdAt: "2026-08-21T00:00:00.000Z",
+      },
+    });
+
+    expect(await loadMessageIdempotencyRecords(agentId)).toEqual({
+      "message-key": {
+        fingerprint: "a".repeat(64),
+        state: "completed",
+        status: 200,
+        body: { accepted: true, status: "running" },
+        createdAt: "2026-08-21T00:00:00.000Z",
+      },
+    });
+    expect((await listAgents()).filter((id) => id.includes("message-ledger"))).toEqual([agentId]);
+    await deleteAgent(agentId);
+    expect(await loadMessageIdempotencyRecords(agentId)).toEqual({});
+  });
+
+  test("legacy v1 message records without state load as completed", async () => {
+    const agentId = "r-message-ledger-v1";
+    const path = agentMessageIdempotencyPath(agentId);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      schema: "runtime-message-idempotency.v1",
+      records: {
+        "legacy-key": {
+          fingerprint: "b".repeat(64),
+          status: 200,
+          body: { accepted: true, status: "running" },
+          createdAt: "2026-08-20T00:00:00.000Z",
+        },
+      },
+    }), "utf8");
+
+    expect(await loadMessageIdempotencyRecords(agentId)).toEqual({
+      "legacy-key": {
+        fingerprint: "b".repeat(64),
+        state: "completed",
+        status: 200,
+        body: { accepted: true, status: "running" },
+        createdAt: "2026-08-20T00:00:00.000Z",
+      },
+    });
+    await deleteAgent(agentId);
   });
 
   test("deleteAgent is no-op for non-existent", async () => {

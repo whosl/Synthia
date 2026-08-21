@@ -12,6 +12,10 @@
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import type {
+  RuntimeTaskKind,
+  TaskAuthorizationScope,
+} from "./task-workspace-client.ts";
 
 /** A generated source / constraint artifact (path + content + optional media type). */
 export interface ArtifactFile {
@@ -556,6 +560,18 @@ export class NoGovernanceClient implements GovernanceClient {
 // ---------------------------------------------------------------------------
 export interface AgentState {
   readonly agentId: string;
+  /** Core-issued task identity. For P3 tasks taskId === agentId. */
+  readonly taskId?: string;
+  readonly taskKind?: RuntimeTaskKind;
+  readonly parentTaskId?: string;
+  readonly workspaceId?: string;
+  readonly authorization?: TaskAuthorizationScope;
+  /** Core input hash when supplied, otherwise the Runtime descriptor hash. */
+  readonly inputHash?: string;
+  /** Hash of the exact dispatch descriptor, used for idempotent conflict checks. */
+  readonly taskDescriptorHash?: string;
+  /** False while any Core-owned task is durably registered but not started. */
+  readonly runtimeStarted?: boolean;
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
@@ -575,8 +591,14 @@ export interface AgentState {
   readonly currentStage: StageId;
   /** Gate currently awaiting approval (when status is awaiting_approval). */
   readonly awaitingGate?: GateId;
-  /** Loop status: running / paused awaiting approval / terminal. */
-  readonly status: "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed";
+  /** Loop/task status: running / paused for user or approval / terminal. */
+  readonly status:
+    | "running"
+    | "awaiting_user"
+    | "awaiting_approval"
+    | "succeeded"
+    | "failed"
+    | "fail_closed";
   /** Registered doc artifacts keyed by stage. */
   readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
   /** Registered RTL revision (rtl_build stage). */

@@ -271,6 +271,29 @@ async function findMissingUpstream(
   return null;
 }
 
+/** Side tasks verify upstreams inside their isolated clone, never in formal artifacts. */
+async function findMissingSideUpstream(
+  ctx: ToolExecContext,
+  reqs: readonly UpstreamReq[],
+): Promise<UpstreamReq | "read-error" | null> {
+  if (!ctx.workspace) return "read-error";
+  let paths: readonly string[];
+  try {
+    paths = (await ctx.workspace.listTree()).map((entry) => entry.path);
+  } catch {
+    return "read-error";
+  }
+  for (const req of reqs) {
+    const prefix = req.type === "RTL_SOURCE_SET"
+      ? "rtl/"
+      : req.type === "TB_SOURCE_SET"
+        ? "tb/"
+        : null;
+    if (!prefix || !paths.some((path) => path.startsWith(prefix))) return req;
+  }
+  return null;
+}
+
 function buildTool(config: SkillToolConfig): AgentTool {
   return {
     name: config.skillId,
@@ -324,8 +347,13 @@ function buildTool(config: SkillToolConfig): AgentTool {
       //     fail-closed naming the producing skill (drives self-correction).
       //     NoGovernanceClient (dev/debug) cannot verify and is exempted;
       //     a read failure is also fail-closed (cannot confirm preconditions).
-      if (config.requiresUpstream.length > 0 && !(ctx.governance instanceof NoGovernanceClient)) {
-        const missing = await findMissingUpstream(ctx, config.requiresUpstream);
+      if (
+        config.requiresUpstream.length > 0 &&
+        (ctx.taskKind === "side" || !(ctx.governance instanceof NoGovernanceClient))
+      ) {
+        const missing = ctx.taskKind === "side"
+          ? await findMissingSideUpstream(ctx, config.requiresUpstream)
+          : await findMissingUpstream(ctx, config.requiresUpstream);
         if (missing !== null) {
           if (missing === "read-error") {
             return {
@@ -346,6 +374,55 @@ function buildTool(config: SkillToolConfig): AgentTool {
       // (b) Vivado capability skills must NOT execute vivado here. We deliberately
       //     do not consult ctx.connector: this tool only registers a candidate
       //     report. The real TOOL_RUN evidence comes from the separate vivado tool.
+
+      // P3 side tasks write only to their Core-owned isolated workspace. The
+      // response intentionally exposes no ArtifactRevision identity: until a
+      // human adopts it, this file is not part of the formal artifact chain.
+      if (ctx.taskKind === "side") {
+        if (!ctx.workspace || !ctx.taskId || !ctx.workspaceId) {
+          return {
+            content:
+              `写入探索副本失败（fail-closed）：${config.skillId} 缺少 Core-issued task workspace capability。`,
+            isError: true,
+          };
+        }
+        let write;
+        try {
+          write = await ctx.workspace.writeFiles({
+            files: [{ path: filename, content }],
+            changeReason: notes ? `side task skill output | ${notes}` : "side task skill output",
+            artifactType: config.registerType,
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          return {
+            content:
+              `写入探索副本失败（fail-closed，正式项目未变更）：${config.skillId} → ${filename}。原因：${reason}`,
+            isError: true,
+          };
+        }
+        const entry = write.registered[0] ?? write.unchanged[0];
+        if (!entry) {
+          return {
+            content: `探索副本写入后 Core 未回报文件身份（fail-closed）：${config.skillId} → ${filename}。`,
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            "已写入侧边任务探索副本（尚未采纳，不进入正式制品链）：",
+            `  taskId       : ${ctx.taskId}`,
+            `  workspaceId  : ${ctx.workspaceId}`,
+            `  skill        : ${config.skillId}`,
+            `  file         : ${entry.path} (${config.registerType})`,
+            `  workspaceCommit: ${write.commit}`,
+            `  contentHash  : ${entry.contentHash}`,
+            "  formalImpact : none（用户采纳前不创建 artifact/revision/snapshot/gate）",
+            "",
+            `上游建议：${config.upstream}`,
+          ].join("\n"),
+        };
+      }
 
       // (c) Write the candidate into the real workspace and register it. The
       //     file lands on disk under RULE-25 first, then Core reconciles it into

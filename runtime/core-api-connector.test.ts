@@ -3,6 +3,7 @@ import { RemoteConnectorError } from "../connector/remote.ts";
 import {
   CoreApiConnector,
   resolveCoreApiConfig,
+  resolveTaskRuntimeApiConfig,
 } from "./core-api-connector.ts";
 import {
   LoopExecutor,
@@ -155,6 +156,71 @@ describe("CoreApiConnector.submit happy path", () => {
     expect(body).not.toHaveProperty("gate_submission_id");
     expect(body).not.toHaveProperty("approved_gate_result_id");
     expect(body).not.toHaveProperty("baseline_id");
+  });
+
+  test("task-bound connector keeps submit, polling, and evidence on task routes with binding headers", async () => {
+    const taskId = "task-side-1";
+    const workspaceId = "ws-side-1";
+    const { fetchImpl, calls } = mockFetch((url, init) => {
+      const method = (init.method ?? "GET").toUpperCase();
+      if (method === "POST") {
+        return {
+          status: 201,
+          body: { data: { jobId: "job-side", runClass: "exploratory", state: "submitted" } },
+        };
+      }
+      if (url.includes("/evidence/content?")) {
+        return {
+          status: 200,
+          body: { data: { name: "run.log", content: "ok", sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" } },
+        };
+      }
+      if (url.endsWith("/evidence")) {
+        return { status: 200, body: { data: { jobId: "job-side", entries: [] } } };
+      }
+      return { status: 200, body: { data: { jobId: "job-side", state: "succeeded" } } };
+    });
+    const conn = new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId,
+      workspaceId,
+      fetchImpl,
+      pollIntervalMs: 0,
+      retryDelayMs: 0,
+    });
+
+    await conn.submit(validateSubmission());
+    await conn.fetchEvidenceContent("job-side", "run.log");
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side/evidence`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side/evidence/content?name=run.log`,
+    ]);
+    for (const call of calls) {
+      expect(call.headers["Authorization"]).toBe(`Bearer ${TOKEN}`);
+      expect(call.headers["X-Synthia-Task-Id"]).toBe(taskId);
+      expect(call.headers["X-Synthia-Workspace-Id"]).toBe(workspaceId);
+    }
+  });
+
+  test("task binding is fail-closed when incomplete or unsafe", () => {
+    expect(() => new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId: "task-side-1",
+    })).toThrow(/taskId and workspaceId/);
+    expect(() => new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId: "task-side-1\nspoofed",
+      workspaceId: "ws-side-1",
+    })).toThrow(/taskId/);
   });
 
   test("simulate maps testbench (module name) into the body", async () => {
@@ -385,6 +451,15 @@ describe("resolveCoreApiConfig", () => {
   test("honours SYNTHIA_CORE_URL and trims trailing slashes", () => {
     const cfg = resolveCoreApiConfig({ SYNTHIA_CORE_URL: "http://core.svc:9/", SYNTHIA_CORE_TOKEN: "tok" });
     expect(cfg.baseUrl).toBe("http://core.svc:9");
+  });
+  test("task Runtime config requires and selects its separate token", () => {
+    expect(() => resolveTaskRuntimeApiConfig({ SYNTHIA_CORE_TOKEN: "generic" }))
+      .toThrow(/SYNTHIA_TASK_RUNTIME_TOKEN/);
+    expect(resolveTaskRuntimeApiConfig({
+      SYNTHIA_CORE_URL: "http://core.svc:9///",
+      SYNTHIA_CORE_TOKEN: "generic",
+      SYNTHIA_TASK_RUNTIME_TOKEN: "task-runtime",
+    })).toEqual({ baseUrl: "http://core.svc:9", token: "task-runtime" });
   });
 });
 

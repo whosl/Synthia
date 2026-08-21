@@ -14,10 +14,11 @@
  * exist), not a rename — deliberately out of scope here.
  */
 
-import { mkdir, readFile, writeFile, readdir, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { GateId, StageId, AgentState, RegisteredRevision } from "./types.ts";
+import type { RuntimeTaskKind, TaskAuthorizationScope } from "./task-workspace-client.ts";
 
 function agentsDir(): string {
   const override = process.env.SYNTHIA_RUNS_DIR;
@@ -33,6 +34,110 @@ export function agentStatePath(agentId: string): string {
   // includes the conversation sidecar suffix — always address the main file.
   const id = agentId.endsWith(".conversation") ? agentId.slice(0, -".conversation".length) : agentId;
   return join(agentsDir(), `${id}.json`);
+}
+
+const MESSAGE_IDEMPOTENCY_DIRECTORY = ".message-idempotency";
+
+export interface RuntimeMessageIdempotencyRecord {
+  readonly fingerprint: string;
+  /**
+   * `in_progress` is a durable intent written before message dispatch. Its
+   * stored 409 response is deliberately replayable by older Runtime versions
+   * that do not understand this discriminator, so rollback cannot re-run the
+   * message either.
+   */
+  readonly state: "in_progress" | "completed";
+  readonly status: number;
+  readonly body: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+export function agentMessageIdempotencyPath(agentId: string): string {
+  const id = agentId.endsWith(".conversation") ? agentId.slice(0, -".conversation".length) : agentId;
+  return join(agentsDir(), MESSAGE_IDEMPOTENCY_DIRECTORY, `${id}.json`);
+}
+
+/**
+ * Load the durable response ledger for Core→Runtime message dispatches.
+ * Corruption fails closed: silently treating an unreadable ledger as empty
+ * could execute an already-accepted user message a second time.
+ */
+export async function loadMessageIdempotencyRecords(
+  agentId: string,
+): Promise<Readonly<Record<string, RuntimeMessageIdempotencyRecord>>> {
+  let raw: string;
+  try {
+    raw = await readFile(agentMessageIdempotencyPath(agentId), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`invalid message idempotency ledger for ${agentId}`);
+  }
+  const envelope = parsed as Record<string, unknown>;
+  if (
+    envelope.schema !== "runtime-message-idempotency.v1" ||
+    !envelope.records ||
+    typeof envelope.records !== "object" ||
+    Array.isArray(envelope.records)
+  ) {
+    throw new Error(`invalid message idempotency ledger for ${agentId}`);
+  }
+  const records: Record<string, RuntimeMessageIdempotencyRecord> = Object.create(null);
+  for (const [key, value] of Object.entries(envelope.records as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`invalid message idempotency record for ${agentId}`);
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.fingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/.test(record.fingerprint) ||
+      (record.state !== undefined &&
+        record.state !== "in_progress" &&
+        record.state !== "completed") ||
+      typeof record.status !== "number" ||
+      !Number.isInteger(record.status) ||
+      !record.body ||
+      typeof record.body !== "object" ||
+      Array.isArray(record.body) ||
+      typeof record.createdAt !== "string"
+    ) {
+      throw new Error(`invalid message idempotency record for ${agentId}`);
+    }
+    records[key] = {
+      fingerprint: record.fingerprint,
+      // Ledgers created before the intent protocol contain completed response
+      // records without a state field. Treating those as completed preserves
+      // the existing replay contract during rolling upgrades.
+      state: record.state === "in_progress" ? "in_progress" : "completed",
+      status: record.status,
+      body: record.body as Readonly<Record<string, unknown>>,
+      createdAt: record.createdAt,
+    };
+  }
+  return records;
+}
+
+/** Atomically replace one agent's lightweight message-response ledger. */
+export async function saveMessageIdempotencyRecords(
+  agentId: string,
+  records: Readonly<Record<string, RuntimeMessageIdempotencyRecord>>,
+): Promise<void> {
+  const path = agentMessageIdempotencyPath(agentId);
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(temporaryPath, JSON.stringify({
+    schema: "runtime-message-idempotency.v1",
+    records,
+  }, null, 2) + "\n", "utf8");
+  try {
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
 }
 
 /** The ordered stage chain. */
@@ -57,6 +162,13 @@ export function nextStage(stage: StageId): StageId | undefined {
 
 export function createAgentState(opts: {
   agentId: string;
+  taskId?: string;
+  taskKind?: RuntimeTaskKind;
+  parentTaskId?: string;
+  workspaceId?: string;
+  authorization?: TaskAuthorizationScope;
+  inputHash?: string;
+  taskDescriptorHash?: string;
   task: string;
   part: string;
   projectId: string;
@@ -71,6 +183,13 @@ export function createAgentState(opts: {
   const now = new Date().toISOString();
   return {
     agentId: opts.agentId,
+    ...(opts.taskId ? { taskId: opts.taskId } : {}),
+    ...(opts.taskKind ? { taskKind: opts.taskKind } : {}),
+    ...(opts.parentTaskId ? { parentTaskId: opts.parentTaskId } : {}),
+    ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+    ...(opts.authorization ? { authorization: opts.authorization } : {}),
+    ...(opts.inputHash ? { inputHash: opts.inputHash } : {}),
+    ...(opts.taskDescriptorHash ? { taskDescriptorHash: opts.taskDescriptorHash } : {}),
     task: opts.task,
     part: opts.part,
     projectId: opts.projectId,
@@ -115,13 +234,17 @@ export async function listAgents(): Promise<string[]> {
     return [];
   }
   return entries
-    .filter(f => f.endsWith(".json") && !f.endsWith(".conversation.json"))
+    .filter(f =>
+      f.endsWith(".json") &&
+      !f.endsWith(".conversation.json")
+    )
     .map(f => f.replace(/\.json$/, ""));
 }
 
 /** Remove an agent-state file. No-op if it doesn't exist. */
 export async function deleteAgent(agentId: string): Promise<void> {
   try { await unlink(agentStatePath(agentId)); } catch { /* no-op */ }
+  try { await unlink(agentMessageIdempotencyPath(agentId)); } catch { /* no-op */ }
 }
 
 // ----- Functional updates for the loop -----

@@ -327,7 +327,7 @@ describe("free-agent: gate submission + system-level lock", () => {
     const state = await loadAgentState(agentId);
     expect(state.freeAgentLock).toBeUndefined();
     expect(state.awaitingGate).toBeUndefined();
-    expect(state.status).toBe("running"); // mapStatus: idle → running
+    expect(state.status).toBe("awaiting_user");
   });
 
   test("core_check_gate rejected keeps the session locked", async () => {
