@@ -20,7 +20,16 @@ import {
   validateWorkspacePath,
   workspacesRoot,
 } from "../src/workspace/paths.ts";
-import { headSha, listTree, statusMap } from "../src/workspace/git.ts";
+import {
+  failNextWorkspacePublishAfterHeadUpdateForTest,
+  failNextWorkspacePublishBeforeHeadUpdateForTest,
+  failNextWorkspacePublishCheckoutForTest,
+  git,
+  gitRaw,
+  headSha,
+  listTree,
+  statusMap,
+} from "../src/workspace/git.ts";
 import {
   commitPending,
   ensureWorkspace,
@@ -276,6 +285,145 @@ describe("人手改动与一键登记", () => {
     await expect(readWorkingFile("p1", "tb/tb_top.v")).rejects.toThrow();
   });
 
+  test("多文件 commit 发布前故障不会让主 HEAD、索引或工作树留下半批状态", async () => {
+    const initial = await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v1\n" },
+      { path: "rtl/b.v", content: "b-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+    const beforeHead = await headSha(dir);
+    const beforeStatus = await statusMap(dir);
+
+    failNextWorkspacePublishBeforeHeadUpdateForTest(dir);
+    await expect(writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v2\n" },
+      { path: "rtl/b.v", content: "b-v2\n" },
+    ], "must fail before publish", AUTHOR)).rejects.toThrow("injected workspace publish failure");
+
+    expect(await headSha(dir)).toBe(beforeHead);
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("a-v1\n");
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v1\n");
+    expect(await statusMap(dir)).toEqual(beforeStatus);
+    expect(await readAtLocation("p1", formatGitLocation(initial.commit!, "rtl/a.v"))).toBe("a-v1\n");
+
+    // one-shot failpoint 不会毒化项目锁；同一批重试可以一次性发布。
+    const retry = await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v2\n" },
+      { path: "rtl/b.v", content: "b-v2\n" },
+    ], "retry", AUTHOR);
+    expect(retry.changed).toEqual(["rtl/a.v", "rtl/b.v"]);
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("a-v2\n");
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v2\n");
+    expect(await statusMap(dir)).toEqual(new Map());
+  });
+
+  test("HEAD 已发布时硬中断可由 ensureWorkspace 前向恢复整批工作树", async () => {
+    await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v1\n" },
+      { path: "rtl/b.v", content: "b-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+    const beforeHead = await headSha(dir);
+
+    failNextWorkspacePublishAfterHeadUpdateForTest(dir);
+    await expect(writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v2\n" },
+      { path: "rtl/b.v", content: "b-v2\n" },
+    ], "publish then interrupt", AUTHOR)).rejects.toThrow("after HEAD update");
+
+    // 模拟的硬中断发生在 HEAD CAS 后、checkout 前：commit 已可追溯，
+    // marker 使下次建区能幂等地把工作树补齐，不会停在半批。
+    expect(await headSha(dir)).not.toBe(beforeHead);
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("a-v1\n");
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v1\n");
+
+    await ensureWorkspace("p1");
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("a-v2\n");
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v2\n");
+    expect(await statusMap(dir)).toEqual(new Map());
+    expect((await gitRaw(dir, ["rev-parse", "--verify", "--quiet", "refs/synthia/workspace-publish"])).exitCode)
+      .not.toBe(0);
+    await ensureWorkspace("p1"); // recovery marker 已清理，再次 ensure 仍幂等。
+  });
+
+  test("HEAD CAS 后的普通 checkout 故障在同一调用内恢复，不误报写入失败", async () => {
+    await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v1\n" },
+      { path: "rtl/b.v", content: "b-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+
+    failNextWorkspacePublishCheckoutForTest(dir);
+    const out = await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v2\n" },
+      { path: "rtl/b.v", content: "b-v2\n" },
+    ], "recover checkout", AUTHOR);
+
+    expect(out.commit).toBe(await headSha(dir));
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("a-v2\n");
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v2\n");
+    expect(await statusMap(dir)).toEqual(new Map());
+    expect((await gitRaw(dir, ["rev-parse", "--verify", "--quiet", "refs/synthia/workspace-publish"])).exitCode)
+      .not.toBe(0);
+  });
+
+  test("宕机后选中路径出现新的人工 staged 改动时，恢复拒绝覆盖并保留 marker", async () => {
+    await writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v1\n" },
+      { path: "rtl/b.v", content: "b-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+
+    failNextWorkspacePublishAfterHeadUpdateForTest(dir);
+    await expect(writeAndCommit("p1", [
+      { path: "rtl/a.v", content: "a-v2\n" },
+      { path: "rtl/b.v", content: "b-v2\n" },
+    ], "publish then interrupt", AUTHOR)).rejects.toThrow("after HEAD update");
+    const publishedHead = (await headSha(dir))!;
+
+    await writeWorkingFile("p1", "rtl/a.v", "宕机后人工改的第三个版本\n");
+    await git(dir, ["add", "--", "rtl/a.v"]);
+    const stagedBeforeRecovery = await git(dir, ["show", ":rtl/a.v"]);
+
+    await expect(ensureWorkspace("p1")).rejects.toThrow("新的暂存改动");
+    expect(await headSha(dir)).toBe(publishedHead);
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("宕机后人工改的第三个版本\n");
+    expect(await git(dir, ["show", ":rtl/a.v"])).toBe(stagedBeforeRecovery);
+    // 恢复在验证整批后才 checkout，因此其他选中路径也不会被先写入。
+    expect(await readWorkingFile("p1", "rtl/b.v")).toBe("b-v1\n");
+    expect(await git(dir, ["rev-parse", "--verify", "refs/synthia/workspace-publish"])).toBe(`${publishedHead}\n`);
+
+    // 即使人工把 index 放回 parent 版，worktree 中的第三个版本也必须独立拦住恢复。
+    await git(dir, ["reset", "--quiet", `${publishedHead}^`, "--", "rtl/a.v"]);
+    await expect(ensureWorkspace("p1")).rejects.toThrow("新的人工改动");
+    expect(await readWorkingFile("p1", "rtl/a.v")).toBe("宕机后人工改的第三个版本\n");
+    expect(await git(dir, ["rev-parse", "--verify", "refs/synthia/workspace-publish"])).toBe(`${publishedHead}\n`);
+  });
+
+  test("agent commit 不吸收未点名的 staged/dirty 人工改动", async () => {
+    const dir = await ensureWorkspace("p1");
+    await writeWorkingFile("p1", "doc/manual.md", "人工暂存的内容\n");
+    await git(dir, ["add", "--", "doc/manual.md"]);
+    await writeWorkingFile("p1", "doc/draft.md", "人工未暂存的草稿\n");
+
+    const out = await writeAndCommit(
+      "p1",
+      [{ path: "rtl/agent.v", content: "module agent; endmodule\n" }],
+      "agent candidate",
+      AUTHOR,
+    );
+
+    expect(await listTree(dir, out.commit!)).toContain("rtl/agent.v");
+    expect(await listTree(dir, out.commit!)).not.toContain("doc/manual.md");
+    expect(await listTree(dir, out.commit!)).not.toContain("doc/draft.md");
+    expect(await readWorkingFile("p1", "doc/manual.md")).toBe("人工暂存的内容\n");
+    expect(await readWorkingFile("p1", "doc/draft.md")).toBe("人工未暂存的草稿\n");
+    const status = await statusMap(dir);
+    expect(status.get("doc/manual.md")).toBe("modified");
+    expect(status.get("doc/draft.md")).toBe("untracked");
+    expect(await git(dir, ["diff", "--cached", "--name-only"])).toContain("doc/manual.md");
+  });
+
   test("要写的内容与人改出来的一字不差：不算冲突，且照样收进 commit", async () => {
     await writeAndCommit("p1", [{ path: "rtl/pwm.v", content: "v1\n" }], "v1", AUTHOR);
     await writeWorkingFile("p1", "rtl/pwm.v", "一样的\n");
@@ -289,6 +437,42 @@ describe("人手改动与一键登记", () => {
     const again = await writeAndCommit("p1", [{ path: "rtl/pwm.v", content: "一样的\n" }], "再重放", AUTHOR);
     expect(again.changed).toEqual([]);
     expect(again.commit).toBe(out.commit!);
+  });
+
+  test("受保护写入在同一项目锁内复核预览哈希，且不吸收同内容脏改动", async () => {
+    await writeAndCommit("p1", [{ path: "rtl/pwm.v", content: "v1\n" }], "v1", AUTHOR);
+    await writeAndCommit("p1", [{ path: "rtl/pwm.v", content: "已经变了\n" }], "concurrent", AUTHOR);
+
+    await expect(writeAndCommit(
+      "p1",
+      [{ path: "rtl/pwm.v", content: "探索结果\n" }],
+      "guarded",
+      AUTHOR,
+      {
+        guards: [{
+          path: "rtl/pwm.v",
+          expectedContentHash: sha256Hex("v1\n"),
+          rejectPending: true,
+        }],
+      },
+    )).rejects.toThrow("预览后发生变化");
+    expect(await readWorkingFile("p1", "rtl/pwm.v")).toBe("已经变了\n");
+
+    await writeWorkingFile("p1", "rtl/pwm.v", "探索结果\n");
+    await expect(writeAndCommit(
+      "p1",
+      [{ path: "rtl/pwm.v", content: "探索结果\n" }],
+      "guarded-dirty",
+      AUTHOR,
+      {
+        guards: [{
+          path: "rtl/pwm.v",
+          expectedContentHash: sha256Hex("探索结果\n"),
+          rejectPending: true,
+        }],
+      },
+    )).rejects.toThrow("未登记改动");
+    expect(await readWorkingFile("p1", "rtl/pwm.v")).toBe("探索结果\n");
   });
 
   test("登记后人再改一次，还能继续登记（版本链不断）", async () => {

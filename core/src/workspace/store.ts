@@ -21,7 +21,19 @@ import {
   validateProjectId,
   validateWorkspacePath,
 } from "./paths.ts";
-import { commitPaths, git, headSha, initRepo, isRepo, listTree, showAt, statusMap, withProjectLock } from "./git.ts";
+import {
+  commitFilesAtomically,
+  commitPaths,
+  git,
+  headSha,
+  initRepo,
+  isRepo,
+  listTree,
+  recoverWorkspacePublish,
+  showAt,
+  statusMap,
+  withProjectLock,
+} from "./git.ts";
 import { sha256Hex } from "../hashing.ts";
 
 /** 工作区文件的登记状态。`ignored` 只出现在 `sim/` 下（证据不是产物，见 RULE-25 §1）。 */
@@ -53,6 +65,22 @@ export interface CommitAuthor {
   readonly email: string;
 }
 
+/**
+ * Optional compare-and-write guard used by operations such as P3 adoption.
+ * The hash is checked again while the project workspace lock is held, closing
+ * the gap between an earlier preview and the actual Git write.
+ */
+export interface WorkspaceWriteGuard {
+  readonly path: string;
+  readonly expectedContentHash: string | null;
+  /** Adoption must never absorb an editor's unregistered change. */
+  readonly rejectPending?: boolean;
+}
+
+export interface WorkspaceWriteOptions {
+  readonly guards?: readonly WorkspaceWriteGuard[];
+}
+
 // `sim/*` 而不是 `sim/`：后者排除的是目录本身，git 就再也无法重新纳入目录里的
 // 任何文件，`!sim/.gitkeep` 会失效、连占位文件都提交不进去。
 const GITIGNORE = `# 仿真/工具运行产物按 EvidenceManifest 登记，不进版本库（SYNTHIA-FPGA-RULE-25 §1）
@@ -80,6 +108,7 @@ export async function ensureWorkspace(projectId: string): Promise<string> {
       await git(dir, ["add", "--", ".gitignore", ...WORKSPACE_DIRS.map((d) => `${d}/.gitkeep`)]);
       await git(dir, ["commit", "--no-verify", "--quiet", "-m", `工作区初始化（RULE-25 布局）\n\nproject: ${projectId}`]);
     }
+    await recoverWorkspacePublish(dir);
     return dir;
   });
 }
@@ -210,12 +239,39 @@ export async function writeAndCommit(
   files: readonly WorkspaceFileInput[],
   message: string,
   author: CommitAuthor,
+  options: WorkspaceWriteOptions = {},
 ): Promise<CommitOutcome> {
   const normalized = files.map((f) => ({ path: validateWorkspacePath(f.path), content: f.content }));
+  const guards = (options.guards ?? []).map((guard) => ({
+    path: validateWorkspacePath(guard.path),
+    expectedContentHash: guard.expectedContentHash,
+    rejectPending: guard.rejectPending === true,
+  }));
   const dir = await ensureWorkspace(projectId);
 
   return withProjectLock(projectId, async () => {
     const status = await statusMap(dir);
+    for (const guard of guards) {
+      if (guard.rejectPending && status.has(guard.path)) {
+        throw new WorkspaceError(
+          "WORKSPACE_FILE_DIRTY",
+          `文件有未登记改动，拒绝覆盖：${guard.path}`,
+          { paths: [guard.path] },
+        );
+      }
+      const actualHash = await contentHashOnDisk(join(dir, guard.path), guard.path);
+      if (actualHash !== guard.expectedContentHash) {
+        throw new WorkspaceError(
+          "WORKSPACE_FILE_DIRTY",
+          `文件在预览后发生变化，拒绝覆盖：${guard.path}`,
+          {
+            path: guard.path,
+            expected: guard.expectedContentHash,
+            actual: actualHash,
+          },
+        );
+      }
+    }
     const conflicts: string[] = [];
     for (const file of normalized) {
       const state = status.get(file.path);
@@ -231,25 +287,24 @@ export async function writeAndCommit(
       );
     }
 
-    const changed: string[] = [];
+    const changedFiles: WorkspaceFileInput[] = [];
     for (const file of normalized) {
       const abs = join(dir, file.path);
       const identical = await sameOnDisk(abs, file.content);
-      if (!identical) {
-        await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, file.content, "utf8");
-      }
       // 盘上恰好已经是这份字节、但 git 里还不是（untracked，或上一次登记 DB 侧失败留下的
       // dirty）时仍要收进本次 commit。只看「内容有没有变」会让这种文件永远进不了树，
       // 也就永远登记不上——agent 重试同样的内容也救不回来。
-      if (!identical || status.get(file.path) !== undefined) changed.push(file.path);
+      if (!identical || status.get(file.path) !== undefined) changedFiles.push(file);
     }
-    if (changed.length === 0) {
+    if (changedFiles.length === 0) {
       // 内容一字未变：不造空 commit，但要给出现 HEAD，让调用方仍能拼出 content_location。
       return { commit: await headSha(dir), changed: [] };
     }
-    const commit = await commitPaths(dir, changed, message, author);
-    return { commit, changed };
+    const commit = await commitFilesAtomically(dir, changedFiles, message, author);
+    return {
+      commit: commit ?? await headSha(dir),
+      changed: changedFiles.map((file) => file.path),
+    };
   });
 }
 
@@ -292,6 +347,21 @@ async function sameOnDisk(abs: string, content: string): Promise<boolean> {
     return (await readFile(abs, "utf8")) === content;
   } catch {
     return false;
+  }
+}
+
+async function contentHashOnDisk(abs: string, path: string): Promise<string | null> {
+  try {
+    const bytes = await readFile(abs);
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return sha256Hex(content);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new WorkspaceError(
+      "WORKSPACE_FILE_DIRTY",
+      `无法安全复核文件，拒绝覆盖：${path}`,
+      { path },
+    );
   }
 }
 

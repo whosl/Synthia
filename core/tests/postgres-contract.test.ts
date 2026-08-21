@@ -5,6 +5,7 @@ import { appendOutboxEvent, withTransaction, type TransactionClient } from "../s
 const migration = readFileSync(new URL("../src/db/migrations/0001_d1_hardening.sql", import.meta.url), "utf8");
 const initialMigration = readFileSync(new URL("../src/db/migrations/0000_initial_schema.sql", import.meta.url), "utf8");
 const projectHardeningMigration = readFileSync(new URL("../src/db/migrations/0007_project_profile_constraints.sql", import.meta.url), "utf8");
+const taskWorkspacesMigration = readFileSync(new URL("../src/db/migrations/0009_task_workspaces.sql", import.meta.url), "utf8");
 const freshSchema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
 describe("PostgreSQL D1 contracts", () => {
   test("initial numbered migration creates fresh core schema", () => {
@@ -30,6 +31,7 @@ describe("PostgreSQL D1 contracts", () => {
       "0006_project_type_process_version",
       "0007_project_profile_constraints",
       "0008_import_snapshots",
+      "0009_task_workspaces",
     ]) {
       expect(freshSchema).toContain(`('${version}')`);
     }
@@ -56,6 +58,54 @@ describe("PostgreSQL D1 contracts", () => {
     ]) {
       expect(projectHardeningMigration).toContain(index);
       expect(freshSchema).toContain(index);
+    }
+  });
+  test("P3 task workspace tables are present in migration and fresh schema", () => {
+    for (const table of [
+      "task_workspace",
+      "agent_task",
+      "task_conversation_event",
+      "task_workspace_file",
+      "task_result",
+      "task_adoption",
+      "task_adoption_file",
+    ]) {
+      const ddl = `CREATE TABLE IF NOT EXISTS ${table}`;
+      expect(taskWorkspacesMigration).toContain(ddl);
+      expect(freshSchema).toContain(ddl);
+    }
+  });
+  test("P3 task ownership and lifecycle constraints match the fresh schema", () => {
+    for (const sql of [taskWorkspacesMigration, freshSchema]) {
+      expect(sql).toContain("agent_task_one_active_engineering_main_idx");
+      expect(sql.match(/DEFERRABLE INITIALLY DEFERRED/g)?.length).toBeGreaterThanOrEqual(2);
+      expect(sql).toMatch(/UNIQUE\s*\(task_id, output_hash\)/);
+      expect(sql).toContain("FOREIGN KEY (project_id, project_type)");
+      expect(sql).toContain("FOREIGN KEY (parent_task_id, project_id)");
+      expect(sql).toContain("FOREIGN KEY (workspace_id, id, project_id)");
+      expect(sql).toContain("FOREIGN KEY (task_id, id, project_id)");
+      expect(sql).toContain("FOREIGN KEY (workspace_file_id, task_id, project_id, path, source_content_hash)");
+      expect(sql).toContain("FOREIGN KEY (target_revision_id, target_artifact_id, project_id)");
+      expect(sql).toContain("agent_task_parent_guard");
+      expect(sql).toContain("task_workspace_state_guard");
+      expect(sql).toContain("agent_task_state_guard");
+      expect(sql).toContain("task_adoption_state_guard");
+      expect(sql).toContain("runtime_actor_id");
+      expect(sql).toMatch(/OLD\.runtime_actor_id IS DISTINCT FROM NEW\.runtime_actor_id/);
+    }
+    expect(taskWorkspacesMigration).toContain("CONSTRAINT agent_task_runtime_actor_fk REFERENCES user_account(uid)");
+    expect(freshSchema).toContain("agent_task_runtime_actor_fk");
+  });
+  test("P3 immutable facts have append-only guards in migration and fresh schema", () => {
+    for (const sql of [taskWorkspacesMigration, freshSchema]) {
+      for (const trigger of [
+        "task_conversation_event_append_only",
+        "task_workspace_file_append_only",
+        "task_result_append_only",
+        "task_adoption_file_append_only",
+      ]) {
+        expect(sql).toContain(trigger);
+      }
     }
   });
   test("migration append-only table names are guarded", () => {
