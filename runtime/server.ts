@@ -29,6 +29,7 @@
  *   SYNTHIA_MODEL_CHAT_MAX_TOKENS   (free-agent 对话轮的可见 token 上限, default 16384)
  *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
  *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
+ *   SYNTHIA_FEATURE_HISTORICAL_MATERIALS 1|true 显式开启历史资料上下文 (default off)
  *   SYNTHIA_CORE_TOKEN / URL        (core / governance mode)
  *
  * Usage:
@@ -61,14 +62,17 @@ import { SkillLoader } from "./skill-loader.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 
 // ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
-import { createFreeAgentSession } from "./free-agent.ts";
+import { createFreeAgentSession, type FreeAgentDeps } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
-import { buildContextSnapshot } from "./context-snapshot.ts";
+import {
+  buildContextSnapshotBundle,
+  buildHistoricalMaterialReferenceContext,
+} from "./context-snapshot.ts";
 import { buildAgentDoc, composeSystemPrompt } from "./agent-doc.ts";
-import type { FreeAgentDeps, FreeAgentSession, ConversationalModel, PromptStreamOptions } from "./agent-types.ts";
+import type { FreeAgentSession, ConversationalModel, PromptStreamOptions } from "./agent-types.ts";
 import { StreamHub, type StreamEvent } from "./stream-hub.ts";
 
 // ---------------------------------------------------------------------------
@@ -134,7 +138,11 @@ export interface ServerConfig {
   readonly defaultPart: string;
   readonly gatePollMs: number;
   readonly port: number;
+  /** Default-off rollout gate. Only literal true enables historical context. */
+  readonly historicalMaterialsEnabled?: boolean;
 }
+
+export type ConversationalModelFactory = () => ConversationalModel;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -493,6 +501,8 @@ export class RuntimeServer {
   constructor(
     private readonly config: ServerConfig,
     private readonly depsFactory: DepsFactory,
+    private readonly conversationalModelFactory: ConversationalModelFactory = () =>
+      new ModelClient(modelConfigFromEnv(process.env)),
   ) {}
 
   get port(): number { return this.server?.port ?? this.config.port; }
@@ -1139,10 +1149,10 @@ export class RuntimeServer {
       return null;
     }
 
-    // model：ConversationalModel，用 env SYNTHIA_MODEL_* 构造（依赖 Slice A 使 ModelClient 实现 chat()）。
+    // model：生产默认用 SYNTHIA_MODEL_* 构造；测试可注入无网络的会话模型。
     let model: ConversationalModel;
     try {
-      model = new ModelClient(modelConfigFromEnv(process.env));
+      model = this.conversationalModelFactory();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(
@@ -1163,14 +1173,15 @@ export class RuntimeServer {
           `[runtime-server] agent doc partially unavailable for ${agentId}: ${doc.problems.join("; ")}\n`,
         );
       }
-      systemPrompt = composeSystemPrompt(
-        doc.text,
-        await buildContextSnapshot(
-          governance,
-          projectId,
-          snapshotProjectInfo ? { projectInfo: snapshotProjectInfo } : {},
-        ),
+      const context = await buildContextSnapshotBundle(
+        governance,
+        projectId,
+        {
+          ...(snapshotProjectInfo ? { projectInfo: snapshotProjectInfo } : {}),
+          includeHistoricalReference: false,
+        },
       );
+      systemPrompt = composeSystemPrompt(doc.text, context.systemContext);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(
@@ -1188,6 +1199,13 @@ export class RuntimeServer {
         assembleSkillDocTool(),
       ],
       systemPrompt,
+      ...(executionMode === "engineering" && this.config.historicalMaterialsEnabled === true ? {
+        loadReferenceContext: () => buildHistoricalMaterialReferenceContext(
+          governance,
+          projectId,
+          snapshotProjectInfo ? { projectInfo: snapshotProjectInfo } : {},
+        ),
+      } : {}),
       projectId,
       part: part ?? "",
       classification: process.env.SYNTHIA_CLASSIFICATION ?? "internal",
@@ -1520,9 +1538,20 @@ export class RuntimeServer {
 // Env-based factory (production)
 // ---------------------------------------------------------------------------
 
+function parseHistoricalMaterialsFeatureFlag(value: string | undefined): boolean {
+  if (value === undefined || value === "0" || value === "false") return false;
+  if (value === "1" || value === "true") return true;
+  throw new Error(
+    "SYNTHIA_FEATURE_HISTORICAL_MATERIALS must be exactly one of: 0, 1, false, true",
+  );
+}
+
 export async function createServerConfig(
   env: Record<string, string | undefined> = process.env,
 ): Promise<ServerConfig> {
+  const historicalMaterialsEnabled = parseHistoricalMaterialsFeatureFlag(
+    env.SYNTHIA_FEATURE_HISTORICAL_MATERIALS,
+  );
   const loader = new SkillLoader();
   const skillPrompts = await loader.buildPrompts();
   return {
@@ -1532,6 +1561,7 @@ export async function createServerConfig(
     defaultPart: env.SYNTHIA_PART ?? "xc7k70tfbv676-1",
     gatePollMs: Number(env.SYNTHIA_GATE_POLL_MS ?? 8000),
     port: Number(env.SYNTHIA_RUNTIME_PORT ?? 8790),
+    historicalMaterialsEnabled,
   };
 }
 

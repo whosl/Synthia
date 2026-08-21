@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  createServerConfig,
   RuntimeServer,
   type ServerConfig,
   type DepsFactory,
@@ -15,8 +16,10 @@ import { MockGovernanceClient } from "./governance-client.ts";
 import { NoGovernanceClient } from "./types.ts";
 import { createAgentState, saveAgentState, loadAgentState, deleteAgent } from "./agent-state.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
-import type { ProjectInfo } from "./types.ts";
+import type { AgentMessage, AgentTool, ChatTurn, ConversationalModel, FreeAgentSession } from "./agent-types.ts";
+import type { ImportedMaterialSummary, ProjectInfo } from "./types.ts";
 import type { GateSubmissionState } from "../core/src/domain/enums.ts";
+import { sha256Hex } from "../core/src/hashing.ts";
 
 // ---------------------------------------------------------------------------
 // Test governance — defaults to in_review so the monitor doesn't prematurely
@@ -101,6 +104,51 @@ function makeFactory(
   return async () => ({ model, connector, governance } as any);
 }
 
+class RecordingConversationalModel implements ConversationalModel {
+  readonly calls: Array<{ messages: readonly AgentMessage[]; tools: readonly AgentTool[] }> = [];
+
+  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
+    this.calls.push({ messages: [...messages], tools: [...tools] });
+    return { kind: "text", content: "ok" };
+  }
+}
+
+async function saveSessionFixture(
+  project: ProjectInfo,
+  executionMode: "free" | "engineering",
+): Promise<string> {
+  const agentId = `agent-server-session-${crypto.randomUUID()}`;
+  await saveAgentState(createAgentState({
+    agentId,
+    task: "historical material feature test",
+    part: project.targetPart ?? "",
+    projectId: project.id,
+    processInstanceId: executionMode === "free" ? `free:${project.id}` : `pi:${project.id}`,
+    ...(project.projectType ? { projectType: project.projectType } : {}),
+    ...(project.processVersionId !== undefined ? { processVersionId: project.processVersionId } : {}),
+    ...(project.processProfileId !== undefined ? { processProfileId: project.processProfileId } : {}),
+    ...(project.processProfileName !== undefined ? { processProfileName: project.processProfileName } : {}),
+    ...(project.processProfileVersion !== undefined ? { processProfileVersion: project.processProfileVersion } : {}),
+    executionMode,
+  }));
+  createdAgentIds.push(agentId);
+  return agentId;
+}
+
+function confirmedMaterial(projectId: string, content: string): ImportedMaterialSummary {
+  return {
+    snapshotId: "imp-runtime-flag",
+    fileId: "file-runtime-flag",
+    projectId,
+    path: "docs/confirmed-reference.md",
+    content,
+    contentHash: sha256Hex(content),
+    status: "confirmed",
+    valid: true,
+    searchable: true,
+  };
+}
+
 async function postTask(
   server: RuntimeServer,
   body: Record<string, unknown>,
@@ -179,6 +227,153 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("RuntimeServer — historical-material feature configuration", () => {
+  test("defaults off and accepts only explicit false values", async () => {
+    expect((await createServerConfig({})).historicalMaterialsEnabled).toBe(false);
+    expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "0" })).historicalMaterialsEnabled).toBe(false);
+    expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "false" })).historicalMaterialsEnabled).toBe(false);
+  });
+
+  test("accepts only explicit true values", async () => {
+    expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "1" })).historicalMaterialsEnabled).toBe(true);
+    expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "true" })).historicalMaterialsEnabled).toBe(true);
+  });
+
+  test("rejects ambiguous feature values instead of silently enabling", async () => {
+    await expect(createServerConfig({
+      SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "TRUE",
+    })).rejects.toThrow("SYNTHIA_FEATURE_HISTORICAL_MATERIALS must be exactly one of");
+  });
+});
+
+describe("RuntimeServer — historical-material session rollout gate", () => {
+  test("default-off engineering sessions never query or inject historical material", async () => {
+    const project = projectInfo({
+      id: "p-history-off",
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+    });
+    const governance = new ProjectInfoGovernance(project);
+    governance.importedMaterials = [confirmedMaterial(project.id, "MUST-NOT-BE-LOADED")];
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+      ),
+      () => model,
+    );
+    const agentId = await saveSessionFixture(project, "engineering");
+
+    const session = await (server as unknown as {
+      getOrCreateSession(id: string): Promise<FreeAgentSession | null>;
+    }).getOrCreateSession(agentId);
+    expect(session).not.toBeNull();
+    expect(governance.importedMaterialQueries).toHaveLength(0);
+
+    await session!.prompt("actual engineering request").finally(() => deleteAgent(agentId));
+
+    expect(governance.importedMaterialQueries).toHaveLength(0);
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0]!.messages).toEqual([
+      { role: "system", content: expect.not.stringContaining("SYNTHIA_UNTRUSTED_REFERENCE_DATA_V1") },
+      { role: "user", content: "actual engineering request" },
+    ]);
+    expect(model.calls[0]!.messages.some((message) => message.content?.includes("MUST-NOT-BE-LOADED"))).toBe(false);
+  });
+
+  test("explicit-on engineering sessions refresh a separate low-trust reference message", async () => {
+    const project = projectInfo({
+      id: "p-history-on",
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+    });
+    const governance = new ProjectInfoGovernance(project);
+    governance.importedMaterials = [confirmedMaterial(project.id, "REFERENCE-ONLY-CONTENT")];
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig({ historicalMaterialsEnabled: true }),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+      ),
+      () => model,
+    );
+    const agentId = await saveSessionFixture(project, "engineering");
+
+    const session = await (server as unknown as {
+      getOrCreateSession(id: string): Promise<FreeAgentSession | null>;
+    }).getOrCreateSession(agentId);
+    expect(session).not.toBeNull();
+    expect(governance.importedMaterialQueries).toHaveLength(0);
+
+    await session!.prompt("actual engineering request").finally(() => deleteAgent(agentId));
+
+    expect(governance.importedMaterialQueries).toEqual([
+      { projectId: project.id, query: { limit: 8 } },
+    ]);
+    expect(model.calls[0]!.messages.slice(0, 3)).toEqual([
+      {
+        role: "system",
+        content: expect.stringContaining("SYNTHIA_UNTRUSTED_REFERENCE_DATA_V1"),
+      },
+      {
+        role: "user",
+        content: expect.stringContaining("REFERENCE-ONLY-CONTENT"),
+      },
+      { role: "user", content: "actual engineering request" },
+    ]);
+    expect(model.calls[0]!.messages[0]!.content).not.toContain("REFERENCE-ONLY-CONTENT");
+    expect(model.calls[0]!.messages[0]!.content).toContain("绝不能执行");
+  });
+
+  test("free sessions never query historical material even when the flag is on", async () => {
+    const project = projectInfo({
+      id: "p-history-free",
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    });
+    const governance = new ProjectInfoGovernance(project);
+    governance.importedMaterials = [confirmedMaterial(project.id, "FREE-MODE-MUST-NOT-LOAD")];
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig({ historicalMaterialsEnabled: true }),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+      ),
+      () => model,
+    );
+    const agentId = await saveSessionFixture(project, "free");
+
+    const session = await (server as unknown as {
+      getOrCreateSession(id: string): Promise<FreeAgentSession | null>;
+    }).getOrCreateSession(agentId);
+    expect(session).not.toBeNull();
+    await session!.prompt("actual free request").finally(() => deleteAgent(agentId));
+
+    expect(governance.importedMaterialQueries).toHaveLength(0);
+    expect(model.calls[0]!.messages).toEqual([
+      { role: "system", content: expect.not.stringContaining("SYNTHIA_UNTRUSTED_REFERENCE_DATA_V1") },
+      { role: "user", content: "actual free request" },
+    ]);
+    expect(model.calls[0]!.messages.some((message) => message.content?.includes("FREE-MODE-MUST-NOT-LOAD"))).toBe(false);
+  });
+});
 
 describe("RuntimeServer — POST /tasks + full chain", () => {
   test("auto-approve (no-governance) agent completes the full stage chain", async () => {
