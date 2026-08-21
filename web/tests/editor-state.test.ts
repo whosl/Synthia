@@ -6,6 +6,7 @@ import {
   languageFromExtension,
   languageFromPath,
   monacoThemeFor,
+  type ReadonlyInput,
 } from "../src/domain/editor-state.ts";
 
 /** 简化的终态判定 mock：与 domain/tasks.ts:isTerminalStatus 语义一致，但不依赖它。 */
@@ -13,38 +14,64 @@ function isAgentTerminal(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "fail_closed" || status === "interrupted";
 }
 
+/** 默认可编辑的一份入参：盘上的工作区文件、候选版本、agent 已停。逐项覆盖来测各条只读原因。 */
+function readonly(over: Partial<ReadonlyInput> = {}): ReadonlyInput {
+  return { revisionState: "candidate", agentStatus: "succeeded", inWorkspace: true, contentSource: "workspace", ...over };
+}
+
 describe("deriveReadonlyReason", () => {
-  test("未打开文件（无版本）→ null", () => {
-    expect(deriveReadonlyReason(null, "running", isAgentTerminal)).toBeNull();
-    expect(deriveReadonlyReason(null, null, isAgentTerminal)).toBeNull();
+  test("盘上的工作区文件、候选版本、agent 已停 → 可编辑（null）", () => {
+    expect(deriveReadonlyReason(readonly(), isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason(readonly({ agentStatus: "failed" }), isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason(readonly({ agentStatus: "fail_closed" }), isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason(readonly({ agentStatus: "interrupted" }), isAgentTerminal)).toBeNull();
   });
 
-  test("已批准版本 → approved（优先级最高，不看 run 状态）", () => {
-    expect(deriveReadonlyReason("approved", "running", isAgentTerminal)).toBe("approved");
-    expect(deriveReadonlyReason("approved", null, isAgentTerminal)).toBe("approved");
-    expect(deriveReadonlyReason("approved", "succeeded", isAgentTerminal)).toBe("approved");
+  test("项目尚无 run（agentStatus=null）→ 可编辑", () => {
+    expect(deriveReadonlyReason(readonly({ agentStatus: null }), isAgentTerminal)).toBeNull();
   });
 
-  test("候选版本 + run 运行中（非终态）→ agent-running", () => {
-    expect(deriveReadonlyReason("candidate", "running", isAgentTerminal)).toBe("agent-running");
-    expect(deriveReadonlyReason("in_review", "awaiting_approval", isAgentTerminal)).toBe("agent-running");
+  test("盘上有、还没登记（revisionState=null）→ 可编辑，不是只读", () => {
+    // 人刚新建的文件没有任何修订，但正文就在盘上、没有治理状态挡着。
+    // 老版本这里是 `revisionState === null → null`（意思是"没打开文件"），
+    // 现在 null 有了实义，判成只读会让新建的文件一打开就敲不进字。
+    expect(deriveReadonlyReason(readonly({ revisionState: null }), isAgentTerminal)).toBeNull();
   });
 
-  test("候选版本 + run 已到终态 → 可编辑（null）", () => {
-    expect(deriveReadonlyReason("candidate", "succeeded", isAgentTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "failed", isAgentTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "fail_closed", isAgentTerminal)).toBeNull();
-    expect(deriveReadonlyReason("candidate", "interrupted", isAgentTerminal)).toBeNull();
+  test("已批准版本 → approved（优先级最高，不看其余三项）", () => {
+    expect(deriveReadonlyReason(readonly({ revisionState: "approved", agentStatus: "running" }), isAgentTerminal)).toBe("approved");
+    expect(deriveReadonlyReason(readonly({ revisionState: "approved", agentStatus: null }), isAgentTerminal)).toBe("approved");
+    expect(deriveReadonlyReason(readonly({ revisionState: "approved", inWorkspace: false }), isAgentTerminal)).toBe("approved");
   });
 
-  test("候选版本 + 项目尚无 run（agentStatus=null）→ 可编辑（null）", () => {
-    expect(deriveReadonlyReason("candidate", null, isAgentTerminal)).toBeNull();
+  test("run 运行中（非终态）→ agent-running，压过后面两条能力原因", () => {
+    expect(deriveReadonlyReason(readonly({ agentStatus: "running" }), isAgentTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason(readonly({ agentStatus: "awaiting_approval" }), isAgentTerminal)).toBe("agent-running");
+    // 治理原因说得比能力原因更准：agent 在跑时，「不在工作区」不是人现在该关心的事。
+    expect(deriveReadonlyReason(readonly({ agentStatus: "running", inWorkspace: false }), isAgentTerminal)).toBe("agent-running");
   });
 
-  test("rejected/superseded/invalidated 等非 approved 状态一律走候选分支的判定规则", () => {
-    expect(deriveReadonlyReason("rejected", "running", isAgentTerminal)).toBe("agent-running");
-    expect(deriveReadonlyReason("superseded", "succeeded", isAgentTerminal)).toBeNull();
-    expect(deriveReadonlyReason("invalidated", "running", isAgentTerminal)).toBe("agent-running");
+  test("产物不在工作区（流水线产出的 art-*）→ not-in-workspace", () => {
+    // 保存只能写工作区文件。这类产物从没落过盘，放开编辑等于收下敲进去的字再丢掉。
+    expect(deriveReadonlyReason(readonly({ inWorkspace: false }), isAgentTerminal)).toBe("not-in-workspace");
+    expect(deriveReadonlyReason(readonly({ inWorkspace: false, revisionState: null }), isAgentTerminal)).toBe("not-in-workspace");
+  });
+
+  test("正文取自某一版修订而非盘上字节 → historical", () => {
+    // 写回去等于拿旧版覆盖盘上的新改动，是一次没人要求过的静默回滚。
+    expect(deriveReadonlyReason(readonly({ contentSource: "revision" }), isAgentTerminal)).toBe("historical");
+  });
+
+  test("不在工作区排在历史版本之前：两条都成立时说更根本的那条", () => {
+    // `art-*` 的正文只可能来自修订，两个条件必然同时成立。说「历史版本 · 只读」
+    // 会让人以为切回最新版就能改，可它压根没有盘上的那一份。
+    expect(deriveReadonlyReason(readonly({ inWorkspace: false, contentSource: "revision" }), isAgentTerminal)).toBe("not-in-workspace");
+  });
+
+  test("rejected/superseded/invalidated 等非 approved 状态一律走后面的判定规则", () => {
+    expect(deriveReadonlyReason(readonly({ revisionState: "rejected", agentStatus: "running" }), isAgentTerminal)).toBe("agent-running");
+    expect(deriveReadonlyReason(readonly({ revisionState: "superseded" }), isAgentTerminal)).toBeNull();
+    expect(deriveReadonlyReason(readonly({ revisionState: "invalidated", inWorkspace: false }), isAgentTerminal)).toBe("not-in-workspace");
   });
 });
 

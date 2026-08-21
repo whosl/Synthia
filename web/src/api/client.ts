@@ -49,7 +49,7 @@ export interface ClientOptions {
 }
 
 export interface RequestOptions {
-  readonly method?: "GET" | "POST";
+  readonly method?: "GET" | "POST" | "PUT";
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
 }

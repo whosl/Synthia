@@ -28,6 +28,7 @@
 import type {
   Artifact,
   ArtifactRevision,
+  ProcessVersion,
   ProjectDetail,
   TaskAuditEvent,
   TaskDocRef,
@@ -50,6 +51,56 @@ const FX = VIVADO_FIXTURE as {
 export const PROJECT_ID = "p1";
 const TASK_TEXT = "做一个 8 位 PWM 发生器：占空比可配，复位低有效，跑通仿真并出码流。";
 
+export const MOCK_CREATED_PROJECTS_STORAGE_KEY = "synthia.mock.created-projects.v1";
+
+function isStoredProject(value: unknown): value is ProjectDetail {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const project = value as Record<string, unknown>;
+  return (
+    typeof project.id === "string" &&
+    typeof project.name === "string" &&
+    (project.project_type === "free" || project.project_type === "engineering") &&
+    Array.isArray(project.process_instances)
+  );
+}
+
+/** Decode only recognisable project rows so stale/corrupt browser state fails closed. */
+export function parseStoredMockProjects(raw: string | null): ProjectDetail[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter(isStoredProject) : [];
+  } catch {
+    return [];
+  }
+}
+
+function browserStorage(): Storage | null {
+  try {
+    return typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function restoredCreatedProjects(): ProjectDetail[] {
+  const storage = browserStorage();
+  return storage ? parseStoredMockProjects(storage.getItem(MOCK_CREATED_PROJECTS_STORAGE_KEY)) : [];
+}
+
+export const MOCK_PROCESS_VERSIONS: readonly ProcessVersion[] = [
+  {
+    id: "GJB_REF_V1",
+    profile_id: "GJB_REF_V1",
+    version: "GJB_REF_V1",
+    name: "GJB 参考流程 v1",
+    status: "active",
+    process_profile_id: "GJB_REF_V1",
+    process_profile_version: "GJB_REF_V1",
+    process_profile_name: "GJB 参考流程 v1",
+  },
+];
+
 // ─────────────────────────────────────────────────────────────────────
 // 项目详情
 // ─────────────────────────────────────────────────────────────────────
@@ -60,13 +111,36 @@ export const MOCK_PROJECT: ProjectDetail = {
   status: "active",
   data_classification: "internal",
   created_at: "2026-08-14T02:31:00.000Z",
+  project_type: "engineering",
+  process_version_id: "GJB_REF_V1",
+  process_profile_id: "GJB_REF_V1",
+  process_profile_version: "GJB_REF_V1",
+  process_profile_name: "GJB 参考流程 v1",
   scope: "单模块 RTL，Kintex-7 目标板 smoke 验证",
   standard_version: "GB/T 33781-2017",
   target_part: FX.toolchain.part,
   toolchain_profile_ref: FX.toolchain.toolchainProfileHash,
   process_instances: [
-    { id: "pi-p1-default", gate_profile_version: "gp-1", current_gate: "G4", created_at: "2026-08-14T02:31:00.000Z" },
+    { id: "pi_p1_G0", gate_profile_version: "GJB_REF_V1", current_gate: "G4", created_at: "2026-08-14T02:31:00.000Z" },
   ],
+};
+
+export const MOCK_LEGACY_PROJECT: ProjectDetail = {
+  id: "legacy-p1",
+  name: "迁移前兼容项目",
+  status: "active",
+  data_classification: "D1",
+  created_at: "2026-08-13T02:31:00.000Z",
+  project_type: "engineering",
+  process_version_id: "LEGACY_COMPAT",
+  process_profile_id: "LEGACY_COMPAT",
+  process_profile_version: "LEGACY_COMPAT",
+  process_profile_name: "兼容旧流程",
+  scope: "",
+  standard_version: "GB/T 33781-2017",
+  target_part: "xc7vx690tffg1761-2",
+  toolchain_profile_ref: null,
+  process_instances: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -390,9 +464,17 @@ const DETAIL_B_DONE: TaskAgentDetail = {
  */
 export const mockState = {
   agentBDone: false,
+  /** 通过 mock POST /projects 新建的项目；持久化后整页刷新仍可打开。 */
+  createdProjects: restoredCreatedProjects(),
   /** 用户在 mock 里新建/发送的消息，回显进对话流。 */
   extraUserMessages: [] as Array<{ agentId: string; text: string; ts: string }>,
 };
+
+export function persistCreatedMockProjects(): void {
+  const storage = browserStorage();
+  if (!storage) return;
+  storage.setItem(MOCK_CREATED_PROJECTS_STORAGE_KEY, JSON.stringify(mockState.createdProjects));
+}
 
 export const LIVE_AGENT_ID = AGENT_B;
 
@@ -456,4 +538,3 @@ export function mockAgentDetail(agentId: string): TaskAgentDetail | null {
 const MOCK_REPLY_TEXT =
   "（离线 mock 模式）这一页的数据来自 worker-66 的真机 Vivado 产物快照，但**没有模型后端在跑**，" +
   "所以我没法真的回答你这条消息。要看真实对话，需要连上 Core 与 Runtime 后去掉 `VITE_MOCK=1`。";
-

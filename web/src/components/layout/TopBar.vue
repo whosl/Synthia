@@ -42,11 +42,21 @@ function onBack(): void {
     </div>
 
     <div class="topbar-center">
-      <StageRail :stage-chain="props.stageChain" @select-stage="(id) => emit('select-stage', id)" />
+      <StageRail
+        :stage-chain="props.stageChain"
+        :empty-text="props.stageEmptyText"
+        @select-stage="(id) => emit('select-stage', id)"
+      />
     </div>
 
     <div class="topbar-right">
-      <TaskSwitcher :agents="props.agents" :current-agent="props.currentAgent" @select-agent="(id) => emit('select-agent', id)" />
+      <TaskSwitcher
+        :agents="props.agents"
+        :current-agent="props.currentAgent"
+        :allow-new-agent="props.allowNewAgent"
+        @select-agent="(id) => emit('select-agent', id)"
+        @new-agent="emit('new-agent')"
+      />
 
       <button
         type="button"
@@ -58,13 +68,13 @@ function onBack(): void {
         💬
       </button>
 
-      <Tooltip :text="props.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'">
+      <Tooltip placement="left" :text="props.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'">
         <Button variant="ghost" size="sm" aria-label="切换主题" @click="emit('toggle-theme')">
           {{ props.theme === "dark" ? "☾" : "☀" }}
         </Button>
       </Tooltip>
 
-      <Tooltip text="退出登录">
+      <Tooltip text="退出登录" placement="left">
         <Button variant="ghost" size="sm" aria-label="退出登录" @click="emit('logout')">⎋</Button>
       </Tooltip>
     </div>
@@ -82,7 +92,7 @@ function onBack(): void {
 }
 
 .topbar-left {
-  flex: none;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);

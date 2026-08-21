@@ -8,16 +8,20 @@
  *   重新排序/分组（严格回合制）；
  * - 流式 token 级追加靠 `:key="item.part.id"` 复用 `MessageItem` 组件实例——
  *   part 内容变但 id 不变时 Vue 只更新该实例的 props，不会整量重渲染整个列表；
- * - 产物卡（`SynthiaDocPart`）点击一律 `open-doc`，在中栏编辑器打开，不弹抽屉。
+ * - 产物卡（`SynthiaDocPart`）点击一律 `open-doc`，在中栏编辑器打开，不弹抽屉；
+ *   「查看改动」走 `open-diff`，同样交给中栏 Monaco，流内不渲染行级 diff。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { buildChatRenderItems } from "../../domain/composer.ts";
 import type { GatePartState } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
 import Badge from "../ui/Badge.vue";
+import AgentToolItem from "./AgentToolItem.vue";
+import ApprovalCard from "./ApprovalCard.vue";
 import ChatComposer from "./ChatComposer.vue";
 import CodeCard from "./CodeCard.vue";
 import MessageItem from "./MessageItem.vue";
+import ReasoningItem from "./ReasoningItem.vue";
 import ToolCallItem from "./ToolCallItem.vue";
 
 const props = defineProps<ChatFeedProps>();
@@ -43,8 +47,12 @@ function shortHash(sha: string): string {
   return sha.length > 12 ? `${sha.slice(0, 12)}…` : sha;
 }
 
-function onOpenDoc(artifactId: string): void {
-  emit("open-doc", artifactId);
+/**
+ * 审批卡里的待审产物：必须把 revisionId 一并透传——快照钉的是提交那一刻的版本，
+ * 丢了第二参就会按最新版打开，等于审了 agent 后来改过的内容。
+ */
+function onOpenApprovalDoc(artifactId: string, revisionId: string): void {
+  emit("open-doc", artifactId, revisionId);
 }
 
 // ─── 输入草稿：ChatFeed 持有，示例任务「一键填入」需要能写回输入框 ────────
@@ -121,6 +129,10 @@ onMounted(() => void nextTick(scrollToBottom));
 
           <ToolCallItem v-else-if="item.part.kind === 'tool'" :part="item.part" @open-records="emit('open-records', $event)" />
 
+          <ReasoningItem v-else-if="item.part.kind === 'reasoning'" :part="item.part" />
+
+          <AgentToolItem v-else-if="item.part.kind === 'agent_tool'" :part="item.part" />
+
           <div v-else-if="item.part.kind === 'gate'" class="chat-feed-gate">
             <span class="chat-feed-gate-glyph" aria-hidden="true">◆</span>
             <span class="chat-feed-gate-title">{{ item.part.review }}</span>
@@ -132,7 +144,9 @@ onMounted(() => void nextTick(scrollToBottom));
             :segment="null"
             :title="item.part.title"
             :artifact-id="item.part.doc.artifact_id"
-            @open="onOpenDoc"
+            :diffable="item.part.prevRevisionId !== null"
+            @open="emit('open-doc', item.part.doc.artifact_id, item.part.doc.revision_id)"
+            @open-diff="emit('open-diff', item.part.doc.artifact_id, item.part.doc.revision_id)"
           />
 
           <button
@@ -169,6 +183,18 @@ onMounted(() => void nextTick(scrollToBottom));
         <button type="button" class="chat-feed-jump" @click="scrollToBottom">回到最新 ↓</button>
       </div>
     </Transition>
+
+    <!--
+      就地审批卡刻意放在 .chat-feed-scroll **外面**：等待批准是当前唯一的阻塞点，
+      放进滚动区的话往上翻历史就把它翻走了，用户得先滚回底部才能批。
+    -->
+    <ApprovalCard
+      v-if="approval"
+      v-bind="approval"
+      @approve="emit('approve')"
+      @reject="emit('reject', $event)"
+      @open-doc="onOpenApprovalDoc"
+    />
 
     <div v-if="sendError" class="chat-feed-error">{{ sendError }}</div>
 

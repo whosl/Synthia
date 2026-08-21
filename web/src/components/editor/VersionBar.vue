@@ -11,7 +11,7 @@
 import { computed, ref } from "vue";
 import type { ArtifactRevision } from "../../api/types.ts";
 import { REVISION_STATE_TEXT } from "../../domain/gates.ts";
-import { artifactDotState, ARTIFACT_DOT_TEXT, type ArtifactDotState } from "../../views/project-view-contract.ts";
+import { artifactDotState, ARTIFACT_DOT_TEXT, ARTIFACT_DOT_TONE } from "../../views/project-view-contract.ts";
 import Dropdown from "../ui/Dropdown.vue";
 import Badge from "../ui/Badge.vue";
 
@@ -27,14 +27,6 @@ const emit = defineEmits<{
 }>();
 
 const open = ref(false);
-
-/** 状态点四态 → Badge 语气色（对齐 ui/Badge.vue 注释给出的映射，四栏统一口径）。 */
-const DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" | "danger" | "neutral">> = {
-  approved: "ok",
-  candidate: "info",
-  rejected: "danger",
-  invalidated: "neutral",
-};
 
 const activeRevision = computed<ArtifactRevision | null>(
   () => props.revisions.find((r) => r.id === props.activeRevisionId) ?? null,
@@ -66,7 +58,7 @@ function onSelect(revisionId: string): void {
           v-if="activeRevision"
           variant="dot"
           size="sm"
-          :tone="DOT_TONE[artifactDotState(activeRevision.state)]"
+          :tone="ARTIFACT_DOT_TONE[artifactDotState(activeRevision.state)]"
         >
           {{ ARTIFACT_DOT_TEXT[artifactDotState(activeRevision.state)] }}
         </Badge>
@@ -87,7 +79,7 @@ function onSelect(revisionId: string): void {
         @click="onSelect(rev.id)"
       >
         <span class="version-bar-item-version">v{{ rev.version }}</span>
-        <Badge variant="dot" size="sm" :tone="DOT_TONE[artifactDotState(rev.state)]">
+        <Badge variant="dot" size="sm" :tone="ARTIFACT_DOT_TONE[artifactDotState(rev.state)]">
           {{ REVISION_STATE_TEXT[rev.state] ?? ARTIFACT_DOT_TEXT[artifactDotState(rev.state)] }}
         </Badge>
         <span class="version-bar-item-time">{{ formatTime(rev.created_at) }}</span>

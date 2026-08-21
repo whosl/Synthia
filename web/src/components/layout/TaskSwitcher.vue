@@ -14,15 +14,24 @@ import Badge from "../ui/Badge.vue";
 const props = defineProps<{
   readonly agents: readonly TaskAgentSummary[];
   readonly currentAgent: TaskAgentSummary | null;
+  readonly allowNewAgent: boolean;
 }>();
 
 const emit = defineEmits<{
   "select-agent": [agentId: string];
+  "new-agent": [];
 }>();
 
 const open = ref(false);
 
 const agents = computed(() => [...props.agents].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+
+/**
+ * 触发器上没有 currentAgent 时的占位文案。项目里其实有 agent、只是刚点了
+ * 「开始新对话」还没发第一条消息（forceNewTask 中间态）时说「尚无任务」是
+ * 撒谎——那五个字是为真·空项目写的。
+ */
+const emptyLabel = computed(() => (props.agents.length > 0 ? "新对话" : "尚无任务"));
 
 function statusTone(run: TaskAgentSummary): "ok" | "accent" | "warn" | "danger" | "neutral" {
   if (run.status === "succeeded") return "ok";
@@ -48,6 +57,12 @@ function onPick(agentId: string): void {
   if (agentId === props.currentAgent?.agent_id) return;
   emit("select-agent", agentId);
 }
+
+function onNew(): void {
+  if (!props.allowNewAgent) return;
+  open.value = false;
+  emit("new-agent");
+}
 </script>
 
 <template>
@@ -58,12 +73,16 @@ function onPick(agentId: string): void {
           <Badge variant="dot" :tone="statusTone(currentAgent)">{{ shortAgentId(currentAgent.agent_id) }}</Badge>
           <span class="task-switcher-current-status">{{ statusText(currentAgent) }}</span>
         </span>
-        <span v-else class="task-switcher-empty">尚无任务</span>
+        <span v-else class="task-switcher-empty">{{ emptyLabel }}</span>
         <span class="task-switcher-caret" aria-hidden="true">▾</span>
       </button>
     </template>
 
     <div class="task-switcher-menu">
+      <button type="button" class="task-switcher-row task-switcher-new" :disabled="!allowNewAgent" @click="onNew">
+        <span class="task-switcher-new-icon" aria-hidden="true">+</span>
+        <span>{{ allowNewAgent ? "开始新对话" : "工程项目暂只保留一个主 Agent" }}</span>
+      </button>
       <div v-if="agents.length === 0" class="task-switcher-menu-empty">本项目还没有任务</div>
       <button
         v-for="run in agents"
@@ -158,6 +177,29 @@ function onPick(agentId: string): void {
 
 .task-switcher-row.is-current {
   background: var(--accent-subtle);
+}
+
+.task-switcher-new {
+  color: var(--accent);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  margin-bottom: 1px;
+}
+
+.task-switcher-new:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+.task-switcher-new-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 13px;
 }
 
 .task-switcher-row-status {

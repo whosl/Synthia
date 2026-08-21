@@ -23,8 +23,9 @@ import {
 } from "../../domain/process-profile.ts";
 
 const props = defineProps<{
-  /** `deriveStageChain` 的输出；null=项目尚无任何 run，不渲染阶段条。 */
+  /** `deriveStageChain` 的输出；null=当前项目不展示新版工程阶段条。 */
   readonly stageChain: readonly StageChainNode[] | null;
+  readonly emptyText: string;
 }>();
 
 const emit = defineEmits<{
@@ -80,8 +81,7 @@ function statusText(status: StageNodeStatus): string {
 
 <template>
   <div class="stage-rail">
-    <!-- 尚无 run：不渲染阶段条，占位提示 -->
-    <div v-if="!stageChain" class="stage-rail-empty">尚无任务</div>
+    <div v-if="!stageChain" class="stage-rail-empty">{{ emptyText }}</div>
 
     <template v-else>
       <!-- PC 端：三段 + 里程碑门 -->

@@ -115,12 +115,18 @@ function codeCardTitle(seg: ReplyCodeSegment): string {
   gap: var(--space-2);
 }
 
+/* 88% 宽度上限必须落在 .message-body 上，不能落在 .message-bubble 上：
+   .message-body 是 shrink-to-fit（宽度由气泡内容撑出）的 flex item，气泡上写
+   max-width:88% 会自我参照——百分比在内在尺寸阶段按 none 计算，布局阶段却按
+   「气泡自身 max-content 的 88%」收紧，于是每条用户消息尾部约 12% 必被折行。
+   放到 .message-body 上则以 .message-item（整行宽度，定值）为基准，无环。 */
 .role-user .message-body {
   align-items: flex-end;
+  max-width: 88%;
 }
 
 .message-bubble {
-  max-width: 88%;
+  max-width: 100%;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius);
   background: var(--accent-subtle);

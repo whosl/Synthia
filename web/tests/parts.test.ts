@@ -11,6 +11,7 @@ import {
   TOOL_STATUS_TEXT,
   auditToParts,
   bitstreamFromEvidence,
+  replyErrorText,
   toolDurationLabel,
   type SynthiaLifecyclePart,
   type SynthiaPart,
@@ -375,6 +376,29 @@ describe("auditToParts：用户气泡、打断标记与提示卡", () => {
     // 英文错误原文不进对话流
     expect(notes[1]!.kind === "note" && notes[1].text.includes("boom")).toBe(false);
   });
+
+  test("reply_error 按 detail 分类给出可操作文案，且都不回显英文原文", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["model-client.chatStream: upstream returned 504 — <html>bad gateway</html>", "超时"],
+      ["model-client.chatStream: no bytes from upstream for 600000ms", "长时间没有输出"],
+      ["model-client.chat: upstream returned 429", "限流"],
+      ["model-client.chat: upstream returned 401", "认证失败"],
+      ["model-client.chat: upstream returned 503", "HTTP 503"],
+      ["fetch failed: ECONNREFUSED 127.0.0.1:8790", "连不上模型服务"],
+      ["This model's maximum context length is 262144 tokens", "上下文超出"],
+    ];
+    for (const [detail, expected] of cases) {
+      const text = replyErrorText(detail);
+      expect(text).toContain(expected);
+      // 约定：原文里的英文/技术串一个都不许漏进对话流
+      for (const token of detail.split(/[\s:—]+/).filter((t) => /^[A-Za-z][A-Za-z.\-_]{3,}$/.test(t))) {
+        expect(text.includes(token)).toBe(false);
+      }
+    }
+    // 认不出来的原因 → 兜底句，同样不回显 detail
+    expect(replyErrorText("some brand new failure")).toBe("本轮回复出现错误，未能完成。可在下方重发消息。");
+    expect(replyErrorText(undefined)).toContain("重发");
+  });
 });
 
 // ─── 门禁 / 产物 / 证据 / 终态 ───────────────────────────────────────
@@ -484,5 +508,78 @@ describe("bitstreamFromEvidence", () => {
     ];
     expect(bitstreamFromEvidence(ev)).toEqual({ name: "b.bit", sha256: "2", sizeBytes: 2 });
     expect(bitstreamFromEvidence([{ entries: [] }])).toBeNull();
+  });
+});
+
+// ─── free_agent_tool：工具调用落 audit（刷新后可回看） ────────────────
+
+describe("auditToParts：free_agent_tool", () => {
+  const toolEvent = (detail: unknown, result: "ok" | "failed" = "ok") =>
+    audit({ category: "model", phase: "loop", action: "free_agent_tool", result, detail: JSON.stringify(detail) });
+
+  test("落成 agent_tool 卡，id 取 runtime 的 callId（与 SSE 那张卡同 id 才能去重）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [toolEvent({ id: "call_7", name: "read_file", args: '{"path":"top.v"}', result: "module top…" })],
+      }),
+    );
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toEqual({
+      kind: "agent_tool",
+      id: "call_7",
+      state: "done",
+      name: "read_file",
+      args: '{"path":"top.v"}',
+      result: "module top…",
+    });
+  });
+
+  test("result=failed → error 态", () => {
+    const parts = auditToParts(
+      makeDetail({ audit: [toolEvent({ id: "c1", name: "vivado_run", args: "{}", result: "boom" }, "failed")] }),
+    );
+    expect((parts[0] as { state: string }).state).toBe("error");
+  });
+
+  test("detail 解不出来整条丢弃，不渲染空壳卡", () => {
+    const broken = auditToParts(
+      makeDetail({ audit: [audit({ category: "model", phase: "loop", action: "free_agent_tool", result: "ok", detail: "{not json" })] }),
+    );
+    expect(broken).toHaveLength(0);
+
+    const nameless = auditToParts(makeDetail({ audit: [toolEvent({ id: "c1", args: "{}", result: "x" })] }));
+    expect(nameless).toHaveLength(0);
+
+    const noDetail = auditToParts(
+      makeDetail({ audit: [audit({ category: "model", phase: "loop", action: "free_agent_tool", result: "ok" })] }),
+    );
+    expect(noDetail).toHaveLength(0);
+  });
+
+  test("工具卡切断叙述段：工具前后的回复不粘成一条", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "我先看一下代码。" }),
+          toolEvent({ id: "c1", name: "read_file", args: "{}", result: "ok" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "看完了，问题在时序。" }),
+        ],
+      }),
+    );
+    expect(parts.map((p) => p.kind)).toEqual(["text", "agent_tool", "text"]);
+    expect(textParts(parts).map((p) => p.text)).toEqual(["我先看一下代码。", "看完了，问题在时序。"]);
+  });
+
+  test("工具卡排在同轮回复之前（audit seq 即真实时序）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [
+          audit({ category: "model", phase: "loop", action: "user_message", detail: "查一下 top.v" }),
+          toolEvent({ id: "c1", name: "read_file", args: "{}", result: "ok" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "读到了。" }),
+        ],
+      }),
+    );
+    expect(parts.map((p) => p.kind)).toEqual(["text", "agent_tool", "text"]);
   });
 });

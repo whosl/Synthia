@@ -2,8 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../main.ts";
-import { createProject, listGateSubmissions, listProjects, listTasks } from "../api/index.ts";
-import type { GateSubmission, Project, TaskAgentSummary } from "../api/types.ts";
+import { createProject, listGateSubmissions, listProcessVersions, listProjects, listTasks } from "../api/index.ts";
+import type { CreateProjectRequest } from "../api/index.ts";
+import type { GateSubmission, ProcessVersion, Project, TaskAgentSummary } from "../api/types.ts";
 import {
   GATE_REVIEW_NAMES,
   PROJECT_STATUS_TEXT,
@@ -13,6 +14,14 @@ import {
 } from "../domain/gates.ts";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import {
+  isLegacyCompatProject,
+  processVersionText,
+  projectType,
+  projectTypeText,
+  validateCreateProject,
+  type ProjectType,
+} from "../domain/project.ts";
 
 const router = useRouter();
 
@@ -45,8 +54,10 @@ function reviewName(gate: string): string {
 }
 
 /** 项目当前阶段的人话描述（如「设计审查等待批准」）。 */
-function stageText(projectId: string): string {
-  const lanes = lanesByProject.value.get(projectId);
+function stageText(project: Project): string {
+  if (projectType(project) === "free") return "自由探索（无固定阶段）";
+  if (isLegacyCompatProject(project)) return "兼容旧流程（无新版阶段）";
+  const lanes = lanesByProject.value.get(project.id);
   if (!lanes) return "—";
   const gate = currentGate(lanes);
   if (!gate) return "全部审查已通过";
@@ -56,6 +67,15 @@ function stageText(projectId: string): string {
     case "rejected": return `${name}被驳回`;
     default: return `${name}未开始`;
   }
+}
+
+function projectTypeLabel(project: Project): string {
+  return projectTypeText(projectType(project));
+}
+
+function profileLabel(project: Project): string {
+  if (projectType(project) === "free") return "—（自由项目）";
+  return processVersionText(project);
 }
 
 function lastActivity(projectId: string): string | null {
@@ -79,7 +99,7 @@ onMounted(async () => {
         let latest = project.created_at;
         try {
           const [subs, agentList] = await Promise.all([
-            listGateSubmissions(api, project.id),
+            projectType(project) === "engineering" ? listGateSubmissions(api, project.id) : Promise.resolve([] as GateSubmission[]),
             listTasks(api, project.id).catch(() => ({ agents: [] as readonly TaskAgentSummary[] })),
           ]);
           lanes.set(project.id, deriveGateLanes(subs));
@@ -116,31 +136,83 @@ onMounted(async () => {
 // ── 新建项目对话框 ─────────────────────────────────────────────────────
 const showCreateDialog = ref(false);
 const newProjectName = ref("");
-const newProjectPart = ref("xc7k70tfbv676-1");
+const newProjectType = ref<ProjectType | null>(null);
+const newProcessProfileId = ref("");
+const newProjectPart = ref("");
+const processVersions = ref<ProcessVersion[]>([]);
+const processVersionsLoading = ref(false);
+const processVersionsError = ref<unknown>(null);
 const creating = ref(false);
 const createError = ref<unknown>(null);
 
+const availableProcessProfileIds = computed(() => processVersions.value.map((version) => version.id));
+const createDisabled = computed(() => {
+  if (creating.value || !newProjectType.value || !newProjectName.value.trim()) return true;
+  if (newProjectType.value === "free") return false;
+  return (
+    processVersionsLoading.value ||
+    processVersionsError.value !== null ||
+    !availableProcessProfileIds.value.includes(newProcessProfileId.value)
+  );
+});
+
+async function loadProcessVersions(): Promise<void> {
+  processVersionsLoading.value = true;
+  processVersionsError.value = null;
+  processVersions.value = [];
+  newProcessProfileId.value = "";
+  try {
+    processVersions.value = await listProcessVersions(api);
+  } catch (err) {
+    processVersionsError.value = err;
+  } finally {
+    processVersionsLoading.value = false;
+  }
+}
+
 function openCreateDialog() {
   newProjectName.value = "";
-  newProjectPart.value = "xc7k70tfbv676-1";
+  newProjectType.value = null;
+  newProcessProfileId.value = "";
+  newProjectPart.value = "";
+  processVersions.value = [];
+  processVersionsError.value = null;
   createError.value = null;
   showCreateDialog.value = true;
+  void loadProcessVersions();
 }
 
 async function submitCreate() {
   const name = newProjectName.value.trim();
-  if (name.length === 0 || creating.value) return;
+  if (creating.value) return;
+  const validationError = validateCreateProject({
+    name,
+    projectType: newProjectType.value,
+    processProfileId: newProcessProfileId.value,
+    targetPart: newProjectPart.value,
+    availableProcessProfileIds: availableProcessProfileIds.value,
+  });
+  if (validationError) {
+    createError.value = new Error(validationError);
+    return;
+  }
+  const selectedType = newProjectType.value;
+  if (!selectedType) return;
+  const baseRequest = {
+    id: `proj-${crypto.randomUUID().slice(0, 8)}`,
+    name,
+    data_classification: "D1",
+    ...(newProjectPart.value.trim() ? { target_part: newProjectPart.value.trim() } : {}),
+  };
+  const request: CreateProjectRequest = selectedType === "engineering"
+    ? { ...baseRequest, project_type: "engineering", process_profile_id: newProcessProfileId.value }
+    : { ...baseRequest, project_type: "free" };
   creating.value = true;
   createError.value = null;
   try {
     const project = await createProject(
       api,
-      {
-        id: `proj-${crypto.randomUUID().slice(0, 8)}`,
-        name,
-        data_classification: "D1",
-        target_part: newProjectPart.value.trim() || "xc7k70tfbv676-1",
-      },
+      request,
       crypto.randomUUID(),
     );
     showCreateDialog.value = false;
@@ -195,6 +267,8 @@ async function submitCreate() {
         <thead>
           <tr>
             <th>项目名称</th>
+            <th>类型</th>
+            <th>流程版本</th>
             <th>状态</th>
             <th>当前阶段</th>
             <th>最近活动</th>
@@ -206,10 +280,12 @@ async function submitCreate() {
             <td>
               <router-link :to="`/projects/${p.id}`"><strong>{{ p.name }}</strong></router-link>
             </td>
+            <td>{{ projectTypeLabel(p) }}</td>
+            <td class="muted">{{ profileLabel(p) }}</td>
             <td>
               <StatusBadge :text="PROJECT_STATUS_TEXT[p.status] ?? p.status" :kind="p.status === 'active' ? 'ok' : 'plain'" />
             </td>
-            <td>{{ stageText(p.id) }}</td>
+            <td>{{ stageText(p) }}</td>
             <td class="muted" style="white-space: nowrap">
               {{ lastActivity(p.id) ? new Date(lastActivity(p.id)!).toLocaleString("zh-CN") : "—" }}
             </td>
@@ -228,16 +304,46 @@ async function submitCreate() {
     <div class="dialog panel" role="dialog" aria-label="新建项目">
       <h2>新建项目</h2>
       <ErrorNotice v-if="createError" :error="createError" />
-      <label class="field">
-        <span>项目名称（必填）</span>
-        <input v-model="newProjectName" type="text" placeholder="如：星载图像处理模块" :disabled="creating" />
-      </label>
-      <label class="field">
-        <span>目标器件（预填，可修改）</span>
-        <input v-model="newProjectPart" type="text" :disabled="creating" />
-      </label>
+      <fieldset class="field project-type-picker" :disabled="creating">
+        <legend>项目类型（必选）</legend>
+        <label><input v-model="newProjectType" type="radio" value="free" /> 自由项目</label>
+        <label><input v-model="newProjectType" type="radio" value="engineering" /> 工程项目</label>
+      </fieldset>
+      <p v-if="newProjectType === null" class="muted form-hint">请先明确选择自由项目或工程项目。</p>
+      <template v-else>
+        <p v-if="newProjectType === 'free'" class="muted form-hint">自由项目用于开放探索，只需名称，目标器件可稍后填写。</p>
+        <template v-else>
+          <div v-if="processVersionsLoading" class="muted" role="status">正在从 Core 加载可用流程版本…</div>
+          <div v-else-if="processVersionsError" class="field">
+            <ErrorNotice :error="processVersionsError" />
+            <p class="form-hint">无法取得 Core 的流程注册表，工程项目暂不可创建。</p>
+            <button class="btn secondary" type="button" :disabled="creating" @click="loadProcessVersions">重试加载</button>
+          </div>
+          <div v-else-if="processVersions.length === 0" class="notice error" role="alert">
+            Core 当前没有可用的工程流程版本，工程项目暂不可创建。
+          </div>
+          <label v-else class="field">
+            <span>流程版本（必选）</span>
+            <select v-model="newProcessProfileId" :disabled="creating">
+              <option disabled value="">请选择 Core 返回的流程版本</option>
+              <option v-for="profile in processVersions" :key="profile.id" :value="profile.id">
+                {{ profile.name }}（{{ profile.version }}）
+              </option>
+            </select>
+          </label>
+          <p class="muted form-hint">流程版本以 Core 注册表为准；器件可以先留空。</p>
+        </template>
+        <label class="field">
+          <span>项目名称（必填）</span>
+          <input v-model="newProjectName" type="text" placeholder="如：星载图像处理模块" :disabled="creating" />
+        </label>
+        <label class="field">
+          <span>目标器件（可选）</span>
+          <input v-model="newProjectPart" type="text" :disabled="creating" />
+        </label>
+      </template>
       <div class="row-actions">
-        <button class="btn" :disabled="newProjectName.trim().length === 0 || creating" @click="submitCreate">
+        <button class="btn" :disabled="createDisabled" @click="submitCreate">
           {{ creating ? "创建中…" : "创建并进入总览" }}
         </button>
         <button class="btn secondary" :disabled="creating" @click="showCreateDialog = false">取消</button>

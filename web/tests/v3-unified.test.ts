@@ -68,7 +68,11 @@ function apiError(status: number, code: string, message: string): ApiError {
 describe("humanizeDecisionError：批准失败人话", () => {
   test("active 基线冲突（409 baseline unique）→ 人话 + 建议，无错误码/关联号", () => {
     const f = humanizeDecisionError(apiError(409, "conflict", "baseline_unique_active_project_kind violation"), "批准");
-    expect(f.text).toContain("生效基线");
+    // 断言「里程碑」而不是「基线」：这条文案面向项目页（L1/L2），只讲里程碑；
+    // 「基线」是库表层术语，只在记录面板出现。原先这里断言「生效基线」，等于把
+    // 内部术语钉进了守卫，与 approval-inplace.test.ts 的措辞守卫直接冲突。
+    expect(f.text).toContain("里程碑");
+    expect(f.text).not.toContain("基线");
     expect(f.hint).toBeTruthy();
     expect(f.text).not.toMatch(/baseline_unique|corr-1/i);
   });

@@ -8,6 +8,9 @@ import type {
   Artifact,
   ArtifactRevision,
   Baseline,
+  CreateProjectRequest,
+  CreateProjectResult,
+  CopyProjectAsEngineeringRequest,
   CreateTaskRequest,
   CreateTaskResult,
   GateSubmission,
@@ -18,10 +21,15 @@ import type {
   OutboxEvent,
   Project,
   ProjectDetail,
+  ProcessVersion,
   RevisionContent,
   SendMessageResult,
   TaskAgentDetail,
   TaskAgentList,
+  WorkspaceFileContent,
+  WorkspaceRegisterResult,
+  WorkspaceTree,
+  WorkspaceWriteResult,
 } from "./types.ts";
 
 const V1 = "/api/v1";
@@ -30,20 +38,38 @@ export function listProjects(client: ApiClient): Promise<Project[]> {
   return client<Project[]>(`${V1}/projects`);
 }
 
-export interface CreateProjectRequest {
-  readonly id: string;
-  readonly name: string;
-  readonly data_classification?: string;
-  readonly target_part?: string;
-}
+export type { CreateProjectRequest, CreateProjectResult } from "./types.ts";
+export type { CopyProjectAsEngineeringRequest } from "./types.ts";
 
 /** 新建项目（服务端缺省：分类 D1、标准 GB/T 33781-2017；写操作带 Idempotency-Key）。 */
-export function createProject(client: ApiClient, body: CreateProjectRequest, idempotencyKey: string): Promise<Project> {
-  return client<Project>(`${V1}/projects`, {
+export function createProject(client: ApiClient, body: CreateProjectRequest, idempotencyKey: string): Promise<CreateProjectResult> {
+  return client<CreateProjectResult>(`${V1}/projects`, {
     method: "POST",
     body,
     headers: { "idempotency-key": idempotencyKey },
   });
+}
+
+/** Core 注册的 active 工程流程版本；调用方必须对加载失败和空列表 fail closed。 */
+export function listProcessVersions(client: ApiClient): Promise<ProcessVersion[]> {
+  return client<ProcessVersion[]>(`${V1}/process-versions`);
+}
+
+/** Formalize a free/legacy project by creating a new engineering project in Core. */
+export function copyProjectAsEngineering(
+  client: ApiClient,
+  sourceProjectId: string,
+  body: CopyProjectAsEngineeringRequest,
+  idempotencyKey: string,
+): Promise<CreateProjectResult> {
+  return client<CreateProjectResult>(
+    `${V1}/projects/${encodeURIComponent(sourceProjectId)}/copy-as-engineering`,
+    {
+      method: "POST",
+      body,
+      headers: { "idempotency-key": idempotencyKey },
+    },
+  );
 }
 
 export function listGateSubmissions(client: ApiClient, projectId: string, state?: string): Promise<GateSubmission[]> {
@@ -83,6 +109,47 @@ export function getRevisionContent(client: ApiClient, projectId: string, artifac
   return client<RevisionContent>(
     `${V1}/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/revisions/${encodeURIComponent(revId)}/content`,
   );
+}
+
+// ─── 磁盘工作区（内容与版本谱系归 git）──────────────────────────────────────
+
+/** 真实盘上的文件树：每个文件带 registered/dirty/untracked/ignored 与对应修订身份。 */
+export function getWorkspaceTree(client: ApiClient, projectId: string): Promise<WorkspaceTree> {
+  return client<WorkspaceTree>(`${V1}/projects/${encodeURIComponent(projectId)}/workspace/tree`);
+}
+
+/** 读工作区**当前**内容（含尚未登记的改动），并告知这份字节是不是某条修订。 */
+export function getWorkspaceFile(client: ApiClient, projectId: string, path: string): Promise<WorkspaceFileContent> {
+  return client<WorkspaceFileContent>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(path)}`,
+  );
+}
+
+/**
+ * 编辑器保存：**只落盘不 commit**，改动随即变成 dirty，等人点【登记】。
+ *
+ * 不带 Idempotency-Key 是刻意的——服务端这条路不走幂等中间件：工作树里的未登记改动
+ * 不是治理状态，PUT 同样内容两次结果相同，受治理的那一刻是 register。
+ */
+export function putWorkspaceFile(client: ApiClient, projectId: string, path: string, content: string): Promise<WorkspaceWriteResult> {
+  return client<WorkspaceWriteResult>(`${V1}/projects/${encodeURIComponent(projectId)}/workspace/file`, {
+    method: "PUT",
+    body: { path, content },
+  });
+}
+
+/** 一键登记：把工作区当前全部待登记改动收进**一个** commit，并逐个出候选修订。 */
+export function registerWorkspace(
+  client: ApiClient,
+  projectId: string,
+  changeReason: string,
+  idempotencyKey: string,
+): Promise<WorkspaceRegisterResult> {
+  return client<WorkspaceRegisterResult>(`${V1}/projects/${encodeURIComponent(projectId)}/workspace/register`, {
+    method: "POST",
+    body: changeReason ? { change_reason: changeReason } : {},
+    headers: { "idempotency-key": idempotencyKey },
+  });
 }
 
 export interface ApproveRequest {

@@ -82,6 +82,17 @@ export interface SynthiaDocPart {
   readonly doc: TaskDocRef;
   readonly title: string;
   readonly ts: string | null;
+  /**
+   * 上一版修订 id：非 null 时这张卡能直接跳中栏 diff（本版 vs 上一版）。
+   *
+   * `auditToParts` 填不了它——audit 与 `detail.docs` 里只有「当时登记的这一版」，
+   * 完整版本链在 artifacts 的 revisions 上，由 ProjectView 合流时补齐
+   * （见其 parts 计算）。首版、或版本链还没加载完时为 null。
+   *
+   * 流内不做行级 diff（对标结论里那条 P1 的取舍：复用中栏 Monaco 的 diff 模式，
+   * 见 specs/agent-stream-benchmark.md §4），所以这里只带一个跳转钩子。
+   */
+  readonly prevRevisionId: string | null;
 }
 
 /** 证据摘要卡（一行，详情在记录面板）。 */
@@ -138,6 +149,51 @@ export interface SynthiaInterruptPart {
   readonly ts: string;
 }
 
+/**
+ * 思考过程 part（模型思维链）。
+ *
+ * 只来自 SSE 实时流（runtime/model-client.ts 解出 delta.reasoning_content），
+ * 不落 audit——思维链体量大且不是回复内容，属于「过程可见」而非「记录」。
+ * 因此本轮结束后刷新页面不再重放，这是有意的。
+ *
+ * TODO(reasoning): **这个 part 在生产中从未产生过**。当前网关每个 delta 只带
+ * `['content','role']`，一个 `reasoning_content` 都不转发（实测见
+ * specs/agent-stream-benchmark.md §1.3①），所以从 runtime 的 reasoningFragment()
+ * 到 ReasoningItem.vue 整条管线是死路径。
+ *
+ * 已拍板挂起、刻意保留不删：错的是上游而不是这套投影，留到多模型适配换上游时一并
+ * 解决（同上 §4.1）。在那之前**等待期的反馈不要指望它**——该由一条不依赖上游
+ * reasoning 的活动条承担（§3 P0.1，尚未做）。改上游时按 `TODO(reasoning)` 搜。
+ */
+export interface SynthiaReasoningPart {
+  readonly kind: "reasoning";
+  readonly id: string;
+  readonly state: "streaming" | "done";
+  readonly text: string;
+}
+
+/**
+ * Agent 自身的工具调用 part（free-agent 的 tool_calls，实时三态）。
+ *
+ * 与 {@link SynthiaToolPart} 不同：那个是流水线阶段工具条（validate_sources /
+ * simulate / synthesize / implement，来自 audit），这个是 Agent 在对话轮里
+ * 直接发起的任意工具调用。
+ *
+ * 两个来源，同一个 id（runtime 的 callId）：SSE 实时流给 running→done 的三态与
+ * 完整载荷；audit 在工具结束时补一条预览记录，保证**刷新页面后还能回看本轮调了
+ * 什么工具**。合流时按 id 去重，位置听 audit、内容优先听 SSE。
+ */
+export interface SynthiaAgentToolPart {
+  readonly kind: "agent_tool";
+  readonly id: string;
+  readonly state: "running" | "done" | "error";
+  readonly name: string;
+  /** 入参 JSON 原文（服务端已截断）。 */
+  readonly args: string;
+  /** 结果摘要（running 时 null；服务端已截断）。 */
+  readonly result: string | null;
+}
+
 export type SynthiaPart =
   | SynthiaToolPart
   | SynthiaTextPart
@@ -147,7 +203,9 @@ export type SynthiaPart =
   | SynthiaGovernancePart
   | SynthiaLifecyclePart
   | SynthiaNotePart
-  | SynthiaInterruptPart;
+  | SynthiaInterruptPart
+  | SynthiaReasoningPart
+  | SynthiaAgentToolPart;
 
 // ─── 工具条状态文案（四态，主页面中文）────────────────────────────────
 
@@ -182,6 +240,75 @@ function revisionIdFromGovernanceAction(action: string): string | null {
 function toolErrorText(title: string, result: string | undefined): string {
   if (result === "fail_closed") return `${title}未能完成，任务已安全停止。技术详情见运行记录。`;
   return `${title}未通过，Agent 将根据结果继续处理（修复或停止）。技术详情见运行记录。`;
+}
+
+/**
+ * free_agent_reply_error 的 detail（runtime 抛出的 `Error.message` 原文）→ 人话。
+ *
+ * 之前这里不看 detail，一律渲染「本轮回复出现错误」——网关 504、模型限流、密钥失效
+ * 长得一模一样，用户只能盲目重发（限流该等、密钥失效重发一万次也没用）。现在按原因
+ * 分类给出「该怎么办」。
+ *
+ * 沿用既有约定：**英文原文不进对话流**（见 parts.test.ts 的守卫），认不出来的原因
+ * 只落到兜底句，不回显 detail。
+ */
+export function replyErrorText(detail: string | undefined): string {
+  const raw = detail ?? "";
+  const retry = "可在下方重发消息。";
+
+  // 网关首字节超时：api 网关对「模型还没吐第一个 token」有硬上限（实测 60s），
+  // 推理强度越高越容易撞上。runtime 已经会自动重试，走到这里说明重试也没过。
+  if (/\b(504|gateway ?time-?out)\b/i.test(raw)) {
+    return `模型思考超时，网关在返回首个字符前就断开了。${retry}若反复出现，把推理强度调低一档更有效。`;
+  }
+  // 空闲看门狗：连上了但长时间零字节。
+  if (/no bytes from upstream|abort/i.test(raw)) {
+    return `模型长时间没有输出，本轮已中止。${retry}`;
+  }
+  if (/\b429\b|rate ?limit|too many requests/i.test(raw)) {
+    return `模型服务限流，本轮回复未完成。请稍等片刻再重发。`;
+  }
+  if (/\b(401|403)\b|unauthorized|forbidden|invalid api key/i.test(raw)) {
+    return `模型服务认证失败，本轮回复未完成。重发无效，需要先修正模型密钥配置。`;
+  }
+  if (/\b(context|token).{0,20}(length|limit|exceed)|too long/i.test(raw)) {
+    return `本轮上下文超出模型长度上限。请新开一轮对话，或把需求拆小后重发。`;
+  }
+  const status = /upstream returned (\d{3})/.exec(raw);
+  if (status && Number(status[1]) >= 500) {
+    return `模型服务暂时不可用（HTTP ${status[1]}），本轮回复未完成。${retry}`;
+  }
+  if (/fetch failed|econnrefused|enotfound|network|socket/i.test(raw)) {
+    return `连不上模型服务，本轮回复未完成。请检查网络与服务地址后重发。`;
+  }
+  return `本轮回复出现错误，未能完成。${retry}`;
+}
+
+/**
+ * free_agent_tool 的 detail（runtime 写的 JSON 预览）→ agent_tool part 字段。
+ *
+ * 这条 audit 是**预览**：args/result 在 runtime 侧已按预览尺寸截断（server.ts 的
+ * AUDIT_TOOL_*_MAX），因为 audit 每 3 秒整量轮询一次，全文会被反复传几百遍。
+ * 本轮还活着时 SSE 那份更全，合流时以 SSE 为准（见 ProjectView 的 parts 合成）。
+ *
+ * 解析容错：认不出来返回 null，由调用方整条丢弃——空壳工具卡比没有更糟。
+ */
+function parseToolAudit(
+  detail: string | undefined,
+): { id: string; name: string; args: string; result: string } | null {
+  if (!detail) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(detail); } catch { return null; }
+  if (!raw || typeof raw !== "object") return null;
+  const j = raw as Record<string, unknown>;
+  const name = typeof j.name === "string" ? j.name : "";
+  if (!name) return null;
+  return {
+    id: typeof j.id === "string" ? j.id : "",
+    name,
+    args: typeof j.args === "string" ? j.args : "",
+    result: typeof j.result === "string" ? j.result : "",
+  };
 }
 
 /** evidence 中的码流条目（文件名 .bit 结尾；取最新一条）。 */
@@ -327,11 +454,28 @@ export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
           break;
         }
         if (event.action === "free_agent_reply_error") {
-          push({ kind: "note", id: `n${event.seq}`, tone: "error", text: "本轮回复出现错误，未能完成。可在下方重发消息。", ts: event.ts });
+          push({ kind: "note", id: `n${event.seq}`, tone: "error", text: replyErrorText(event.detail), ts: event.ts });
           break;
         }
         if (event.action === "free_agent_abort") {
           push({ kind: "interrupt", id: `i${event.seq}`, text: "已打断当前回复，按新消息继续。", ts: event.ts });
+          break;
+        }
+        if (event.action === "free_agent_tool") {
+          const call = parseToolAudit(event.detail);
+          // detail 解不出来就整条丢掉：宁可少一张卡，也不要渲染一张空壳工具卡。
+          if (call) {
+            push({
+              kind: "agent_tool",
+              // id 取 runtime 的 callId——SSE 实时流里那张卡用的是同一个 id，
+              // 合流时按 id 去重（见 ProjectView 的 parts 合成），否则本轮渲染两遍。
+              id: call.id || `at${event.seq}`,
+              state: event.result === "ok" ? "done" : "error",
+              name: call.name,
+              args: call.args,
+              result: call.result,
+            });
+          }
           break;
         }
         const sentence = narrateAuditEvent(event);
@@ -413,7 +557,7 @@ export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
         if (doc) {
           if (!filedDocs.has(doc.revision_id)) {
             filedDocs.add(doc.revision_id);
-            push({ kind: "doc", id: `doc-${doc.revision_id}`, doc, title: phaseDocName(doc.phase), ts: event.ts });
+            push({ kind: "doc", id: `doc-${doc.revision_id}`, doc, title: phaseDocName(doc.phase), ts: event.ts, prevRevisionId: null });
           }
         } else {
           push({ kind: "governance", id: `gov${event.seq}`, text: "已登记候选产物（候选修订待审）。", ts: event.ts });
@@ -456,7 +600,7 @@ export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
   for (const doc of detail.docs) {
     if (filedDocs.has(doc.revision_id)) continue;
     filedDocs.add(doc.revision_id);
-    push({ kind: "doc", id: `doc-${doc.revision_id}`, doc, title: phaseDocName(doc.phase), ts: null });
+    push({ kind: "doc", id: `doc-${doc.revision_id}`, doc, title: phaseDocName(doc.phase), ts: null, prevRevisionId: null });
   }
 
   // 证据摘要：一行合并，详情在记录面板。

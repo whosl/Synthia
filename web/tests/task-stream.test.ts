@@ -4,6 +4,9 @@
  * 帧解析与 `applyStreamEvent` 的状态归并，本文件聚焦其未覆盖的部分：
  * - `parseSSEFrames` 多帧粘包（一次拿到的字节里含多条完整帧）拆分；
  * - `applyStreamEvent` 对 status/done 类事件的处理（原样透传，不影响 feed）；
+ * - `applyStreamEvent` 对过程 part 的归并：reasoning（思考过程，与 text 同构、
+ *   delta 按 id 追加）与 tool（Agent 工具调用，定稿事件只带 result，name/args
+ *   沿用 running 事件）；
  * - `subscribeTaskStream` 端到端：跨网络分片（chunk 边界与帧边界不对齐）时的
  *   帧重组、五种事件类型（status/part/delta/done/reset）的分发、以及断线重连
  *   携带 Last-Event-ID 续传游标。
@@ -71,6 +74,105 @@ describe("applyStreamEvent（status/done 事件透传，不影响 feed 内容）
   test("reset 事件清空 feed（游标过老，全量刷新兜底）", () => {
     const feed: StreamFeedPart[] = [{ kind: "text", id: "sp-1", state: "streaming", text: "x" }];
     expect(applyStreamEvent(feed, { type: "reset" })).toEqual([]);
+  });
+});
+
+// ─── applyStreamEvent：过程 part（思考过程 / Agent 工具调用）────────────
+
+describe("applyStreamEvent（reasoning 思考过程 part）", () => {
+  test("reasoning part 与 text part 同构：delta 按 partId 追加，两条流互不串味", () => {
+    let feed: StreamFeedPart[] = [];
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "reasoning", id: "rs-1", state: "streaming", text: "" },
+    });
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "text", id: "sp-1", state: "streaming", text: "" },
+    });
+    feed = applyStreamEvent(feed, { type: "delta", partId: "rs-1", text: "先看时钟域" });
+    feed = applyStreamEvent(feed, { type: "delta", partId: "sp-1", text: "结论：" });
+    feed = applyStreamEvent(feed, { type: "delta", partId: "rs-1", text: "，再算裕量" });
+
+    expect(feed).toEqual([
+      { kind: "reasoning", id: "rs-1", state: "streaming", text: "先看时钟域，再算裕量" },
+      { kind: "text", id: "sp-1", state: "streaming", text: "结论：" },
+    ]);
+  });
+
+  test("reasoning 定稿事件按 id 覆盖为 done（后续 delta 因不再 streaming 被忽略）", () => {
+    let feed: StreamFeedPart[] = [{ kind: "reasoning", id: "rs-1", state: "streaming", text: "思考中" }];
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "reasoning", id: "rs-1", state: "done", text: "思考中" },
+    });
+    expect(feed).toEqual([{ kind: "reasoning", id: "rs-1", state: "done", text: "思考中" }]);
+
+    feed = applyStreamEvent(feed, { type: "delta", partId: "rs-1", text: "迟到的增量" });
+    expect(feed[0]).toMatchObject({ text: "思考中" });
+  });
+});
+
+describe("applyStreamEvent（agent 工具调用 part）", () => {
+  test("running → done：定稿事件不带 name/args 时沿用 running 事件的字段，只补 result", () => {
+    let feed: StreamFeedPart[] = [];
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "tool", id: "fc-1", state: "running", name: "core_check_gate", args: "{\"gate\":\"G1\"}" },
+    });
+    expect(feed).toEqual([
+      { kind: "tool", id: "fc-1", state: "running", name: "core_check_gate", args: "{\"gate\":\"G1\"}", result: null },
+    ]);
+
+    // 服务端只在 running 事件里带一次 name/args（见 runtime/free-agent.ts）。
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "tool", id: "fc-1", state: "done", result: "{\"status\":\"in_review\"}" },
+    });
+    expect(feed).toEqual([
+      {
+        kind: "tool",
+        id: "fc-1",
+        state: "done",
+        name: "core_check_gate",
+        args: "{\"gate\":\"G1\"}",
+        result: "{\"status\":\"in_review\"}",
+      },
+    ]);
+  });
+
+  test("工具报错：state=error 保留 name/args，供失败卡默认展开", () => {
+    let feed: StreamFeedPart[] = [
+      { kind: "tool", id: "fc-1", state: "running", name: "vivado_run", args: "{}", result: null },
+    ];
+    feed = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "tool", id: "fc-1", state: "error", result: "connector timeout" },
+    });
+    expect(feed[0]).toEqual({
+      kind: "tool",
+      id: "fc-1",
+      state: "error",
+      name: "vivado_run",
+      args: "{}",
+      result: "connector timeout",
+    });
+  });
+
+  test("delta 永不落到工具 part 上（工具结果整条下发，没有 token 级增量）", () => {
+    const feed: StreamFeedPart[] = [
+      { kind: "tool", id: "fc-1", state: "running", name: "core_check_gate", args: "{}", result: null },
+    ];
+    expect(applyStreamEvent(feed, { type: "delta", partId: "fc-1", text: "xx" })).toEqual(feed);
+  });
+
+  test("未知 kind 的 part 被忽略（服务端新增一种 part 不会污染流）", () => {
+    const feed: StreamFeedPart[] = [{ kind: "text", id: "sp-1", state: "streaming", text: "a" }];
+    const next = applyStreamEvent(feed, {
+      type: "part",
+      part: { kind: "future_kind", id: "x-1", state: "streaming" },
+    });
+    expect(next).toEqual(feed);
   });
 });
 

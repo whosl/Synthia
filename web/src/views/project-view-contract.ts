@@ -16,66 +16,128 @@
  * 关联，四个栏位组件与后续开发者不需要、也不应该自己再关联一遍。
  */
 
-import type { ArtifactRevision, JobEvidenceContent, TaskAgentSummary } from "../api/types.ts";
+import type { ArtifactRevision, JobEvidenceContent, TaskAgentSummary, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
 import type { StageChainNode } from "../domain/tasks.ts";
 import type { StreamPhase } from "../domain/task-stream.ts";
 import type { Theme } from "../domain/theme.ts";
+import type { ApprovalCardState, ApprovalMember, DecisionFailure } from "../domain/unified.ts";
 
 // ─────────────────────────────────────────────────────────────────────────
 // 文件树统一视图模型（左栏 + 中栏共用）
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * 文件树条目：artifact 与 revision 按 id 关联后的统一视图。
+ * 文件树条目：**一个工作区文件**（或一个没有落盘的历史产物）的统一视图。
  *
  * 关联规则（ProjectView 在编排层一次性算好）：
+ * - 路径与状态以 `GET .../workspace/tree` 为准——那是真实磁盘上的东西。同一个
+ *   artifact 在树里有对应文件时，`path` / `status` 都取自它；
  * - artifactId / artifactType / createdAt 来自 `GET .../artifacts`（`Artifact`，
  *   只有 id/artifact_type/created_at 三个字段）；
  * - revisions 来自 `GET .../artifacts/:aid/revisions`，按 version 升序；
  *   latestRevision 取其中 version 最大的一条——文件树上只展示最新版，完整版本
  *   历史在编辑器顶部下拉里通过 revisions 渲染；
- * - path / phase 来自**当前选中 run** 详情的 `docs[]`（`TaskDocRef`），按
- *   `artifact_id` 匹配；一个 artifact 可能被多个历史 run 的 docs 引用，这里只
- *   取当前选中 run 的引用——任务切换器切换 run 时，文件树的路径/阶段视图分组
- *   会随之变化，这是预期行为（每个 run 只看得到自己产出的文档归属）；
+ * - phase 来自**当前选中 run** 详情的 `docs[]`（`TaskDocRef`），按 `artifact_id`
+ *   匹配；一个 artifact 可能被多个历史 run 的 docs 引用，这里只取当前选中 run
+ *   的引用——任务切换器切换 run 时，「阶段」视图分组会随之变化，这是预期行为；
  * - 当前 run 没有引用到该 artifact 时（如项目还没有任何 run，或该 artifact 由
- *   其他历史 run 产出），path/phase 为 null——「路径」「阶段」视图下应将其归入
- *   「未关联当前任务」分组兜底，「产物类型」视图不受影响，因为它的分组键
- *   artifactType 不依赖 docs（对应 spec R7）。
+ *   其他历史 run 产出），phase 为 null——「阶段」视图归入「未关联当前任务」兜底，
+ *   「产物类型」视图不受影响，因为它的分组键 artifactType 不依赖 docs（spec R7）。
+ *
+ * 两类条目的 latestRevision 会是 null，含义完全不同，别混：
+ * - **盘上有、还没登记**（`status` 为 `untracked` 或某次登记还没走完）——是文件，
+ *   只是还不是修订；
+ * - 反过来，**登记了但盘上没有**（`status` 为 null）是流水线产出的 `art-*`，
+ *   它有修订、没有文件。
  */
 export interface FileTreeEntry {
   readonly artifactId: string;
   /** 产物类型原文（英文枚举），中文名用 domain/artifacts.ts:artifactGroupName / artifactDocName 转换。 */
   readonly artifactType: string;
   readonly createdAt: string;
-  /** 最新版本（树上展示 + 默认打开的版本）。 */
-  readonly latestRevision: ArtifactRevision;
-  /** 该 artifact 的全部版本，按 version 升序（编辑器顶部版本下拉 / diff 对比用）。 */
+  /**
+   * 最新版本（树上展示 + 默认打开的版本）。
+   *
+   * **为 null 表示这个文件在盘上、但还没有任何修订**——人刚用编辑器新建、或
+   * agent 写了还没登记。它是文件树上必须看得见的一行（否则「工作区有 N 个改动」
+   * 指向的东西是隐形的），但它没有版本、没有状态点、也不能进快照。
+   */
+  readonly latestRevision: ArtifactRevision | null;
+  /** 该 artifact 的全部版本，按 version 升序（编辑器顶部版本下拉 / diff 对比用）；尚未登记时为空。 */
   readonly revisions: readonly ArtifactRevision[];
-  /** 当前选中 run 的 docs[] 关联到的文件路径；未关联为 null。 */
+  /** 工作区相对路径。以 `workspace/tree` 为准，其次当前 run 的 docs[]，再次从标题反解；都没有为 null。 */
   readonly path: string | null;
   /** 当前选中 run 的 docs[] 关联到的阶段 id（对齐 domain/tasks.ts:STAGE_CHAIN 的 node.id）；未关联为 null。 */
   readonly phase: string | null;
+  /**
+   * 这个文件在磁盘工作区里的处境（`GET workspace/tree`）。
+   *
+   * 为 null 表示它**根本不在工作区里**——流水线产出的 `art-*` 产物只有 DB 里的
+   * 正文、从来没有落过盘。这类产物照常显示、照常可读，只是没有「改动/登记」这层
+   * 语义，不该被算进待登记计数，也不该显示角标。
+   */
+  readonly status: WorkspaceFileStatus | null;
 }
 
 /** 左栏三种视图（spec §3.2，默认「路径」）。 */
 export type FileTreeViewMode = "path" | "type" | "stage";
 
-/** 文件树状态点四态（spec §3.2：✅ 已批准 / 🔵 候选 / ⚠️ 已驳回 / ⊘ 已作废）。 */
-export type ArtifactDotState = "approved" | "candidate" | "rejected" | "invalidated";
+/**
+ * 打开哪一版：审批场景必须能钉住快照当时的修订。
+ *
+ * - 不传 revisionId（文件树、对话流产物卡）→ 最新版，既有行为不变；
+ * - 传了且命中 → 就是那一版。快照钉的是**提交那一刻**的修订，agent 之后可能又写了
+ *   新版，按最新版审等于审了一份不是被提交的内容；
+ * - 传了但没命中（历史版本已被清理）→ 回落最新版。总比什么都不打开强，且调用方
+ *   拿到的永远是一个真实存在的 revision。
+ *
+ * 返回 null 只有一种情况：这个条目还没有任何修订（盘上有、没登记）。那时正文得走
+ * `GET workspace/file` 从工作区读，不是从修订读。
+ */
+export function pickRevision(entry: FileTreeEntry, revisionId?: string): ArtifactRevision | null {
+  if (!revisionId) return entry.latestRevision;
+  return entry.revisions.find((r) => r.id === revisionId) ?? entry.latestRevision;
+}
+
+/**
+ * 某一版的前一版修订 id——对话流产物卡据此决定要不要给出「查看改动」，点了之后
+ * 它就是中栏 diff 的 base（head 是卡片自己那一版）。
+ *
+ * revisions 按版本升序（domain/file-tree.ts:buildFileTreeEntries），所以前驱就是
+ * 命中项的前一个元素。首版、或这一版已不在版本链里 → null：宁可不出这个入口，也
+ * 不要给出一个点了会落空的按钮。
+ */
+export function prevRevisionId(entry: FileTreeEntry, revisionId: string): string | null {
+  const at = entry.revisions.findIndex((r) => r.id === revisionId);
+  return at > 0 ? entry.revisions[at - 1]!.id : null;
+}
+
+/**
+ * 文件树状态点（spec §3.2 的四态 ✅ 已批准 / 🔵 候选 / ⚠️ 已驳回 / ⊘ 已作废，
+ * 外加 ○ 未登记）。
+ *
+ * `unregistered` 不是第五种「修订状态」——恰恰相反，它表示**这个文件还没有任何
+ * 修订**。它和另外四个并列在同一个位置，是因为用户在树上要回答的是同一个问题：
+ * 「这一行现在算数吗」。把它并进 candidate 会是实打实的谎：候选是已经登记、能进
+ * 快照的东西，未登记的文件进不了任何一道门。
+ */
+export type ArtifactDotState = "approved" | "candidate" | "rejected" | "invalidated" | "unregistered";
 
 /**
  * `ArtifactRevision.state`（后端 revision.state 原文，见 domain/gates.ts:REVISION_STATE_TEXT
- * 的 key 集合：candidate/in_review/approved/rejected/superseded/invalidated）→ 文件树状态点四态。
+ * 的 key 集合：candidate/in_review/approved/rejected/superseded/invalidated）→ 文件树状态点。
  * 统一在这里做一次映射，避免四个栏位各自理解不一致：
  * - approved → 已批准；
  * - candidate / in_review → 候选（尚未定稿的两种在制状态，UI 上不需要区分）；
  * - rejected → 已驳回；
  * - superseded / invalidated → 已作废（被新版本替换 / 已失效，UI 上不需要区分）。
+ *
+ * 传 null（该条目还没有修订）→ 未登记。
  */
-export function artifactDotState(revisionState: string): ArtifactDotState {
+export function artifactDotState(revisionState: string | null | undefined): ArtifactDotState {
+  if (!revisionState) return "unregistered";
   switch (revisionState) {
     case "approved":
       return "approved";
@@ -94,14 +156,31 @@ export const ARTIFACT_DOT_TEXT: Readonly<Record<ArtifactDotState, string>> = {
   candidate: "候选",
   rejected: "已驳回",
   invalidated: "已作废",
+  unregistered: "未登记",
 };
 
-/** 状态点符号（spec §3.2 原样给出的四个符号）。 */
+/** 状态点符号（spec §3.2 原样给出的四个符号，外加未登记的空心圈）。 */
 export const ARTIFACT_DOT_GLYPH: Readonly<Record<ArtifactDotState, string>> = {
   approved: "✅",
   candidate: "🔵",
   rejected: "⚠️",
   invalidated: "⊘",
+  unregistered: "○",
+};
+
+/**
+ * 状态点 → `ui/Badge.vue` 的语气色。定义在这里而不是各组件里，是因为文件树行、
+ * 编辑器版本条都要画同一个点，抄三份迟早会各自漂移。
+ *
+ * `unregistered` 与 `invalidated` 同为 neutral 不是偷懒：两者都是「不在治理链上」，
+ * 都不该用告警色抢注意力——真正要人动手的提示在文件树顶栏那条横幅上，不在行内。
+ */
+export const ARTIFACT_DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" | "danger" | "neutral">> = {
+  approved: "ok",
+  candidate: "info",
+  rejected: "danger",
+  invalidated: "neutral",
+  unregistered: "neutral",
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -118,13 +197,19 @@ export interface TopBarProps {
    * 与“存在但全部 pending”的区别，后者是合法状态，前者不是）。
    */
   readonly stageChain: readonly StageChainNode[] | null;
+  /** 项目没有新版工程阶段链时的准确占位文案。 */
+  readonly stageEmptyText: string;
   /**
-   * 当前选中的 run 摘要（`GET .../tasks` 列表项）。驱动「③ RTL 编写 · 进行中 ·
-   * 8/15」一类文案与任务切换器的高亮项；为 null 当且仅当 stageChain 也为 null。
+   * 当前选中的 run 摘要（`GET .../tasks` 列表项），驱动任务切换器的高亮项。
+   * 自由/兼容项目可以有当前 run 但不展示新版工程 stageChain，因此两个空值不再
+   * 强行绑定。
    */
   readonly currentAgent: TaskAgentSummary | null;
   /** 项目全部 run（`GET .../tasks`，按 created_at 倒序），供任务切换器列出（含仍在后台跑的其它 run）。 */
   readonly agents: readonly TaskAgentSummary[];
+  /** P1: free projects may open multiple conversations; engineering projects
+   * expose one formal agent until side-task isolation lands in P3. */
+  readonly allowNewAgent: boolean;
   /** 当前生效主题，驱动 ☀/☾ 图标显示哪一个。 */
   readonly theme: Theme;
   /** <1024px 时文件树抽屉是否已展开（驱动汉堡按钮的开合态）。见 spec R3。 */
@@ -136,6 +221,11 @@ export interface TopBarProps {
 export interface TopBarEmits {
   /** 任务切换器选中另一个 run（其它 run 仍在后台继续跑，不受影响）。 */
   "select-agent": [agentId: string];
+  /**
+   * 任务切换器里点「开始新对话」：项目已有 agent（可能全部卡在终态/锁死），
+   * 用户仍要开一条新会话。旧 agent 不受影响、仍在切换器里可选回去。
+   */
+  "new-agent": [];
   /**
    * 点击阶段/门节点：左栏应联动切换到「阶段」视图并定位到该阶段的产物分组
    * （spec §3.1 末条）。stageId 对齐 `STAGE_CHAIN` 的 node.id（含门节点 G1/G3/G4）。
@@ -158,11 +248,18 @@ export interface TopBarEmits {
 export interface FileTreeProps {
   /** ProjectView 已完成 artifact↔TaskDocRef 关联的统一视图模型（见上）。 */
   readonly entries: readonly FileTreeEntry[];
+  /** 新版 GJB 工程按正式文档名分组；自由/兼容项目使用中性产物分组。 */
+  readonly documentContext: "gjb" | "generic";
   /** 当前视图（受控：TopBar 的阶段点击会切换它，因此必须提升到 ProjectView）。 */
   readonly viewMode: FileTreeViewMode;
   /**
    * 项目是否存在至少一个 run。为 false 时「路径」「阶段」视图应降级提示
    * （path/phase 全部缺失，无法分组），「产物类型」视图仍可正常工作（spec R7）。
+   *
+   * 注意这只是**下限**而非充要条件：`buildFileTreeEntries` 会在 run 详情的
+   * `docs[]` miss 时从 revision 标题 / artifact id 反解 path 与 phase，所以
+   * hasAgent=false 也可能拿得到分组键。`buildSplitFileTree` 因此按「一个都没
+   * 反解出来」来决定是否降级，而不是只看这个标志。
    */
   readonly hasAgent: boolean;
   /** 当前编辑器打开的 artifactId；树上据此高亮，未打开任何文件为 null。 */
@@ -177,6 +274,19 @@ export interface FileTreeProps {
    * 未曾点击过任何阶段节点时为 null。
    */
   readonly focusStageId: string | null;
+  /**
+   * 工作区里待登记的文件数（`GET workspace/tree`.pending_count）——顶栏
+   * 「工作区有 N 个改动 [登记]」的 N。为 0 时不出这条横幅。
+   *
+   * 由 ProjectView 直接传服务端的计数，而不是让 FileTree 数 entries 里的
+   * dirty/untracked：服务端知道 `sim/` 该排除、也知道二进制文件的处境，前端数
+   * 一遍只会在边界上和后端不一致。
+   */
+  readonly pendingCount: number;
+  /** 登记请求进行中：横幅按钮应置灰，避免重复提交（幂等键不同就是两次真登记）。 */
+  readonly registering: boolean;
+  /** 上一次登记失败的人话；无失败为 null。不给这个字段的话，点了没反应是唯一的反馈。 */
+  readonly registerError: string | null;
 }
 
 export interface FileTreeEmits {
@@ -185,19 +295,29 @@ export interface FileTreeEmits {
   "open-file": [artifactId: string];
   /** 抽屉模式下选中文件后请求收起抽屉（drawerMode=false 时不应触发）。 */
   "close-drawer": [];
+  /** 一键登记：把工作区当前全部改动收成一个 commit + N 条候选修订。说明可为空串。 */
+  register: [changeReason: string];
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // CodeEditor（中栏上：Monaco 编辑器）
 // ─────────────────────────────────────────────────────────────────────────
 
-/** 编辑器只读原因：批准态只读 / agent 运行中只读 / null=可编辑（spec §3.3 三态表 + D19）。 */
-export type EditorReadonlyReason = "approved" | "agent-running" | null;
+/**
+ * 编辑器只读原因（spec §3.3 三态表 + D19），null=可编辑：
+ * - `approved` / `agent-running`：治理原因，不该改；
+ * - `not-in-workspace` / `historical`：**没有可写的目标**——保存只能写工作区文件，
+ *   流水线产出的 `art-*` 从没落过盘，历史版本的正文也不是盘上那份字节。这两种
+ *   情况下放开编辑，用户敲下的字没有任何地方可去。
+ */
+export type EditorReadonlyReason = "approved" | "agent-running" | "not-in-workspace" | "historical" | null;
 
 /** 只读原因 → 顶部提示文案后半段（前半段是「vN · 」版本前缀，由 CodeEditor 自己拼）。 */
 export const EDITOR_READONLY_BANNER: Readonly<Record<Exclude<EditorReadonlyReason, null>, string>> = {
   approved: "已批准 · 只读",
   "agent-running": "agent 正在工作，暂不可编辑",
+  "not-in-workspace": "不在工作区 · 只读",
+  historical: "历史版本 · 只读",
 };
 
 export interface CodeEditorProps {
@@ -210,10 +330,23 @@ export interface CodeEditorProps {
   readonly activeRevision: ArtifactRevision | null;
   /** activeRevision 对应的正文内容（`GET .../revisions/:rid/content`.content）；加载中为 null。 */
   readonly content: string | null;
+  /**
+   * `content` 是从哪儿取的——**只有编辑器自己知道这件事，用户看不出来**，所以必须
+   * 由编排层如实告知：
+   * - `"workspace"`：`GET workspace/file` 的**盘上当前字节**，含还没登记的改动。
+   *   这是唯一可写回的来源，也是文件树点开一个工作区文件时的默认来源；
+   * - `"revision"`：某一条修订的正文（审批卡/产物卡钉版本、或用户从版本下拉选了
+   *   历史版本）。它可能与盘上的字节不同，保存回去等于悄悄回滚，因此恒只读。
+   */
+  readonly contentSource: "workspace" | "revision";
   /** 内容是否正在加载（切换文件/版本时短暂为 true，用于骨架屏）。 */
   readonly loading: boolean;
-  /** 只读原因，见上。为 null 时才允许编辑（本批次骨架只做只读展示，可编辑态先占位）。 */
+  /** 只读原因，见上。为 null 时才允许编辑，并出「保存」按钮。 */
   readonly readonlyReason: EditorReadonlyReason;
+  /** 保存请求进行中：按钮置灰显示「保存中…」。 */
+  readonly saving: boolean;
+  /** 上一次保存失败的人话；无失败为 null。 */
+  readonly saveError: string | null;
   /** Monaco 语言 id（verilog/systemverilog/tcl/markdown/json/yaml…），由 ProjectView 按文件后缀/产物类型推导。 */
   readonly language: string;
   /** 编辑器主题跟随全局：dark→"vs-dark"，light→"vs"（CodeEditor 直接用 theme==='dark' 判断即可）。 */
@@ -233,9 +366,11 @@ export interface CodeEditorEmits {
   /** 退出对比模式，回到单文件视图。 */
   "exit-diff": [];
   /**
-   * 保存为新候选版本（`POST .../artifacts/:aid/revisions`，需 Idempotency-Key + 乐观锁，
-   * 见 spec §3.3）——**批次二**功能。本批次骨架里 ProjectView 暂不监听/调用保存端点，
-   * 这里只做契约占位，避免批次二给 CodeEditor 加保存按钮时又要回头改 ProjectView.vue。
+   * 保存到工作区（`PUT .../workspace/file`）：**只落盘、不 commit**，字节随即变成
+   * 待登记改动，等人在文件树顶栏点【登记】才成为候选修订。
+   *
+   * 分两步是刻意的：保存是编辑动作，登记是治理动作。存一次就出一版修订会把版本链
+   * 冲成一堆半成品，而人改文件本来就是改几行存一下、再改几行再存一下。
    */
   save: [content: string];
 }
@@ -252,6 +387,51 @@ export interface CodeEditorEmits {
  *   按顺序生效，下一个工具调用结束后生效）。
  */
 export type ChatComposerMode = "new-task" | "prompt" | "steer";
+
+// ─────────────────────────────────────────────────────────────────────────
+// ApprovalCard（就地审批卡：钉在输入框上方，滚动区之外）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 就地审批卡（spec §3.5）。渲染在 ChatFeed 的滚动容器**外面**、输入框上面，
+ * 所以往上翻历史时它不滚走——等待批准是当前唯一的阻塞点，不该翻两屏才找得到。
+ *
+ * 与其它栏位组件同一条契约：只吃 props、只吐 emits。提交拉取、请求体组装
+ * （`domain/unified.ts:buildApproveBody`）、幂等键冻结、批准后刷新，全部在
+ * ProjectView 里；本组件连 submission id 都不需要知道。
+ */
+export interface ApprovalCardProps {
+  /** `domain/unified.ts:deriveApprovalCard` 的输出；"hidden" 时整卡不渲染。 */
+  readonly state: ApprovalCardState;
+  /** 门 id 原文（"G4"），仅用于 title 悬浮与 `approvalButtonLabel` 取里程碑文案。 */
+  readonly gate: string;
+  /** 门审查中文名（`GATE_REVIEW_NAMES[gate]` → "RTL审查"），卡片标题用这个。 */
+  readonly review: string;
+  /** 待审产物（快照成员修订）；null = 仍在加载，[] = 快照为空。 */
+  readonly members: readonly ApprovalMember[] | null;
+  /** 产物列表加载失败的人话；失败不挡审批操作，只在展开区提示。 */
+  readonly membersError: string | null;
+  /** 提交时刻（`submitted_at`），用于「已等待 X」；缺失为 null 则不显示等待时长。 */
+  readonly submittedAt: string | null;
+  /** 批准/驳回请求进行中：两个按钮都禁用并显示加载态。 */
+  readonly deciding: boolean;
+  /** 上一次决策失败的人话 + 建议（`humanizeDecisionError`）；无失败为 null。 */
+  readonly decisionError: DecisionFailure | null;
+  /** state="rejected" 时回显的驳回理由（`loadRejectionReason`）；未取到为 null。 */
+  readonly rejectionReason: string | null;
+}
+
+export interface ApprovalCardEmits {
+  /** 点击批准。里程碑门会同时建立里程碑，但那是 ProjectView 组装请求体时的事。 */
+  approve: [];
+  /** 点击驳回（reason 已由组件保证非空白，见 `domain/unified.ts:rejectDisabled`）。 */
+  reject: [reason: string];
+  /**
+   * 点击某个待审产物 → 中栏编辑器打开。**必须带 revisionId**：快照钉的是提交那一
+   * 刻的版本，agent 之后可能又写了新版，按最新版审等于审错内容。
+   */
+  "open-doc": [artifactId: string, revisionId: string];
+}
 
 export interface ChatFeedProps {
   /**
@@ -274,6 +454,12 @@ export interface ChatFeedProps {
   readonly sendError: string | null;
   /** 空项目首屏示例任务文案（`domain/unified.ts:EXAMPLE_TASKS`），仅 composerMode="new-task" 时展示。 */
   readonly exampleTasks: readonly string[];
+  /**
+   * 就地审批卡的全部入参（收成一个嵌套对象，免得 props 列表被审批的 9 个字段撑爆）。
+   * 无待审提交时为 null；ChatFeed 只负责把它原样透传给 ApprovalCard 并把
+   * approve/reject 冒泡上去，自己不解读其中任何字段。
+   */
+  readonly approval: ApprovalCardProps | null;
 }
 
 export interface ChatFeedEmits {
@@ -285,13 +471,32 @@ export interface ChatFeedEmits {
   send: [text: string];
   /** 点击「⏹ 打断」（`POST .../tasks/:agentId/abort`）；仅 canAbort=true 时应可点击。 */
   abort: [];
-  /** 点击产物卡关联的文档 → 中栏编辑器打开（不再弹抽屉，这是三栏相对 v3 的主要收益）。 */
-  "open-doc": [artifactId: string];
+  /**
+   * 点击产物卡关联的文档 → 中栏编辑器打开（不再弹抽屉，这是三栏相对 v3 的主要收益）。
+   *
+   * 两个来源都会带上 revisionId 钉住「当时登记的那一版」：审批卡钉的是快照那一刻，
+   * 对话流产物卡钉的是 agent 登记那一刻。都不按最新版打开——同一张卡上的
+   * `open-diff` 比的就是这一版与它的上一版，若「打开」跳到最新版，两个动作会指向
+   * 不同的东西。第二参可选只为兼容不关心版本的调用方。
+   */
+  "open-doc": [artifactId: string, revisionId?: string];
+  /**
+   * 产物卡的「查看改动」→ 中栏 Monaco 的 diff 模式（这一版 vs 上一版）。
+   *
+   * 流内**不做**行级 diff：对话流是过程叙事，逐行改动属于编辑器的活，重复实现一套
+   * 只会多一份要维护的高亮逻辑（对标结论 P1 的取舍，见 specs/agent-stream-benchmark.md §4）。
+   * `revisionId` 是 head（这一版），base 由 ProjectView 按版本链取其前驱。
+   */
+  "open-diff": [artifactId: string, revisionId: string];
   /**
    * 打开运行记录面板（工具条上的「运行记录」链接、或证据摘要行）。带 jobId 时
    * 面板应展开并定位到该条；证据摘要行点击不定位任何一条，传 null。
    */
   "open-records": [jobId: string | null];
+  /** 就地审批卡的批准（原样冒泡自 ApprovalCard）。 */
+  approve: [];
+  /** 就地审批卡的驳回（原样冒泡自 ApprovalCard）。 */
+  reject: [reason: string];
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -2,12 +2,81 @@
  * Synthia Core API 契约类型（字段与 Contract 一致，不得私改）。
  */
 
+export type ProjectType = "free" | "engineering";
+
+export interface ProcessInstance {
+  readonly id: string;
+  readonly gate_profile_version: string;
+  readonly current_gate: string;
+  readonly created_at: string;
+}
+
+/** P1 formalization relation returned for a project copied from a free/legacy source. */
+export interface ProjectSourceRelation {
+  readonly source_project_id: string;
+  readonly target_project_id: string;
+  readonly relation_kind: "copied_as_engineering";
+  readonly created_by_type: string;
+  readonly created_by: string;
+  readonly created_at: string;
+}
+
+/** GET /api/v1/projects 的列表项。 */
 export interface Project {
   readonly id: string;
   readonly name: string;
   readonly status: string;
   readonly data_classification: string;
   readonly created_at: string;
+  readonly project_type: ProjectType;
+  readonly process_version_id: string | null;
+  readonly process_profile_id: string | null;
+  readonly process_profile_name: string | null;
+  readonly process_profile_version: string | null;
+  readonly target_part: string | null;
+  readonly process_instances: readonly ProcessInstance[];
+  readonly source_relation?: ProjectSourceRelation | null;
+}
+
+interface CreateProjectRequestBase {
+  readonly id: string;
+  readonly name: string;
+  readonly data_classification?: string;
+  readonly target_part?: string | null;
+}
+
+/** POST /api/v1/projects 请求；工程项目的流程版本在类型层就是必填项。 */
+export type CreateProjectRequest =
+  | (CreateProjectRequestBase & {
+      readonly project_type: "free";
+      readonly process_profile_id?: null;
+    })
+  | (CreateProjectRequestBase & {
+      readonly project_type: "engineering";
+      readonly process_profile_id: string;
+    });
+
+/** POST /api/v1/projects 响应；Core 不在创建响应中返回列表专用的时间与分类字段。 */
+export interface CreateProjectResult {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
+  readonly project_type: ProjectType;
+  readonly process_version_id: string | null;
+  readonly process_profile_id: string | null;
+  readonly process_profile_name: string | null;
+  readonly process_profile_version: string | null;
+  readonly target_part: string | null;
+  readonly process_instances: readonly ProcessInstance[];
+  readonly source_relation?: ProjectSourceRelation | null;
+  readonly workspace_content_copied?: boolean;
+}
+
+/** POST /projects/:id/copy-as-engineering request. Project configuration is copied by Core. */
+export interface CopyProjectAsEngineeringRequest {
+  readonly id: string;
+  readonly name: string;
+  readonly target_part?: string | null;
 }
 
 export interface GateSubmission {
@@ -70,6 +139,84 @@ export interface ArtifactRevision {
 export interface RevisionContent {
   readonly content: string;
   readonly content_hash: string;
+}
+
+// ─── 磁盘工作区（内容与版本谱系归 git，治理状态归 Postgres）────────────────────
+
+/**
+ * 一个工作区文件相对「已登记的最新一版」的处境。
+ *
+ * - `registered` — 盘上这份字节与 git 里的一致，且已有对应修订；
+ * - `dirty` — 已登记过，但盘上被改动过（人在编辑器/vim 里改的，还没点登记）；
+ * - `untracked` — 盘上有、git 里没有：刚新建、从没登记过；
+ * - `ignored` — `sim/` 下的仿真产物。按 `rules/25` §1 它是**证据不是产物**，
+ *   永不登记，也不该出现在待登记计数里。
+ */
+export type WorkspaceFileStatus = "registered" | "dirty" | "untracked" | "ignored";
+
+/** `GET /projects/:id/workspace/tree` 的一行。artifact 侧字段在文件尚未登记时全为 null。 */
+export interface WorkspaceTreeFile {
+  readonly path: string;
+  readonly status: WorkspaceFileStatus;
+  readonly bytes: number;
+  readonly modified_at: string;
+  readonly artifact_id: string | null;
+  readonly revision_id: string | null;
+  readonly version: number | null;
+  readonly revision_state: string | null;
+  readonly content_hash: string | null;
+}
+
+export interface WorkspaceTree {
+  readonly project_id: string;
+  readonly files: readonly WorkspaceTreeFile[];
+  /** dirty + untracked 的条数，也就是顶栏「工作区有 N 个改动」里的 N。 */
+  readonly pending_count: number;
+}
+
+/**
+ * `GET /workspace/file` 的响应：工作区**当前**内容（含尚未登记的改动）。
+ *
+ * `registered` 是拿这份字节的 sha256 与该产物最新一版的 content_hash 比出来的，
+ * 不是看 git status——人把文件改坏又改回来时 status 会说 dirty，可字节确实就是登记
+ * 的那一版。`commit` 只在 registered 为真时给出。
+ */
+export interface WorkspaceFileContent {
+  readonly path: string;
+  readonly content: string;
+  readonly content_hash: string;
+  readonly registered: boolean;
+  readonly artifact_id: string | null;
+  readonly revision_id: string | null;
+  readonly version: number | null;
+  readonly commit: string | null;
+}
+
+/** `PUT /workspace/file` 的响应。`changed=false` 表示内容与盘上原样相同，树不必刷新。 */
+export interface WorkspaceWriteResult {
+  readonly path: string;
+  readonly changed: boolean;
+  readonly content_hash: string;
+}
+
+/** 一键登记后新出的（或本就相同的）一版。 */
+export interface WorkspaceRegisteredFile {
+  readonly path: string;
+  readonly artifact_id: string;
+  readonly revision_id: string;
+  readonly version: number;
+  readonly content_hash: string;
+}
+
+/** `POST /workspace/register` 的响应。一次 commit 对应 N 条修订，见 workspace-handlers.ts。 */
+export interface WorkspaceRegisterResult {
+  readonly commit: string;
+  /** 本次 commit 实际收进去的路径（同 key 重放时为空数组）。 */
+  readonly committed: readonly string[];
+  readonly registered: readonly WorkspaceRegisteredFile[];
+  /** 字节与最新一版完全相同、因而没出新版的文件——连同它指向的那一版。 */
+  readonly unchanged: readonly WorkspaceRegisteredFile[];
+  readonly skipped: readonly { readonly path: string; readonly reason: string }[];
 }
 
 /** snapshot.created 事件 payload（解析快照成员修订）。 */
@@ -178,14 +325,19 @@ export interface AbortAgentResult {
 export interface ProjectDetail extends Project {
   readonly scope: string;
   readonly standard_version: string;
-  readonly target_part: string;
   readonly toolchain_profile_ref: string | null;
-  readonly process_instances: ReadonlyArray<{
-    readonly id: string;
-    readonly gate_profile_version: string;
-    readonly current_gate: string;
-    readonly created_at: string;
-  }>;
+}
+
+/** GET /api/v1/process-versions 的可选流程版本。 */
+export interface ProcessVersion {
+  readonly id: string;
+  readonly profile_id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: "active";
+  readonly process_profile_id: string;
+  readonly process_profile_version: string;
+  readonly process_profile_name: string;
 }
 
 /** GET /projects/:id/jobs 列表项（tool_run 行镜像；startTime/endTime 可为 null）。 */

@@ -9,20 +9,30 @@
  *    agent 登记的候选产物在对话流里的引用。点击直接 emit `open`，由 ChatFeed
  *    转发 `open-doc`，在中栏编辑器打开（spec §3.5：不再弹抽屉，这是三栏相对
  *    v3 单页的主要收益）。这类卡片没有正文预览，只有一行标题。
+ *
+ *    `diffable` 时额外给一枚「查看改动」——**流内不渲染行级 diff**，而是复用中栏
+ *    Monaco 的 diff 模式（对标结论 P1 的取舍，见 specs/agent-stream-benchmark.md §4）。
+ *    本组件不认识修订号：两个事件都只带 artifactId，由 ChatFeed 补上这张卡对应的
+ *    revisionId。
  */
 import { computed, ref } from "vue";
 import type { ReplyCodeSegment } from "../../domain/reply-segments.ts";
 
-const props = defineProps<{
-  /** 叙述折叠模式的代码内容；产物卡模式传 null。 */
-  segment: ReplyCodeSegment | null;
-  /** 卡片标题：叙述折叠模式用「语言 · 文件名 · N 行代码」；产物卡模式传文档中文名。 */
-  title: string;
-  /** 非空时卡片可点击「在编辑器中打开」；为 null 时只能本地展开/收起查看代码。 */
-  artifactId: string | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 叙述折叠模式的代码内容；产物卡模式传 null。 */
+    segment: ReplyCodeSegment | null;
+    /** 卡片标题：叙述折叠模式用「语言 · 文件名 · N 行代码」；产物卡模式传文档中文名。 */
+    title: string;
+    /** 非空时卡片可点击「在编辑器中打开」；为 null 时只能本地展开/收起查看代码。 */
+    artifactId: string | null;
+    /** 这一版有上一版可比时为 true → 多一枚「查看改动」。首版为 false。 */
+    diffable?: boolean;
+  }>(),
+  { diffable: false },
+);
 
-const emit = defineEmits<{ open: [artifactId: string] }>();
+const emit = defineEmits<{ open: [artifactId: string]; "open-diff": [artifactId: string] }>();
 
 const openable = computed(() => props.artifactId !== null);
 const expanded = ref(false);
@@ -38,13 +48,23 @@ function onClick(): void {
 
 <template>
   <div class="code-card" :class="{ openable }">
-    <button type="button" class="code-card-header" @click="onClick">
-      <span class="code-card-icon" aria-hidden="true">📄</span>
-      <span class="code-card-title">{{ title }}</span>
-      <span v-if="segment" class="code-card-meta">{{ segment.lineCount }} 行</span>
-      <span v-if="openable" class="code-card-action">在编辑器中打开 ↗</span>
-      <span v-else-if="segment?.collapsible" class="code-card-action">{{ expanded ? "收起 ▴" : "展开 ▾" }}</span>
-    </button>
+    <div class="code-card-row">
+      <button type="button" class="code-card-header" @click="onClick">
+        <span class="code-card-icon" aria-hidden="true">📄</span>
+        <span class="code-card-title">{{ title }}</span>
+        <span v-if="segment" class="code-card-meta">{{ segment.lineCount }} 行</span>
+        <span v-if="openable" class="code-card-action">在编辑器中打开 ↗</span>
+        <span v-else-if="segment?.collapsible" class="code-card-action">{{ expanded ? "收起 ▴" : "展开 ▾" }}</span>
+      </button>
+      <button
+        v-if="diffable && artifactId"
+        type="button"
+        class="code-card-diff"
+        @click="emit('open-diff', artifactId)"
+      >
+        查看改动 ⇄
+      </button>
+    </div>
     <pre v-if="segment && (expanded || !segment.collapsible)" class="code-card-body mono"><code>{{ segment.code }}</code></pre>
   </div>
 </template>
@@ -56,11 +76,17 @@ function onClick(): void {
   overflow: hidden;
 }
 
+.code-card-row {
+  display: flex;
+  align-items: stretch;
+}
+
 .code-card-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: var(--space-1) var(--space-2);
   border: none;
   background: transparent;
@@ -69,6 +95,22 @@ function onClick(): void {
   font-size: var(--font-size-sm);
   cursor: pointer;
   text-align: left;
+}
+
+.code-card-diff {
+  flex: none;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.code-card-diff:hover {
+  color: var(--accent);
 }
 
 .code-card-icon {

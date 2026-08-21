@@ -79,6 +79,56 @@ export function deriveApprovalCard(
   }
 }
 
+/**
+ * 是否需要去后端拉当前门的提交（3s 轮询下的去重判据）。
+ *
+ * 稳定等待期间每 3s 都会跑一次 refresh，若不判据直接拉，一次等待就会放大成几十
+ * 个 gate-submissions 请求。已持有同一门的 in_review 提交时直接跳过即可。
+ *
+ * ⚠️ 返回 false **不等于**「该清空已持有的提交」——`deriveApprovalCard` 刻意把
+ * approved/rejected 的卡留作对话记录，决策成功后 run 会立刻离开 awaiting_approval，
+ * 此时若顺手把提交清掉，刚点完批准的那张卡会当场消失。调用方只做「拉/不拉」，
+ * 可见性交给 deriveApprovalCard。
+ */
+export function shouldFetchSubmission(
+  run: { readonly status: string; readonly awaiting_gate: string | null } | null,
+  current: { readonly gate: string; readonly state: string } | null,
+): boolean {
+  if (!run || run.status !== "awaiting_approval" || !run.awaiting_gate) return false;
+  return !(current && current.gate === run.awaiting_gate && current.state === "in_review");
+}
+
+/**
+ * 一次决策尝试该复用上次的「幂等键 + 请求体」，还是重铸一份？
+ *
+ * 幂等的单位是**键加体**，不是键。`buildApproveBody` 里带 `signed_at: new Date()`
+ * 和 `makeBaselineId(gate, Date.now())` 两个时间戳，重试时重新组装会得到不同的
+ * canonicalRequestHash；服务端对「同键异体」直接抛 409 IDEMPOTENCY_CONFLICT
+ * （core/src/services/approval.ts），于是一次本可安全重放的重试反而变成硬失败。
+ * 所以失败重试必须原样重发同键同体，只有换了提交才重铸。
+ *
+ * 写成类型谓词（`prev is T`）是为了调用端的 `if (!reuse) prev = {...}` 之后能直接
+ * 用 `prev.body`，不必补一个 `!` 断言。
+ */
+export function shouldReuseApproveAttempt<T extends { readonly subId: string }>(
+  prev: T | null,
+  subId: string,
+): prev is T {
+  return prev !== null && prev.subId === subId;
+}
+
+/**
+ * 驳回同理，但多一个判据：理由进请求体、参与 requestHash，
+ * 用户改了理由再提交就是另一个请求体，必须重铸键，否则同样撞 409。
+ */
+export function shouldReuseRejectAttempt<T extends { readonly subId: string; readonly reason: string }>(
+  prev: T | null,
+  subId: string,
+  reason: string,
+): prev is T {
+  return prev !== null && prev.subId === subId && prev.reason === reason;
+}
+
 /** 里程碑门批准文案：「✓ 批准并建立 B? 里程碑」；非里程碑门：「✓ 批准」。 */
 export function approvalButtonLabel(gate: string): string {
   if (!isMilestoneGate(gate)) return "✓ 批准";
@@ -266,18 +316,26 @@ export interface DecisionFailure {
  * 关联号与错误码只在记录面板可见，故此处不拼接 err.code/correlationId）。
  * active 基线冲突 = 同一 (project, kind) 已有 active Baseline 的唯一索引冲突
  * （core schema baseline_unique_active_project_kind，409）。
+ *
+ * 匹配用 `${err.code} ${err.message}`：信封的 code 恒为六个固定值之一
+ * （validation/authorization/conflict/...），具体错误码在 message 里。
  */
 export function humanizeDecisionError(err: unknown, action: DecisionAction): DecisionFailure {
   if (err instanceof ApiError) {
+    const detail = `${err.code} ${err.message}`;
+    // 「该提交已不可再处理」的三个码分属不同 HTTP 状态——NOT_REVIEWABLE 是
+    // InvariantError，被 core 的 mapServiceError 兜成 400；NOT_REJECTABLE 是
+    // conflictApiError，是 409。所以必须在 status 分支之前统一拦下，否则 400
+    // 那条（别人已抢先批准，最常见的失败）会落到兜底文案，让人无限重试。
+    if (/NOT_REVIEWABLE|NOT_SUBMITTABLE|NOT_REJECTABLE/i.test(detail)) {
+      return { text: `该提交已被处理过（状态已变化），${action}未生效。`, hint: "页面将自动刷新至最新状态，请确认结果。" };
+    }
     if (err.status === 409) {
-      if (/baseline|unique/i.test(`${err.code} ${err.message}`)) {
+      if (/baseline|unique/i.test(detail)) {
         return {
-          text: `${action}失败：该项目同类里程碑已存在生效基线（active 基线冲突），本次未能建立新里程碑。`,
-          hint: "请稍候刷新查看最新里程碑状态；若需重新建立，请联系管理员处理旧基线后重试。",
+          text: `${action}失败：该项目同类里程碑已经建立过，本次未能重复建立。`,
+          hint: "请刷新查看最新的里程碑状态；若确需重新建立，请联系管理员处理后重试。",
         };
-      }
-      if (/NOT_REVIEWABLE|NOT_SUBMITTABLE/i.test(err.code)) {
-        return { text: `该提交已被处理过（状态已变化），${action}未生效。`, hint: "页面将自动刷新至最新状态，请确认结果。" };
       }
       return { text: `该提交状态已变化，${action}未生效。`, hint: null };
     }
