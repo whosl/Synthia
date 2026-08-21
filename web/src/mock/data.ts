@@ -28,6 +28,7 @@
 import type {
   Artifact,
   ArtifactRevision,
+  CopyHistoricalMaterialResult,
   ProcessVersion,
   ProjectDetail,
   TaskAuditEvent,
@@ -35,6 +36,7 @@ import type {
   TaskEvidenceSummary,
   TaskAgentDetail,
   TaskAgentSummary,
+  HistoricalMaterialSnapshot,
 } from "../api/types.ts";
 import { VIVADO_FIXTURE } from "./vivado-fixture.ts";
 import { DOC_INTAKE, DOC_BEHAVIOR, DOC_ARCH, DOC_REG } from "./docs.ts";
@@ -411,6 +413,103 @@ export const MOCK_REVISIONS: Readonly<Record<string, readonly ArtifactRevision[]
 
 export const MOCK_CONTENT: Readonly<Record<string, string>> = { ...ART_A.content, ...ART_B.content };
 
+// ─────────────────────────────────────────────────────────────────────
+// P2 历史资料库（规范化 JSON 快照；不伪装成真实 Core/Git 导入）
+// ─────────────────────────────────────────────────────────────────────
+
+const MOCK_MATERIAL_PENDING_FILES = [
+  {
+    id: "mat-file-pending-rtl",
+    file_id: "mat-file-pending-rtl",
+    snapshot_id: "import-snap-pending-p1",
+    path: "rtl/pwm_gen.v",
+    bytes: 1820,
+    size_bytes: 1820,
+    content_hash: "1".repeat(64),
+    media_type: "text/plain",
+    valid: true,
+    searchable: false,
+    created_at: "2026-08-21T02:00:00.000Z",
+    content: RTL_V2,
+  },
+  {
+    id: "mat-file-pending-readme",
+    file_id: "mat-file-pending-readme",
+    snapshot_id: "import-snap-pending-p1",
+    path: "README.md",
+    bytes: 540,
+    size_bytes: 540,
+    content_hash: "2".repeat(64),
+    media_type: "text/markdown",
+    valid: true,
+    searchable: false,
+    created_at: "2026-08-21T02:00:00.000Z",
+    content: "# 历史 PWM 参考\n\n这是一份待人工确认的资料快照。",
+  },
+] as const;
+
+const MOCK_MATERIAL_CONFIRMED_FILES = [
+  {
+    id: "mat-file-confirmed-rtl",
+    file_id: "mat-file-confirmed-rtl",
+    snapshot_id: "import-snap-confirmed-p1",
+    path: "rtl/counter.v",
+    bytes: 812,
+    size_bytes: 812,
+    content_hash: "3".repeat(64),
+    media_type: "text/plain",
+    valid: true,
+    searchable: true,
+    created_at: "2026-08-18T04:00:00.000Z",
+    content: "module counter(input logic clk, output logic [7:0] q);\n  always_ff @(posedge clk) q <= q + 1'b1;\nendmodule\n",
+  },
+] as const;
+
+export const MOCK_IMPORT_SNAPSHOTS: readonly HistoricalMaterialSnapshot[] = [
+  {
+    id: "import-snap-confirmed-p1",
+    snapshot_id: "import-snap-confirmed-p1",
+    project_id: PROJECT_ID,
+    source_kind: "project",
+    source_project_id: "legacy-p1",
+    source_name: "迁移前兼容项目",
+    source_hash: "4".repeat(64),
+    source_commit: "a".repeat(40),
+    commit: "a".repeat(40),
+    status: "confirmed",
+    valid: true,
+    searchable: true,
+    expires_at: null,
+    files: MOCK_MATERIAL_CONFIRMED_FILES,
+    created_at: "2026-08-18T04:00:00.000Z",
+    confirmed_at: "2026-08-18T04:10:00.000Z",
+    denied_at: null,
+    denial_reason: null,
+    failure_reason: null,
+  },
+  {
+    id: "import-snap-pending-p1",
+    snapshot_id: "import-snap-pending-p1",
+    project_id: PROJECT_ID,
+    source_kind: "local_directory",
+    source_project_id: null,
+    source_name: "本地 PWM 资料目录",
+    source_hash: "5".repeat(64),
+    source_commit: null,
+    commit: null,
+    status: "pending_confirmation",
+    valid: true,
+    searchable: false,
+    expires_at: null,
+    files: MOCK_MATERIAL_PENDING_FILES,
+    created_at: "2026-08-21T02:00:00.000Z",
+    confirmed_at: null,
+    denied_at: null,
+    denial_reason: null,
+    failure_reason: null,
+  },
+];
+
 const SUMMARY_A: TaskAgentSummary = {
   agent_id: AGENT_A,
   project_id: PROJECT_ID,
@@ -468,6 +567,17 @@ export const mockState = {
   createdProjects: restoredCreatedProjects(),
   /** 用户在 mock 里新建/发送的消息，回显进对话流。 */
   extraUserMessages: [] as Array<{ agentId: string; text: string; ts: string }>,
+  /** P2 快照按 projectId 隔离；资料默认不跨项目共享。 */
+  importSnapshots: { [PROJECT_ID]: [...MOCK_IMPORT_SNAPSHOTS] } as Record<string, HistoricalMaterialSnapshot[]>,
+  /** 历史资料复制后真实落入 Mock 产物/修订读模型，供工作台刷新与 v2 验证。 */
+  importArtifacts: {} as Record<string, Artifact[]>,
+  importRevisions: {} as Record<string, ArtifactRevision[]>,
+  importRevisionContent: {} as Record<string, string>,
+  /** copy 写操作按 HTTP 幂等键缓存；同键异体 fail closed。 */
+  importCopyOperations: {} as Record<string, {
+    readonly requestHash: string;
+    readonly result: CopyHistoricalMaterialResult;
+  }>,
 };
 
 export function persistCreatedMockProjects(): void {

@@ -141,6 +141,143 @@ export interface RevisionContent {
   readonly content_hash: string;
 }
 
+// ─── P2 历史资料库（导入快照 / 确认 / 检索 / 复制）──────────────────────────
+
+/** 导入资料的来源类型。首版不接受 Git 仓库，避免把工作树语义混入固定快照。 */
+export type ImportSnapshotSourceKind = "project" | "local_directory" | "zip";
+
+/**
+ * 导入快照的治理状态。`valid` 不是状态，而是资料是否仍可作为默认上下文的
+ * 独立事实；只有 `confirmed && valid` 才能被搜索和复制为候选。
+ */
+export type ImportSnapshotStatus = "pending_confirmation" | "confirmed" | "denied" | "failed" | "expired";
+
+/** POST /projects/:id/import-snapshots.files 的规范化 JSON 文件条目。 */
+export interface ImportSnapshotFileInput {
+  readonly path: string;
+  readonly content: string;
+  readonly media_type?: string;
+}
+
+/** `GET /import-snapshots` 返回的固定快照文件条目。 */
+export interface HistoricalMaterialFile {
+  readonly id: string;
+  readonly file_id: string;
+  readonly snapshot_id: string;
+  readonly path: string;
+  readonly bytes: number;
+  readonly size_bytes: number;
+  readonly content_hash: string;
+  readonly media_type: string;
+  readonly valid: boolean;
+  readonly searchable: boolean;
+  readonly created_at: string;
+  /** 待确认快照详情可带正文；列表/搜索通常省略，避免把资料库整包下发。 */
+  readonly content?: string;
+  readonly content_base64?: string;
+}
+
+/** 导入请求；Core 会再次执行路径、敏感文件和大小限制校验。 */
+export interface CreateImportSnapshotRequest {
+  readonly id?: string;
+  readonly source_kind: ImportSnapshotSourceKind;
+  readonly source_project_id?: string;
+  readonly commit?: string;
+  readonly source_name?: string;
+  readonly source_hash?: string;
+  readonly expires_at?: string | null;
+  /** project 来源可由 Core 按 source_project_id + commit 读取固定 Git 树。 */
+  readonly files?: readonly ImportSnapshotFileInput[];
+}
+
+/** `POST /projects/:id/import-snapshots` 与列表项共用的快照摘要。 */
+export interface HistoricalMaterialSnapshot {
+  readonly id: string;
+  readonly snapshot_id: string;
+  readonly project_id: string;
+  readonly source_kind: ImportSnapshotSourceKind;
+  readonly source_project_id: string | null;
+  readonly source_name: string | null;
+  readonly source_hash: string;
+  readonly source_commit: string | null;
+  readonly commit: string | null;
+  readonly status: ImportSnapshotStatus;
+  readonly valid: boolean;
+  readonly searchable: boolean;
+  readonly expires_at: string | null;
+  readonly files: readonly HistoricalMaterialFile[];
+  readonly created_at: string;
+  readonly confirmed_at: string | null;
+  readonly denied_at: string | null;
+  readonly denial_reason: string | null;
+  readonly failure_reason: string | null;
+}
+
+/** POST /:snapshotId/deny。理由可选，但若填写会进入审计记录。 */
+export interface DenyImportSnapshotRequest {
+  readonly reason?: string;
+}
+
+/** GET /search?q= 的资料条目；只返回 `confirmed && valid` 的结果。 */
+export interface HistoricalMaterialSearchResult extends HistoricalMaterialFile {
+  readonly project_id: string;
+  readonly source_name: string | null;
+  readonly status: "confirmed";
+  readonly source_kind: ImportSnapshotSourceKind;
+  readonly source_project_id: string | null;
+  readonly source_hash: string;
+  readonly snippet?: string | null;
+}
+
+/** Canonical GET /import-snapshots/search response. */
+export interface HistoricalMaterialSearchResponse {
+  readonly items: readonly HistoricalMaterialSearchResult[];
+  readonly results?: readonly HistoricalMaterialSearchResult[];
+  readonly query: string;
+  readonly total: number;
+}
+
+/** POST /:snapshotId/copy 请求；复制后一定生成当前项目的新候选修订。 */
+export interface CopyHistoricalMaterialRequest {
+  readonly id: string;
+  readonly name: string;
+  readonly artifact_type?: string;
+  readonly file_ids: readonly string[];
+}
+
+/** 复制结果；Core 可附带具体 artifact/revision 身份，UI 只展示已复制数量。 */
+export interface CopyHistoricalMaterialResult {
+  readonly id: string;
+  readonly snapshot_id: string;
+  readonly project_id: string;
+  readonly candidate: true;
+  readonly revision_ids: readonly string[];
+  readonly copied_files: readonly {
+    readonly file_id: string;
+    readonly path: string;
+    readonly revision_id: string;
+    readonly artifact_id: string;
+    readonly version: number;
+  }[];
+  readonly revisions: readonly {
+    readonly id: string;
+    readonly artifact_id: string;
+    readonly project_id: string;
+    readonly version: number;
+    readonly state: "candidate";
+    readonly file_id: string;
+    readonly path: string;
+    readonly content_hash: string;
+  }[];
+  readonly source_relations: readonly {
+    readonly id: string;
+    readonly snapshot_id: string;
+    readonly entry_id: string;
+    readonly target_revision_id: string;
+    readonly relation_kind: "imported_candidate";
+  }[];
+}
+
 // ─── 磁盘工作区（内容与版本谱系归 git，治理状态归 Postgres）────────────────────
 
 /**

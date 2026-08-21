@@ -26,7 +26,26 @@ import {
   mockState,
   persistCreatedMockProjects,
 } from "./data.ts";
-import type { CreateProjectResult, ProcessInstance, Project, ProjectDetail } from "../api/types.ts";
+import type {
+  Artifact,
+  ArtifactRevision,
+  CopyHistoricalMaterialResult,
+  CreateImportSnapshotRequest,
+  CreateProjectResult,
+  HistoricalMaterialFile,
+  HistoricalMaterialSearchResult,
+  HistoricalMaterialSnapshot,
+  ImportSnapshotFileInput,
+  ProcessInstance,
+  Project,
+  ProjectDetail,
+} from "../api/types.ts";
+import {
+  DEFAULT_HISTORICAL_COPY_ARTIFACT_TYPE,
+  isHistoricalCopyArtifactType,
+  parseMaterialImportPayload,
+} from "../domain/historical-materials.ts";
+import { sha256Bytes } from "../util/sha256.ts";
 
 /** 假装有网络：让 loading 态真的能被看见，而不是同步瞬间填满。 */
 const LATENCY_MS = 80;
@@ -34,6 +53,8 @@ const LATENCY_MS = 80;
 const DELTA_INTERVAL_MS = 700;
 /** 浏览器验收可用同名本地值或 `?mockProcessVersions=error` 验证 UI fail closed。 */
 export const MOCK_PROCESS_VERSIONS_MODE_KEY = "synthia.mock.process-versions-mode";
+/** `error` makes the P2 library endpoint return 503 for browser fail-closed QA. */
+export const MOCK_IMPORT_SNAPSHOTS_MODE_KEY = "synthia.mock.import-snapshots-mode";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -46,6 +67,20 @@ function processVersionsMode(): string | null {
     return typeof globalThis.localStorage === "undefined"
       ? null
       : globalThis.localStorage.getItem(MOCK_PROCESS_VERSIONS_MODE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function importSnapshotsMode(): string | null {
+  try {
+    const queryMode = typeof globalThis.location === "undefined"
+      ? null
+      : new URLSearchParams(globalThis.location.search).get("mockMaterials");
+    if (queryMode) return queryMode;
+    return typeof globalThis.localStorage === "undefined"
+      ? null
+      : globalThis.localStorage.getItem(MOCK_IMPORT_SNAPSHOTS_MODE_KEY);
   } catch {
     return null;
   }
@@ -203,6 +238,347 @@ function copyMockProjectAsEngineering(sourceProjectId: string, body: unknown): R
   return ok({ ...createResult(project), source_relation: project.source_relation, workspace_content_copied: false }, 201);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// P2 历史资料库 mock
+// ─────────────────────────────────────────────────────────────────────
+
+function materialSnapshots(projectId: string): HistoricalMaterialSnapshot[] {
+  const existing = mockState.importSnapshots[projectId];
+  if (existing) return existing;
+  const created: HistoricalMaterialSnapshot[] = [];
+  mockState.importSnapshots[projectId] = created;
+  return created;
+}
+
+function mockDigest(seed: string): string {
+  return sha256Bytes(new TextEncoder().encode(seed));
+}
+
+function canonicalInputHash(files: readonly ImportSnapshotFileInput[]): string {
+  return mockDigest(
+    [...files]
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((file) => `${file.path}:${mockDigest(file.content)}`)
+      .join("\n"),
+  );
+}
+
+function materialFile(snapshotId: string, row: ImportSnapshotFileInput, index: number): HistoricalMaterialFile {
+  const contentBytes = new TextEncoder().encode(row.content).byteLength;
+  const id = `${snapshotId}:file:${index + 1}`;
+  return {
+    id,
+    file_id: id,
+    snapshot_id: snapshotId,
+    path: row.path,
+    bytes: contentBytes,
+    size_bytes: contentBytes,
+    content_hash: mockDigest(row.content),
+    media_type: row.media_type ?? "text/plain",
+    valid: true,
+    searchable: false,
+    created_at: new Date().toISOString(),
+    content: row.content,
+  };
+}
+
+/** Mock 没有每个项目的真实 Git 工作树；用固定清单模拟 Core 按 commit 读取树。 */
+function mockProjectSourceFiles(
+  source: ProjectDetail,
+  commit: string | undefined,
+): readonly ImportSnapshotFileInput[] {
+  return [{
+    path: "doc/source-project.md",
+    media_type: "text/markdown",
+    content: [
+      `# ${source.name}`,
+      "",
+      `来源项目：${source.id}`,
+      `固定提交：${commit ?? "HEAD"}`,
+      "",
+      "这是离线 Mock 为 project source 生成的确定性资料清单。",
+    ].join("\n"),
+  }];
+}
+
+/** 与 Core 的 effectiveStatus 一致：到期是读取时事实，不只在创建时固化一次。 */
+function effectiveMockImportSnapshot(snapshot: HistoricalMaterialSnapshot): HistoricalMaterialSnapshot {
+  const expiresAt = snapshot.expires_at === null ? null : Date.parse(snapshot.expires_at);
+  const expired = (snapshot.status === "pending_confirmation" || snapshot.status === "confirmed")
+    && expiresAt !== null
+    && expiresAt <= Date.now();
+  const status = expired ? "expired" : snapshot.status;
+  const valid = snapshot.valid && status !== "failed" && status !== "expired";
+  const searchable = status === "confirmed" && valid && snapshot.searchable;
+  return {
+    ...snapshot,
+    status,
+    valid,
+    searchable,
+    files: snapshot.files.map((file) => ({
+      ...file,
+      searchable: searchable && file.valid === true && file.searchable === true,
+    })),
+  };
+}
+
+/** list/detail/create 默认与 Core 一样不下发正文；Mock 内部仍保留正文供搜索/复制。 */
+function publicMockImportSnapshot(snapshot: HistoricalMaterialSnapshot): HistoricalMaterialSnapshot {
+  const current = effectiveMockImportSnapshot(snapshot);
+  return {
+    ...current,
+    files: current.files.map((file) => {
+      const { content, content_base64: contentBase64, ...view } = file;
+      void content;
+      void contentBase64;
+      return view;
+    }),
+  };
+}
+
+function projectArtifacts(projectId: string): readonly Artifact[] {
+  const fixture = projectId === MOCK_PROJECT.id ? MOCK_ARTIFACTS : [];
+  return [...fixture, ...(mockState.importArtifacts[projectId] ?? [])];
+}
+
+function artifactRevisions(projectId: string, artifactId: string): readonly ArtifactRevision[] {
+  if (!projectArtifacts(projectId).some((artifact) => artifact.id === artifactId)) return [];
+  const fixture = projectId === MOCK_PROJECT.id ? MOCK_REVISIONS[artifactId] ?? [] : [];
+  return [...fixture, ...(mockState.importRevisions[artifactId] ?? [])]
+    .sort((a, b) => a.version - b.version);
+}
+
+function createMockImportSnapshot(projectId: string, body: unknown): Response {
+  const parsed = parseMaterialImportPayload(JSON.stringify(body));
+  if (!parsed.ok) return fail(400, "validation", parsed.message);
+  const request: CreateImportSnapshotRequest = parsed.request;
+  const target = findProject(projectId);
+  if (!target || target.project_type !== "engineering") {
+    return fail(409, "IMPORT_REQUIRES_ENGINEERING_PROJECT", "历史资料只能导入工程项目");
+  }
+  if (request.source_kind === "project" && !request.source_project_id) {
+    return fail(400, "validation", "project 来源必须提供 source_project_id");
+  }
+  let sourceProject: ProjectDetail | null = null;
+  if (request.source_kind === "project") {
+    const source = request.source_project_id ? findProject(request.source_project_id) : null;
+    if (!source) return fail(404, "not_found", "来源项目不存在");
+    if (source.id === projectId) return fail(400, "validation", "来源项目不能与目标项目相同");
+    if (source.status !== "active") return fail(409, "SOURCE_PROJECT_NOT_ACTIVE", "来源项目不是 active 状态");
+    sourceProject = source;
+  }
+  const snapshots = materialSnapshots(projectId);
+  const id = request.id ?? `import-${projectId}-${crypto.randomUUID().slice(0, 8)}`;
+  if (snapshots.some((snapshot) => snapshot.id === id)) return fail(409, "IMPORT_SNAPSHOT_ALREADY_EXISTS", `资料快照 ${id} 已存在`);
+  const createdAt = new Date().toISOString();
+  const workspaceFiles = sourceProject ? mockProjectSourceFiles(sourceProject, request.commit) : null;
+  if (workspaceFiles && request.files && canonicalInputHash(request.files) !== canonicalInputHash(workspaceFiles)) {
+    return fail(400, "validation", "project 导入 files 与来源项目固定 commit 清单不匹配");
+  }
+  const sourceFiles = request.files ?? workspaceFiles ?? [];
+  const files = sourceFiles.map((row, index) => materialFile(id, row, index));
+  const canonicalSourceHash = canonicalInputHash(sourceFiles);
+  if (request.source_hash && request.source_hash !== canonicalSourceHash) {
+    return fail(400, "validation", "source_hash 与规范化资料清单不匹配");
+  }
+  const expiresAt = request.expires_at ? new Date(request.expires_at).toISOString() : null;
+  const expired = expiresAt !== null && Date.parse(expiresAt) <= Date.now();
+  const snapshot: HistoricalMaterialSnapshot = {
+    id,
+    snapshot_id: id,
+    project_id: projectId,
+    source_kind: request.source_kind,
+    source_project_id: request.source_project_id ?? null,
+    source_name: request.source_name ?? sourceProject?.id ?? request.source_kind,
+    source_hash: canonicalSourceHash,
+    source_commit: request.commit ?? null,
+    commit: request.commit ?? null,
+    status: expired ? "expired" : "pending_confirmation",
+    valid: !expired,
+    searchable: false,
+    expires_at: expiresAt,
+    files,
+    created_at: createdAt,
+    confirmed_at: null,
+    denied_at: null,
+    denial_reason: null,
+    failure_reason: null,
+  };
+  snapshots.unshift(snapshot);
+  return ok(publicMockImportSnapshot(snapshot), 201);
+}
+
+function findMockImportSnapshot(projectId: string, snapshotId: string): HistoricalMaterialSnapshot | null {
+  return materialSnapshots(projectId).find((snapshot) => snapshot.id === snapshotId) ?? null;
+}
+
+function updateMockImportSnapshot(projectId: string, snapshotId: string, action: "confirm" | "deny", body: unknown): Response {
+  const snapshots = materialSnapshots(projectId);
+  const at = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
+  if (at < 0) return fail(404, "not_found", "资料快照不存在");
+  const current = effectiveMockImportSnapshot(snapshots[at]!);
+  if (current.status !== "pending_confirmation") return fail(409, "IMPORT_SNAPSHOT_STATE_CONFLICT", "资料快照已经完成确认决策");
+  const now = new Date().toISOString();
+  const next: HistoricalMaterialSnapshot = action === "confirm"
+    ? { ...current, status: "confirmed", searchable: current.valid, confirmed_at: now, files: current.files.map((file) => ({ ...file, searchable: file.valid })) }
+    : { ...current, status: "denied", searchable: false, denied_at: now, denial_reason: typeof (body as { reason?: unknown } | null)?.reason === "string" ? (body as { reason: string }).reason : null, files: current.files.map((file) => ({ ...file, searchable: false })) };
+  snapshots[at] = next;
+  return ok(publicMockImportSnapshot(next));
+}
+
+function searchMockImportSnapshots(projectId: string, query: string): Response {
+  const needle = query.trim().toLowerCase();
+  const rows: HistoricalMaterialSearchResult[] = [];
+  for (const stored of materialSnapshots(projectId)) {
+    const snapshot = effectiveMockImportSnapshot(stored);
+    if (snapshot.status !== "confirmed" || !snapshot.valid || !snapshot.searchable) continue;
+    for (const file of snapshot.files) {
+      if (!file.valid || !file.searchable) continue;
+      const haystack = `${file.path}\n${file.content ?? ""}`.toLowerCase();
+      if (needle && !haystack.includes(needle)) continue;
+      rows.push({
+        id: file.id,
+        file_id: file.file_id,
+        snapshot_id: snapshot.id,
+        path: file.path,
+        bytes: file.bytes,
+        size_bytes: file.size_bytes,
+        content_hash: file.content_hash,
+        media_type: file.media_type,
+        created_at: file.created_at,
+        project_id: projectId,
+        source_name: snapshot.source_name,
+        status: "confirmed",
+        source_kind: snapshot.source_kind,
+        source_project_id: snapshot.source_project_id,
+        source_hash: snapshot.source_hash,
+        valid: snapshot.valid,
+        searchable: snapshot.searchable,
+      });
+    }
+  }
+  return ok({ items: rows, results: rows, query, total: rows.length });
+}
+
+function copyMockImportSnapshot(projectId: string, snapshotId: string, body: unknown, idempotencyKey: string | null): Response {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "validation", "复制请求必须是对象");
+  const request = body as Record<string, unknown>;
+  const fileIds = Array.isArray(request.file_ids) ? request.file_ids.filter((id): id is string => typeof id === "string") : [];
+  if (typeof request.id !== "string" || !request.id.trim() || typeof request.name !== "string" || !request.name.trim() || fileIds.length === 0 || new Set(fileIds).size !== fileIds.length) {
+    return fail(400, "validation", "复制请求必须包含 id、name 和至少一个 file_id");
+  }
+  const copyId = request.id.trim();
+  const copyName = request.name.trim();
+  const artifactType = request.artifact_type ?? DEFAULT_HISTORICAL_COPY_ARTIFACT_TYPE;
+  if (!isHistoricalCopyArtifactType(artifactType)) {
+    return fail(400, "validation", "artifact_type 必须是历史资料复制支持的合法产物类型");
+  }
+
+  const requestHash = mockDigest(JSON.stringify({ copyId, copyName, artifactType, fileIds }));
+  const operationKey = idempotencyKey ? `${projectId}\0${snapshotId}\0${idempotencyKey}` : null;
+  const previous = operationKey ? mockState.importCopyOperations[operationKey] : undefined;
+  if (previous) {
+    return previous.requestHash === requestHash
+      ? ok(previous.result)
+      : fail(409, "IDEMPOTENCY_KEY_REUSED", "同一幂等键不能用于不同复制请求");
+  }
+
+  const stored = findMockImportSnapshot(projectId, snapshotId);
+  if (!stored) return fail(404, "not_found", "资料快照不存在");
+  const snapshot = effectiveMockImportSnapshot(stored);
+  if (snapshot.status !== "confirmed" || !snapshot.valid || !snapshot.searchable) {
+    return fail(409, "IMPORT_SNAPSHOT_NOT_SEARCHABLE", "只有已确认且仍有效的资料可以复制");
+  }
+  const selected: HistoricalMaterialFile[] = [];
+  for (const fileId of fileIds) {
+    const file = snapshot.files.find((candidate) => candidate.id === fileId);
+    if (!file || !file.valid || !file.searchable || typeof file.content !== "string") {
+      return fail(400, "validation", "file_id 不属于该资料快照、文件已失效或正文不可复制");
+    }
+    selected.push(file);
+  }
+
+  for (const file of selected) {
+    const artifactId = `import-${projectId}-${mockDigest(file.path).slice(0, 24)}`;
+    const existingArtifact = projectArtifacts(projectId).find((artifact) => artifact.id === artifactId);
+    if (existingArtifact && existingArtifact.artifact_type !== artifactType) {
+      return fail(409, "IMPORT_ARTIFACT_METADATA_CONFLICT", "同路径候选的产物类型与既有产物不一致");
+    }
+  }
+  const planned = selected.map((file) => {
+    const id = `import_rev_${mockDigest(`${projectId}\0${snapshotId}\0${copyId}\0${file.id}`).slice(0, 48)}`;
+    const artifactId = `import-${projectId}-${mockDigest(file.path).slice(0, 24)}`;
+    const existingArtifact = projectArtifacts(projectId).find((artifact) => artifact.id === artifactId);
+    const versions = artifactRevisions(projectId, artifactId);
+    return {
+      file,
+      id,
+      artifactId,
+      version: versions.reduce((max, revision) => Math.max(max, revision.version), 0) + 1,
+      createArtifact: !existingArtifact,
+    } as const;
+  });
+  const existingRevisionIds = new Set([
+    ...Object.values(MOCK_REVISIONS).flat().map((revision) => revision.id),
+    ...Object.values(mockState.importRevisions).flat().map((revision) => revision.id),
+  ]);
+  if (planned.some((item) => existingRevisionIds.has(item.id))) {
+    return fail(409, "IMPORT_REVISION_ID_CONFLICT", "复制标识已用于同一资料文件，请使用新的候选标识");
+  }
+
+  const now = new Date().toISOString();
+  const importedArtifacts = mockState.importArtifacts[projectId] ?? (mockState.importArtifacts[projectId] = []);
+  for (const item of planned) {
+    if (item.createArtifact) importedArtifacts.push({ id: item.artifactId, artifact_type: artifactType, created_at: now });
+    const revisionList = mockState.importRevisions[item.artifactId] ?? (mockState.importRevisions[item.artifactId] = []);
+    revisionList.push({
+      id: item.id,
+      version: item.version,
+      state: "candidate",
+      content_hash: item.file.content_hash,
+      content_location: `mock://artifact_revision/${item.id}`,
+      title: copyName,
+      created_at: now,
+    });
+    if (typeof item.file.content === "string") mockState.importRevisionContent[item.id] = item.file.content;
+  }
+
+  const revisions = planned.map((item) => ({
+    id: item.id,
+    artifact_id: item.artifactId,
+    project_id: projectId,
+    version: item.version,
+    state: "candidate" as const,
+    file_id: item.file.id,
+    path: item.file.path,
+    content_hash: item.file.content_hash,
+  }));
+  const result: CopyHistoricalMaterialResult = {
+    id: copyId,
+    snapshot_id: snapshotId,
+    project_id: projectId,
+    candidate: true,
+    revision_ids: revisions.map((revision) => revision.id),
+    copied_files: planned.map((item, index) => ({
+      file_id: item.file.id,
+      path: item.file.path,
+      revision_id: revisions[index]!.id,
+      artifact_id: revisions[index]!.artifact_id,
+      version: revisions[index]!.version,
+    })),
+    revisions,
+    source_relations: planned.map((item, index) => ({
+      id: `import_rel_${mockDigest(revisions[index]!.id).slice(0, 48)}`,
+      snapshot_id: snapshotId,
+      entry_id: item.file.id,
+      target_revision_id: revisions[index]!.id,
+      relation_kind: "imported_candidate" as const,
+    })),
+  };
+  if (operationKey) mockState.importCopyOperations[operationKey] = { requestHash, result };
+  return ok(result);
+}
+
 function sseFrame(event: string, id: number, data: unknown): string {
   return `event: ${event}\nid: ${id}\ndata: ${JSON.stringify(data)}\n\n`;
 }
@@ -272,7 +648,14 @@ function liveStream(agentId: string, signal: AbortSignal | null | undefined): Re
   });
 }
 
-async function route(pathname: string, method: string, body: unknown, signal: AbortSignal | null | undefined, searchParams: URLSearchParams): Promise<Response | null> {
+async function route(
+  pathname: string,
+  method: string,
+  body: unknown,
+  signal: AbortSignal | null | undefined,
+  searchParams: URLSearchParams,
+  headers: Headers,
+): Promise<Response | null> {
   const seg = pathname.replace(/^\/api\/v1\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
   if (seg.length === 1 && seg[0] === "process-versions" && method === "GET") {
@@ -304,19 +687,45 @@ async function route(pathname: string, method: string, body: unknown, signal: Ab
     return copyMockProjectAsEngineering(projectId, body);
   }
 
+  // /projects/:id/import-snapshots[/:snapshotId[/confirm|deny|copy]]
+  // Search is intentionally nested below the project so Core can enforce project
+  // scope; it never searches the global database from the browser.
+  if (rest[0] === "import-snapshots") {
+    if (importSnapshotsMode() === "error") {
+      return fail(503, "import_library_unavailable", "Core 历史资料库暂不可用");
+    }
+    if (rest.length === 1 && method === "GET") {
+      return ok(materialSnapshots(projectId).map(publicMockImportSnapshot));
+    }
+    if (rest.length === 1 && method === "POST") return createMockImportSnapshot(projectId, body);
+    if (rest.length === 2 && rest[1] === "search" && method === "GET") {
+      return searchMockImportSnapshots(projectId, searchParams.get("q") ?? "");
+    }
+    if (rest.length === 2 && method === "GET") {
+      const snapshot = findMockImportSnapshot(projectId, rest[1]!);
+      return snapshot ? ok(publicMockImportSnapshot(snapshot)) : fail(404, "not_found", "资料快照不存在");
+    }
+    if (rest.length === 3 && (rest[2] === "confirm" || rest[2] === "deny") && method === "POST") {
+      return updateMockImportSnapshot(projectId, rest[1]!, rest[2], body);
+    }
+    if (rest.length === 3 && rest[2] === "copy" && method === "POST") {
+      return copyMockImportSnapshot(projectId, rest[1]!, body, headers.get("idempotency-key"));
+    }
+    return null;
+  }
+
   if (rest[0] === "gate-submissions" && rest.length === 1 && method === "GET") return ok([]);
 
   // /projects/:id/artifacts[/:aid/revisions[/:rid/content]]
   if (rest[0] === "artifacts") {
-    if (rest.length === 1 && method === "GET") return ok(fixtureProject ? MOCK_ARTIFACTS : []);
-    if (!fixtureProject) return fail(404, "not_found", "artifact 不存在");
+    if (rest.length === 1 && method === "GET") return ok(projectArtifacts(projectId));
     const artifactId = rest[1]!;
-    const revisions = MOCK_REVISIONS[artifactId];
-    if (!revisions) return fail(404, "not_found", "artifact 不存在");
+    const revisions = artifactRevisions(projectId, artifactId);
+    if (revisions.length === 0) return fail(404, "not_found", "artifact 不存在");
     if (rest.length === 3 && rest[2] === "revisions" && method === "GET") return ok(revisions);
     if (rest.length === 5 && rest[2] === "revisions" && rest[4] === "content" && method === "GET") {
       const revision = revisions.find((r) => r.id === rest[3]);
-      const content = revision ? MOCK_CONTENT[revision.id] : undefined;
+      const content = revision ? MOCK_CONTENT[revision.id] ?? mockState.importRevisionContent[revision.id] : undefined;
       if (!revision || content === undefined) return fail(404, "not_found", "修订不存在");
       return ok({ content, content_hash: revision.content_hash });
     }
@@ -380,6 +789,9 @@ export async function mockApiFetch(input: RequestInfo | URL, init?: RequestInit)
   if (!pathname.startsWith("/api/v1")) return null;
 
   const method = (init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET")).toUpperCase();
+  const headers = new Headers(
+    init?.headers ?? (typeof input === "object" && "headers" in input ? input.headers : undefined),
+  );
   let body: unknown = null;
   if (typeof init?.body === "string") {
     try {
@@ -393,7 +805,7 @@ export async function mockApiFetch(input: RequestInfo | URL, init?: RequestInit)
   const isStream = pathname.endsWith("/stream");
   if (!isStream) await sleep(LATENCY_MS);
 
-  const res = await route(pathname, method, body, init?.signal, searchParams);
+  const res = await route(pathname, method, body, init?.signal, searchParams, headers);
   return res ?? fail(404, "not_found", `mock 未实现该端点：${method} ${pathname}`);
 }
 

@@ -15,6 +15,13 @@ import type {
   CreateTaskResult,
   GateSubmission,
   GateSubmissionDetail,
+  CreateImportSnapshotRequest,
+  CopyHistoricalMaterialRequest,
+  CopyHistoricalMaterialResult,
+  DenyImportSnapshotRequest,
+  HistoricalMaterialSearchResult,
+  HistoricalMaterialSearchResponse,
+  HistoricalMaterialSnapshot,
   JobEvidenceContent,
   JobEvidenceManifest,
   JobRunSummary,
@@ -108,6 +115,89 @@ export function listRevisions(client: ApiClient, projectId: string, artifactId: 
 export function getRevisionContent(client: ApiClient, projectId: string, artifactId: string, revId: string): Promise<RevisionContent> {
   return client<RevisionContent>(
     `${V1}/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/revisions/${encodeURIComponent(revId)}/content`,
+  );
+}
+
+// ─── P2 历史资料库（固定导入快照）────────────────────────────────────────────
+
+/** 列出项目资料快照；默认按创建时间由 Core 返回新到旧。 */
+export function listImportSnapshots(client: ApiClient, projectId: string): Promise<HistoricalMaterialSnapshot[]> {
+  return client<HistoricalMaterialSnapshot[]>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots`,
+  );
+}
+
+/** 导入已规范化的 JSON 文件集合；Core 负责再次执行安全校验与快照哈希。 */
+export function createImportSnapshot(
+  client: ApiClient,
+  projectId: string,
+  body: CreateImportSnapshotRequest,
+  idempotencyKey: string,
+): Promise<HistoricalMaterialSnapshot> {
+  return client<HistoricalMaterialSnapshot>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots`,
+    { method: "POST", body, headers: { "idempotency-key": idempotencyKey } },
+  );
+}
+
+/** 查看单个导入快照及其固定文件清单。 */
+export function getImportSnapshot(client: ApiClient, projectId: string, snapshotId: string): Promise<HistoricalMaterialSnapshot> {
+  return client<HistoricalMaterialSnapshot>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots/${encodeURIComponent(snapshotId)}`,
+  );
+}
+
+/** 人工确认资料快照；确认后才可进入默认检索范围。 */
+export function confirmImportSnapshot(
+  client: ApiClient,
+  projectId: string,
+  snapshotId: string,
+  idempotencyKey: string,
+): Promise<HistoricalMaterialSnapshot> {
+  return client<HistoricalMaterialSnapshot>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots/${encodeURIComponent(snapshotId)}/confirm`,
+    { method: "POST", body: {}, headers: { "idempotency-key": idempotencyKey } },
+  );
+}
+
+/** 否决资料快照；失败/否决资料永远不会默认进入 Agent 上下文。 */
+export function denyImportSnapshot(
+  client: ApiClient,
+  projectId: string,
+  snapshotId: string,
+  body: DenyImportSnapshotRequest,
+  idempotencyKey: string,
+): Promise<HistoricalMaterialSnapshot> {
+  return client<HistoricalMaterialSnapshot>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots/${encodeURIComponent(snapshotId)}/deny`,
+    { method: "POST", body, headers: { "idempotency-key": idempotencyKey } },
+  );
+}
+
+/** 搜索默认资料范围；Core 只返回 confirmed 且 valid 的文件条目。 */
+export function searchHistoricalMaterials(
+  client: ApiClient,
+  projectId: string,
+  query: string,
+): Promise<HistoricalMaterialSearchResult[]> {
+  const q = query.trim();
+  const suffix = q ? `?q=${encodeURIComponent(q)}` : "?q=";
+  return client<HistoricalMaterialSearchResponse>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots/search${suffix}`,
+  ).then((response) => [...response.items]);
+}
+
+/** 把已确认资料的选中文件复制为当前项目的新候选修订。 */
+export function copyHistoricalMaterial(
+  client: ApiClient,
+  projectId: string,
+  snapshotId: string,
+  body: CopyHistoricalMaterialRequest,
+  idempotencyKey: string,
+): Promise<CopyHistoricalMaterialResult> {
+  return client<CopyHistoricalMaterialResult>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/import-snapshots/${encodeURIComponent(snapshotId)}/copy`,
+    { method: "POST", body, headers: { "idempotency-key": idempotencyKey } },
   );
 }
 
