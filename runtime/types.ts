@@ -266,8 +266,16 @@ export interface ProjectInfo {
   readonly status: string;
   readonly scope: string;
   readonly dataClassification: string;
-  readonly targetPart: string;
+  readonly targetPart: string | null;
   readonly standardVersion: string;
+  /** Core project_type; currently "free" or "engineering", open for future profiles. */
+  readonly projectType?: string;
+  /** Canonical immutable process-version binding from Core. */
+  readonly processVersionId?: string | null;
+  /** Versioned process profile selected for this project, when Core exposes it. */
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
   /** Process instances on this project (current_gate hints the milestone). */
   readonly processInstances: readonly {
     readonly id: string;
@@ -315,6 +323,40 @@ export interface ProjectEventSummary {
   readonly occurredAt: string;
 }
 
+/** One file's current bytes in the project workspace (GET workspace/file),
+ *  plus whether those exact bytes are a registered revision. */
+export interface WorkspaceFileContent {
+  readonly path: string;
+  readonly content: string;
+  readonly contentHash: string;
+  /** True when these bytes equal the latest registered revision's content_hash. */
+  readonly registered: boolean;
+  /** The revision these bytes are — null when they carry unregistered edits. */
+  readonly revisionId: string | null;
+  readonly version: number | null;
+  /** Commit holding these bytes; null unless `registered`. */
+  readonly commit: string | null;
+}
+
+/** One path's identity in Core after a workspace write. */
+export interface WorkspaceRegisteredFile {
+  readonly path: string;
+  readonly artifactId: string;
+  readonly revisionId: string;
+  readonly version: number;
+  readonly contentHash: string;
+}
+
+/** What a workspace write became in Core (POST workspace/files). */
+export interface WorkspaceWriteResult {
+  /** Commit the write landed in — or current HEAD when the bytes were already there. */
+  readonly commit: string;
+  readonly registered: readonly WorkspaceRegisteredFile[];
+  /** Paths whose bytes already matched the latest registered revision (no new
+   *  version), pointing at that existing revision. */
+  readonly unchanged: readonly WorkspaceRegisteredFile[];
+}
+
 /** A Core API governance client the loop calls to register artifacts and manage gates. */
 export interface GovernanceClient {
   /** Register a candidate ArtifactRevision for the given artifact.
@@ -329,6 +371,24 @@ export interface GovernanceClient {
     changeReason?: string;
     version: number;
   }): Promise<RegisteredRevision>;
+  /**
+   * Write candidate files into the project's real workspace (disk + git) and
+   * register each as the next candidate revision — versions come from Core, so
+   * the same path can be re-registered as v2, v3, … without a client-side
+   * counter.
+   *
+   * Rejects (409 `WORKSPACE_FILE_DIRTY`) when a target file carries unregistered
+   * human edits. That is deliberate: the workspace is shared between the operator
+   * and the agent, and silently overwriting someone's in-flight work is never the
+   * safe default. On that error the agent should read the file and reconcile.
+   */
+  writeWorkspaceFiles(input: {
+    files: readonly { path: string; content: string }[];
+    changeReason?: string;
+    artifactType?: ArtifactType;
+  }): Promise<WorkspaceWriteResult>;
+  /** Read a workspace file's **current** bytes, including unregistered edits. */
+  readWorkspaceFile(path: string): Promise<WorkspaceFileContent>;
   /** Create a ConfigurationSnapshot freezing the given revisions. */
   createSnapshot(input: {
     memberRevisionIds: readonly string[];
@@ -359,6 +419,9 @@ export interface GovernanceClient {
 /** A no-op governance client for --no-governance mode (dev/debug only). */
 export class NoGovernanceClient implements GovernanceClient {
   private counter = 0;
+  /** In-memory stand-in for the on-disk workspace, so `vivado_run` (which reads
+   *  its sources back by path) still works with governance switched off. */
+  private readonly workspace = new Map<string, { content: string; commit: string; revisionId: string }>();
   private nextId(prefix: string): string {
     return `${prefix}-nogov-${++this.counter}`;
   }
@@ -368,6 +431,35 @@ export class NoGovernanceClient implements GovernanceClient {
       artifactId: this.nextId("art"),
       version: input.version,
       contentHash: sha256Hex(input.content),
+    };
+  }
+  async writeWorkspaceFiles(input: {
+    files: readonly { path: string; content: string }[];
+  }): Promise<WorkspaceWriteResult> {
+    const commit = this.nextId("commit");
+    const registered = input.files.map((f) => {
+      this.workspace.set(f.path, { content: f.content, commit, revisionId: this.nextId("rev") });
+      return {
+        path: f.path,
+        artifactId: this.nextId("art"),
+        revisionId: this.workspace.get(f.path)!.revisionId,
+        version: 1,
+        contentHash: sha256Hex(f.content),
+      };
+    });
+    return { commit, registered, unchanged: [] };
+  }
+  async readWorkspaceFile(path: string): Promise<WorkspaceFileContent> {
+    const file = this.workspace.get(path);
+    if (file === undefined) throw new Error(`WORKSPACE_FILE_NOT_FOUND: ${path}`);
+    return {
+      path,
+      content: file.content,
+      contentHash: sha256Hex(file.content),
+      registered: true,
+      revisionId: file.revisionId,
+      version: 1,
+      commit: file.commit,
     };
   }
   async createSnapshot(): Promise<{ snapshotId: string }> {
@@ -389,8 +481,9 @@ export class NoGovernanceClient implements GovernanceClient {
       status: "active",
       scope: "",
       dataClassification: "UNCLASSIFIED",
-      targetPart: "",
+      targetPart: null,
       standardVersion: "",
+      projectType: "free",
       processInstances: [],
     };
   }
@@ -416,6 +509,14 @@ export interface AgentState {
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
+  /** Frozen project execution context copied from Core at task creation. */
+  readonly projectType?: string;
+  readonly processVersionId?: string | null;
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
+  /** Whether this agent is a free conversation or the engineering mainline. */
+  readonly executionMode?: "free" | "engineering";
   /** Process instance id for gate-submission governance (server-injected). */
   readonly processInstanceId?: string;
   readonly createdAt: string;

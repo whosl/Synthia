@@ -13,8 +13,9 @@ import { CounterScriptedModel } from "./deps.ts";
 import { FakeVivadoConnector, successBehavior, alwaysFailBehavior } from "./loop.ts";
 import { MockGovernanceClient } from "./governance-client.ts";
 import { NoGovernanceClient } from "./types.ts";
-import { createAgentState, saveAgentState, deleteAgent } from "./agent-state.ts";
+import { createAgentState, saveAgentState, loadAgentState, deleteAgent } from "./agent-state.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
+import type { ProjectInfo } from "./types.ts";
 import type { GateSubmissionState } from "../core/src/domain/enums.ts";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,19 @@ class TestGovernance extends MockGovernanceClient {
   }
 }
 
+class ProjectInfoGovernance extends TestGovernance {
+  readProjectInfoCount = 0;
+
+  constructor(private readonly info: ProjectInfo) {
+    super();
+  }
+
+  override async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+    this.readProjectInfoCount++;
+    return { ...this.info, id: projectId };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -46,6 +60,27 @@ const EMPTY_PROMPTS: SkillPrompts = {
   rtl: "", tb: "", xdc: "", repair: "",
   intake: "", behaviorWave: "", architecture: "", registerSpec: "",
 };
+
+const PROCESS_FACT_CASES = [
+  "processVersionId",
+  "processProfileId",
+  "processProfileVersion",
+  "processProfileName",
+] as const;
+
+function projectInfo(overrides: Partial<ProjectInfo>): ProjectInfo {
+  return {
+    id: "p",
+    name: "Project",
+    status: "active",
+    scope: "",
+    dataClassification: "D1",
+    targetPart: null,
+    standardVersion: "",
+    processInstances: [],
+    ...overrides,
+  };
+}
 
 function makeConfig(opts: Partial<ServerConfig> = {}): ServerConfig {
   return {
@@ -78,6 +113,21 @@ async function postTask(
   expect(res.status).toBe(201);
   const json = await res.json() as { agent_id: string };
   return json.agent_id;
+}
+
+async function postTaskRaw(
+  server: RuntimeServer,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${server.url}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return {
+    status: res.status,
+    body: await res.json() as Record<string, unknown>,
+  };
 }
 
 async function getTask(
@@ -157,6 +207,554 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       expect(body["task"]).toBe("8位计数器");
     } finally {
       await server.stop();
+    }
+  });
+
+  test("passes optional project type and process profile fields to deps factory", async () => {
+    let capturedFactoryOpts: Parameters<DepsFactory>[0] | undefined;
+    const server = new RuntimeServer(
+      makeConfig(),
+      async (opts) => {
+        capturedFactoryOpts = opts;
+        return {
+          model: new CounterScriptedModel(),
+          connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+          governance: new NoGovernanceClient(),
+        };
+      },
+    );
+    await server.start();
+    try {
+      const agentId = await postTask(server, {
+        project_id: "p-profile",
+        process_instance_id: "pi-profile",
+        project_type: "engineering",
+        process_version_id: "GJB_REF_V1",
+        process_profile_id: "GJB_REF_V1",
+        process_profile_name: "GJB reference flow",
+        process_profile_version: "GJB_REF_V1",
+        task: "profile passthrough",
+        mode: "agent",
+      });
+      createdAgentIds.push(agentId);
+
+      expect(capturedFactoryOpts).toMatchObject({
+        projectId: "p-profile",
+        processInstanceId: "pi-profile",
+        projectType: "engineering",
+        processVersionId: "GJB_REF_V1",
+        processProfileId: "GJB_REF_V1",
+        processProfileName: "GJB reference flow",
+        processProfileVersion: "GJB_REF_V1",
+      });
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("Core engineering project facts override mode=agent and run the governed loop", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: "xc7k70tfbv676-1",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const agentId = await postTask(server, {
+        project_id: "p-core-eng",
+        process_instance_id: "pi-core-eng",
+        task: "Core says engineering",
+        mode: "agent",
+      });
+      createdAgentIds.push(agentId);
+
+      const body = await waitForStatus(server, agentId, ["awaiting_approval", "succeeded"]);
+      expect(body["execution_mode"]).toBe("engineering");
+      expect(body["project_type"]).toBe("engineering");
+      expect(body["process_version_id"]).toBe("GJB_REF_V1");
+      expect(gov.readProjectInfoCount).toBeGreaterThan(0);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("unknown Core project_type fails closed before creating an agent", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "research" as unknown as ProjectInfo["projectType"],
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const res = await postTaskRaw(server, {
+        project_id: "p-unknown-type",
+        process_instance_id: "pi-unknown-type",
+        task: "bad type",
+        mode: "agent",
+      });
+
+      expect(res.status).toBe(409);
+      expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_type_unsupported");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("engineering Core project without a frozen profile fails closed", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const res = await postTaskRaw(server, {
+        project_id: "p-missing-profile",
+        process_instance_id: "pi-missing-profile",
+        task: "missing profile",
+        mode: "agent",
+      });
+
+      expect(res.status).toBe(409);
+      expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_invalid");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("engineering Core project rejects every missing frozen alias, version, or name", async () => {
+    const complete: Partial<ProjectInfo> = {
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+    };
+    let current = projectInfo(complete);
+    class MutableProjectInfoGovernance extends TestGovernance {
+      override async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+        return { ...current, id: projectId };
+      }
+    }
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        new MutableProjectInfoGovernance(),
+      ),
+    );
+    await server.start();
+    try {
+      for (const key of [
+        "processVersionId",
+        "processProfileId",
+        "processProfileVersion",
+        "processProfileName",
+      ] as const) {
+        current = projectInfo({ ...complete, [key]: null });
+        const res = await postTaskRaw(server, {
+          project_id: `p-missing-${key}`,
+          process_instance_id: `pi-missing-${key}`,
+          task: `missing ${key}`,
+        });
+        expect(res.status).toBe(409);
+        expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_invalid");
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("complete modern free facts stay free and persist every process field as null", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const agentId = await postTask(server, {
+        project_id: "p-free-complete",
+        task: "free project",
+      });
+      createdAgentIds.push(agentId);
+      const body = await getTask(server, agentId);
+      expect(body["execution_mode"]).toBe("free");
+      expect(body["project_type"]).toBe("free");
+      expect(body["process_version_id"]).toBeNull();
+      expect(body["process_profile_id"]).toBeNull();
+      expect(body["process_profile_name"]).toBeNull();
+      expect(body["process_profile_version"]).toBeNull();
+      expect(body["status"]).toBe("idle");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("free Core project requires every process field to be explicit null", async () => {
+    const complete: Partial<ProjectInfo> = {
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    };
+    let current = projectInfo(complete);
+    class MutableProjectInfoGovernance extends TestGovernance {
+      override async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+        return { ...current, id: projectId };
+      }
+    }
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        new MutableProjectInfoGovernance(),
+      ),
+    );
+    await server.start();
+    try {
+      for (const key of PROCESS_FACT_CASES) {
+        current = projectInfo({ ...complete, [key]: undefined });
+        const res = await postTaskRaw(server, {
+          project_id: `p-free-omitted-${key}`,
+          task: `invalid omitted free ${key}`,
+        });
+        expect(res.status).toBe(409);
+        expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_invalid");
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("free Core project rejects every non-null process field", async () => {
+    const complete: Partial<ProjectInfo> = {
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    };
+    let current = projectInfo(complete);
+    class MutableProjectInfoGovernance extends TestGovernance {
+      override async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+        return { ...current, id: projectId };
+      }
+    }
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        new MutableProjectInfoGovernance(),
+      ),
+    );
+    await server.start();
+    try {
+      const values: Record<(typeof PROCESS_FACT_CASES)[number], string> = {
+        processVersionId: "GJB_REF_V1",
+        processProfileId: "GJB_REF_V1",
+        processProfileVersion: "GJB_REF_V1",
+        processProfileName: "GJB reference flow",
+      };
+      for (const key of PROCESS_FACT_CASES) {
+        current = projectInfo({ ...complete, [key]: values[key] });
+        const res = await postTaskRaw(server, {
+          project_id: `p-free-${key}`,
+          task: `invalid free ${key}`,
+        });
+        expect(res.status).toBe(409);
+        expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_invalid");
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("request process strings conflict with Core explicit nulls", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    const requestKeys: Record<(typeof PROCESS_FACT_CASES)[number], string> = {
+      processVersionId: "process_version_id",
+      processProfileId: "process_profile_id",
+      processProfileVersion: "process_profile_version",
+      processProfileName: "process_profile_name",
+    };
+    await server.start();
+    try {
+      for (const key of PROCESS_FACT_CASES) {
+        const res = await postTaskRaw(server, {
+          project_id: `p-free-request-conflict-${key}`,
+          project_type: "free",
+          task: `conflicting request ${key}`,
+          [requestKeys[key]]: key === "processProfileName" ? "GJB reference flow" : "GJB_REF_V1",
+        });
+        expect(res.status).toBe(409);
+        expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_mismatch");
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("missing Core project_type cannot downgrade a complete GJB binding to free", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const res = await postTaskRaw(server, {
+        project_id: "p-gjb-without-type",
+        task: "must fail closed",
+        mode: "agent",
+      });
+      expect(res.status).toBe(409);
+      expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_type_missing");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("LEGACY_COMPAT uses the compatibility agent path instead of the GJB reference loop", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "LEGACY_COMPAT",
+      processProfileId: "LEGACY_COMPAT",
+      processProfileName: "兼容旧流程",
+      processProfileVersion: "LEGACY_COMPAT",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const agentId = await postTask(server, {
+        project_id: "p-legacy",
+        process_instance_id: "pi-legacy",
+        task: "continue legacy project",
+      });
+      createdAgentIds.push(agentId);
+      const body = await getTask(server, agentId);
+      expect(body["execution_mode"]).toBe("free");
+      expect(body["project_type"]).toBe("engineering");
+      expect(body["process_version_id"]).toBe("LEGACY_COMPAT");
+      expect(body["status"]).toBe("idle");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("incomplete LEGACY_COMPAT facts fail closed instead of inferring compatibility", async () => {
+    const complete: Partial<ProjectInfo> = {
+      projectType: "engineering",
+      processVersionId: "LEGACY_COMPAT",
+      processProfileId: "LEGACY_COMPAT",
+      processProfileName: "兼容旧流程",
+      processProfileVersion: "LEGACY_COMPAT",
+    };
+    let current = projectInfo(complete);
+    class MutableProjectInfoGovernance extends TestGovernance {
+      override async getProjectInfo(projectId: string): Promise<ProjectInfo> {
+        return { ...current, id: projectId };
+      }
+    }
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        new MutableProjectInfoGovernance(),
+      ),
+    );
+    await server.start();
+    try {
+      for (const key of PROCESS_FACT_CASES) {
+        current = projectInfo({ ...complete, [key]: null });
+        const res = await postTaskRaw(server, {
+          project_id: `p-legacy-missing-${key}`,
+          process_instance_id: `pi-legacy-missing-${key}`,
+          task: `incomplete legacy ${key}`,
+        });
+        expect(res.status).toBe(409);
+        expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_invalid");
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("modern engineering project with no target part does not inherit SYNTHIA_PART", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: null,
+    }));
+    const server = new RuntimeServer(
+      makeConfig({ defaultPart: "must-not-be-invented" }),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const agentId = await postTask(server, {
+        project_id: "p-no-part",
+        process_instance_id: "pi-no-part",
+        task: "engineering without selected device",
+      });
+      createdAgentIds.push(agentId);
+      expect((await loadAgentState(agentId)).part).toBe("");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("conflicting frozen profile aliases fail closed", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "LEGACY_COMPAT",
+      processProfileName: "conflicting flow",
+      processProfileVersion: "GJB_REF_V1",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const res = await postTaskRaw(server, {
+        project_id: "p-conflicting-profile",
+        process_instance_id: "pi-conflicting-profile",
+        task: "bad frozen facts",
+      });
+      expect(res.status).toBe(409);
+      expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_conflict");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("session snapshot reuses the same Core project read used for mode resolution", async () => {
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    const envKeys = ["SYNTHIA_MODEL_URL", "SYNTHIA_MODEL_KEY", "SYNTHIA_MODEL_NAME"] as const;
+    const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    process.env.SYNTHIA_MODEL_URL = "http://127.0.0.1:9/v1";
+    process.env.SYNTHIA_MODEL_KEY = "test-key";
+    process.env.SYNTHIA_MODEL_NAME = "test-model";
+    await server.start();
+    try {
+      const beforeCreate = gov.readProjectInfoCount;
+      const agentId = await postTask(server, {
+        project_id: "p-session-frozen-facts",
+        task: "fixed snapshot facts",
+      });
+      createdAgentIds.push(agentId);
+      expect(gov.readProjectInfoCount - beforeCreate).toBe(1);
+
+      const afterCreate = gov.readProjectInfoCount;
+      const session = await (server as unknown as {
+        getOrCreateSession(id: string): Promise<unknown>;
+      }).getOrCreateSession(agentId);
+      expect(session).not.toBeNull();
+      // One read resolves this session. buildContextSnapshot must consume that
+      // exact ProjectInfo instead of issuing another project read.
+      expect(gov.readProjectInfoCount - afterCreate).toBe(1);
+    } finally {
+      await server.stop();
+      for (const key of envKeys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 });
@@ -395,6 +993,126 @@ describe("RuntimeServer — restart recovery", () => {
       const recovered = listBody.agents.find((r) => r.agent_id === seedAgentId);
       expect(recovered).toBeDefined();
       expect(recovered!["status"]).toBe("interrupted");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("recovery refreshes missing project/profile facts from Core", async () => {
+    const seedAgentId = "agent-test-core-facts-recovery-001";
+    const base = createAgentState({
+      agentId: seedAgentId,
+      task: "恢复项目事实",
+      part: "xc7k70tfbv676-1",
+      projectId: "p-recover-facts",
+      processInstanceId: "pi-recover-facts",
+      executionMode: "free",
+    });
+    await saveAgentState({ ...base, status: "failed", endedReason: "seed" });
+    createdAgentIds.push(seedAgentId);
+
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const body = await getTask(server, seedAgentId);
+      expect(body["execution_mode"]).toBe("engineering");
+      expect(body["project_type"]).toBe("engineering");
+      expect(body["process_version_id"]).toBe("GJB_REF_V1");
+      expect(body["process_profile_id"]).toBe("GJB_REF_V1");
+      expect(gov.readProjectInfoCount).toBeGreaterThan(0);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("recovery rejects a stored process string when Core freezes that field as null", async () => {
+    const seedAgentId = "agent-test-null-fact-conflict-001";
+    const base = createAgentState({
+      agentId: seedAgentId,
+      task: "恢复 null 冲突",
+      part: "",
+      projectId: "p-recover-null-conflict",
+      processInstanceId: "free:p-recover-null-conflict",
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: "stale profile name",
+      processProfileVersion: null,
+      executionMode: "free",
+    });
+    await saveAgentState({ ...base, status: "failed", endedReason: "seed" });
+    createdAgentIds.push(seedAgentId);
+
+    const gov = new ProjectInfoGovernance(projectInfo({
+      projectType: "free",
+      processVersionId: null,
+      processProfileId: null,
+      processProfileName: null,
+      processProfileVersion: null,
+    }));
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        gov,
+      ),
+    );
+    await server.start();
+    try {
+      const res = await fetch(`${server.url}/tasks/${seedAgentId}`);
+      expect(res.status).toBe(404);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("旧格式的自由 agent 状态（只有 freeAgentLock）恢复出 awaiting_gate", async () => {
+    // 本次修复之前落盘的自由 agent 状态只写了 freeAgentLock，没有 awaitingGate。
+    // 直接恢复会得到「等待批准但不知道等哪个门」，前端 shouldFetchSubmission
+    // 首句短路 → 审批卡永不出现，阶段条也退回按 current_stage 画成需求阶段。
+    const seedAgentId = "agent-test-legacy-lock-001";
+    const base = createAgentState({
+      agentId: seedAgentId,
+      task: "旧格式锁恢复",
+      part: "xc7k70tfbv676-1",
+      projectId: "p-legacy-lock",
+      processInstanceId: "pi-legacy-lock",
+    });
+    await saveAgentState({
+      ...base,
+      status: "awaiting_approval",
+      freeAgentLock: { gate: "G4", submissionId: "sub-legacy-lock" },
+    });
+    createdAgentIds.push(seedAgentId);
+
+    const server = new RuntimeServer(
+      makeConfig(),
+      makeFactory(
+        new CounterScriptedModel(),
+        new FakeVivadoConnector({ behavior: successBehavior() }),
+        new NoGovernanceClient(),
+      ),
+    );
+    await server.start();
+    try {
+      const body = await getTask(server, seedAgentId);
+      expect(body["status"]).toBe("awaiting_approval");
+      expect(body["awaiting_gate"]).toBe("G4");
     } finally {
       await server.stop();
     }

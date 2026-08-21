@@ -128,25 +128,43 @@ export interface ConversationalModel {
 
 /**
  * 可选流式扩展：chat 的 `stream:true` 变体。模型文本增量实时回调
- * （onDelta），聚合结果与 chat() 等价。未实现者由会话回退到缓冲 chat()。
+ * （onDelta）、思维链增量实时回调（onReasoning），聚合结果与 chat() 等价。
+ * 未实现者由会话回退到缓冲 chat()。
  */
 export interface StreamingConversationalModel {
   chatStream(
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
-    opts: { onTextStart?: () => void; onDelta?: (text: string) => void },
+    opts: {
+      onTextStart?: () => void;
+      onDelta?: (text: string) => void;
+      onReasoningStart?: () => void;
+      onReasoning?: (text: string) => void;
+    },
   ): Promise<ChatTurn>;
 }
 
 /**
  * prompt 的流式选项（SSE 切片）：模型文本 delta 实时写入会话消息流
  * （流式 text part），完整轮次结束照旧落 audit（free_agent_reply）。
+ *
+ * 思维链（reasoning）与工具调用（tool）同样实时上流——否则模型推理的那段
+ * （实测 8–40 秒）与工具执行期间前端完全空白，看上去就是「没有流式输出」。
+ * 思维链不落 audit（体量大、非回复内容），只在实时流里可见。
  */
 export interface PromptStreamOptions {
   /** 第一个文本 delta 到达（text part 创建，state=streaming）。 */
   onTextStart?: (partId: string) => void;
   /** 文本增量（追加到该 part）。 */
   onDelta?: (partId: string, text: string) => void;
+  /** 第一个思维链 delta 到达（reasoning part 创建，state=streaming）。 */
+  onReasoningStart?: (partId: string) => void;
+  /** 思维链增量（追加到该 part）。 */
+  onReasoningDelta?: (partId: string, text: string) => void;
+  /** 工具开始执行（tool part 创建，state=running）。 */
+  onToolStart?: (callId: string, name: string, args: string) => void;
+  /** 工具执行结束（同一 part 转 done/error）。 */
+  onToolEnd?: (callId: string, ok: boolean, result: string) => void;
 }
 
 /** 会话状态机。 */
@@ -163,6 +181,13 @@ export interface FreeAgentSession {
   readonly agentId: string;
   readonly projectId: string;
   status(): FreeAgentStatus;
+  /**
+   * 当前锁定的门（会话停在门审查上时非 undefined）。
+   *
+   * server 在轮次边界据此回写 `handle.awaitingGate` —— 自由 agent 不走
+   * `executeAgent`，handle 没有别的写入者（见 `syncHandleFromSession`）。
+   */
+  readonly lockedGate: { readonly gate: GateId; readonly submissionId: string } | undefined;
   /**
    * 新指令或闲聊。内部循环：chat → 若 tool_calls 则逐个执行（含钩子）→ 回填 → 再 chat，
    * 直到模型返回纯文本。返回该文本。可被 steer()/abort() 打断。

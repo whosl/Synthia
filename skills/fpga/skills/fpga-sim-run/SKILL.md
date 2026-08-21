@@ -31,7 +31,7 @@
 
 1. 确认用户本轮明确要求运行仿真；
 2. 校验 `rtl/` 与 `tb/` 候选源齐备；缺失按边界路由；
-3. 通过 Core API 提交 `vivado-batch-1:simulate` JobRequest：`sources` 为 RTL+TB 候选源集 manifest，`top` 为 RTL 顶层，`testbench` 为 TB 顶层模块，`runClass=exploratory`；
+3. 通过 Core API 提交 `vivado-batch-1:simulate` JobRequest：`sources` 为 RTL+TB 候选源集 manifest（**只列工作区相对路径，不贴正文**，正文由平台从工作区读取），`top` 为 RTL 顶层，`testbench` 为 TB 顶层模块，`runClass=exploratory`；
 4. Worker 在独立工作区执行 XSim 编译/展开/运行，Core 登记 ToolRun、输入哈希与 EvidenceManifest；
 5. 写 `doc/compile/run_report.md`：请求参数、PASS/FAIL（以 ToolRun 退出状态与 TB 自检输出为据）、日志证据引用、失败阶段与建议下一步；
 6. 编译失败：不在此修复，路由 `fpga-compile-and-repair`；

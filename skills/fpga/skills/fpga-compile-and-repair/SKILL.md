@@ -40,7 +40,7 @@
 
 ### 步骤 2 — 提交编译检查
 
-3. 通过 Core API 提交 `vivado-batch-1:validate_sources` JobRequest：`sources` 为候选源集 manifest，`top` 为 TB 顶层模块，`runClass=exploratory`；
+3. 通过 Core API 提交 `vivado-batch-1:validate_sources` JobRequest：`sources` 为候选源集 manifest（**只列工作区相对路径，不贴正文**，正文由平台从工作区读取），`top` 为 TB 顶层模块，`runClass=exploratory`；
 4. Worker 返回后，Core 登记 ToolRun 与 EvidenceManifest（日志条目含 SHA-256）；本技能读取登记结果，不接触 Worker 本地路径。
 
 ### 步骤 3 — 诊断与修复

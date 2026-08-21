@@ -24,7 +24,11 @@
  *   SYNTHIA_TOOL_MODEL_POLICY_HASH (default synthia-policy-v1)
  *   SYNTHIA_RUNS_DIR           override .runs/ directory (tests)
  *   SYNTHIA_MODEL_URL / KEY / NAME  (real model, non-offline mode)
- *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort)
+ *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort. 当前保 xhigh，
+ *                                    见 specs/agent-stream-benchmark.md §4.2)
+ *   SYNTHIA_MODEL_CHAT_MAX_TOKENS   (free-agent 对话轮的可见 token 上限, default 16384)
+ *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
+ *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
  *   SYNTHIA_CORE_TOKEN / URL        (core / governance mode)
  *
  * Usage:
@@ -42,8 +46,11 @@ import {
 import type {
   AuditEvent, EvidenceSummary, GateId, GovernanceClient, LoopModel,
   LoopConnector, LoopResult, RegisteredRevision, AgentState, StageId,
-  TerminalCause,
+  ProjectInfo, TerminalCause,
 } from "./types.ts";
+// 值导入（上面那块是 import type，`new` 不到）：offline / fake-connector /
+// SYNTHIA_NO_GOVERNANCE 三条路径都要实例化它。
+import { NoGovernanceClient } from "./types.ts";
 
 // ── shared deps ──────────────────────────────────────────────────────────────
 import {
@@ -58,8 +65,10 @@ import { createFreeAgentSession } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
+import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { buildContextSnapshot } from "./context-snapshot.ts";
-import type { FreeAgentDeps, FreeAgentSession, ConversationalModel } from "./agent-types.ts";
+import { buildAgentDoc, composeSystemPrompt } from "./agent-doc.ts";
+import type { FreeAgentDeps, FreeAgentSession, ConversationalModel, PromptStreamOptions } from "./agent-types.ts";
 import { StreamHub, type StreamEvent } from "./stream-hub.ts";
 
 // ---------------------------------------------------------------------------
@@ -74,8 +83,15 @@ export interface AgentHandle {
   readonly agentId: string;
   readonly projectId: string;
   readonly processInstanceId: string;
+  readonly projectType?: string;
+  readonly processVersionId?: string | null;
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
+  readonly executionMode: "free" | "engineering";
   readonly task: string;
   readonly part: string;
+  readonly createdAt: string;
   status: ServerStatus;
   currentStage: StageId;
   awaitingGate?: GateId;
@@ -105,6 +121,11 @@ export interface AgentDeps {
 export type DepsFactory = (opts: {
   projectId: string;
   processInstanceId: string;
+  projectType?: string;
+  processVersionId?: string;
+  processProfileId?: string;
+  processProfileName?: string;
+  processProfileVersion?: string;
 }) => Promise<AgentDeps>;
 
 export interface ServerConfig {
@@ -133,9 +154,331 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function optionalBodyString(
+  body: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string,
+): string | undefined {
+  const value = body[snakeKey] ?? body[camelKey];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function inferExecutionMode(state: AgentState): "free" | "engineering" {
+  if (state.executionMode) return state.executionMode;
+  // Pre-P1 free sessions used this stable task label; old pipeline states use
+  // the user's task text. Unknown states fail toward the governed path.
+  return state.task === "free-agent session" ? "free" : "engineering";
+}
+
+class RuntimeProjectConfigError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RuntimeProjectConfigError";
+  }
+}
+
+interface ProjectRuntimeFacts {
+  readonly projectType?: "free" | "engineering";
+  readonly processVersionId?: string | null;
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
+}
+
+interface ResolvedProjectRuntime extends ProjectRuntimeFacts {
+  readonly executionMode: "free" | "engineering";
+  readonly processInstanceId: string;
+  readonly part: string;
+}
+
+function normalizeKnownProjectType(projectType: string | undefined): "free" | "engineering" | undefined {
+  if (projectType === undefined) return undefined;
+  if (projectType === "free" || projectType === "engineering") return projectType;
+  throw new RuntimeProjectConfigError(409, "project_type_unsupported", `unsupported project_type: ${projectType}`);
+}
+
+function factsFromProjectInfo(info: ProjectInfo | null): ProjectRuntimeFacts {
+  if (!info) return {};
+  return {
+    projectType: normalizeKnownProjectType(info.projectType),
+    ...(info.processVersionId !== undefined ? { processVersionId: info.processVersionId } : {}),
+    ...(info.processProfileId !== undefined ? { processProfileId: info.processProfileId } : {}),
+    ...(info.processProfileName !== undefined ? { processProfileName: info.processProfileName } : {}),
+    ...(info.processProfileVersion !== undefined ? { processProfileVersion: info.processProfileVersion } : {}),
+  };
+}
+
+function coalesceNullableString(...values: readonly (string | null | undefined)[]): string | null | undefined {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function supportedProfileId(facts: ProjectRuntimeFacts): string | null {
+  return facts.processProfileId ?? facts.processVersionId ?? null;
+}
+
+const PROCESS_RUNTIME_FACT_KEYS = [
+  "processVersionId",
+  "processProfileId",
+  "processProfileVersion",
+  "processProfileName",
+] as const satisfies readonly (keyof ProjectRuntimeFacts)[];
+
+function isNonEmptyString(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function assertSupportedProjectRuntime(facts: ProjectRuntimeFacts): void {
+  const hasProcessFacts = PROCESS_RUNTIME_FACT_KEYS.some(
+    (key) => facts[key] !== undefined && facts[key] !== null,
+  );
+  if (!facts.projectType) {
+    if (hasProcessFacts) {
+      throw new RuntimeProjectConfigError(
+        409,
+        "project_type_missing",
+        "project_type is required when process profile facts are present",
+      );
+    }
+    // Pre-P1/no-governance callers may have no project-model facts at all.
+    // That compatibility path is deliberately distinct from a partial modern
+    // binding, which is rejected above.
+    return;
+  }
+
+  if (facts.projectType === "free") {
+    const configured = PROCESS_RUNTIME_FACT_KEYS.filter(
+      (key) => facts[key] !== undefined && facts[key] !== null,
+    );
+    if (configured.length > 0) {
+      throw new RuntimeProjectConfigError(
+        409,
+        "project_process_profile_invalid",
+        `free project process fields must all be null: ${configured.join(", ")}`,
+      );
+    }
+    return;
+  }
+
+  const missing = PROCESS_RUNTIME_FACT_KEYS.filter((key) => !isNonEmptyString(facts[key]));
+  if (missing.length > 0) {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_process_profile_invalid",
+      `engineering project is missing frozen process facts: ${missing.join(", ")}`,
+    );
+  }
+
+  const processVersionId = facts.processVersionId!;
+  const processProfileId = facts.processProfileId!;
+  const processProfileVersion = facts.processProfileVersion!;
+  if (processVersionId !== processProfileId || processProfileVersion !== processProfileId) {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_process_profile_conflict",
+      `frozen process aliases disagree: process_version_id=${processVersionId}, ` +
+        `process_profile_id=${processProfileId}, process_profile_version=${processProfileVersion}`,
+    );
+  }
+  const profile = processProfileId;
+  if (profile && profile !== "GJB_REF_V1" && profile !== "LEGACY_COMPAT") {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_process_profile_unsupported",
+      `unsupported process profile: ${profile}`,
+    );
+  }
+}
+
+function assertCompleteCoreProjectRuntime(facts: ProjectRuntimeFacts): void {
+  if (!facts.projectType) {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_type_missing",
+      "Core project facts are missing project_type",
+    );
+  }
+  if (facts.projectType === "free") {
+    const notNull = PROCESS_RUNTIME_FACT_KEYS.filter((key) => facts[key] !== null);
+    if (notNull.length > 0) {
+      throw new RuntimeProjectConfigError(
+        409,
+        "project_process_profile_invalid",
+        `Core free-project process fields must be explicit null: ${notNull.join(", ")}`,
+      );
+    }
+    return;
+  }
+  assertSupportedProjectRuntime(facts);
+}
+
+function assertMatchingFact(
+  key: string,
+  requestValue: string | null | undefined,
+  coreValue: string | null | undefined,
+): void {
+  if (requestValue !== undefined && coreValue !== undefined && requestValue !== coreValue) {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_process_profile_mismatch",
+      `request ${key} ${requestValue} does not match Core ${key} ${coreValue}`,
+    );
+  }
+}
+
+function mergeProjectRuntimeFacts(
+  request: ProjectRuntimeFacts,
+  core: ProjectRuntimeFacts,
+): ProjectRuntimeFacts {
+  if (request.projectType && core.projectType && request.projectType !== core.projectType) {
+    throw new RuntimeProjectConfigError(
+      409,
+      "project_type_mismatch",
+      `request project_type ${request.projectType} does not match Core project_type ${core.projectType}`,
+    );
+  }
+  assertMatchingFact("process_version_id", request.processVersionId, core.processVersionId);
+  assertMatchingFact("process_profile_id", request.processProfileId, core.processProfileId);
+  assertMatchingFact("process_profile_name", request.processProfileName, core.processProfileName);
+  assertMatchingFact("process_profile_version", request.processProfileVersion, core.processProfileVersion);
+  const projectType = core.projectType ?? request.projectType;
+  const processVersionId = coalesceNullableString(core.processVersionId, request.processVersionId);
+  const processProfileId = coalesceNullableString(core.processProfileId, request.processProfileId);
+  const processProfileName = coalesceNullableString(core.processProfileName, request.processProfileName);
+  const processProfileVersion = coalesceNullableString(core.processProfileVersion, request.processProfileVersion);
+  const merged: ProjectRuntimeFacts = {
+    ...(projectType ? { projectType } : {}),
+    ...(processVersionId !== undefined ? { processVersionId } : {}),
+    ...(processProfileId !== undefined ? { processProfileId } : {}),
+    ...(processProfileName !== undefined ? { processProfileName } : {}),
+    ...(processProfileVersion !== undefined ? { processProfileVersion } : {}),
+  };
+  assertSupportedProjectRuntime(merged);
+  return merged.projectType === "free"
+    ? {
+        ...merged,
+        processVersionId: null,
+        processProfileId: null,
+        processProfileName: null,
+        processProfileVersion: null,
+      }
+    : merged;
+}
+
+function resolveProjectRuntime(input: {
+  readonly requestFacts: ProjectRuntimeFacts;
+  readonly coreInfo: ProjectInfo | null;
+  readonly requestedMode: unknown;
+  readonly rawProcessInstanceId: unknown;
+  readonly projectId: string;
+  readonly requestedPart: unknown;
+  readonly defaultPart: string;
+}): ResolvedProjectRuntime {
+  const coreFacts = factsFromProjectInfo(input.coreInfo);
+  if (input.coreInfo !== null) assertCompleteCoreProjectRuntime(coreFacts);
+  const facts = mergeProjectRuntimeFacts(input.requestFacts, coreFacts);
+  const legacyMode: "free" | "engineering" = input.requestedMode === "agent" ? "free" : "engineering";
+  const frozenProfile = supportedProfileId(facts);
+  // LEGACY_COMPAT preserves access to old projects but must never be treated
+  // as adoption of the new GJB reference loop. Core also sends mode="agent"
+  // for this path; the frozen profile is authoritative if that hint is absent.
+  const executionMode: "free" | "engineering" = frozenProfile === "LEGACY_COMPAT"
+    ? "free"
+    : facts.projectType === "engineering" && frozenProfile === "GJB_REF_V1"
+      ? "engineering"
+      : facts.projectType === "free"
+        ? "free"
+        : legacyMode;
+  const processInstanceId = typeof input.rawProcessInstanceId === "string" && input.rawProcessInstanceId
+    ? input.rawProcessInstanceId
+    : executionMode === "free"
+      ? `free:${input.projectId}`
+      : "";
+  if (!processInstanceId) {
+    throw new RuntimeProjectConfigError(
+      400,
+      "bad_request",
+      "process_instance_id is required for engineering projects",
+    );
+  }
+  const requestedPart = typeof input.requestedPart === "string" ? input.requestedPart.trim() : "";
+  // A modern Core project is allowed to have no target part at creation. Only
+  // the legacy/no-governance path retains SYNTHIA_PART as a compatibility
+  // default; authoritative project facts must never be overwritten by it.
+  const hasAuthoritativeProjectFacts = input.coreInfo !== null || facts.projectType !== undefined;
+  const part = requestedPart || (!hasAuthoritativeProjectFacts && executionMode === "engineering"
+    ? input.defaultPart
+    : "");
+  return { ...facts, executionMode, processInstanceId, part };
+}
+
+async function readProjectInfo(
+  governance: GovernanceClient,
+  projectId: string,
+): Promise<ProjectInfo | null> {
+  if (governance instanceof NoGovernanceClient) return null;
+  try {
+    return await governance.getProjectInfo(projectId);
+  } catch (e) {
+    if (e instanceof RuntimeProjectConfigError) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new RuntimeProjectConfigError(503, "project_fact_unavailable", `failed to read project facts: ${msg}`);
+  }
+}
+
+function depsFactoryInput(projectId: string, runtime: {
+  readonly processInstanceId: string;
+  readonly projectType?: string;
+  readonly processVersionId?: string | null;
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
+}): Parameters<DepsFactory>[0] {
+  return {
+    projectId,
+    processInstanceId: runtime.processInstanceId,
+    ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
+    ...(runtime.processVersionId ? { processVersionId: runtime.processVersionId } : {}),
+    ...(runtime.processProfileId ? { processProfileId: runtime.processProfileId } : {}),
+    ...(runtime.processProfileName ? { processProfileName: runtime.processProfileName } : {}),
+    ...(runtime.processProfileVersion ? { processProfileVersion: runtime.processProfileVersion } : {}),
+  };
+}
+
 function errorResponse(status: number, code: string, message: string): Response {
   return json({ error: { code, message } }, status);
 }
+
+/**
+ * audit 里的工具载荷比 SSE 那份再收一道。
+ *
+ * SSE 的 2000 字上限（free-agent.ts 的 STREAM_PAYLOAD_MAX）是「一次性推送」的预算；
+ * audit 不一样——GET /tasks/:agentId 每 3 秒整量返回一次 slice，同样的字数会被
+ * 反复传几百遍。回看一次工具调用只需要认出「调了什么、给了什么、大概返回什么」，
+ * 不需要全文，所以这里按预览尺寸截。真正的全文在证据/产物里。
+ */
+const AUDIT_TOOL_ARGS_MAX = 400;
+const AUDIT_TOOL_RESULT_MAX = 800;
+
+/** 超长截断并标注，`…（共 N 字）` 让前端知道这是预览而非全部。 */
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…（共 ${s.length} 字）`;
+}
+
+/**
+ * GET /tasks/:agentId 返回的 audit 条数上限。
+ *
+ * 原来是 50。工具调用落 audit 后，一轮多工具的对话能一口气吃掉十几条，50 会把
+ * 更早的用户消息挤出去、对话流开头凭空消失。按上面的预览尺寸算，200 条的最坏
+ * 情况约 250KB，3 秒一轮可以接受。
+ */
+const AUDIT_RESPONSE_LIMIT = 200;
 
 // ---------------------------------------------------------------------------
 // RuntimeServer
@@ -162,6 +505,11 @@ export class RuntimeServer {
     this.startMonitor();
     this.server = Bun.serve({
       port: this.config.port,
+      // Bun 默认 idleTimeout=10s，会在「无字节收发满 10 秒」时直接掐断连接。
+      // SSE 长连接在模型推理阶段（实测 8–40 秒）完全静默，落在这个窗口里必被
+      // 掐断——而心跳原本是 15s，永远赶不及。这里放到 Bun 上限 255s，真正的
+      // 保活交给 HEARTBEAT_MS（见 handleStream）。
+      idleTimeout: 255,
       fetch: (req) => this.handle(req),
     });
     process.stderr.write(`[runtime-server] listening on ${this.url}\n`);
@@ -232,32 +580,90 @@ export class RuntimeServer {
     }
 
     const projectId = body.project_id;
-    const processInstanceId = body.process_instance_id;
+    const rawProcessInstanceId = body.process_instance_id;
     const task = body.task;
-    const part = (typeof body.part === "string" && body.part) || this.config.defaultPart;
-
     if (typeof projectId !== "string" || !projectId)
       return errorResponse(400, "bad_request", "project_id is required");
-    if (typeof processInstanceId !== "string" || !processInstanceId)
-      return errorResponse(400, "bad_request", "process_instance_id is required");
     if (typeof task !== "string" || !task)
       return errorResponse(400, "bad_request", "task is required");
+
+    let requestFacts: ProjectRuntimeFacts;
+    try {
+      const projectType = normalizeKnownProjectType(optionalBodyString(body, "project_type", "projectType"));
+      requestFacts = {
+        ...(projectType ? { projectType } : {}),
+        ...(optionalBodyString(body, "process_version_id", "processVersionId") ? {
+          processVersionId: optionalBodyString(body, "process_version_id", "processVersionId"),
+        } : {}),
+        ...(optionalBodyString(body, "process_profile_id", "processProfileId") ? {
+          processProfileId: optionalBodyString(body, "process_profile_id", "processProfileId"),
+        } : {}),
+        ...(optionalBodyString(body, "process_profile_name", "processProfileName") ? {
+          processProfileName: optionalBodyString(body, "process_profile_name", "processProfileName"),
+        } : {}),
+        ...(optionalBodyString(body, "process_profile_version", "processProfileVersion") ? {
+          processProfileVersion: optionalBodyString(body, "process_profile_version", "processProfileVersion"),
+        } : {}),
+      };
+    } catch (e) {
+      if (e instanceof RuntimeProjectConfigError) return errorResponse(400, "bad_request", e.message);
+      throw e;
+    }
+
+    // Build lightweight deps first so Runtime can read Core's project facts
+    // before deciding whether this is a free session or governed engineering run.
+    const lookupProcessInstanceId =
+      typeof rawProcessInstanceId === "string" && rawProcessInstanceId ? rawProcessInstanceId : `lookup:${projectId}`;
+    let lookupDeps: AgentDeps;
+    let runtime: ResolvedProjectRuntime;
+    try {
+      lookupDeps = await this.depsFactory({ projectId, processInstanceId: lookupProcessInstanceId });
+      runtime = resolveProjectRuntime({
+        requestFacts,
+        coreInfo: await readProjectInfo(lookupDeps.governance, projectId),
+        requestedMode: body.mode,
+        rawProcessInstanceId,
+        projectId,
+        requestedPart: body.part,
+        defaultPart: this.config.defaultPart,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof RuntimeProjectConfigError) {
+        return errorResponse(e.status, e.code, msg);
+      }
+      return errorResponse(503, "capability_unavailable", `failed to resolve project runtime config: ${msg}`);
+    }
 
     // Build deps before creating state so a factory failure doesn't orphan files.
     let deps: AgentDeps;
     try {
-      deps = await this.depsFactory({ projectId, processInstanceId });
+      deps = await this.depsFactory(depsFactoryInput(projectId, runtime));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return errorResponse(503, "capability_unavailable", `failed to build runtime deps: ${msg}`);
     }
 
     const agentId = newAgentId();
-    const agentState = createAgentState({ agentId, task, part, projectId, processInstanceId });
+    const agentState = createAgentState({
+      agentId, task, part: runtime.part, projectId, processInstanceId: runtime.processInstanceId,
+      ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
+      ...(runtime.processVersionId !== undefined ? { processVersionId: runtime.processVersionId } : {}),
+      ...(runtime.processProfileId !== undefined ? { processProfileId: runtime.processProfileId } : {}),
+      ...(runtime.processProfileName !== undefined ? { processProfileName: runtime.processProfileName } : {}),
+      ...(runtime.processProfileVersion !== undefined ? { processProfileVersion: runtime.processProfileVersion } : {}),
+      executionMode: runtime.executionMode,
+    });
     await saveAgentState(agentState);
 
     const handle: AgentHandle = {
-      agentId, projectId, processInstanceId, task, part,
+      agentId, projectId, processInstanceId: runtime.processInstanceId, task, part: runtime.part,
+      ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
+      ...(runtime.processVersionId !== undefined ? { processVersionId: runtime.processVersionId } : {}),
+      ...(runtime.processProfileId !== undefined ? { processProfileId: runtime.processProfileId } : {}),
+      ...(runtime.processProfileName !== undefined ? { processProfileName: runtime.processProfileName } : {}),
+      ...(runtime.processProfileVersion !== undefined ? { processProfileVersion: runtime.processProfileVersion } : {}),
+      executionMode: runtime.executionMode,
       status: "running",
       currentStage: "intake",
       busy: false,
@@ -276,7 +682,7 @@ export class RuntimeServer {
 
     // mode="agent": free-agent conversation only — do NOT start the GJB
     // pipeline loop. The agent stays idle until /message drives it.
-    if (body.mode === "agent") {
+    if (runtime.executionMode === "free") {
       handle.status = "idle";
       return json({ agent_id: agentId }, 201);
     }
@@ -319,12 +725,18 @@ export class RuntimeServer {
     return json({
       agent_id: h.agentId,
       project_id: h.projectId,
+      execution_mode: h.executionMode,
+      project_type: h.projectType ?? null,
+      process_version_id: h.processVersionId ?? null,
+      process_profile_id: h.processProfileId ?? null,
+      process_profile_name: h.processProfileName ?? null,
+      process_profile_version: h.processProfileVersion ?? null,
       task: h.task,
       status: h.status,
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
       docs,
-      audit: h.audit.slice(-50),
+      audit: h.audit.slice(-AUDIT_RESPONSE_LIMIT),
       evidence: h.evidence,
       ...(h.endedReason ? { reason: h.endedReason } : {}),
       ...(h.terminalCause ? { terminal_cause: h.terminalCause } : {}),
@@ -421,6 +833,7 @@ export class RuntimeServer {
       .then((reply) => {
         this.recordConversationAudit(agentId, "free_agent_reply", reply);
         opts.finalize();
+        this.syncHandleFromSession(agentId, session);
         const status = session.status();
         hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -429,10 +842,12 @@ export class RuntimeServer {
         const reason = e instanceof Error ? e.message : String(e);
         this.recordConversationAudit(agentId, "free_agent_reply_error", reason);
         opts.finalize();
+        this.syncHandleFromSession(agentId, session);
         const status = session.status();
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
       });
+    this.syncHandleFromSession(agentId, session);
     return json({ accepted: true, status: session.status() });
   }
 
@@ -452,9 +867,17 @@ export class RuntimeServer {
     const hub = StreamHub.for(agentId);
     const lastEventId = Number(req.headers.get("last-event-id") ?? "");
     const after = Number.isFinite(lastEventId) && lastEventId > 0 ? lastEventId : undefined;
-    const cursor = hub.subscribe(after);
+    // `?from=turn`（前端首连用）只回放当前轮次；断线重连带 Last-Event-ID 精确续传。
+    const cursor = after !== undefined
+      ? hub.subscribe(after)
+      : new URL(req.url).searchParams.get("from") === "turn"
+        ? hub.subscribeCurrentTurn()
+        : hub.subscribe();
     const encoder = new TextEncoder();
-    const HEARTBEAT_MS = 15_000;
+    // 5s：必须显著小于任何中间层的 idle 超时（Bun 默认 10s，Cloudflare 100s），
+    // 否则静默期（模型推理 8–40 秒无任何 token）连接会被掐断，前端陷入重连
+    // 回放循环、流式输出永远渲染不出来。
+    const HEARTBEAT_MS = 5_000;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -514,30 +937,78 @@ export class RuntimeServer {
   }
 
   /** 流式 prompt 回调 → hub 事件（part 定位用 Map 累计文本）。 */
-  private streamOptions(agentId: string): {
-    onTextStart: (partId: string) => void;
-    onDelta: (partId: string, text: string) => void;
-    /** 轮次结束：所有未定稿 part 补发 state=done 定稿事件。 */
-    finalize: () => void;
-  } {
+  private streamOptions(agentId: string): PromptStreamOptions & { finalize: () => void } {
     const hub = StreamHub.for(agentId);
-    const parts = new Map<string, string>();
+    /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
+    const parts = new Map<string, { kind: "text" | "reasoning"; text: string }>();
+    /**
+     * callId → 工具名/入参。onToolEnd 只带 callId（定稿事件整体替换前一条，
+     * 前端沿用已有 part 的 name/args），但落 audit 要写一条自足的记录，
+     * 所以在这里把 onToolStart 的 name/args 存着，结束时合并成一条。
+     */
+    const toolCalls = new Map<string, { name: string; args: string }>();
+    const openText = (partId: string, kind: "text" | "reasoning"): void => {
+      parts.set(partId, { kind, text: "" });
+      hub.emit({
+        type: "part",
+        part: { kind, id: partId, state: "streaming", text: "", ts: new Date().toISOString() },
+      });
+    };
+    const appendText = (partId: string, text: string): void => {
+      const cell = parts.get(partId);
+      if (cell) cell.text += text;
+      hub.emit({ type: "delta", partId, text });
+    };
     return {
-      onTextStart: (partId) => {
-        parts.set(partId, "");
-        hub.emit({ type: "part", part: { kind: "text", id: partId, state: "streaming", text: "", ts: new Date().toISOString() } });
+      onTextStart: (partId) => openText(partId, "text"),
+      onDelta: appendText,
+      onReasoningStart: (partId) => openText(partId, "reasoning"),
+      onReasoningDelta: appendText,
+      onToolStart: (callId, name, args) => {
+        toolCalls.set(callId, { name, args });
+        hub.emit({
+          type: "part",
+          part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
+        });
       },
-      onDelta: (partId, text) => {
-        const acc = (parts.get(partId) ?? "") + text;
-        parts.set(partId, acc);
-        hub.emit({ type: "delta", partId, text });
+      onToolEnd: (callId, ok, result) => {
+        hub.emit({
+          type: "part",
+          part: {
+            kind: "tool",
+            id: callId,
+            state: ok ? "done" : "error",
+            // 工具 part 定稿事件整体替换前一条，name/args 由前端沿用已有 part。
+            name: "",
+            args: "",
+            result,
+            ts: new Date().toISOString(),
+          },
+        });
+        // 只在结束时落一条 audit（不是 start/end 两条）：轮次进行中刷新页面走的是
+        // StreamHub.subscribeCurrentTurn()，它从上一个 done 事件之后重放，running
+        // 态的卡片本来就会被 SSE 补回来；audit 只需要负责「本轮结束后还能回看」。
+        const started = toolCalls.get(callId);
+        toolCalls.delete(callId);
+        this.recordConversationAudit(
+          agentId,
+          "free_agent_tool",
+          JSON.stringify({
+            id: callId,
+            name: started?.name ?? "",
+            args: clip(started?.args ?? "", AUDIT_TOOL_ARGS_MAX),
+            result: clip(result, AUDIT_TOOL_RESULT_MAX),
+          }),
+          ok ? "ok" : "failed",
+        );
       },
       finalize: () => {
         const ts = new Date().toISOString();
-        for (const [id, text] of parts) {
-          hub.emit({ type: "part", part: { kind: "text", id, state: "done", text, ts } });
+        for (const [id, cell] of parts) {
+          hub.emit({ type: "part", part: { kind: cell.kind, id, state: "done", text: cell.text, ts } });
         }
         parts.clear();
+        toolCalls.clear();
       },
     };
   }
@@ -553,6 +1024,7 @@ export class RuntimeServer {
     }
     session.abort("aborted via web");
     this.recordConversationAudit(agentId, "free_agent_abort");
+    this.syncHandleFromSession(agentId, session);
     return json({ aborted: true, status: session.status() });
   }
 
@@ -568,6 +1040,13 @@ export class RuntimeServer {
     let governance: GovernanceClient | undefined;
     let connector: LoopConnector | null = null;
     let processInstanceId = "pi-default";
+    let executionMode: "free" | "engineering" = "engineering";
+    let projectType: string | undefined;
+    let processVersionId: string | null | undefined;
+    let processProfileId: string | null | undefined;
+    let processProfileName: string | null | undefined;
+    let processProfileVersion: string | null | undefined;
+    let snapshotProjectInfo: ProjectInfo | undefined;
     let initialGateLock: { gate: GateId; submissionId: string } | undefined;
 
     const handle = this.registry.get(agentId);
@@ -577,7 +1056,13 @@ export class RuntimeServer {
       governance = handle.governance;
       connector = handle.connector;
       processInstanceId = handle.processInstanceId ?? "pi-default";
-      initialGateLock = handle.currentState?.freeAgentLock;
+      executionMode = handle.executionMode;
+      projectType = handle.projectType;
+      processVersionId = handle.processVersionId;
+      processProfileId = handle.processProfileId;
+      processProfileName = handle.processProfileName;
+      processProfileVersion = handle.processProfileVersion;
+      initialGateLock = executionMode === "engineering" ? handle.currentState?.freeAgentLock : undefined;
     } else {
       let state: AgentState | undefined;
       try {
@@ -587,9 +1072,23 @@ export class RuntimeServer {
       }
       if (!state) return null;
       processInstanceId = state.processInstanceId ?? "pi-default";
-      initialGateLock = state.freeAgentLock;
+      executionMode = inferExecutionMode(state);
+      projectType = state.projectType;
+      processVersionId = state.processVersionId;
+      processProfileId = state.processProfileId;
+      processProfileName = state.processProfileName;
+      processProfileVersion = state.processProfileVersion;
+      initialGateLock = executionMode === "engineering" ? state.freeAgentLock : undefined;
       try {
-        const deps = await this.depsFactory({ projectId: state.projectId, processInstanceId });
+        const deps = await this.depsFactory({
+          projectId: state.projectId,
+          processInstanceId,
+          ...(state.projectType ? { projectType: state.projectType } : {}),
+          ...(state.processVersionId ? { processVersionId: state.processVersionId } : {}),
+          ...(state.processProfileId ? { processProfileId: state.processProfileId } : {}),
+          ...(state.processProfileName ? { processProfileName: state.processProfileName } : {}),
+          ...(state.processProfileVersion ? { processProfileVersion: state.processProfileVersion } : {}),
+        });
         projectId = state.projectId;
         part = state.part;
         governance = deps.governance;
@@ -603,7 +1102,42 @@ export class RuntimeServer {
       }
     }
 
-    if (!projectId || !part || !governance) return null;
+    if (!projectId || !governance) return null;
+
+    try {
+      const coreInfo = await readProjectInfo(governance, projectId);
+      const runtime = resolveProjectRuntime({
+        requestFacts: {
+          ...(projectType ? { projectType: normalizeKnownProjectType(projectType) } : {}),
+          ...(processVersionId !== undefined ? { processVersionId } : {}),
+          ...(processProfileId !== undefined ? { processProfileId } : {}),
+          ...(processProfileName !== undefined ? { processProfileName } : {}),
+          ...(processProfileVersion !== undefined ? { processProfileVersion } : {}),
+        },
+        coreInfo,
+        requestedMode: executionMode === "free" ? "agent" : undefined,
+        rawProcessInstanceId: processInstanceId,
+        projectId,
+        requestedPart: part,
+        defaultPart: this.config.defaultPart,
+      });
+      executionMode = runtime.executionMode;
+      processInstanceId = runtime.processInstanceId;
+      part = runtime.part;
+      projectType = runtime.projectType;
+      processVersionId = runtime.processVersionId;
+      processProfileId = runtime.processProfileId;
+      processProfileName = runtime.processProfileName;
+      processProfileVersion = runtime.processProfileVersion;
+      snapshotProjectInfo = coreInfo ?? undefined;
+      initialGateLock = executionMode === "engineering" ? initialGateLock : undefined;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(
+        `[runtime-server] project runtime config invalid for ${agentId}: ${msg}\n`,
+      );
+      return null;
+    }
 
     // model：ConversationalModel，用 env SYNTHIA_MODEL_* 构造（依赖 Slice A 使 ModelClient 实现 chat()）。
     let model: ConversationalModel;
@@ -617,9 +1151,26 @@ export class RuntimeServer {
       return null;
     }
 
+    // System prompt = static operating manual + rules, then the live project
+    // status snapshot. The manual half never throws (it degrades to whatever it
+    // could read); only the snapshot half can fail hard enough to abort session
+    // creation, because a session with no project state is not worth starting.
     let systemPrompt: string;
     try {
-      systemPrompt = await buildContextSnapshot(governance, projectId);
+      const doc = await buildAgentDoc({ mode: executionMode });
+      if (doc.problems.length > 0) {
+        process.stderr.write(
+          `[runtime-server] agent doc partially unavailable for ${agentId}: ${doc.problems.join("; ")}\n`,
+        );
+      }
+      systemPrompt = composeSystemPrompt(
+        doc.text,
+        await buildContextSnapshot(
+          governance,
+          projectId,
+          snapshotProjectInfo ? { projectInfo: snapshotProjectInfo } : {},
+        ),
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(
@@ -630,10 +1181,15 @@ export class RuntimeServer {
 
     const deps: FreeAgentDeps = {
       model,
-      tools: [...await assembleSkillTools(), ...assembleGateTools(), assembleVivadoTool()],
+      tools: [
+        ...await assembleSkillTools(),
+        ...(executionMode === "engineering" ? await assembleGateTools() : []),
+        assembleVivadoTool(),
+        assembleSkillDocTool(),
+      ],
       systemPrompt,
       projectId,
-      part,
+      part: part ?? "",
       classification: process.env.SYNTHIA_CLASSIFICATION ?? "internal",
       governance,
       connector,
@@ -648,11 +1204,45 @@ export class RuntimeServer {
   }
 
   /**
+   * 把自由会话的状态回写进 registry handle。
+   *
+   * 自由 agent 走的是 `POST /message` → `session.prompt()`，全程**不经过**
+   * `executeAgent`，而 `h.status` / `h.awaitingGate` 只有 `executeAgent` 和
+   * `recover()` 写。结果是自由 agent 在门上停住时，handle 还停在创建时的
+   * `idle`、`awaitingGate` 恒 undefined —— GET /tasks 据此序列化，前端就永远
+   * 看不到待批的门。会话才是自由 agent 的真相，所以在每个轮次边界把它同步过来。
+   *
+   * `currentStage` 不动：自由 agent 没有流水线的阶段推进，前端
+   * `deriveStageChain` 对 `awaiting_approval + awaiting_gate` 有优先分支，
+   * 拿到门就能把阶段条画对，不需要 stage。
+   */
+  private syncHandleFromSession(agentId: string, session: FreeAgentSession): void {
+    const h = this.registry.get(agentId);
+    if (!h) return;
+
+    const locked = session.lockedGate;
+    if (locked) {
+      h.status = "awaiting_approval";
+      h.awaitingGate = locked.gate;
+      return;
+    }
+
+    const s = session.status();
+    h.status = s === "completed" ? "succeeded" : s === "cancelled" ? "failed" : s;
+    h.awaitingGate = undefined;
+  }
+
+  /**
    * 记录对话/接管/终止审计事件，进入 handle.audit（带单调 seq），
    * 供 GET /tasks/:agentId 的 audit 序列返回（web 信息流据此渲染）。
    * agent 无 in-memory handle 时静默跳过（磁盘恢复竞态，罕见）。
    */
-  private recordConversationAudit(agentId: string, action: string, detail?: string): void {
+  private recordConversationAudit(
+    agentId: string,
+    action: string,
+    detail?: string,
+    result?: AuditEvent["result"],
+  ): void {
     const handle = this.registry.get(agentId);
     if (!handle) return;
     const seq = handle.audit.reduce((max, e) => (e.seq > max ? e.seq : max), -1) + 1;
@@ -663,6 +1253,7 @@ export class RuntimeServer {
       phase: "loop",
       action,
       ...(detail !== undefined ? { detail } : {}),
+      ...(result !== undefined ? { result } : {}),
     };
     handle.audit.push(event);
   }
@@ -832,21 +1423,57 @@ export class RuntimeServer {
         const state = await loadAgentState(agentId);
         const wasRunning = state.status === "running";
         const processInstanceId = state.processInstanceId ?? "pi-default";
+        const executionMode = inferExecutionMode(state);
+
+        const lookupDeps = await this.depsFactory({
+          projectId: state.projectId,
+          processInstanceId,
+        });
+        const runtime = resolveProjectRuntime({
+          requestFacts: {
+            ...(state.projectType ? { projectType: normalizeKnownProjectType(state.projectType) } : {}),
+            ...(state.processVersionId !== undefined ? { processVersionId: state.processVersionId } : {}),
+            ...(state.processProfileId !== undefined ? { processProfileId: state.processProfileId } : {}),
+            ...(state.processProfileName !== undefined ? { processProfileName: state.processProfileName } : {}),
+            ...(state.processProfileVersion !== undefined ? { processProfileVersion: state.processProfileVersion } : {}),
+          },
+          coreInfo: await readProjectInfo(lookupDeps.governance, state.projectId),
+          requestedMode: executionMode === "free" ? "agent" : undefined,
+          rawProcessInstanceId: processInstanceId,
+          projectId: state.projectId,
+          requestedPart: state.part,
+          defaultPart: this.config.defaultPart,
+        });
 
         const deps = await this.depsFactory({
           projectId: state.projectId,
-          processInstanceId,
+          processInstanceId: runtime.processInstanceId,
+          ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
+          ...(runtime.processVersionId ? { processVersionId: runtime.processVersionId } : {}),
+          ...(runtime.processProfileId ? { processProfileId: runtime.processProfileId } : {}),
+          ...(runtime.processProfileName ? { processProfileName: runtime.processProfileName } : {}),
+          ...(runtime.processProfileVersion ? { processProfileVersion: runtime.processProfileVersion } : {}),
         });
 
         const handle: AgentHandle = {
           agentId,
           projectId: state.projectId,
-          processInstanceId,
+          processInstanceId: runtime.processInstanceId,
           task: state.task,
-          part: state.part,
+          part: runtime.part,
+          createdAt: state.createdAt,
+          ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
+          ...(runtime.processVersionId !== undefined ? { processVersionId: runtime.processVersionId } : {}),
+          ...(runtime.processProfileId !== undefined ? { processProfileId: runtime.processProfileId } : {}),
+          ...(runtime.processProfileName !== undefined ? { processProfileName: runtime.processProfileName } : {}),
+          ...(runtime.processProfileVersion !== undefined ? { processProfileVersion: runtime.processProfileVersion } : {}),
+          executionMode: runtime.executionMode,
           status: wasRunning ? "interrupted" : state.status,
           currentStage: state.currentStage,
-          awaitingGate: state.awaitingGate,
+          // `?? freeAgentLock.gate` 是为**本次修复之前**落盘的自由 agent 状态兜底：
+          // 那些文件只写了 freeAgentLock，没有 awaitingGate，直接读会恢复成
+          // 「等待批准但不知道等哪个门」。两个字段本就同源，取任一非空即可。
+          awaitingGate: state.awaitingGate ?? state.freeAgentLock?.gate,
           busy: false,
           audit: [],
           evidence: [],
@@ -916,7 +1543,18 @@ export function createEnvDepsFactory(
   const noGovernance =
     env.SYNTHIA_NO_GOVERNANCE === "1" || env.SYNTHIA_NO_GOVERNANCE === "true";
 
-  return async ({ projectId, processInstanceId }) => {
+  return async ({ projectId, processInstanceId, projectType, processVersionId, processProfileId }) => {
+    if (projectType !== undefined) normalizeKnownProjectType(projectType);
+    const frozenProfile = processProfileId ?? processVersionId;
+    if (projectType === "free" && frozenProfile) {
+      throw new Error("free project cannot carry a process profile");
+    }
+    if (projectType === "engineering" && !frozenProfile) {
+      throw new Error("engineering project is missing its frozen process profile");
+    }
+    if (frozenProfile && frozenProfile !== "GJB_REF_V1" && frozenProfile !== "LEGACY_COMPAT") {
+      throw new Error(`unsupported process profile: ${frozenProfile}`);
+    }
     // Model
     const model: LoopModel =
       mode === "offline"

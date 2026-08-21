@@ -139,9 +139,10 @@ describe("CoreGovernanceClient", () => {
     expect(capturedUrl).toBe("http://core:8787/api/v1/projects/p1/artifacts/art-x/revisions");
     expect(capturedBody.artifact_type).toBe("DEVELOPMENT_REQUIREMENTS");
     expect(capturedBody.content_hash).toMatch(/^[0-9a-f]{64}$/);
-    // content is inlined; content_location is no longer sent (server defaults it)
+    // 正文内联，路径也一并送上——不送就只剩 `db://artifact_revision/<id>`，
+    // 前端便无从知道这一版对应工作区里的哪个文件。
     expect(capturedBody.content).toBe("# doc");
-    expect(capturedBody.content_location).toBeUndefined();
+    expect(capturedBody.content_location).toBe("doc/intake/summary.md");
     expect(capturedBody.version).toBe(1);
     expect(capturedHeaders.Authorization).toBe("Bearer tok");
     expect(capturedHeaders["Idempotency-Key"]).toBeTruthy();
@@ -216,6 +217,101 @@ describe("CoreGovernanceClient", () => {
     expect(state).toBe("approved");
     expect(capturedUrl).toBe("http://core/api/v1/projects/p1/gate-submissions/sub-xyz");
     expect(capturedMethod).toBe("GET");
+  });
+
+  test("getProjectInfo maps project type and process profile fields when Core exposes them", async () => {
+    let capturedUrl = "";
+    const fetchImpl = async (url: string, _init: RequestInit) => {
+      capturedUrl = url;
+      return new Response(JSON.stringify({
+        data: {
+          id: "p1",
+          name: "UART TX",
+          scope: "single module",
+          status: "active",
+          data_classification: "D1",
+          standard_version: "GB/T 33781-2017",
+          target_part: "xc7a100tcsg324-1",
+          project_type: "engineering",
+          process_version_id: "GJB_REF_V1",
+          process_profile_id: "GJB_REF_V1",
+          process_profile_name: "GJB reference flow",
+          process_profile_version: "GJB_REF_V1",
+          process_instances: [{
+            id: "pi-1",
+            current_gate: "G0",
+            gate_profile_version: "flow-v1",
+          }],
+        },
+      }), { status: 200 });
+    };
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      processInstanceId: "pi-1", fetchImpl,
+    });
+
+    const info = await gov.getProjectInfo("p1");
+
+    expect(capturedUrl).toBe("http://core/api/v1/projects/p1");
+    expect(info.projectType).toBe("engineering");
+    expect(info.processVersionId).toBe("GJB_REF_V1");
+    expect(info.processProfileId).toBe("GJB_REF_V1");
+    expect(info.processProfileName).toBe("GJB reference flow");
+    expect(info.processProfileVersion).toBe("GJB_REF_V1");
+    expect(info.processInstances[0]).toEqual({
+      id: "pi-1",
+      currentGate: "G0",
+      gateProfileVersion: "flow-v1",
+    });
+  });
+
+  test("getProjectInfo preserves explicit null process facts separately from omitted facts", async () => {
+    let includeProcessFacts = true;
+    const fetchImpl = async () => new Response(JSON.stringify({
+      data: {
+        id: "p-free",
+        name: "Free project",
+        scope: "",
+        status: "active",
+        data_classification: "D1",
+        standard_version: "",
+        target_part: null,
+        project_type: "free",
+        ...(includeProcessFacts ? {
+          process_version_id: null,
+          process_profile_id: null,
+          process_profile_name: null,
+          process_profile_version: null,
+        } : {}),
+        process_instances: [],
+      },
+    }), { status: 200 });
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p-free",
+      processInstanceId: "pi-free", fetchImpl,
+    });
+
+    const explicitNull = await gov.getProjectInfo("p-free");
+    for (const key of [
+      "processVersionId",
+      "processProfileId",
+      "processProfileName",
+      "processProfileVersion",
+    ] as const) {
+      expect(Object.hasOwn(explicitNull, key)).toBe(true);
+      expect(explicitNull[key]).toBeNull();
+    }
+
+    includeProcessFacts = false;
+    const omitted = await gov.getProjectInfo("p-free");
+    for (const key of [
+      "processVersionId",
+      "processProfileId",
+      "processProfileName",
+      "processProfileVersion",
+    ] as const) {
+      expect(Object.hasOwn(omitted, key)).toBe(false);
+    }
   });
 
   test("4xx error surfaces immediately as GovernanceError", async () => {
@@ -293,9 +389,9 @@ describe("CoreGovernanceClient", () => {
       version: 1,
     });
     expect(capturedBody.content_hash).toMatch(/^[0-9a-f]{64}$/);
-    // content is inlined verbatim; content_location omitted
+    // content is inlined verbatim; content_location carries the workspace path
     expect(capturedBody.content).toBe("test content 123");
-    expect(capturedBody.content_location).toBeUndefined();
+    expect(capturedBody.content_location).toBe("doc/arch/module_partition.md");
     // Verify it's actually the SHA-256 by re-computing
     const recomputed = createHash("sha256").update("test content 123").digest("hex");
     expect(capturedBody.content_hash).toBe(recomputed);

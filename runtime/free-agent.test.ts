@@ -35,7 +35,7 @@ import type {
   ChatTurn,
   ConversationalModel,
 } from "./agent-types.ts";
-import type { ArtifactFile, GovernanceClient, LoopConnector, VivadoSubmission } from "./types.ts";
+import type { ArtifactFile, LoopConnector, VivadoSubmission } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -105,12 +105,17 @@ afterAll(async () => {
 
 function makeSession(opts: {
   model: ConversationalModel;
-  governance?: GovernanceClient;
+  governance?: MockGovernanceClient;
   connector?: LoopConnector | null;
+  /** 先摆进工作区的文件。`vivado_run` 只收路径，正文由 runtime 向 Core 取，
+   *  所以「文件已经在工作区里」是调用它的前置状态，得显式摆出来。 */
+  workspace?: readonly ArtifactFile[];
   initialGateLock?: { gate: "G1" | "G2" | "G3" | "G4"; submissionId: string };
   processInstanceId?: string;
 }) {
   const agentId = `agent-fa-test-${++idCounter}`;
+  const governance = opts.governance ?? new MockGovernanceClient();
+  for (const file of opts.workspace ?? []) governance.seedWorkspaceFile(file.path, file.content);
   const session = createFreeAgentSession(agentId, {
     model: opts.model,
     tools: [...assembleSkillTools(), ...assembleGateTools(), assembleVivadoTool()],
@@ -118,13 +123,18 @@ function makeSession(opts: {
     projectId: "proj-test",
     part: "xc7a100tcsg324-1",
     classification: "internal",
-    governance: opts.governance ?? new MockGovernanceClient(),
+    governance,
     connector: opts.connector ?? null,
     ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     ...(opts.initialGateLock ? { initialGateLock: opts.initialGateLock } : {}),
     agentsDir,
   });
-  return { session, agentId };
+  return { session, agentId, governance };
+}
+
+/** `vivado_run` 的 sources 入参：只有路径。 */
+function refs(...files: readonly ArtifactFile[]): { path: string }[] {
+  return files.map((f) => ({ path: f.path }));
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +259,28 @@ describe("free-agent: gate submission + system-level lock", () => {
     expect(session.status()).toBe("idle");
   });
 
+  test("解锁后 awaitingGate 与 freeAgentLock 一起清掉，不留幽灵门", async () => {
+    const gov = new MockGovernanceClient();
+    gov.setSubmitResult("in_review");
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "UART requirement", filename: "doc/intake/summary.md" }),
+      call("tc2", "core_create_snapshot", { member_revision_ids: ["rev-mock-1"] }),
+      call("tc3", "core_submit_gate", { gate: "G1", snapshot_id: "snap-mock-2" }),
+      call("tc4", "core_check_gate", { submission_id: "sub-mock-3" }),
+      txt("G1 已批准。"),
+    ]);
+    const { session, agentId } = makeSession({ model, governance: gov });
+
+    await session.prompt("提交 G1 并查询");
+
+    // 置位与清位必须同步：只清 freeAgentLock 而留下 awaitingGate，会让
+    // GET /tasks 一直报一个已经批过的门，前端反复去拉一条不存在的待批提交。
+    const state = await loadAgentState(agentId);
+    expect(state.freeAgentLock).toBeUndefined();
+    expect(state.awaitingGate).toBeUndefined();
+    expect(state.status).toBe("running"); // mapStatus: idle → running
+  });
+
   test("core_check_gate rejected keeps the session locked", async () => {
     const gov = new MockGovernanceClient();
     gov.setSubmitResult("in_review");
@@ -285,12 +317,18 @@ describe("free-agent: gate submission + system-level lock", () => {
       call("tc3", "core_submit_gate", { gate: "G1", snapshot_id: "snap-mock-2" }),
       call("tc4", "vivado_run", {
         operation: "validate_sources",
-        sources: [{ path: "rtl/x.v", content: "module x(); endmodule" }],
+        sources: [{ path: "rtl/x.v" }],
         top: "x",
       }),
       txt("locked, vivado blocked."),
     ]);
-    const { session } = makeSession({ model, governance: gov, connector });
+    // 文件确实在工作区里——被挡住的是门禁锁，不是「找不到源文件」。
+    const { session } = makeSession({
+      model,
+      governance: gov,
+      connector,
+      workspace: [{ path: "rtl/x.v", content: "module x(); endmodule" }],
+    });
 
     await session.prompt("submit then try vivado");
 
@@ -303,17 +341,25 @@ describe("free-agent: gate submission + system-level lock", () => {
 });
 
 describe("free-agent: vivado_run job tool", () => {
+  /** 这一组共用的工作区内容：模型只报路径，正文得先在工作区里。 */
+  const COUNTER: ArtifactFile = {
+    path: "rtl/counter.v",
+    content: "module counter(input clk, output [7:0] q); assign q=0; endmodule",
+  };
+  const C: ArtifactFile = { path: "rtl/c.v", content: "module c(); endmodule" };
+  const X: ArtifactFile = { path: "rtl/x.v", content: "module x(); endmodule" };
+
   test("succeeds and returns terminal state + evidence list", async () => {
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "validate_sources",
-        sources: [{ path: "rtl/counter.v", content: "module counter(input clk, output [7:0] q); assign q=0; endmodule" }],
+        sources: refs(COUNTER),
         top: "counter",
       }),
       txt("validation succeeded."),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [COUNTER] });
 
     await session.prompt("validate the RTL");
 
@@ -331,13 +377,13 @@ describe("free-agent: vivado_run job tool", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "simulate",
-        sources: [{ path: "rtl/c.v", content: "module c(); endmodule" }],
+        sources: refs(C),
         top: "c",
         testbench: "tb_c",
       }),
       txt("simulation failed, need repair."),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [C] });
 
     await session.prompt("run simulation");
 
@@ -354,12 +400,12 @@ describe("free-agent: vivado_run job tool", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "validate_sources",
-        sources: [{ path: "rtl/x.v", content: "module x(); endmodule" }],
+        sources: refs(X),
         top: "x",
       }),
       txt("fail-closed: binary unavailable."),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [X] });
 
     await session.prompt("validate");
 
@@ -373,12 +419,12 @@ describe("free-agent: vivado_run job tool", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "synthesize",
-        sources: [{ path: "rtl/x.v", content: "module x(); endmodule" }],
+        sources: refs(X),
         top: "x",
       }),
       txt("drift fail-closed."),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [X] });
 
     await session.prompt("synthesize");
 
@@ -392,12 +438,12 @@ describe("free-agent: vivado_run job tool", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "validate_sources",
-        sources: [{ path: "rtl/x.v", content: "module x(); endmodule" }],
+        sources: refs(X),
         top: "x",
       }),
       txt("no connector."),
     ]);
-    const { session } = makeSession({ model, connector: null });
+    const { session } = makeSession({ model, connector: null, workspace: [X] });
 
     await session.prompt("validate");
 
@@ -487,6 +533,11 @@ describe("free-agent: lock persistence across restart", () => {
     expect(state.freeAgentLock).toBeDefined();
     expect(state.freeAgentLock!.gate).toBe("G2");
     expect(state.freeAgentLock!.submissionId).toBe("sub-mock-3");
+    // …and mirrors it into awaitingGate, the field GET /tasks serializes as
+    // `awaiting_gate`. 早先只写 freeAgentLock，自由 agent 停在门上时对外恒报
+    // null，前端 shouldFetchSubmission 首句短路 → 审批卡永不出现。
+    expect(state.status).toBe("awaiting_approval");
+    expect(state.awaitingGate).toBe("G2");
 
     // Simulate restart: reconstruct the session with the persisted lock.
     const govB = new MockGovernanceClient();
@@ -588,6 +639,9 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
     path: "tb/tb_counter.v",
     content: "module tb_counter;\nreg clk;\nwire [7:0] q;\ncounter dut(.clk(clk), .q(q));\ninitial begin #10 $finish; end\nendmodule\n",
   };
+  /** 两个互不例化的顶层——推断不出唯一 top。 */
+  const A: ArtifactFile = { path: "rtl/a.v", content: "module a;\nendmodule\n" };
+  const B: ArtifactFile = { path: "rtl/b.v", content: "module b;\nendmodule\n" };
 
   test("纯函数：RTL+TB 推断出 top 与 testbench", () => {
     const inf = inferTopAndTestbench([RTL, TB], true);
@@ -606,9 +660,7 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
   });
 
   test("纯函数：两个独立顶层 → 多候选，不推断", () => {
-    const a = { path: "rtl/a.v", content: "module a;\nendmodule\n" };
-    const b = { path: "rtl/b.v", content: "module b;\nendmodule\n" };
-    const inf = inferTopAndTestbench([a, b], false);
+    const inf = inferTopAndTestbench([A, B], false);
     expect(inf.top).toBeUndefined();
     expect([...inf.topCandidates].sort()).toEqual(["a", "b"]);
   });
@@ -631,10 +683,10 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
       },
     });
     const model = new ScriptedModel([
-      call("tc1", "vivado_run", { operation: "simulate", sources: [RTL, TB] }),
+      call("tc1", "vivado_run", { operation: "simulate", sources: refs(RTL, TB) }),
       txt("仿真已运行，汇报结果。"),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [RTL, TB] });
     await session.prompt("请仿真验证 counter");
 
     expect(connector.callCount("simulate")).toBe(1);
@@ -650,13 +702,13 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
       // p7 实证场景：top/testbench 都填成 TB 模块名（原本会被 Core 以 SAME_TOP_TESTBENCH 拒绝）。
       call("tc1", "vivado_run", {
         operation: "simulate",
-        sources: [RTL, TB],
+        sources: refs(RTL, TB),
         top: "tb_counter",
         testbench: "tb_counter",
       }),
       txt("参数有误，修正后重试。"),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [RTL, TB] });
     await session.prompt("请仿真验证 counter");
 
     expect(connector.callCount("simulate")).toBe(0);
@@ -672,13 +724,13 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "simulate",
-        sources: [RTL, TB],
+        sources: refs(RTL, TB),
         top: "counter",
         testbench: "counter",
       }),
       txt("参数有误，修正后重试。"),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [RTL, TB] });
     await session.prompt("请仿真验证 counter");
 
     expect(connector.callCount("simulate")).toBe(0);
@@ -691,14 +743,11 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "validate_sources",
-        sources: [
-          { path: "rtl/a.v", content: "module a;\nendmodule\n" },
-          { path: "rtl/b.v", content: "module b;\nendmodule\n" },
-        ],
+        sources: refs(A, B),
       }),
       txt("需显式指定 top。"),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [A, B] });
     await session.prompt("校验源文件");
 
     const result = parseJSON(toolResultFor(model, "tc1"));
@@ -711,21 +760,142 @@ describe("free-agent: vivado_run top/testbench 推断（防呆 1）", () => {
     const model = new ScriptedModel([
       call("tc1", "vivado_run", {
         operation: "validate_sources",
-        sources: [
-          { path: "rtl/a.v", content: "module a;\nendmodule\n" },
-          { path: "rtl/b.v", content: "module b;\nendmodule\n" },
-        ],
+        sources: refs(A, B),
         top: "a",
       }),
       txt("校验完成。"),
     ]);
-    const { session } = makeSession({ model, connector });
+    const { session } = makeSession({ model, connector, workspace: [A, B] });
     await session.prompt("校验源文件");
 
     expect(connector.callCount("validate_sources")).toBe(1);
     const result = parseJSON(toolResultFor(model, "tc1"));
     expect(result!.state).toBe("succeeded");
     expect(result!.top).toBe("a");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// vivado_run 的正文来源：工作区，而不是模型手打
+// ---------------------------------------------------------------------------
+
+describe("free-agent: vivado_run 从工作区取正文", () => {
+  const RTL: ArtifactFile = {
+    path: "rtl/pwm.v",
+    content: "module pwm(input clk, output q);\nassign q = clk;\nendmodule\n",
+  };
+
+  test("路径不在工作区 → sources_unavailable，未提交作业", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", { operation: "validate_sources", sources: [{ path: "rtl/ghost.v" }], top: "ghost" }),
+      txt("文件不在工作区。"),
+    ]);
+    const { session } = makeSession({ model, connector, workspace: [RTL] });
+    await session.prompt("校验 ghost");
+
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    expect(result!.error).toBe("sources_unavailable");
+    expect(result!.failed).toEqual(["rtl/ghost.v"]);
+    // fail-closed：路径错就一步都不往前走。
+    expect(connector.callCount("validate_sources")).toBe(0);
+  });
+
+  test("模型贴的正文与工作区不符 → 硬报错，绝不静默择一", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "validate_sources",
+        sources: [{ path: RTL.path, content: "module pwm(input clk, output q);\nassign q = ~clk;\nendmodule\n" }],
+        top: "pwm",
+      }),
+      txt("正文对不上。"),
+    ]);
+    const { session } = makeSession({ model, connector, workspace: [RTL] });
+    await session.prompt("校验 pwm");
+
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    // 送去编译的字节与库里登记的那版一旦分叉，证据描述的就是从没存在过的代码。
+    expect(result!.error).toBe("sources_unavailable");
+    expect(result!.failed).toEqual([RTL.path]);
+    expect(connector.callCount("validate_sources")).toBe(0);
+  });
+
+  test("贴的正文与工作区一字不差 → 放行（多此一举但无害）", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", {
+        operation: "validate_sources",
+        sources: [{ path: RTL.path, content: RTL.content }],
+        top: "pwm",
+      }),
+      txt("校验完成。"),
+    ]);
+    const { session } = makeSession({ model, connector, workspace: [RTL] });
+    await session.prompt("校验 pwm");
+
+    expect(parseJSON(toolResultFor(model, "tc1"))!.state).toBe("succeeded");
+  });
+
+  test("送去编译的正是工作区里的字节：连接器收到的是服务端填的 content", async () => {
+    const submitted: VivadoSubmission[] = [];
+    const ok = successBehavior();
+    const connector = new FakeVivadoConnector({
+      behavior: { respond: (req, idx) => { submitted.push(req); return ok.respond(req, idx); } },
+    });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", { operation: "validate_sources", sources: [{ path: RTL.path }], top: "pwm" }),
+      txt("校验完成。"),
+    ]);
+    const { session } = makeSession({ model, connector, workspace: [RTL] });
+    await session.prompt("校验 pwm");
+
+    expect(submitted[0]!.sources).toEqual([{ path: RTL.path, content: RTL.content }]);
+  });
+
+  test("已登记的输入回报 sha256 / 修订 / commit", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const gov = new MockGovernanceClient();
+    const write = await gov.writeWorkspaceFiles({ files: [RTL], changeReason: "生成 PWM" });
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", { operation: "validate_sources", sources: [{ path: RTL.path }], top: "pwm" }),
+      txt("校验完成。"),
+    ]);
+    const { session } = makeSession({ model, connector, governance: gov });
+    await session.prompt("校验 pwm");
+
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    const inputs = result!.inputs as Array<Record<string, unknown>>;
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.path).toBe(RTL.path);
+    expect(inputs[0]!.sha256).toBe(write.registered[0]!.contentHash);
+    expect(inputs[0]!.registered).toBe(true);
+    expect(inputs[0]!.revisionId).toBe(write.registered[0]!.revisionId);
+    expect(result!.workspaceCommit).toBe(write.commit);
+    expect(result!.unregisteredInputs).toBeUndefined();
+  });
+
+  test("带未登记改动的输入照跑，但结果里明说它不是任何一条修订", async () => {
+    const connector = new FakeVivadoConnector({ behavior: successBehavior() });
+    const gov = new MockGovernanceClient();
+    await gov.writeWorkspaceFiles({ files: [RTL], changeReason: "生成 PWM" });
+    // 人在编辑器里改了一行，还没登记。
+    gov.seedWorkspaceFile(RTL.path, "module pwm(input clk, output q);\nassign q = ~clk; // 人改的\nendmodule\n");
+
+    const model = new ScriptedModel([
+      call("tc1", "vivado_run", { operation: "validate_sources", sources: [{ path: RTL.path }], top: "pwm" }),
+      txt("校验完成。"),
+    ]);
+    const { session } = makeSession({ model, connector, governance: gov });
+    await session.prompt("校验 pwm");
+
+    const result = parseJSON(toolResultFor(model, "tc1"));
+    // 编译是允许的——先跑再登记是正常迭代节奏；不允许的是把它说成已登记的那一版。
+    expect(result!.state).toBe("succeeded");
+    expect((result!.inputs as Array<Record<string, unknown>>)[0]!.registered).toBe(false);
+    expect(result!.unregisteredInputs).toEqual([RTL.path]);
+    expect(result!.unregisteredNote).toContain("尚未登记");
+    expect(result!.workspaceCommit).toBeUndefined();
   });
 });
 
@@ -763,17 +933,18 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
   test("有 succeeded simulate 记录 → 声称仿真通过直接放行", async () => {
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
     const claimed = "仿真通过，波形符合预期。";
+    const workspace: ArtifactFile[] = [
+      { path: "rtl/c.v", content: "module c(input clk, output q);\nassign q = clk;\nendmodule\n" },
+      {
+        path: "tb/tb_c.v",
+        content: "module tb_c;\nreg clk;\nwire q;\nc dut(.clk(clk), .q(q));\ninitial begin #10 $finish; end\nendmodule\n",
+      },
+    ];
     const model = new ScriptedModel([
-      call("tc1", "vivado_run", {
-        operation: "simulate",
-        sources: [
-          { path: "rtl/c.v", content: "module c(input clk, output q);\nassign q = clk;\nendmodule\n" },
-          { path: "tb/tb_c.v", content: "module tb_c;\nreg clk;\nwire q;\nc dut(.clk(clk), .q(q));\ninitial begin #10 $finish; end\nendmodule\n" },
-        ],
-      }),
+      call("tc1", "vivado_run", { operation: "simulate", sources: refs(...workspace) }),
       txt(claimed),
     ]);
-    const { session, agentId } = makeSession({ model, connector });
+    const { session, agentId } = makeSession({ model, connector, workspace });
 
     const reply = await session.prompt("请仿真并汇报");
 

@@ -162,6 +162,14 @@ export class FreeAgentAbortedError extends Error {
 /** Safety bound: a single prompt() may not spin more tool rounds than this. */
 const MAX_TOOL_ROUNDS = 50;
 
+/** 工具入参/结果上流前的截断上限（字符）。SSE 是给人看的实时视图，完整内容
+ *  在会话消息与运行记录里；不截断的话一次 Vivado 日志就能把流灌爆。 */
+const STREAM_PAYLOAD_MAX = 2000;
+
+function truncateForStream(s: string): string {
+  return s.length <= STREAM_PAYLOAD_MAX ? s : `${s.slice(0, STREAM_PAYLOAD_MAX)}…（已截断，完整内容见运行记录）`;
+}
+
 // ---------------------------------------------------------------------------
 // 声称-记录一致性核查（防呆 2）
 // ---------------------------------------------------------------------------
@@ -377,7 +385,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         ? (this.deps.model as StreamingConversationalModel)
         : undefined;
       let partId: string | null = null;
-      const useStream = !!streamingModel && !!(opts.onTextStart || opts.onDelta);
+      let reasoningPartId: string | null = null;
+      const useStream = !!streamingModel
+        && !!(opts.onTextStart || opts.onDelta || opts.onReasoningStart || opts.onReasoningDelta);
       const turn: ChatTurn = useStream && streamingModel
         ? await streamingModel.chatStream(this.messages, this.deps.tools, {
             onTextStart: () => {
@@ -386,6 +396,13 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
             },
             onDelta: (t) => {
               if (partId) opts.onDelta?.(partId, t);
+            },
+            onReasoningStart: () => {
+              reasoningPartId = `rp-${this.agentId}-${++this.streamPartCounter}`;
+              opts.onReasoningStart?.(reasoningPartId);
+            },
+            onReasoning: (t) => {
+              if (reasoningPartId) opts.onReasoningDelta?.(reasoningPartId, t);
             },
           })
         : await this.deps.model.chat(this.messages, this.deps.tools);
@@ -466,7 +483,11 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       for (const call of turn.calls) {
         this.checkAbort();
 
+        // 工具执行期间（Vivado 一轮可达数分钟）流里必须有东西，否则前端只看得到
+        // 一段死寂。开 part → 执行 → 同 id 转 done/error。
+        opts.onToolStart?.(call.toolCallId, call.name, truncateForStream(JSON.stringify(call.args ?? {})));
         const result = await this.executeToolCall(call);
+        opts.onToolEnd?.(call.toolCallId, !result.isError, truncateForStream(result.content));
 
         this.messages.push({
           role: "tool",
@@ -665,14 +686,29 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         ? this.abortReason ?? this._status
         : undefined;
 
+    const locked = this.lockGate !== undefined && this.lockSubmissionId !== undefined;
+    // `awaitingGate` 必须与 `freeAgentLock` 同源写入：前者是 API 的对外字段
+    // （GET /tasks 的 `awaiting_gate`），后者只是自由会话的内部锁。早先只写后者，
+    // 于是自由 agent 停在门上时对外恒报 `awaiting_gate: null`，前端
+    // `shouldFetchSubmission` 首句即短路 → 审批卡永不出现，阶段条也退回按
+    // `current_stage`（恒为创建默认值 intake）画成需求阶段。
+    //
+    // 清位比置位保守：只有「上一次确实是自由会话锁的」才清。自由会话可以被
+    // 挂到一个流水线 agent 上（POST /message 对任意 agent 都会懒装配 session），
+    // 那种情况下不能把流水线写的 awaitingGate 抹掉。
+    const clearsOwnLock = !locked && this.agentState.freeAgentLock !== undefined;
+
     this.agentState = {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
       status,
       ...(endedReason ? { endedReason } : {}),
-      ...(this.lockGate !== undefined && this.lockSubmissionId !== undefined
-        ? { freeAgentLock: { gate: this.lockGate, submissionId: this.lockSubmissionId } }
-        : { freeAgentLock: undefined }),
+      ...(locked
+        ? {
+            freeAgentLock: { gate: this.lockGate!, submissionId: this.lockSubmissionId! },
+            awaitingGate: this.lockGate!,
+          }
+        : { freeAgentLock: undefined, ...(clearsOwnLock ? { awaitingGate: undefined } : {}) }),
     };
     // saveAgentState serializes with JSON.stringify; an explicit undefined field
     // is dropped, clearing any previously-persisted lock on unlock.

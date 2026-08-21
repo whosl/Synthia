@@ -8,6 +8,8 @@
  *
  * Endpoints (all under /api/v1/projects/:projectId):
  *   POST /artifacts/:artifactId/revisions       → 201 {id, version, state}
+ *   POST /workspace/files                       → 200 {commit, registered[], …}
+ *   GET  /workspace/file?path=                  → 200 {path, content, content_hash, registered, …}
  *   POST /snapshots                             → 201 {id, manifestHash}
  *   POST /gate-submissions                      → 201 {id, state}
  *   POST /gate-submissions/:subId/submit        → 200 {state}
@@ -38,13 +40,16 @@ import type {
   ProjectEventSummary,
   ProjectInfo,
   RegisteredRevision,
+  WorkspaceFileContent,
+  WorkspaceRegisteredFile,
+  WorkspaceWriteResult,
 } from "./types.ts";
 
 export interface CoreGovernanceConfig {
   readonly baseUrl: string;
   readonly token: string;
   readonly projectId: string;
-  readonly processInstanceId: string;
+  readonly processInstanceId?: string;
   readonly fetchImpl?: typeof fetch;
   readonly retryDelayMs?: number;
 }
@@ -75,11 +80,100 @@ export class GovernanceError extends Error {
   }
 }
 
+type HttpMethod = "GET" | "POST" | "PUT";
+
+interface WorkspaceFileRow {
+  readonly path: string;
+  readonly artifact_id: string;
+  readonly revision_id: string;
+  readonly version: number;
+  readonly content_hash: string;
+}
+
+function narrowWorkspaceRow(r: WorkspaceFileRow): WorkspaceRegisteredFile {
+  return {
+    path: r.path,
+    artifactId: r.artifact_id,
+    revisionId: r.revision_id,
+    version: r.version,
+    contentHash: r.content_hash,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function stringField(row: Record<string, unknown>, ...keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
+function optionalStringField(row: Record<string, unknown> | null, ...keys: readonly string[]): string | undefined {
+  if (!row) return undefined;
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function nullableStringField(row: Record<string, unknown> | null, ...keys: readonly string[]): string | null {
+  if (!row) return null;
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string") return value.trim() === "" ? null : value;
+    if (value === null) return null;
+  }
+  return null;
+}
+
+/**
+ * Read a nullable Core field without collapsing an omitted property into null.
+ * That distinction is part of the project-process contract: free projects must
+ * return all four process fields explicitly as null, while engineering projects
+ * must return all four as non-empty strings.
+ */
+function optionalNullableStringField(
+  row: Record<string, unknown> | null,
+  ...keys: readonly string[]
+): string | null | undefined {
+  if (!row) return undefined;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(row, key)) continue;
+    const value = row[key];
+    if (value === null || typeof value === "string") return value;
+    // Preserve a present-but-invalid value as a non-null string. The Runtime
+    // validator will then reject both free and engineering shapes instead of
+    // treating the malformed property as absent or null.
+    return "";
+  }
+  return undefined;
+}
+
+function firstDefined<T>(...values: readonly (T | undefined)[]): T | undefined {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function arrayField(row: Record<string, unknown>, ...keys: readonly string[]): readonly unknown[] {
+  for (const key of keys) {
+    const value = row[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
 export class CoreGovernanceClient implements GovernanceClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly projectId: string;
-  private readonly processInstanceId: string;
+  private readonly processInstanceId: string | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly retryDelayMs: number;
 
@@ -107,6 +201,9 @@ export class CoreGovernanceClient implements GovernanceClient {
       version: input.version,
       content_hash: contentHash,
       content: input.content,
+      // 不传这个字段是老的真 bug：Core 会退化成 `db://artifact_revision/<id>`，于是
+      // 前端拿不到任何路径线索，只能去反解标题里的 `技能名: rtl/pwm.v`。
+      content_location: input.contentLocation,
       artifact_type: input.artifactType,
       title: input.title,
       ...(input.changeReason ? { change_reason: input.changeReason } : {}),
@@ -122,6 +219,63 @@ export class CoreGovernanceClient implements GovernanceClient {
       artifactId: input.artifactId,
       version: data.version,
       contentHash,
+    };
+  }
+
+  // ----- workspace (real disk + git; Core is the only writer) -----
+
+  async writeWorkspaceFiles(input: {
+    files: readonly { path: string; content: string }[];
+    changeReason?: string;
+    artifactType?: ArtifactType;
+  }): Promise<WorkspaceWriteResult> {
+    const body = {
+      files: input.files.map((f) => ({ path: f.path, content: f.content })),
+      ...(input.changeReason ? { change_reason: input.changeReason } : {}),
+      ...(input.artifactType ? { artifact_type: input.artifactType } : {}),
+    };
+    // 幂等键由「路径 + 内容」决定：同一批字节重发是同一次写入，内容一变就是新的一次。
+    const fingerprint = sha256Hex(
+      input.files.map((f) => `${f.path}\0${sha256Hex(f.content)}`).sort().join("\n"),
+    );
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/workspace/files`,
+      body,
+      `wsfiles-${fingerprint.slice(0, 32)}`,
+    ) as {
+      commit: string;
+      registered: readonly WorkspaceFileRow[];
+      unchanged?: readonly WorkspaceFileRow[];
+    };
+    return {
+      commit: data.commit,
+      registered: (data.registered ?? []).map(narrowWorkspaceRow),
+      unchanged: (data.unchanged ?? []).map(narrowWorkspaceRow),
+    };
+  }
+
+  async readWorkspaceFile(path: string): Promise<WorkspaceFileContent> {
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/workspace/file?path=${encodeURIComponent(path)}`,
+    ) as {
+      path: string;
+      content: string;
+      content_hash: string;
+      registered?: boolean;
+      revision_id?: string | null;
+      version?: number | null;
+      commit?: string | null;
+    };
+    return {
+      path: data.path,
+      content: data.content,
+      contentHash: data.content_hash,
+      registered: data.registered === true,
+      revisionId: data.revision_id ?? null,
+      version: data.version ?? null,
+      commit: data.commit ?? null,
     };
   }
 
@@ -186,33 +340,55 @@ export class CoreGovernanceClient implements GovernanceClient {
   // ----- read-only queries (project status snapshot) -----
 
   async getProjectInfo(projectId: string): Promise<ProjectInfo> {
-    const data = await this.request("GET", `/api/v1/projects/${projectId}`) as {
-      id: string;
-      name: string;
-      scope: string;
-      status: string;
-      data_classification: string;
-      standard_version: string;
-      target_part: string;
-      process_instances?: readonly {
-        id: string;
-        current_gate: string;
-        gate_profile_version: string;
-      }[];
-    };
+    const data = asRecord(await this.request("GET", `/api/v1/projects/${projectId}`)) ?? {};
+    const returnedId = optionalStringField(data, "id");
+    if (returnedId !== undefined && returnedId !== projectId) {
+      throw new GovernanceError(
+        `Core returned project ${returnedId} while ${projectId} was requested`,
+        "PROJECT_OWNERSHIP_MISMATCH",
+        502,
+        false,
+      );
+    }
+    const processProfile = asRecord(data["process_profile"] ?? data["processProfile"]);
+    const projectType = optionalStringField(data, "project_type", "projectType");
+    const processVersionId = firstDefined(
+      optionalNullableStringField(data, "process_version_id", "processVersionId"),
+      optionalNullableStringField(processProfile, "process_version_id", "processVersionId"),
+    );
+    const processProfileId = firstDefined(
+      optionalNullableStringField(data, "process_profile_id", "processProfileId"),
+      optionalNullableStringField(processProfile, "id", "profile_id", "profileId"),
+    );
+    const processProfileName = firstDefined(
+      optionalNullableStringField(data, "process_profile_name", "processProfileName"),
+      optionalNullableStringField(processProfile, "name"),
+    );
+    const processProfileVersion = firstDefined(
+      optionalNullableStringField(data, "process_profile_version", "processProfileVersion"),
+      optionalNullableStringField(processProfile, "version"),
+    );
     return {
-      id: data.id,
-      name: data.name,
-      status: data.status,
-      scope: data.scope,
-      dataClassification: data.data_classification,
-      targetPart: data.target_part,
-      standardVersion: data.standard_version,
-      processInstances: (data.process_instances ?? []).map((pi) => ({
-        id: pi.id,
-        currentGate: pi.current_gate,
-        gateProfileVersion: pi.gate_profile_version,
-      })),
+      id: stringField(data, "id"),
+      name: stringField(data, "name"),
+      status: stringField(data, "status"),
+      scope: stringField(data, "scope"),
+      dataClassification: stringField(data, "data_classification", "dataClassification"),
+      targetPart: nullableStringField(data, "target_part", "targetPart"),
+      standardVersion: stringField(data, "standard_version", "standardVersion"),
+      ...(projectType ? { projectType } : {}),
+      ...(processVersionId !== undefined ? { processVersionId } : {}),
+      ...(processProfileId !== undefined ? { processProfileId } : {}),
+      ...(processProfileName !== undefined ? { processProfileName } : {}),
+      ...(processProfileVersion !== undefined ? { processProfileVersion } : {}),
+      processInstances: arrayField(data, "process_instances", "processInstances").map((row) => {
+        const pi = asRecord(row) ?? {};
+        return {
+          id: stringField(pi, "id"),
+          currentGate: stringField(pi, "current_gate", "currentGate"),
+          gateProfileVersion: stringField(pi, "gate_profile_version", "gateProfileVersion"),
+        };
+      }),
     };
   }
 
@@ -316,7 +492,7 @@ export class CoreGovernanceClient implements GovernanceClient {
   // ----- internals -----
 
   private async request(
-    method: "GET" | "POST",
+    method: HttpMethod,
     path: string,
     body?: unknown,
     idempotencyKey?: string,
@@ -362,9 +538,9 @@ export class CoreGovernanceClient implements GovernanceClient {
     throw new GovernanceError("request failed after retry", "request_failed", 0, false);
   }
 
-  private buildInit(method: "GET" | "POST", body: unknown, idempotencyKey?: string): RequestInit {
+  private buildInit(method: HttpMethod, body: unknown, idempotencyKey?: string): RequestInit {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
-    if (method === "POST") {
+    if (method !== "GET") {
       headers["Content-Type"] = "application/json";
       if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     }
@@ -415,6 +591,114 @@ export class MockGovernanceClient implements GovernanceClient {
   }
   /** Highest version registered per artifactId (monotonicity guard). */
   private artifactVersions = new Map<string, number>();
+
+  // ----- in-memory workspace (mirrors Core's disk + git behaviour) -----
+
+  /** path → current bytes, plus what the last **registered** write left behind.
+   *  `registeredHash === null` means "on disk but never registered" (untracked). */
+  private readonly workspace = new Map<
+    string,
+    { content: string; registeredHash: string | null; revisionId: string | null; commit: string | null }
+  >();
+
+  /** Seed a file as if a human had edited it: present on disk, not registered. */
+  seedWorkspaceFile(path: string, content: string): void {
+    const prev = this.workspace.get(path);
+    this.workspace.set(path, {
+      content,
+      registeredHash: prev?.registeredHash ?? null,
+      revisionId: prev?.revisionId ?? null,
+      commit: prev?.commit ?? null,
+    });
+  }
+
+  /** Current workspace contents, for assertions. */
+  workspaceSnapshot(): Map<string, string> {
+    return new Map([...this.workspace].map(([path, f]) => [path, f.content]));
+  }
+
+  async writeWorkspaceFiles(input: {
+    files: readonly { path: string; content: string }[];
+    changeReason?: string;
+    artifactType?: ArtifactType;
+  }): Promise<WorkspaceWriteResult> {
+    // 与 Core 的 `writeAndCommit` 同一条红线：目标文件带着未登记的人工改动就整批拒绝。
+    const conflicts = input.files
+      .filter((f) => {
+        const cur = this.workspace.get(f.path);
+        if (!cur || cur.content === f.content) return false;
+        return cur.registeredHash !== sha256Hex(cur.content);
+      })
+      .map((f) => f.path);
+    if (conflicts.length > 0) {
+      throw new GovernanceError(
+        `这些文件有未登记的人工改动，拒绝覆盖：${conflicts.join("、")}`,
+        "WORKSPACE_FILE_DIRTY", 409, false,
+      );
+    }
+
+    // 不消耗 `counter`：revisionId 的编号是测试断言的对象，不该被这里的取值扰动。
+    const commit = sha256Hex(
+      input.files.map((f) => `${f.path} ${sha256Hex(f.content)}`).sort().join("\n"),
+    ).slice(0, 40);
+
+    const registered: WorkspaceRegisteredFile[] = [];
+    const unchanged: WorkspaceRegisteredFile[] = [];
+    for (const file of input.files) {
+      const contentHash = sha256Hex(file.content);
+      const artifactId = `ws-${file.path}`.replace(/[^A-Za-z0-9._-]/g, "-");
+      const prev = this.workspace.get(file.path);
+      if (prev?.registeredHash === contentHash) {
+        const prior = [...this.registeredArtifacts].reverse().find((a) => a.artifactId === artifactId);
+        this.workspace.set(file.path, { ...prev, content: file.content });
+        unchanged.push({
+          path: file.path,
+          artifactId,
+          revisionId: prior?.revisionId ?? "",
+          version: prior?.version ?? 0,
+          contentHash,
+        });
+        continue;
+      }
+      const version = (this.artifactVersions.get(artifactId) ?? 0) + 1;
+      this.artifactVersions.set(artifactId, version);
+      const revisionId = this.nextId("rev");
+      this.workspace.set(file.path, { content: file.content, registeredHash: contentHash, revisionId, commit });
+      this.registeredArtifacts.push({
+        artifactId,
+        artifactType: input.artifactType ?? ("DETAILED_DESIGN" as ArtifactType),
+        title: file.path,
+        contentHash,
+        contentLocation: file.path,
+        revisionId,
+        version,
+      });
+      registered.push({ path: file.path, artifactId, revisionId, version, contentHash });
+    }
+    return { commit, registered, unchanged };
+  }
+
+  async readWorkspaceFile(path: string): Promise<WorkspaceFileContent> {
+    const file = this.workspace.get(path);
+    if (!file) {
+      throw new GovernanceError(`工作区没有这个文件：${path}`, "WORKSPACE_FILE_NOT_FOUND", 404, false);
+    }
+    const contentHash = sha256Hex(file.content);
+    const registered = file.registeredHash === contentHash;
+    const artifactId = `ws-${path}`.replace(/[^A-Za-z0-9._-]/g, "-");
+    const prior = registered
+      ? [...this.registeredArtifacts].reverse().find((a) => a.artifactId === artifactId)
+      : undefined;
+    return {
+      path,
+      content: file.content,
+      contentHash,
+      registered,
+      revisionId: registered ? file.revisionId : null,
+      version: prior?.version ?? null,
+      commit: registered ? file.commit : null,
+    };
+  }
 
   async registerCandidateArtifact(input: {
     artifactId: string;
@@ -494,6 +778,11 @@ export class MockGovernanceClient implements GovernanceClient {
       dataClassification: "D1",
       targetPart: "",
       standardVersion: "",
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB reference flow",
+      processProfileVersion: "GJB_REF_V1",
       processInstances: [...piIds].map((id) => ({ id, currentGate: "", gateProfileVersion: "" })),
     };
   }

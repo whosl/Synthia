@@ -2,16 +2,16 @@
  * Synthia Runtime — project context snapshot for the free-agent system prompt.
  *
  * {@link buildContextSnapshot} queries the governance client for the project's
- * current engineering state — project meta, the milestone inferred from approved
- * gate submissions (G1–G4), pending gate submissions, each artifact's latest
- * revision, and recent outbox events — and renders a compact Chinese markdown
- * section that the free agent injects into its system prompt. With this, the
- * model can answer "where is the project now?" without calling any tool.
+ * current state — project meta, optional process profile, project-type-aware
+ * gate state, each artifact's latest revision, and recent outbox events — and
+ * renders a compact Chinese markdown section that the free agent injects into
+ * its system prompt. With this, the model can answer "where is the project now?"
+ * without calling any tool.
  *
  * Fault tolerance: every query is wrapped individually. If Core is unreachable
  * or a query fails, the corresponding section is rendered with a "获取失败" /
  * "未知" marker and the call still returns a usable (degraded) snapshot — it
- * never throws. Only engineering state is rendered: no credentials, no event
+ * never throws. Only project state is rendered: no credentials, no event
  * payloads, no inline revision content (the {@link ProjectEventSummary} type
  * does not even carry the payload field).
  */
@@ -108,6 +108,56 @@ function shortTime(iso: string | null | undefined): string {
   );
 }
 
+function normalizeProjectType(projectType: string | undefined): "free" | "engineering" | null {
+  if (projectType === "free" || projectType === "engineering") return projectType;
+  return null;
+}
+
+function projectTypeLabel(projectType: string | undefined): string {
+  const known = normalizeProjectType(projectType);
+  if (known === "free") return "自由";
+  if (known === "engineering") return "工程";
+  return projectType || "未知";
+}
+
+function isFreeProject(project: ProjectInfo | null): boolean {
+  return normalizeProjectType(project?.projectType) === "free";
+}
+
+function shouldRenderGjbFlow(project: ProjectInfo | null): boolean {
+  if (normalizeProjectType(project?.projectType) !== "engineering") return false;
+  // Missing project facts and LEGACY_COMPAT both fail closed. A transient
+  // second Core read must not inject GJB milestones into a resolved free or
+  // compatibility session.
+  return project?.processVersionId === "GJB_REF_V1" &&
+    project.processProfileId === "GJB_REF_V1" &&
+    project.processProfileVersion === "GJB_REF_V1" &&
+    typeof project.processProfileName === "string" &&
+    project.processProfileName.trim().length > 0;
+}
+
+function profileLabel(project: ProjectInfo): string | null {
+  const parts: string[] = [];
+  const profileId = project.processProfileId ?? project.processVersionId;
+  if (project.processProfileName) parts.push(project.processProfileName);
+  if (profileId && profileId !== project.processProfileName) {
+    parts.push(profileId === "LEGACY_COMPAT" ? "兼容旧流程" : profileId);
+  }
+  if (project.processProfileVersion) parts.push(`v${project.processProfileVersion}`);
+  return parts.length > 0 ? parts.join("　") : null;
+}
+
+function gateDisplay(gate: string | undefined): string {
+  if (!gate) return "未设置";
+  if (gate === "G0") return "G0（项目准备）";
+  const desc = GATE_DESCRIPTION[gate as GjbGate];
+  return desc ? `${gate}（${desc}）` : gate;
+}
+
+function firstCurrentGate(project: ProjectInfo | null): string | null {
+  return project?.processInstances.find((pi) => pi.currentGate)?.currentGate ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Milestone inference (from approved gate submissions; runtime gates G1–G4)
 // ---------------------------------------------------------------------------
@@ -185,16 +235,27 @@ function renderProject(project: Outcome<ProjectInfo>): string[] {
   const lines: string[] = ["### 项目"];
   if (project.ok) {
     const p = project.value;
+    const freeProject = isFreeProject(p);
     lines.push(`- 名称：${p.name || "（未命名）"}（${p.id}）`);
     lines.push(
-      `- 状态：${p.status || "未知"}　密级：${p.dataClassification || "未知"}　` +
-        `标准：${p.standardVersion || "未知"}　目标器件：${p.targetPart || "未指定"}`,
+      `- 状态：${p.status || "未知"}　类型：${projectTypeLabel(p.projectType)}　` +
+        `密级：${p.dataClassification || "未知"}`,
     );
+    const profile = freeProject ? null : profileLabel(p);
+    if (profile) lines.push(`- 流程配置：${profile}`);
+    const technicalContext: string[] = [];
+    if (!freeProject) technicalContext.push(`标准：${p.standardVersion || "未知"}`);
+    if (p.targetPart) technicalContext.push(`目标器件：${p.targetPart}`);
+    else if (!freeProject) technicalContext.push("目标器件：未指定");
+    if (technicalContext.length > 0) lines.push(`- ${technicalContext.join("　")}`);
     const pis = p.processInstances;
     if (pis.length > 0) {
       lines.push(
         `- 流程实例：${pis
-          .map((pi) => `${pi.id}（当前门禁 ${pi.currentGate || "未设置"}）`)
+          .map((pi) => {
+            if (freeProject) return pi.id;
+            return `${pi.id}（当前门禁 ${gateDisplay(pi.currentGate)}）`;
+          })
           .join("；")}`,
       );
     }
@@ -204,7 +265,11 @@ function renderProject(project: Outcome<ProjectInfo>): string[] {
   return lines;
 }
 
-function renderMilestone(milestone: Milestone, gateError: string | null): string[] {
+function renderMilestone(
+  milestone: Milestone,
+  gateError: string | null,
+  currentGate: string | null,
+): string[] {
   const lines: string[] = ["### 里程碑"];
   if (gateError) {
     lines.push(failLine("里程碑（门禁提交）", gateError));
@@ -220,9 +285,10 @@ function renderMilestone(milestone: Milestone, gateError: string | null): string
     lines.push(`- 已通过全部开发门禁（${passedLabel}）；项目进入确认/释放阶段`);
   } else {
     const first = milestone.next ?? GJB_GATES[0];
+    const current = currentGate === "G0" ? "项目准备中（G0）" : "项目起步";
     lines.push(
       `- 已通过门禁：尚无`,
-      `- 当前阶段：项目起步，下一步推进 ${first}（${first ? GATE_DESCRIPTION[first] : ""}）`,
+      `- 当前阶段：${current}，下一步推进 ${first}（${first ? GATE_DESCRIPTION[first] : ""}）`,
     );
   }
   return lines;
@@ -305,7 +371,7 @@ function renderEvents(events: Outcome<readonly ProjectEventSummary[]>): string[]
     return lines;
   }
   for (const e of evs) {
-    // Note: only engineering metadata is rendered — never the event payload.
+    // Note: only event metadata is rendered — never the event payload.
     lines.push(`- ${shortTime(e.occurredAt)}　[${e.aggregateType}] ${e.eventType}（${e.aggregateId}）`);
   }
   return lines;
@@ -322,15 +388,24 @@ function renderEvents(events: Outcome<readonly ProjectEventSummary[]>): string[]
  * submission state, the latest revision of every artifact, and recent events.
  *
  * Never throws: on Core being unreachable or any query failing, a degraded
- * snapshot is returned with the failing sections marked. Only engineering state
+ * snapshot is returned with the failing sections marked. Only project state
  * is rendered.
  */
 export async function buildContextSnapshot(
   governance: GovernanceClient,
   projectId: string,
+  options: { readonly projectInfo?: ProjectInfo } = {},
 ): Promise<string> {
+  // Session assembly can pin the exact ProjectInfo used to resolve execution
+  // mode. In that path we must not perform a second Core project read: a
+  // transiently inconsistent response could otherwise inject GJB milestones
+  // into an already-resolved free/compatibility session (or remove them from an
+  // engineering one). Standalone callers keep the historical live-read default.
+  const projectQuery: Promise<Outcome<ProjectInfo>> = options.projectInfo !== undefined
+    ? Promise.resolve({ ok: true, value: options.projectInfo })
+    : safely(() => governance.getProjectInfo(projectId));
   const [project, submissions, events] = await Promise.all([
-    safely(() => governance.getProjectInfo(projectId)),
+    projectQuery,
     safely(() => governance.listGateSubmissions(projectId)),
     safely(() => governance.listEvents(projectId, RECENT_EVENT_LIMIT)),
   ]);
@@ -346,11 +421,14 @@ export async function buildContextSnapshot(
     ? inferMilestone(submissions.value)
     : { passed: [] as readonly GjbGate[], lastPassed: null as GjbGate | null, next: null as GjbGate | null };
   const gateError = submissions.ok ? null : submissions.error;
+  const projectInfo = project.ok ? project.value : null;
 
-  const blocks: string[] = ["## 项目状态快照（自动生成，仅工程状态）", ""];
+  const blocks: string[] = ["## 项目状态快照（自动生成，仅项目状态）", ""];
   blocks.push(...renderProject(project));
-  blocks.push(...renderMilestone(milestone, gateError));
-  blocks.push(...renderGateSubmissions(submissions));
+  if (shouldRenderGjbFlow(projectInfo)) {
+    blocks.push(...renderMilestone(milestone, gateError, firstCurrentGate(projectInfo)));
+    blocks.push(...renderGateSubmissions(submissions));
+  }
   blocks.push(...renderArtifacts(artifactRows, artifactError));
   blocks.push(...renderEvents(events));
 

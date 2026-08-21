@@ -61,6 +61,12 @@ export function createAgentState(opts: {
   part: string;
   projectId: string;
   processInstanceId?: string;
+  projectType?: string;
+  processVersionId?: string | null;
+  processProfileId?: string | null;
+  processProfileName?: string | null;
+  processProfileVersion?: string | null;
+  executionMode?: "free" | "engineering";
 }): AgentState {
   const now = new Date().toISOString();
   return {
@@ -68,6 +74,12 @@ export function createAgentState(opts: {
     task: opts.task,
     part: opts.part,
     projectId: opts.projectId,
+    ...(opts.projectType ? { projectType: opts.projectType } : {}),
+    ...(opts.processVersionId !== undefined ? { processVersionId: opts.processVersionId } : {}),
+    ...(opts.processProfileId !== undefined ? { processProfileId: opts.processProfileId } : {}),
+    ...(opts.processProfileName !== undefined ? { processProfileName: opts.processProfileName } : {}),
+    ...(opts.processProfileVersion !== undefined ? { processProfileVersion: opts.processProfileVersion } : {}),
+    ...(opts.executionMode ? { executionMode: opts.executionMode } : {}),
     ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     createdAt: now,
     updatedAt: now,
@@ -81,7 +93,11 @@ export function createAgentState(opts: {
 
 export async function loadAgentState(agentId: string): Promise<AgentState> {
   const raw = await readFile(agentStatePath(agentId), "utf8");
-  return JSON.parse(raw) as AgentState;
+  const state = JSON.parse(raw) as AgentState;
+  // Back-compat: pre-rename files persisted the id under `runId`, not `agentId`.
+  // Stamp it from the (always-correct, filename-derived) parameter so callers
+  // never see a missing agentId.
+  return state.agentId ? state : { ...state, agentId };
 }
 
 export async function saveAgentState(state: AgentState): Promise<void> {

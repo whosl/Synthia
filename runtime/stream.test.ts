@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import {
   ModelClient,
   consumeChatSSE,
+  type ChatPoster,
   type ChatStreamPoster,
 } from "./model-client.ts";
 import { StreamHub, StreamHub as Hub, type StreamEvent } from "./stream-hub.ts";
@@ -267,6 +268,58 @@ describe("ModelClient.chatStream", () => {
     expect(turn.kind).toBe("tool_calls");
     if (turn.kind === "tool_calls") expect(turn.calls[0]!.args).toBe("{oops");
   });
+
+  // 网关 504 降级：SSE 通道在这个网关上比非流式慢 2.6 倍，首字节经常骑在 60s
+  // 上限上（specs/agent-stream-benchmark.md §1.3）。重试治不了它——降级非流式才有答案。
+  const bufferedPost = (content: string): ChatPoster => async () => ({
+    status: 200,
+    text: "",
+    json: { choices: [{ message: { content } }] },
+  });
+
+  test("falls back to buffered chat() when the SSE connect fails with 504", async () => {
+    let streamCalls = 0;
+    const postStream: ChatStreamPoster = async () => {
+      streamCalls++;
+      return new Response("upstream timeout", { status: 504 });
+    };
+    const client = new ModelClient({ ...cfg, postStream, post: bufferedPost("late but here") });
+    const deltas: string[] = [];
+    const turn = await client.chatStream(
+      [{ role: "user", content: "hi" }],
+      [],
+      { onDelta: (t) => deltas.push(t) },
+    );
+    expect(turn.kind).toBe("text");
+    if (turn.kind === "text") expect(turn.content).toBe("late but here");
+    expect(streamCalls).toBe(1);       // networkRetries: 0 → 一次建连即放弃
+    expect(deltas).toEqual([]);        // 降级那轮没有打字机效果，这是已知代价
+  });
+
+  test("falls back to buffered chat() when the SSE connect throws", async () => {
+    const postStream: ChatStreamPoster = async () => { throw new Error("ECONNRESET"); };
+    const client = new ModelClient({ ...cfg, postStream, post: bufferedPost("recovered") });
+    const turn = await client.chatStream([{ role: "user", content: "hi" }], []);
+    expect(turn.kind).toBe("text");
+    if (turn.kind === "text") expect(turn.content).toBe("recovered");
+  });
+
+  test("fallback disabled: surfaces the streaming error verbatim", async () => {
+    const postStream: ChatStreamPoster = async () => new Response("boom", { status: 504 });
+    let bufferedCalls = 0;
+    const post: ChatPoster = async () => { bufferedCalls++; return { status: 200, text: "", json: {} }; };
+    const client = new ModelClient({ ...cfg, postStream, post, streamFallbackToBuffered: false });
+    await expect(client.chatStream([{ role: "user", content: "hi" }], [])).rejects.toThrow(/504/);
+    expect(bufferedCalls).toBe(0);
+  });
+
+  test("fallback failure surfaces the streaming error, not the buffered one", async () => {
+    const postStream: ChatStreamPoster = async () => new Response("boom", { status: 504 });
+    const post: ChatPoster = async () => { throw new Error("SECOND_FAILURE"); };
+    const client = new ModelClient({ ...cfg, postStream, post });
+    // 首因是网关 504；前端 replyErrorText 靠状态码分类，二次错误不该盖掉它。
+    await expect(client.chatStream([{ role: "user", content: "hi" }], [])).rejects.toThrow(/504/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -342,6 +395,15 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
   let server: RuntimeServer;
   const agentIds: string[] = [];
 
+  const DEFAULT_TEXT_SSE = [
+    `data: {"choices":[{"delta":{"content":"我来"}}]}\n\n`,
+    `data: {"choices":[{"delta":{"content":"设计"}}]}\n\n`,
+    `data: {"choices":[{"delta":{"content":"计数器"}}]}\n\n`,
+    `data: [DONE]\n\n`,
+  ].join("");
+  /** 下一次上游请求返回的 SSE（消费即清空）；null → DEFAULT_TEXT_SSE。 */
+  let nextUpstreamSSE: string | null = null;
+
   beforeAll(async () => {
     agentsDir = await mkdtemp(join(tmpdir(), "synthia-sse-test-"));
     process.env.SYNTHIA_RUNS_DIR = agentsDir;
@@ -354,15 +416,13 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     // with a mock upstream SSE served by a local Bun server.)
     const mockUpstream = Bun.serve({
       port: 0,
-      fetch: () => new Response(
-        [
-          `data: {"choices":[{"delta":{"content":"我来"}}]}\n\n`,
-          `data: {"choices":[{"delta":{"content":"设计"}}]}\n\n`,
-          `data: {"choices":[{"delta":{"content":"计数器"}}]}\n\n`,
-          `data: [DONE]\n\n`,
-        ].join(""),
-        { headers: { "content-type": "text/event-stream" } },
-      ),
+      fetch: () => {
+        // 一次性脚本优先（工具调用那一轮用），消费即清空，之后回落到默认文本流
+        // ——否则 free-agent 会拿着同一个 tool_call 无限循环。
+        const sse = nextUpstreamSSE ?? DEFAULT_TEXT_SSE;
+        nextUpstreamSSE = null;
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+      },
     });
     process.env.SYNTHIA_MODEL_URL = `http://127.0.0.1:${mockUpstream.port}/v1`;
     process.env.SYNTHIA_MODEL_KEY = "test-key";
@@ -484,5 +544,55 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { steered?: boolean; accepted?: boolean };
     expect(body.steered === true || body.accepted === true).toBe(true);
+  });
+
+  test("工具调用落 audit：本轮结束后 GET /tasks/:id 仍能回看调了什么", async () => {
+    const createRes = await fetch(`${server.url}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project_id: "p-tool-audit",
+        process_instance_id: "pi-tool-audit",
+        task: "tool audit",
+        mode: "agent",
+      }),
+    });
+    const agentId = (await createRes.json() as { agent_id: string }).agent_id;
+    agentIds.push(agentId);
+
+    // 第一轮上游吐一个 tool_call，第二轮回落到默认文本流收尾。工具名故意不存在：
+    // free-agent 对未知工具走 unknown_tool 错误结果，onToolStart/onToolEnd 照常触发
+    // ——这里要验的是 audit 有没有写，不是工具本身。
+    nextUpstreamSSE = [
+      `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_audit_1",`
+        + `"function":{"name":"nope_tool","arguments":"{\\"path\\":\\"top.v\\"}"}}]}}]}\n\n`,
+      `data: [DONE]\n\n`,
+    ].join("");
+
+    await fetch(`${server.url}/tasks/${agentId}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "读一下 top.v" }),
+    });
+
+    // POST /message 立即返回，轮次在后台跑完才写 audit。
+    let toolEvent: { action: string; result?: string; detail?: string } | undefined;
+    for (let i = 0; i < 60 && !toolEvent; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      const detailRes = await fetch(`${server.url}/tasks/${agentId}`);
+      const detailBody = await detailRes.json() as {
+        audit: Array<{ action: string; result?: string; detail?: string }>;
+      };
+      toolEvent = detailBody.audit.find((e) => e.action === "free_agent_tool");
+    }
+
+    expect(toolEvent).toBeDefined();
+    expect(toolEvent!.result).toBe("failed"); // unknown_tool → isError
+    const payload = JSON.parse(toolEvent!.detail!) as Record<string, unknown>;
+    // id 必须是模型给的 callId——前端靠它与 SSE 那张卡去重。
+    expect(payload.id).toBe("call_audit_1");
+    expect(payload.name).toBe("nope_tool");
+    expect(payload.args).toContain("top.v");
+    expect(String(payload.result)).toContain("unknown_tool");
   });
 });
