@@ -323,6 +323,39 @@ export interface ProjectEventSummary {
   readonly occurredAt: string;
 }
 
+/**
+ * A file-level result from Core's approved historical-material search.
+ *
+ * Core's search endpoint is expected to return only confirmed + currently
+ * valid rows.  Ownership, status, validity and searchability are explicit so
+ * Runtime can fail closed when a malformed row slips through an adapter;
+ * optional expiry fields provide a second time-based check. `projectId` is the
+ * owning/target project; `sourceProjectId` identifies the project a material
+ * was copied from, when applicable.
+ */
+export interface ImportedMaterialSummary {
+  readonly snapshotId: string;
+  readonly fileId: string;
+  readonly projectId: string;
+  readonly path: string;
+  readonly content?: string | null;
+  readonly contentHash: string;
+  readonly sourceHash?: string | null;
+  readonly sourceKind?: string | null;
+  readonly sourceName?: string | null;
+  readonly sourceProjectId?: string | null;
+  /** Core's canonical values include pending_confirmation/confirmed/denied/failed/expired. */
+  readonly status: string;
+  /** Derived validity state, when Core exposes a string form. */
+  readonly validity?: string | null;
+  readonly isValid?: boolean | null;
+  /** Core P2 search response's explicit validity/searchability flags. */
+  readonly valid: boolean;
+  readonly searchable: boolean;
+  readonly validUntil?: string | null;
+  readonly expiresAt?: string | null;
+}
+
 /** One file's current bytes in the project workspace (GET workspace/file),
  *  plus whether those exact bytes are a registered revision. */
 export interface WorkspaceFileContent {
@@ -414,6 +447,20 @@ export interface GovernanceClient {
   listRevisions(projectId: string, artifactId: string): Promise<readonly ArtifactRevisionSummary[]>;
   /** List recent outbox events for a project (most recent first, bounded by limit). */
   listEvents(projectId: string, limit?: number): Promise<readonly ProjectEventSummary[]>;
+  /**
+   * Search the project's imported historical materials.  Core applies the
+   * confirmed + valid default-search policy server-side; Runtime still applies
+   * ownership/state/expiry checks before injecting any row into context.
+   *
+   * Optional during the P2 compatibility window so older governance clients
+   * and offline fixtures continue to work.  Engineering sessions render a
+   * degraded/unavailable section when the method is absent; free sessions do
+   * not call it at all.
+   */
+  searchImportedMaterials?(projectId: string, query?: {
+    readonly q?: string;
+    readonly limit?: number;
+  }): Promise<readonly ImportedMaterialSummary[]>;
 }
 
 /** A no-op governance client for --no-governance mode (dev/debug only). */
@@ -497,6 +544,9 @@ export class NoGovernanceClient implements GovernanceClient {
     return [];
   }
   async listEvents(): Promise<readonly ProjectEventSummary[]> {
+    return [];
+  }
+  async searchImportedMaterials(): Promise<readonly ImportedMaterialSummary[]> {
     return [];
   }
 }

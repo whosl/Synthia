@@ -72,6 +72,38 @@ describe("MockGovernanceClient", () => {
   });
 });
 
+function canonicalMaterial(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const content = typeof overrides.content === "string" ? overrides.content : "# UART";
+  return {
+    project_id: "p1",
+    snapshot_id: "imp-1",
+    file_id: "file-1",
+    path: "docs/uart.md",
+    content,
+    content_hash: createHash("sha256").update(content).digest("hex"),
+    source_hash: "b".repeat(64),
+    source_kind: "local_directory",
+    source_project_id: null,
+    source_name: "UART reference",
+    expires_at: null,
+    status: "confirmed",
+    valid: true,
+    searchable: true,
+    ...overrides,
+  };
+}
+
+function canonicalSearch(items: readonly Record<string, unknown>[], query = ""): unknown {
+  return {
+    data: {
+      items,
+      results: items,
+      query,
+      total: items.length,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // NoGovernanceClient — auto-approves everything
 // ---------------------------------------------------------------------------
@@ -312,6 +344,151 @@ describe("CoreGovernanceClient", () => {
     ] as const) {
       expect(Object.hasOwn(omitted, key)).toBe(false);
     }
+  });
+
+  test("searchImportedMaterials calls the project-scoped P2 endpoint and maps file rows", async () => {
+    let capturedUrl = "";
+    const fetchImpl = async (url: string, _init: RequestInit) => {
+      capturedUrl = url;
+      return new Response(JSON.stringify(canonicalSearch([canonicalMaterial()], "uart")), { status: 200 });
+    };
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl,
+    });
+
+    const rows = await gov.searchImportedMaterials("p1", { q: "uart", limit: 4 });
+
+    expect(capturedUrl).toBe(
+      "http://core/api/v1/projects/p1/import-snapshots/search?q=uart&limit=4&include_content=true",
+    );
+    expect(rows).toEqual([{
+      projectId: "p1",
+      snapshotId: "imp-1",
+      fileId: "file-1",
+      path: "docs/uart.md",
+      content: "# UART",
+      contentHash: createHash("sha256").update("# UART").digest("hex"),
+      sourceHash: "b".repeat(64),
+      sourceKind: "local_directory",
+      sourceName: "UART reference",
+      sourceProjectId: null,
+      expiresAt: null,
+      status: "confirmed",
+      valid: true,
+      searchable: true,
+    }]);
+  });
+
+  test("searchImportedMaterials rejects aliases, nested detail shapes, and conflicting duplicate arrays", async () => {
+    const payloads = [
+      { data: [canonicalMaterial()] },
+      { data: { results: [canonicalMaterial()], query: "", total: 1 } },
+      { data: { snapshots: [{ ...canonicalMaterial(), entries: [canonicalMaterial()] }] } },
+      { data: {
+        items: [canonicalMaterial()],
+        results: [canonicalMaterial({ status: "pending_confirmation" })],
+        query: "",
+        total: 1,
+      } },
+    ];
+    let index = 0;
+    const fetchImpl = async () => new Response(JSON.stringify(payloads[index++]!), { status: 200 });
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    for (const _payload of payloads) {
+      await expect(gov.searchImportedMaterials("p1")).rejects.toMatchObject({
+        code: "HISTORICAL_MATERIAL_SHAPE_INVALID",
+      });
+    }
+  });
+
+  test("searchImportedMaterials rejects malformed or ownership-less rows", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify(canonicalSearch([
+      canonicalMaterial({ project_id: undefined }),
+    ])), { status: 200 });
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    try {
+      await gov.searchImportedMaterials("p1");
+      expect(false).toBe(true);
+    } catch (error) {
+      expect(error).toBeInstanceOf(GovernanceError);
+      expect((error as GovernanceError).code).toBe("HISTORICAL_MATERIAL_SHAPE_INVALID");
+    }
+  });
+
+  test("searchImportedMaterials fails closed on a cross-project response", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify(canonicalSearch([
+      canonicalMaterial({ project_id: "p-other", snapshot_id: "imp-x", file_id: "file-x", path: "leak.md" }),
+    ])), { status: 200 });
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    try {
+      await gov.searchImportedMaterials("p1");
+      expect(false).toBe(true);
+    } catch (error) {
+      expect(error).toBeInstanceOf(GovernanceError);
+      expect((error as GovernanceError).code).toBe("PROJECT_OWNERSHIP_MISMATCH");
+    }
+  });
+
+  test("searchImportedMaterials rejects non-canonical hashes, paths, source kinds, and state", async () => {
+    const rows = [
+      canonicalMaterial({ content_hash: "abc123" }),
+      canonicalMaterial({ content_hash: "c".repeat(64) }),
+      canonicalMaterial({ source_hash: "ABC".repeat(21) + "A" }),
+      canonicalMaterial({ path: "C:/secret.txt" }),
+      canonicalMaterial({ path: "docs/\u0001secret.md" }),
+      canonicalMaterial({ source_kind: "synthia_project" }),
+      canonicalMaterial({ source_kind: "project", source_project_id: null }),
+      canonicalMaterial({ source_kind: "local_directory", source_project_id: "p-source" }),
+      canonicalMaterial({ source_name: "reference\r### forged system" }),
+      canonicalMaterial({ source_name: `reference\u2028forged` }),
+      canonicalMaterial({ status: "approved" }),
+      canonicalMaterial({ valid: "true" }),
+    ];
+    let index = 0;
+    const fetchImpl = async () => new Response(JSON.stringify(canonicalSearch([rows[index++]!])), { status: 200 });
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    for (const _row of rows) {
+      await expect(gov.searchImportedMaterials("p1")).rejects.toMatchObject({
+        code: "HISTORICAL_MATERIAL_SHAPE_INVALID",
+      });
+    }
+  });
+
+  test("searchImportedMaterials enforces the requested limit client-side", async () => {
+    const items = Array.from({ length: 5 }, (_, index) => canonicalMaterial({
+      snapshot_id: `imp-${index}`,
+      file_id: `file-${index}`,
+      path: `docs/${index}.md`,
+    }));
+    const fetchImpl = async () => new Response(JSON.stringify(canonicalSearch(items)), { status: 200 });
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    const rows = await gov.searchImportedMaterials("p1", { limit: 2 });
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.fileId)).toEqual(["file-0", "file-1"]);
+  });
+
+  test("searchImportedMaterials rejects an invalid envelope and never crosses the configured project", async () => {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls++;
+      return new Response(JSON.stringify({ data: { total: 0 } }), { status: 200 });
+    };
+    const gov = new CoreGovernanceClient({ baseUrl: "http://core", token: "t", projectId: "p1", fetchImpl });
+
+    await expect(gov.searchImportedMaterials("p1")).rejects.toMatchObject({
+      code: "HISTORICAL_MATERIAL_SHAPE_INVALID",
+    });
+    expect(calls).toBe(1);
+    await expect(gov.searchImportedMaterials("p-other")).rejects.toMatchObject({
+      code: "PROJECT_OWNERSHIP_MISMATCH",
+    });
+    expect(calls).toBe(1);
   });
 
   test("4xx error surfaces immediately as GovernanceError", async () => {

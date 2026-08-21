@@ -37,6 +37,7 @@ import type {
   ArtifactSummary,
   GateSubmissionSummary,
   GovernanceClient,
+  ImportedMaterialSummary,
   ProjectEventSummary,
   ProjectInfo,
   RegisteredRevision,
@@ -167,6 +168,111 @@ function arrayField(row: Record<string, unknown>, ...keys: readonly string[]): r
     if (Array.isArray(value)) return value;
   }
   return [];
+}
+
+function recordRows(value: readonly unknown[]): Record<string, unknown>[] | null {
+  const rows: Record<string, unknown>[] = [];
+  for (const item of value) {
+    const row = asRecord(item);
+    if (!row) return null;
+    rows.push(row);
+  }
+  return rows;
+}
+
+function importedMaterialRows(data: unknown): Record<string, unknown>[] | null {
+  const root = asRecord(data);
+  if (!root) return null;
+  const items = root["items"];
+  const results = root["results"];
+  const query = root["query"];
+  const total = root["total"];
+  if (!Array.isArray(items) || !Array.isArray(results) || typeof query !== "string") return null;
+  if (!Number.isSafeInteger(total) || (total as number) < items.length) return null;
+  // Core intentionally exposes both names to one canonical file-level array.
+  // Reject conflicting duplicates instead of choosing whichever is convenient.
+  if (JSON.stringify(items) !== JSON.stringify(results)) return null;
+  return recordRows(items);
+}
+
+const IMPORT_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const IMPORT_SOURCE_KINDS = new Set(["project", "local_directory", "zip"]);
+
+function validImportIdentifier(value: string, maxLength = 128): boolean {
+  return value.length > 0 && value.length <= maxLength && IMPORT_IDENTIFIER_PATTERN.test(value);
+}
+
+function validImportPath(path: string): boolean {
+  if (path.length === 0 || new TextEncoder().encode(path).length > 512) return false;
+  if (path.includes("\0") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) return false;
+  const parts = path.split("/");
+  if (parts.length === 0 || parts.length > 32) return false;
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) return false;
+  return !parts.some((part) => [...part].some((char) => char.charCodeAt(0) < 0x20 || char === "\u007f"));
+}
+
+function searchableImportPath(path: string): boolean {
+  if (!validImportPath(path)) return false;
+  const normalized = path.toLowerCase();
+  if (normalized === "sim" || normalized.startsWith("sim/")) return false;
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  if (base === ".env" || base.startsWith(".env.")) return false;
+  if (/^(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|known_hosts)$/.test(base)) return false;
+  if (/(?:secret|credential|password|private[_-]?key|access[_-]?token)/.test(base)) return false;
+  return !/\.(?:key|pem|crt|cer|der|p12|pfx|jks|keystore|kdb|kdbx)$/.test(base);
+}
+
+function mapImportedMaterial(
+  row: Record<string, unknown>,
+): ImportedMaterialSummary | null {
+  const projectId = row["project_id"];
+  const snapshotId = row["snapshot_id"];
+  const fileId = row["file_id"];
+  const path = row["path"];
+  const content = row["content"];
+  const contentHash = row["content_hash"];
+  const sourceHash = row["source_hash"];
+  const sourceKind = row["source_kind"];
+  const sourceProjectId = row["source_project_id"];
+  const sourceName = row["source_name"];
+  const expiresAt = row["expires_at"];
+  if (typeof projectId !== "string" || !validImportIdentifier(projectId)) return null;
+  if (typeof snapshotId !== "string" || !validImportIdentifier(snapshotId)) return null;
+  // File ids append a server-generated suffix to a valid 128-byte snapshot id.
+  if (typeof fileId !== "string" || !validImportIdentifier(fileId, 256)) return null;
+  if (typeof path !== "string" || !searchableImportPath(path)) return null;
+  if (typeof content !== "string" || new TextEncoder().encode(content).length > 1024 * 1024) return null;
+  if (typeof contentHash !== "string" || !SHA256_PATTERN.test(contentHash)) return null;
+  if (sha256Hex(content) !== contentHash) return null;
+  if (typeof sourceHash !== "string" || !SHA256_PATTERN.test(sourceHash)) return null;
+  if (typeof sourceKind !== "string" || !IMPORT_SOURCE_KINDS.has(sourceKind)) return null;
+  if (sourceProjectId !== null && (typeof sourceProjectId !== "string" || !validImportIdentifier(sourceProjectId))) return null;
+  if (sourceKind === "project" ? typeof sourceProjectId !== "string" : sourceProjectId !== null) return null;
+  if (typeof sourceName !== "string" || sourceName.trim().length === 0) return null;
+  if (new TextEncoder().encode(sourceName).length > 256 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(sourceName)) return null;
+  if (expiresAt !== null && (typeof expiresAt !== "string" || Number.isNaN(Date.parse(expiresAt)))) return null;
+  if (row["status"] !== "confirmed" || row["valid"] !== true || row["searchable"] !== true) return null;
+
+  return {
+    snapshotId,
+    fileId,
+    // Do not infer ownership from the URL.  P2 search items must carry an
+    // explicit project_id; missing/null values are rejected below rather than
+    // being silently pinned to the requested project.
+    projectId,
+    path,
+    contentHash,
+    content,
+    sourceKind,
+    sourceName,
+    sourceProjectId,
+    sourceHash,
+    status: "confirmed",
+    valid: true,
+    searchable: true,
+    expiresAt,
+  };
 }
 
 export class CoreGovernanceClient implements GovernanceClient {
@@ -489,6 +595,73 @@ export class CoreGovernanceClient implements GovernanceClient {
     return limit && limit > 0 ? mapped.slice(0, limit) : mapped;
   }
 
+  /**
+   * Query Core's project-scoped default historical-material index.  Core's
+   * endpoint enforces confirmed+valid search semantics; `include_content=true`
+   * is intentional because the result is used as a bounded prompt context,
+   * not merely as a catalogue.  Runtime applies a second state/ownership/
+   * expiry filter before rendering any bytes.
+   */
+  async searchImportedMaterials(
+    projectId: string,
+    query: { readonly q?: string; readonly limit?: number } = {},
+  ): Promise<readonly ImportedMaterialSummary[]> {
+    if (projectId !== this.projectId) {
+      throw new GovernanceError(
+        `governance client for ${this.projectId} cannot query historical material for ${projectId}`,
+        "PROJECT_OWNERSHIP_MISMATCH",
+        403,
+        false,
+      );
+    }
+    const params = new URLSearchParams();
+    if (query.q?.trim()) params.set("q", query.q.trim());
+    if (query.limit !== undefined) {
+      if (!Number.isInteger(query.limit) || query.limit <= 0) {
+        throw new GovernanceError("historical material limit must be a positive integer", "validation", 400, false);
+      }
+      params.set("limit", String(query.limit));
+    }
+    params.set("include_content", "true");
+    const suffix = params.toString();
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${projectId}/import-snapshots/search${suffix ? `?${suffix}` : ""}`,
+    );
+    const rawRows = importedMaterialRows(data);
+    if (!rawRows) {
+      throw new GovernanceError(
+        "Core returned an invalid historical-material search envelope",
+        "HISTORICAL_MATERIAL_SHAPE_INVALID",
+        502,
+        false,
+      );
+    }
+    const rows: ImportedMaterialSummary[] = [];
+    for (const rawRow of rawRows) {
+      const row = mapImportedMaterial(rawRow);
+      if (!row) {
+        throw new GovernanceError(
+          "Core returned a malformed historical-material row",
+          "HISTORICAL_MATERIAL_SHAPE_INVALID",
+          502,
+          false,
+        );
+      }
+      rows.push(row);
+    }
+    const mismatch = rows.find((row) => row.projectId !== projectId);
+    if (mismatch) {
+      throw new GovernanceError(
+        `Core returned historical material for ${mismatch.projectId} while ${projectId} was requested`,
+        "PROJECT_OWNERSHIP_MISMATCH",
+        502,
+        false,
+      );
+    }
+    return query.limit === undefined ? rows : rows.slice(0, query.limit);
+  }
+
   // ----- internals -----
 
   private async request(
@@ -571,6 +744,12 @@ export class MockGovernanceClient implements GovernanceClient {
   }> = [];
   readonly snapshots: Array<{ snapshotId: string; memberRevisionIds: readonly string[]; toolModelPolicyHash: string }> = [];
   readonly submissions: Array<{ submissionId: string; processInstanceId: string; gate: GateId; snapshotId: string }> = [];
+  /** Seedable P2 rows returned by the default historical-material search. */
+  importedMaterials: ImportedMaterialSummary[] = [];
+  readonly importedMaterialQueries: Array<{
+    projectId: string;
+    query?: { readonly q?: string; readonly limit?: number };
+  }> = [];
   readonly submittedGates: string[] = [];
   readonly polledGates: string[] = [];
   private counter = 0;
@@ -827,5 +1006,19 @@ export class MockGovernanceClient implements GovernanceClient {
 
   async listEvents(): Promise<readonly ProjectEventSummary[]> {
     return [];
+  }
+
+  async searchImportedMaterials(
+    projectId: string,
+    query?: { readonly q?: string; readonly limit?: number },
+  ): Promise<readonly ImportedMaterialSummary[]> {
+    this.importedMaterialQueries.push({ projectId, ...(query ? { query } : {}) });
+    const q = query?.q?.trim().toLocaleLowerCase();
+    const filtered = q
+      ? this.importedMaterials.filter((row) =>
+          (row.path + " " + (row.sourceName ?? "")).toLocaleLowerCase().includes(q),
+        )
+      : this.importedMaterials;
+    return query?.limit && query.limit > 0 ? filtered.slice(0, query.limit) : [...filtered];
   }
 }
