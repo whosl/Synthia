@@ -3,7 +3,9 @@
 - **Branch**: `001-agent-freedom`
 - **Spec**: [`spec.md`](./spec.md)
 - **Date**: 2026-08-13
-- **Status**: Draft
+- **Status**: 部分替代（实施拆分以 [`../product-baseline-v1.md`](../product-baseline-v1.md) 为准）
+
+> **基线说明（2026-08-20）**：本计划的自由 Agent 循环和安全边界仍可复用；项目类型、精简 G0～G4、侧边探索任务、历史资料、备份恢复及 Connector 试用前修复，必须按产品基线重新拆分。文中关于固定 GJB、单 Agent、`pi-agent-core` 和“Connector 不动”的旧假设不再是约束。
 
 ---
 

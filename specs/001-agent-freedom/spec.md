@@ -2,8 +2,10 @@
 
 - **Feature Branch**: `001-agent-freedom`
 - **Created**: 2026-08-13
-- **Status**: Draft（待项目负责人确认）
+- **Status**: 部分替代（功能实现参考；产品边界以 [`../product-baseline-v1.md`](../product-baseline-v1.md) 为准）
 - **Input**: 用户需求：「不把 synthia 钉死为工作流。synthia 可以自由活动，具备完成 FPGA 设计的 skill，能自由将项目向里程碑推进，同时用户可以进行一定程度的闲聊」
+
+> **基线说明（2026-08-20）**：本文保留自由 Agent 的技术验收思路，但早期“所有项目固定 GJB 流程”“首版只到 G3/G4”“不做多 Agent”和部分 `pi-agent-core` 假设已过期。当前产品分为自由项目与工程项目；工程项目使用版本化的 GJB 参考流程 v1，并采用“一条正式推进线 + 侧边探索任务”。
 
 ---
 

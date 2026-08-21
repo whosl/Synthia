@@ -1,9 +1,11 @@
-# Synthia Web UI 重设计规格（v2：四项修订）
+# Synthia Web UI 重设计规格（v2：四项修订·部分替代）
 
-- 状态：草案，待项目负责人确认
+- 状态：部分替代；用户可见术语和项目边界以 [`product-baseline-v1.md`](product-baseline-v1.md) 为准
 - 日期：2026-08-13
 - 上游：`specs/ui-redesign-v1.md`（信息三级分层、术语表、验收标准仍然有效，本规格为增量修订）
 - 调研依据：opencode 对话信息流调研（anomalyco/opencode v1.18.18，packages/schema/src/v1/session.ts 等）
+
+> B0～B4 和 GJB 文档名只适用于选择 GJB 参考流程的工程项目；自由项目和未来其他流程使用各自的通用或流程自带名称。
 
 ## 1. 项目列表为主页面（确认项，无需改动）
 
