@@ -19,6 +19,12 @@ export {
 export { routeApi } from "./router.ts";
 export { startSynthiaServer } from "./server.ts";
 export {
+  DISABLED_CORE_FEATURE_FLAGS,
+  parseBooleanFeatureFlag,
+  resolveCoreFeatureFlags,
+} from "./feature-flags.ts";
+export type { CoreFeatureFlags, CoreFeatureFlagOptions } from "./feature-flags.ts";
+export {
   createTaskHandler,
   getTaskHandler,
   listTasksHandler,

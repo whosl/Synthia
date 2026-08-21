@@ -9,6 +9,10 @@
 import type { Pool } from "pg";
 import type { ConnectorPort } from "./connector-port.ts";
 import { createRuntimeClientFromEnv, type RuntimeClient } from "./task-proxy.ts";
+import {
+  resolveCoreFeatureFlags,
+  type CoreFeatureFlags,
+} from "./feature-flags.ts";
 import { routeApi } from "./router.ts";
 
 export interface SynthiaServer {
@@ -39,10 +43,16 @@ export interface SynthiaServerOptions {
    * a fake RuntimeClient directly.
    */
   readonly runtimeClient?: RuntimeClient;
+  /**
+   * Explicit Core feature overrides. Historical-material writes default off;
+   * when omitted, SYNTHIA_FEATURE_HISTORICAL_MATERIALS is parsed strictly.
+   */
+  readonly features?: Readonly<Partial<CoreFeatureFlags>>;
 }
 
 export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}): SynthiaServer {
   const runtimeClient = opts.runtimeClient ?? createRuntimeClientFromEnv();
+  const featureFlags = resolveCoreFeatureFlags({ features: opts.features });
   const server = Bun.serve({
     port: opts.port ?? 0,
     hostname: opts.hostname ?? "127.0.0.1",
@@ -50,7 +60,7 @@ export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}):
     // 推理静默期会超过它而被掐断，浏览器于是陷入 ~10 秒一次的重连回放循环，
     // 流式输出永远渲染不出来。放到 Bun 上限，保活由 Runtime 的心跳负责。
     idleTimeout: 255,
-    fetch: (request: Request) => routeApi(request, pool, opts.connector, runtimeClient),
+    fetch: (request: Request) => routeApi(request, pool, opts.connector, runtimeClient, featureFlags),
   });
   return {
     port: server.port,

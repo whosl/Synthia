@@ -58,6 +58,7 @@ import type { RuntimeClient } from "./task-proxy.ts";
 import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
 import { ensureWorkspace, readAtLocation } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
+import type { CoreFeatureFlags } from "./feature-flags.ts";
 
 // ─── shared request context ──────────────────────────────────────────────────
 
@@ -81,6 +82,8 @@ export interface RequestContext {
   readonly connector?: ConnectorPort;
   /** Runtime client for the task-workbench slice; undefined when not configured (task endpoints → 503). */
   readonly runtimeClient?: RuntimeClient;
+  /** Explicitly resolved Core capabilities. Missing flags are fail-closed. */
+  readonly featureFlags?: Readonly<CoreFeatureFlags>;
 }
 
 export interface HandlerResult {
@@ -266,6 +269,7 @@ export async function runIdempotent<T>(
   operation: string,
   projectId: string,
   work: (tx: TransactionClient) => Promise<T>,
+  authorize?: (tx: TransactionClient) => Promise<void>,
 ): Promise<{ result: T; replayed: boolean }> {
   if (!ctx.idempotencyKey) throw validationError("Idempotency-Key header is required for writes");
 
@@ -281,6 +285,12 @@ export async function runIdempotent<T>(
   const conn = await ctx.pool.connect();
   try {
     return await withTransaction(conn as unknown as TransactionClient, async (tx) => {
+      // Authorization is deliberately evaluated before the idempotency claim.
+      // A completed replay must not return a cached response after the actor's
+      // project access is revoked or the project becomes ineligible for the
+      // operation. Keeping this check in the same transaction also avoids a
+      // handler-level preflight racing with claim/replay.
+      if (authorize) await authorize(tx);
       const claim = await claimIdempotencySlot(tx, scope, requestHash);
       if (claim.owned) {
         const result = await work(tx);

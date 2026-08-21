@@ -16,6 +16,10 @@ import type { Pool } from "pg";
 import { authenticate } from "./auth.ts";
 import type { ConnectorPort } from "./connector-port.ts";
 import type { RuntimeClient } from "./task-proxy.ts";
+import {
+  DISABLED_CORE_FEATURE_FLAGS,
+  type CoreFeatureFlags,
+} from "./feature-flags.ts";
 import { errorEnvelope, resolveCorrelationId, successEnvelope } from "./envelope.ts";
 import {
   ApiError,
@@ -73,6 +77,15 @@ import {
   registerWorkspaceHandler,
   writeWorkspaceFilesHandler,
 } from "./workspace-handlers.ts";
+import {
+  confirmImportSnapshotHandler,
+  copyImportSnapshotHandler,
+  createImportSnapshotHandler,
+  denyImportSnapshotHandler,
+  getImportSnapshotHandler,
+  listImportSnapshotsHandler,
+  searchImportSnapshotsHandler,
+} from "./import-handlers.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
@@ -92,7 +105,13 @@ interface RouteMatch {
 }
 
 
-export async function routeApi(request: Request, pool: Pool, connector?: ConnectorPort, runtimeClient?: RuntimeClient): Promise<Response> {
+export async function routeApi(
+  request: Request,
+  pool: Pool,
+  connector?: ConnectorPort,
+  runtimeClient?: RuntimeClient,
+  featureFlags: Readonly<CoreFeatureFlags> = DISABLED_CORE_FEATURE_FLAGS,
+): Promise<Response> {
   const url = new URL(request.url);
   const correlationId = resolveCorrelationId(request.headers.get("x-correlation-id"));
 
@@ -141,6 +160,7 @@ export async function routeApi(request: Request, pool: Pool, connector?: Connect
     classification,
     connector,
     runtimeClient,
+    featureFlags,
   };
 
   const match = matchRoute(ctx);
@@ -228,6 +248,10 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
         case "snapshots":
           if (method === "POST") return { handler: createSnapshotHandler, params, requiredScope: "core:write" };
           break;
+        case "import-snapshots":
+          if (method === "POST") return { handler: createImportSnapshotHandler, params, requiredScope: "core:write" };
+          if (method === "GET") return { handler: listImportSnapshotsHandler, params, requiredScope: "core:read" };
+          break;
         case "trace-relations":
           if (method === "POST") return { handler: createTraceRelationHandler, params, requiredScope: "core:write" };
           if (method === "GET") return { handler: getTraceRelations, params, requiredScope: "core:read" };
@@ -253,6 +277,23 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     // GET /projects/:projectId/gate-submissions/:subId
     if (segments.length === 4 && segments[2] === "gate-submissions" && method === "GET") {
       return { handler: getGateSubmissionHandler, params: { projectId, subId: segments[3]! }, requiredScope: "core:read" };
+    }
+
+    // P2 historical-material library: search and snapshot detail.
+    if (segments.length === 4 && segments[2] === "import-snapshots") {
+      if (segments[3] === "search" && method === "GET") {
+        return { handler: searchImportSnapshotsHandler, params: { projectId }, requiredScope: "core:read" };
+      }
+      if (method === "GET") {
+        return { handler: getImportSnapshotHandler, params: { projectId, snapshotId: segments[3]! }, requiredScope: "core:read" };
+      }
+    }
+
+    if (segments.length === 5 && segments[2] === "import-snapshots" && method === "POST") {
+      const params = { projectId, snapshotId: segments[3]! };
+      if (segments[4] === "confirm") return { handler: confirmImportSnapshotHandler, params, requiredScope: "core:approve" };
+      if (segments[4] === "deny") return { handler: denyImportSnapshotHandler, params, requiredScope: "core:approve" };
+      if (segments[4] === "copy") return { handler: copyImportSnapshotHandler, params, requiredScope: "core:write" };
     }
 
     // GET /projects/:projectId/jobs/:jobId

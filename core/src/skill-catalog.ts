@@ -27,7 +27,11 @@
  * source of truth (SYNTHIA-ARC-001 §3, SYNTHIA-ARC-002 §6 invariants 1-2).
  */
 
-import type { ArtifactType, GateId } from "./domain/enums.ts";
+import {
+  ARTIFACT_TYPE_SET,
+  type ArtifactType,
+  type GateId,
+} from "./domain/enums.ts";
 import type { Permission } from "./policy.ts";
 import { AGENT_FORBIDDEN_OPERATIONS } from "./policy.ts";
 
@@ -229,27 +233,6 @@ const KNOWN_GATE_IDS: Record<string, true> = {
   G5: true, G6: true, G7: true, G8: true, G9: true,
 };
 
-// Mirror of ArtifactType (domain/enums.ts). Kept as a runtime table because the
-// enum is a type union with no emitted array; validated here so a descriptor
-// cannot claim to produce an artifact type Core does not recognize.
-const KNOWN_ARTIFACT_TYPES: Record<string, true> = {
-  SOURCE_PACKAGE: true, PROJECT_PROFILE: true, TAILORING_RECORD: true, FEASIBILITY_RISK_REPORT: true,
-  DEVELOPMENT_REQUIREMENTS: true, SYSTEM_REQUIREMENTS: true, OPEN_QUESTION_SET: true,
-  PLDS_SRS: true, DERIVED_REQUIREMENT_SET: true, REQUIREMENT_TRACE: true, VERIFICATION_METHOD_MAP: true,
-  ARCHITECTURE_DESIGN: true, DETAILED_DESIGN: true, CONSTRAINT_DESIGN: true, DESIGN_TRACE: true,
-  DESIGN_REVIEW: true,
-  RTL_SOURCE_SET: true, TB_SOURCE_SET: true, XDC_CANDIDATE: true, CODE_TRACE: true, CODE_REVIEW: true,
-  STATIC_REPORT_SET: true, BUILD_MANIFEST: true,
-  TOOLCHAIN_PROFILE: true, TOOL_RUN: true, SYNTH_RESULT: true, IMPLEMENT_RESULT: true,
-  DRC_REPORT: true, STA_REPORT: true, POWER_REPORT: true,
-  CONFIRMATION_TEST_PLAN: true, TEST_SPECIFICATION: true, TEST_RUN: true, COVERAGE_REPORT: true,
-  CONFIRMATION_TEST_REPORT: true, BITSTREAM_PACKAGE: true, HARDWARE_TEST_RECORD: true,
-  CONFIG_AUDIT: true, USER_MANUAL: true, DEVELOPMENT_SUMMARY: true, RELEASE_PACKAGE: true,
-  CONFIGURATION_SNAPSHOT: true, GATE_SUBMISSION: true, APPROVAL_RECORD: true,
-  APPROVED_GATE_RESULT: true, BASELINE: true, WAIVER: true, ISSUE_RISK_DECISION: true,
-  TASK_HANDOFF: true, KNOWLEDGE_ENTRY: true,
-};
-
 const SKILL_ID_RE = /^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)?$/;
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const PACK_ID_RE = /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$/;
@@ -398,7 +381,7 @@ export function validateSkill(descriptor: SkillDescriptor): SkillValidationResul
       }
       if (
         !isNonEmptyString(output.artifact_type) ||
-        !(output.artifact_type in KNOWN_ARTIFACT_TYPES)
+        !Object.prototype.hasOwnProperty.call(ARTIFACT_TYPE_SET, output.artifact_type)
       ) {
         errors.push(`${path}.artifact_type: unknown artifact type "${output.artifact_type}"`);
       }

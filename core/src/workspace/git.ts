@@ -147,6 +147,54 @@ export async function listTree(dir: string, commit: string): Promise<string[]> {
   return decode(res.stdout).split("\0").filter((p) => p.length > 0);
 }
 
+export interface GitTreeEntry {
+  readonly path: string;
+  readonly objectType: "blob" | "commit";
+  /** `null` is Git's `-` size marker (for example a submodule commit). */
+  readonly sizeBytes: number | null;
+}
+
+/**
+ * List a fixed commit with blob sizes before reading any blob content. Import
+ * callers use this as a resource-budget preflight so an authorized but huge
+ * project cannot make Core materialize an unbounded tree in memory.
+ */
+export async function listTreeEntries(dir: string, commit: string): Promise<GitTreeEntry[]> {
+  const res = await gitRaw(dir, ["ls-tree", "-r", "-l", "-z", commit]);
+  if (res.exitCode !== 0) {
+    throw new WorkspaceError(
+      "WORKSPACE_GIT_FAILED",
+      `git ls-tree 失败（exit ${res.exitCode}）：${res.stderr.trim() || "(无输出)"}`,
+      { commit, cwd: dir },
+    );
+  }
+  let output: string;
+  try {
+    output = new TextDecoder("utf-8", { fatal: true }).decode(res.stdout);
+  } catch {
+    throw new WorkspaceError("WORKSPACE_PATH_INVALID", "git tree contains a non-UTF-8 path", { commit });
+  }
+  const entries: GitTreeEntry[] = [];
+  for (const field of output.split("\0")) {
+    if (!field) continue;
+    const match = /^(?:[0-7]{6}) (blob|commit) [0-9a-f]+ +(-|[0-9]+)\t([\s\S]+)$/.exec(field);
+    if (!match) {
+      throw new WorkspaceError("WORKSPACE_GIT_FAILED", "git ls-tree returned an invalid record", { commit });
+    }
+    const rawSize = match[2]!;
+    const sizeBytes = rawSize === "-" ? null : Number(rawSize);
+    if (sizeBytes !== null && (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0)) {
+      throw new WorkspaceError("WORKSPACE_GIT_FAILED", "git ls-tree returned an invalid blob size", { commit });
+    }
+    entries.push({
+      objectType: match[1]! as "blob" | "commit",
+      sizeBytes,
+      path: match[3]!,
+    });
+  }
+  return entries;
+}
+
 export type GitFileState = "modified" | "untracked" | "deleted";
 
 /**
