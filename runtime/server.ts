@@ -21,7 +21,8 @@
  *   SYNTHIA_RUNTIME_MODE       offline | core | fake-connector  (default core)
  *   SYNTHIA_NO_GOVERNANCE      1|true to skip gate flow
  *   SYNTHIA_PART               default FPGA part (default xc7k70tfbv676-1)
- *   SYNTHIA_TOOL_MODEL_POLICY_HASH (default synthia-policy-v1)
+ *   SYNTHIA_TOOL_MODEL_POLICY_HASH (legacy default synthia-policy-v1; modern
+ *                                   GJB_REF_V1 requires explicit lowercase SHA-256)
  *   SYNTHIA_RUNS_DIR           override .runs/ directory (tests)
  *   SYNTHIA_MODEL_URL / KEY / NAME  (real model, non-offline mode)
  *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort. 当前保 xhigh，
@@ -96,6 +97,7 @@ import type {
 } from "./agent-types.ts";
 import { StreamHub, type StreamEvent } from "./stream-hub.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import { FORMAL_G4_OPERATIONS } from "./formal-flow.ts";
 import {
   normalizeWorkspacePath,
   type RuntimeTaskKind,
@@ -217,6 +219,50 @@ const STAGE_PHASE: Readonly<Record<string, string>> = {
   architecture: "generate_architecture",
   register_spec: "generate_register_spec",
 };
+
+/** Keep task list/detail formal progress byte-for-byte shape compatible. */
+export function serializeTaskFormalInput(
+  formalFlow: AgentState["formalFlow"],
+): Record<string, unknown> | null {
+  if (!formalFlow) return null;
+  const jobs = Object.fromEntries(FORMAL_G4_OPERATIONS.flatMap((operation) => {
+    const job = formalFlow.jobs[operation];
+    return job ? [[operation, {
+      job_id: job.jobId,
+      state: job.state,
+      ...(job.evidenceManifestId ? { evidence_manifest_id: job.evidenceManifestId } : {}),
+      ...(job.evidenceManifestHash ? { evidence_manifest_hash: job.evidenceManifestHash } : {}),
+    }]] : [];
+  }));
+  return {
+    status: formalFlow.status,
+    approval_id: formalFlow.approvalId,
+    preview: {
+      schema: formalFlow.preview.schema,
+      work_version_id: formalFlow.preview.workVersionId,
+      snapshot_id: formalFlow.preview.snapshotId,
+      readiness_id: formalFlow.preview.readinessId,
+      authorized_task_id: formalFlow.preview.authorizedTaskId,
+      prerequisite_baseline_id: formalFlow.preview.prerequisiteBaselineId,
+      target_part: formalFlow.preview.targetPart,
+      toolchain_profile_hash: formalFlow.preview.toolchainProfileHash,
+      constraints_complete: formalFlow.preview.constraintsComplete,
+      purpose: formalFlow.preview.purpose,
+      allowed_operations: formalFlow.preview.allowedOperations,
+      files: formalFlow.preview.files.map((file) => ({
+        revision_id: file.revisionId,
+        path: file.path,
+        role: file.role,
+        sha256: file.sha256,
+        size_bytes: file.sizeBytes,
+        storage_uri: file.storageUri,
+      })),
+      input_hash: formalFlow.preview.inputHash,
+      preview_hash: formalFlow.preview.previewHash,
+    },
+    jobs,
+  };
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1336,6 +1382,7 @@ export class RuntimeServer {
       status: h.status,
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
+      formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
       created_at: h.createdAt,
     }));
     return json({ agents });
@@ -1374,6 +1421,7 @@ export class RuntimeServer {
       status: h.status,
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
+      formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
       docs,
       audit: h.audit.slice(-AUDIT_RESPONSE_LIMIT),
       evidence: h.evidence,
@@ -2705,6 +2753,19 @@ export class RuntimeServer {
     const submissionId = h.currentState?.gateSubmissions?.[gate];
     if (!submissionId) return;
 
+    if (gate === "G4" && h.currentState?.formalFlow?.status !== "awaiting_gate_approval") {
+      this.executeAgent(h.agentId, "resume").catch(() => {});
+      return;
+    }
+    if (
+      (gate === "G1" || gate === "G2" || gate === "G3") &&
+      h.currentState?.evaluatedGateFlows?.[gate] &&
+      !h.currentState.evaluatedGateFlows[gate]?.submitted
+    ) {
+      this.executeAgent(h.agentId, "resume").catch(() => {});
+      return;
+    }
+
     const { state } = await h.governance.getGateSubmissionState(submissionId);
 
     if (state === "approved") {
@@ -2958,7 +3019,7 @@ export function createEnvDepsFactory(
     } else if (noGovernance) {
       governance = new NoGovernanceClient();
     } else if (mode === "core") {
-      governance = buildCoreGovernanceClient(projectId, processInstanceId, env);
+      governance = buildCoreGovernanceClient(projectId, processInstanceId, taskId, env);
     } else {
       // offline / fake-connector without Core → no governance.
       governance = new NoGovernanceClient();

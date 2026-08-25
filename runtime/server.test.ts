@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +7,7 @@ import {
   createServerConfig,
   createEnvDepsFactory,
   RuntimeServer,
+  serializeTaskFormalInput,
   type ServerConfig,
   type DepsFactory,
   type RuntimeMessageIdempotencyStore,
@@ -27,15 +28,21 @@ import {
 } from "./agent-state.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 import type { AgentMessage, AgentTool, ChatTurn, ConversationalModel, FreeAgentSession } from "./agent-types.ts";
-import type { ImportedMaterialSummary, ProjectInfo } from "./types.ts";
+import type { ImportedMaterialSummary, ProcessStateV1, ProjectInfo } from "./types.ts";
+import {
+  type EvaluatedGateSubmissionV1,
+  type GateEvaluationV1,
+  type ProjectReadinessRecordV1,
+} from "./formal-flow.ts";
 import {
   CoreTaskWorkspaceClient,
   type TaskAuthorizationScope,
   type TaskConversationClient,
   type TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
-import type { GateSubmissionState } from "../core/src/domain/enums.ts";
+import type { GateId, GateSubmissionState } from "../core/src/domain/enums.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 
 // ---------------------------------------------------------------------------
 // Test governance — defaults to in_review so the monitor doesn't prematurely
@@ -61,7 +68,7 @@ class TestGovernance extends MockGovernanceClient {
 class ProjectInfoGovernance extends TestGovernance {
   readProjectInfoCount = 0;
 
-  constructor(private readonly info: ProjectInfo) {
+  constructor(protected readonly info: ProjectInfo) {
     super();
   }
 
@@ -69,6 +76,191 @@ class ProjectInfoGovernance extends TestGovernance {
     this.readProjectInfoCount++;
     return { ...this.info, id: projectId };
   }
+}
+
+/**
+ * Keeps the pre-project-model server tests on their original compatibility
+ * path. Extending NoGovernanceClient deliberately makes Runtime skip the Core
+ * project-fact read, while these overrides retain human gate behavior.
+ */
+class LegacyGateGovernance extends NoGovernanceClient {
+  readonly submissions: Array<{
+    submissionId: string;
+    processInstanceId: string;
+    gate: GateId;
+    snapshotId: string;
+  }> = [];
+  readonly polledGates: string[] = [];
+  private readonly gateStates = new Map<string, GateSubmissionState>();
+  private defaultPollState: GateSubmissionState = "in_review";
+  private submitResultState: GateSubmissionState = "in_review";
+
+  setSubmitResult(state: GateSubmissionState): void {
+    this.submitResultState = state;
+  }
+
+  setGateState(submissionId: string, state: GateSubmissionState): void {
+    this.gateStates.set(submissionId, state);
+  }
+
+  override async createGateSubmission(input: {
+    processInstanceId: string;
+    gate: GateId;
+    snapshotId: string;
+  }): Promise<{ submissionId: string }> {
+    const submissionId = `sub-legacy-${crypto.randomUUID()}`;
+    this.submissions.push({ submissionId, ...input });
+    return { submissionId };
+  }
+
+  override async submitGate(): Promise<{ state: GateSubmissionState }> {
+    return { state: this.submitResultState };
+  }
+
+  override async getGateSubmissionState(
+    submissionId: string,
+  ): Promise<{ state: GateSubmissionState }> {
+    this.polledGates.push(submissionId);
+    return { state: this.gateStates.get(submissionId) ?? this.defaultPollState };
+  }
+}
+
+/** Minimal real-profile fixture for server tests that stop at evaluated G1. */
+class EarlyGateProjectInfoGovernance extends ProjectInfoGovernance {
+  private activeProjectId = "";
+
+  constructor(info: ProjectInfo, private readonly expectedProcessInstanceId: string) {
+    super(info);
+  }
+
+  override async getProcessState(projectId: string): Promise<ProcessStateV1> {
+    this.activeProjectId = projectId;
+    return {
+      schema: "process-state.v1",
+      projectId,
+      processInstanceId: this.expectedProcessInstanceId,
+      workVersionId: `wv-${projectId}`,
+      profileId: "GJB_REF_V1",
+      profileHash: GJB_REF_V1_PROFILE.profileHash,
+      currentGate: "G0",
+      completed: false,
+      readiness: {
+        id: `ready-${projectId}`,
+        status: "confirmed",
+        ready: true,
+        readinessHash: sha256Hex(`readiness:${projectId}`),
+        targetPart: this.info.targetPart ?? "unassigned",
+        boardRef: "unassigned",
+        workspaceReady: true,
+        dataScopeRecorded: true,
+        sourceMaterialsRecorded: true,
+        pinConstraintsComplete: false,
+        electricalConstraintsComplete: false,
+        clockConstraintsComplete: false,
+        constraintsComplete: false,
+        toolchainProfileHash: sha256Hex("toolchain:test"),
+        constraintRevisionIds: [],
+        generatedBy: { type: "runtime-test", id: "fixture" },
+        confirmedBy: { id: "test-user", at: "2026-08-24T00:00:00.000Z" },
+      },
+    };
+  }
+
+  async listReadiness(): Promise<readonly ProjectReadinessRecordV1[]> {
+    const projectId = this.activeProjectId;
+    if (!projectId) throw new Error("process state must be read before readiness");
+    return [{
+      id: `ready-${projectId}`,
+      projectId,
+      processInstanceId: this.expectedProcessInstanceId,
+      workVersionId: `wv-${projectId}`,
+      status: "confirmed",
+      state: "ready",
+      ready: true,
+      readinessHash: sha256Hex(`readiness:${projectId}`),
+      resultHash: sha256Hex(`readiness-result:${projectId}`),
+      engineeringConfig: {},
+      engineeringConfigHash: sha256Hex(`engineering-config:${projectId}`),
+      targetPart: this.info.targetPart ?? "unassigned",
+      boardRef: "unassigned",
+      workspaceReady: true,
+      dataScopeRecorded: true,
+      sourceMaterialsRecorded: true,
+      pinConstraintsComplete: false,
+      electricalConstraintsComplete: false,
+      clockConstraintsComplete: false,
+      constraintsComplete: false,
+      constraintRevisionIds: [],
+      toolchainProfileHash: sha256Hex("toolchain:test"),
+      generatedByType: "runtime-test",
+      generatedBy: "fixture",
+      generatedAt: "2026-08-24T00:00:00.000Z",
+      confirmedBy: "test-user",
+      confirmedAt: "2026-08-24T00:00:00.000Z",
+      checks: [{ code: "workspace.ready", severity: "hard", passed: true, details: {} }],
+    }];
+  }
+
+  async createGateEvaluation(input: {
+    submissionId: string;
+    evaluationId: string;
+    workVersionId: string;
+    expectedSnapshotManifestHash: string;
+  }): Promise<GateEvaluationV1> {
+    const submission = this.submissions.find((row) => row.submissionId === input.submissionId);
+    if (!submission) throw new Error(`missing submission ${input.submissionId}`);
+    return {
+      id: input.evaluationId,
+      projectId: this.activeProjectId,
+      gateSubmissionId: input.submissionId,
+      workVersionId: input.workVersionId,
+      snapshotId: submission.snapshotId,
+      snapshotManifestHash: input.expectedSnapshotManifestHash,
+      profileHash: GJB_REF_V1_PROFILE.profileHash,
+      resultHash: sha256Hex(`evaluation:${input.evaluationId}`),
+      passed: true,
+      sealedProjectionHash: null,
+      deliveryReleaseId: null,
+      deliveryReleaseVersion: null,
+      supersedesReleaseId: null,
+      evaluatedAt: "2026-08-24T00:00:00.000Z",
+      items: [{
+        id: `item-${input.evaluationId}`,
+        checkCode: "snapshot.members_frozen",
+        severity: "hard",
+        passed: true,
+        details: {},
+        evidenceRefs: [],
+      }],
+    };
+  }
+
+  async submitEvaluatedGate(input: {
+    submissionId: string;
+    evaluationId: string;
+    resultHash: string;
+  }): Promise<EvaluatedGateSubmissionV1> {
+    const submission = this.submissions.find((row) => row.submissionId === input.submissionId);
+    if (!submission || !["G1", "G2", "G3"].includes(submission.gate)) {
+      throw new Error(`missing early-gate submission ${input.submissionId}`);
+    }
+    const { state } = await this.submitGate(input.submissionId);
+    return {
+      id: input.submissionId,
+      projectId: this.activeProjectId,
+      gate: submission.gate as "G1" | "G2" | "G3",
+      state: state === "approved" ? "approved" : "in_review",
+      gateCheckEvaluationId: input.evaluationId,
+      checkResultsHash: input.resultHash,
+    };
+  }
+
+  async previewFormalInput(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
+  async getFormalInputApproval(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
+  async submitFormalJob(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
+  async getFormalJob(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
+  async freezeFormalEvidence(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
+  async getFormalEvidence(): Promise<never> { throw new Error("G4 is not reached by this fixture"); }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +296,7 @@ function projectInfo(overrides: Partial<ProjectInfo>): ProjectInfo {
 function makeConfig(opts: Partial<ServerConfig> = {}): ServerConfig {
   return {
     skillPrompts: EMPTY_PROMPTS,
-    toolModelPolicyHash: "test-policy-v1",
+    toolModelPolicyHash: sha256Hex("test-policy-v1"),
     defaultPart: "xc7k70tfbv676-1",
     gatePollMs: 50,
     port: 0,
@@ -341,13 +533,16 @@ async function waitForStatus(
   timeoutMs = 15_000,
 ): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
+  let lastBody: Record<string, unknown> | undefined;
   while (Date.now() < deadline) {
     const body = await getTask(server, agentId);
+    lastBody = body;
     if (statuses.includes(body.status as ServerStatus)) return body;
     await Bun.sleep(30);
   }
   throw new Error(
-    `timeout waiting for status ${statuses.join("|")} (agent ${agentId})`,
+    `timeout waiting for status ${statuses.join("|")} (agent ${agentId}); ` +
+      `last status=${String(lastBody?.status)} reason=${String(lastBody?.reason ?? "")}`,
   );
 }
 
@@ -358,15 +553,16 @@ async function waitForStatus(
 let agentsDir: string;
 const createdAgentIds: string[] = [];
 
-beforeAll(async () => {
+beforeEach(async () => {
   agentsDir = await mkdtemp(join(tmpdir(), "synthia-runtime-test-"));
   process.env.SYNTHIA_RUNS_DIR = agentsDir;
 });
 
-afterAll(async () => {
+afterEach(async () => {
   for (const agentId of createdAgentIds) {
     await deleteAgent(agentId).catch(() => {});
   }
+  createdAgentIds.length = 0;
   delete process.env.SYNTHIA_RUNS_DIR;
   await rm(agentsDir, { recursive: true, force: true });
 });
@@ -443,9 +639,75 @@ describe("RuntimeServer — separated Core capabilities", () => {
 
     expect(deps.governance).toBeInstanceOf(CoreGovernanceClient);
     expect((deps.governance as unknown as { token: string }).token).toBe("generic-core-token");
+    expect((deps.governance as unknown as { taskRuntimeToken: string }).taskRuntimeToken)
+      .toBe("task-runtime-token");
+    expect((deps.governance as unknown as { taskId: string }).taskId)
+      .toBe("task-main-capability");
     expect((deps.connector as unknown as { token: string }).token).toBe("generic-core-token");
     expect((deps.taskEvents as unknown as { token: string }).token).toBe("task-runtime-token");
     expect(deps.taskWorkspace).toBeUndefined();
+  });
+});
+
+describe("RuntimeServer — P4 formal progress projection", () => {
+  test("serializes the same preview and persisted Job/evidence facts for list and detail", () => {
+    const digest = (value: string) => sha256Hex(value);
+    const formal = serializeTaskFormalInput({
+      schema: "formal-flow-progress.v1",
+      status: "running",
+      projectId: "p1",
+      gateSubmissionId: "sub-g4",
+      workVersionId: "wv-1",
+      snapshotId: "snap-4",
+      snapshotManifestHash: digest("snapshot"),
+      profileHash: digest("profile"),
+      readinessId: "ready-1",
+      authorizedTaskId: "task-main-1",
+      approvalId: "fia-1",
+      preview: {
+        schema: "formal-input-preview.v1",
+        workVersionId: "wv-1",
+        snapshotId: "snap-4",
+        readinessId: "ready-1",
+        authorizedTaskId: "task-main-1",
+        prerequisiteBaselineId: "bl-b1",
+        targetPart: "xc7k70tfbv676-1",
+        toolchainProfileHash: digest("toolchain"),
+        constraintsComplete: true,
+        purpose: "g4_delivery",
+        allowedOperations: ["implement", "simulate", "synthesize", "validate_sources"],
+        files: [{
+          revisionId: "rev-rtl",
+          path: "rtl/top.sv",
+          role: "rtl",
+          sha256: digest("rtl"),
+          sizeBytes: 3,
+          storageUri: `content://sha256/${digest("rtl")}`,
+        }],
+        inputHash: digest("input"),
+        previewHash: digest("preview"),
+      },
+      jobs: {
+        validate_sources: {
+          jobId: "job-validate",
+          state: "succeeded",
+          evidenceManifestId: "evidence-validate",
+          evidenceManifestHash: digest("evidence"),
+        },
+      },
+    });
+    expect(formal).toMatchObject({
+      approval_id: "fia-1",
+      preview: { input_hash: digest("input") },
+      jobs: {
+        validate_sources: {
+          job_id: "job-validate",
+          state: "succeeded",
+          evidence_manifest_id: "evidence-validate",
+          evidence_manifest_hash: digest("evidence"),
+        },
+      },
+    });
   });
 });
 
@@ -456,7 +718,7 @@ describe("RuntimeServer — historical-material session rollout gate", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
     });
     const governance = new ProjectInfoGovernance(project);
@@ -497,7 +759,7 @@ describe("RuntimeServer — historical-material session rollout gate", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
     });
     const governance = new ProjectInfoGovernance(project);
@@ -596,14 +858,14 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
         return { taskId, eventId: input.eventId, sequence: eventTypes.length, replayed: false };
       },
     };
-    const governance = new ProjectInfoGovernance(projectInfo({
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
-    }));
+    }), "pi-core-main-start");
     const server = new RuntimeServer(
       makeConfig(),
       async () => ({
@@ -953,7 +1215,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1061,7 +1323,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1137,7 +1399,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1292,7 +1554,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1487,7 +1749,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1590,7 +1852,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1776,7 +2038,7 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: null,
     }));
@@ -1939,7 +2201,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         project_type: "engineering",
         process_version_id: "GJB_REF_V1",
         process_profile_id: "GJB_REF_V1",
-        process_profile_name: "GJB reference flow",
+        process_profile_name: "GJB 参考流程 v1",
         process_profile_version: "GJB_REF_V1",
         task: "profile passthrough",
         mode: "agent",
@@ -1952,7 +2214,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         projectType: "engineering",
         processVersionId: "GJB_REF_V1",
         processProfileId: "GJB_REF_V1",
-        processProfileName: "GJB reference flow",
+        processProfileName: "GJB 参考流程 v1",
         processProfileVersion: "GJB_REF_V1",
       });
     } finally {
@@ -1961,14 +2223,14 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
   });
 
   test("Core engineering project facts override mode=agent and run the governed loop", async () => {
-    const gov = new ProjectInfoGovernance(projectInfo({
+    const gov = new EarlyGateProjectInfoGovernance(projectInfo({
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
       targetPart: "xc7k70tfbv676-1",
-    }));
+    }), "pi-core-eng");
     const server = new RuntimeServer(
       makeConfig(),
       makeFactory(
@@ -2058,7 +2320,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
     };
     let current = projectInfo(complete);
@@ -2229,7 +2491,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         processVersionId: "GJB_REF_V1",
         processProfileId: "GJB_REF_V1",
         processProfileVersion: "GJB_REF_V1",
-        processProfileName: "GJB reference flow",
+        processProfileName: "GJB 参考流程 v1",
       };
       for (const key of PROCESS_FACT_CASES) {
         current = projectInfo({ ...complete, [key]: values[key] });
@@ -2274,7 +2536,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
           project_id: `p-free-request-conflict-${key}`,
           project_type: "free",
           task: `conflicting request ${key}`,
-          [requestKeys[key]]: key === "processProfileName" ? "GJB reference flow" : "GJB_REF_V1",
+          [requestKeys[key]]: key === "processProfileName" ? "GJB 参考流程 v1" : "GJB_REF_V1",
         });
         expect(res.status).toBe(409);
         expect((res.body.error as Record<string, unknown>)["code"]).toBe("project_process_profile_mismatch");
@@ -2288,7 +2550,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     const gov = new ProjectInfoGovernance(projectInfo({
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
     }));
     const server = new RuntimeServer(
@@ -2587,7 +2849,7 @@ describe("RuntimeServer — GET /tasks list", () => {
 
 describe("RuntimeServer — approval auto-resume monitor", () => {
   test("awaiting_approval → approved → auto-resume → succeeded", async () => {
-    const gov = new TestGovernance();
+    const gov = new LegacyGateGovernance();
     gov.setSubmitResult("in_review"); // gates pause
 
     const server = new RuntimeServer(
@@ -2623,7 +2885,7 @@ describe("RuntimeServer — approval auto-resume monitor", () => {
   });
 
   test("rejected gate → fail_closed terminal", async () => {
-    const gov = new TestGovernance();
+    const gov = new LegacyGateGovernance();
     gov.setSubmitResult("in_review");
 
     const server = new RuntimeServer(
@@ -2841,7 +3103,7 @@ describe("RuntimeServer — restart recovery", () => {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: "GJB 参考流程 v1",
       processProfileVersion: "GJB_REF_V1",
     }));
     const server = new RuntimeServer(
@@ -2947,7 +3209,7 @@ describe("RuntimeServer — restart recovery", () => {
 
 describe("RuntimeServer — resume endpoint", () => {
   test("POST /tasks/:agentId/resume is idempotent", async () => {
-    const gov = new TestGovernance();
+    const gov = new LegacyGateGovernance();
     gov.setSubmitResult("in_review");
 
     const server = new RuntimeServer(
@@ -3120,7 +3382,7 @@ describe("RuntimeServer — resume from execution failure", () => {
   });
 
   test("gate rejected → resume returns 409 and does not execute", async () => {
-    const gov = new TestGovernance();
+    const gov = new LegacyGateGovernance();
     gov.setSubmitResult("in_review");
 
     const server = new RuntimeServer(

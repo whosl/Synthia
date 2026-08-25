@@ -11,7 +11,11 @@
 
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
-import { sha256Hex } from "../core/src/hashing.ts";
+import { computeManifestHash, sha256Hex } from "../core/src/hashing.ts";
+import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
+import { parseProcessProfile } from "./process-profile.ts";
+import type { P4GateId, ProcessProfileV1 } from "./process-profile.ts";
+import type { EvaluatedGateFlowProgressV1, FormalFlowProgressV1 } from "./formal-flow.ts";
 import type {
   RuntimeTaskKind,
   TaskAuthorizationScope,
@@ -85,6 +89,14 @@ export interface RepairGeneration {
   /** Repaired testbench, when the failure pointed at the TB. */
   readonly testbench?: ArtifactFile;
 }
+
+/** Any validated model action returned to the deterministic loop. */
+export type LoopAction =
+  | RtlGeneration
+  | TbGeneration
+  | XdcGeneration
+  | DocGeneration
+  | RepairGeneration;
 
 export interface LoopModel {
   generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration>;
@@ -216,6 +228,8 @@ export interface LoopResult {
   readonly audit: readonly AuditEvent[];
   readonly endedReason?: string;
   readonly agentId?: string;
+  /** Present when execution paused for a Core-owned gate approval. */
+  readonly awaitingGate?: GateId;
   /** Structured cause when status is failed/fail_closed (drives resume). */
   readonly terminalCause?: TerminalCause;
 }
@@ -297,6 +311,39 @@ export interface GateSubmissionSummary {
   readonly processInstanceId: string;
   readonly submittedAt: string | null;
   readonly createdAt: string;
+}
+
+export interface ProcessReadinessV1 {
+  readonly id: string;
+  readonly status: "draft" | "confirmed";
+  readonly ready: boolean;
+  readonly readinessHash: string;
+  readonly targetPart: string;
+  readonly boardRef: string;
+  readonly workspaceReady: boolean;
+  readonly dataScopeRecorded: boolean;
+  readonly sourceMaterialsRecorded: boolean;
+  readonly pinConstraintsComplete: boolean;
+  readonly electricalConstraintsComplete: boolean;
+  readonly clockConstraintsComplete: boolean;
+  readonly constraintsComplete: boolean;
+  readonly toolchainProfileHash: string | null;
+  readonly constraintRevisionIds: readonly string[];
+  readonly generatedBy: { readonly type: string; readonly id: string };
+  readonly confirmedBy: { readonly id: string; readonly at: string } | null;
+}
+
+/** Core-owned projection for the active modern engineering work version. */
+export interface ProcessStateV1 {
+  readonly schema: "process-state.v1";
+  readonly projectId: string;
+  readonly processInstanceId: string;
+  readonly workVersionId: string;
+  readonly profileId: "GJB_REF_V1";
+  readonly profileHash: string;
+  readonly currentGate: P4GateId;
+  readonly completed: boolean;
+  readonly readiness: ProcessReadinessV1 | null;
 }
 
 /** An artifact container row (GET /projects/:projectId/artifacts). */
@@ -430,7 +477,7 @@ export interface GovernanceClient {
   createSnapshot(input: {
     memberRevisionIds: readonly string[];
     toolModelPolicyHash: string;
-  }): Promise<{ snapshotId: string }>;
+  }): Promise<{ snapshotId: string; manifestHash: string }>;
   /** Create a GateSubmission (state=preparing) and return its id. */
   createGateSubmission(input: {
     processInstanceId: string;
@@ -443,6 +490,14 @@ export interface GovernanceClient {
   getGateSubmissionState(submissionId: string): Promise<{ state: GateSubmissionState }>;
   /** Read-only project overview (meta + process instances). */
   getProjectInfo(projectId: string): Promise<ProjectInfo>;
+  /**
+   * Read the Core-owned modern process definition. Optional only during the
+   * compatibility window for older injected mocks; modern engineering callers
+   * must fail closed when it is absent.
+   */
+  getProcessProfile?(processVersionId: string): Promise<ProcessProfileV1>;
+  /** Read the Core-owned G0-G4 projection and G0 readiness fact. */
+  getProcessState?(projectId: string): Promise<ProcessStateV1>;
   /** List gate submissions for a project; optional state filter. */
   listGateSubmissions(projectId: string, state?: GateSubmissionState): Promise<readonly GateSubmissionSummary[]>;
   /** List artifact containers in a project. */
@@ -470,6 +525,7 @@ export interface GovernanceClient {
 /** A no-op governance client for --no-governance mode (dev/debug only). */
 export class NoGovernanceClient implements GovernanceClient {
   private counter = 0;
+  private readonly revisionHashes = new Map<string, string>();
   /** In-memory stand-in for the on-disk workspace, so `vivado_run` (which reads
    *  its sources back by path) still works with governance switched off. */
   private readonly workspace = new Map<string, { content: string; commit: string; revisionId: string }>();
@@ -477,11 +533,14 @@ export class NoGovernanceClient implements GovernanceClient {
     return `${prefix}-nogov-${++this.counter}`;
   }
   async registerCandidateArtifact(input: { content: string; version: number }): Promise<RegisteredRevision> {
+    const revisionId = this.nextId("rev");
+    const contentHash = sha256Hex(input.content);
+    this.revisionHashes.set(revisionId, contentHash);
     return {
-      revisionId: this.nextId("rev"),
+      revisionId,
       artifactId: this.nextId("art"),
       version: input.version,
-      contentHash: sha256Hex(input.content),
+      contentHash,
     };
   }
   async writeWorkspaceFiles(input: {
@@ -490,6 +549,7 @@ export class NoGovernanceClient implements GovernanceClient {
     const commit = this.nextId("commit");
     const registered = input.files.map((f) => {
       this.workspace.set(f.path, { content: f.content, commit, revisionId: this.nextId("rev") });
+      this.revisionHashes.set(this.workspace.get(f.path)!.revisionId, sha256Hex(f.content));
       return {
         path: f.path,
         artifactId: this.nextId("art"),
@@ -513,8 +573,15 @@ export class NoGovernanceClient implements GovernanceClient {
       commit: file.commit,
     };
   }
-  async createSnapshot(): Promise<{ snapshotId: string }> {
-    return { snapshotId: this.nextId("snap") };
+  async createSnapshot(input: {
+    memberRevisionIds: readonly string[];
+    toolModelPolicyHash: string;
+  }): Promise<{ snapshotId: string; manifestHash: string }> {
+    const members = input.memberRevisionIds.map((id) => ({
+      id,
+      sha256: this.revisionHashes.get(id) ?? sha256Hex(`nogov-missing:${id}`),
+    }));
+    return { snapshotId: this.nextId("snap"), manifestHash: computeManifestHash(members) };
   }
   async createGateSubmission(): Promise<{ submissionId: string }> {
     return { submissionId: this.nextId("sub") };
@@ -536,6 +603,40 @@ export class NoGovernanceClient implements GovernanceClient {
       standardVersion: "",
       projectType: "free",
       processInstances: [],
+    };
+  }
+  async getProcessProfile(processVersionId: string): Promise<ProcessProfileV1> {
+    return parseProcessProfile(structuredClone(GJB_REF_V1_PROFILE), processVersionId);
+  }
+  async getProcessState(projectId: string): Promise<ProcessStateV1> {
+    return {
+      schema: "process-state.v1",
+      projectId,
+      processInstanceId: `pi-nogov-${projectId}`,
+      workVersionId: `wv-nogov-${projectId}`,
+      profileId: "GJB_REF_V1",
+      profileHash: GJB_REF_V1_PROFILE.profileHash,
+      currentGate: "G0",
+      completed: false,
+      readiness: {
+        id: `readiness-nogov-${projectId}`,
+        status: "confirmed",
+        ready: true,
+        readinessHash: sha256Hex(`readiness-nogov:${projectId}`),
+        targetPart: "offline-unverified",
+        boardRef: "offline-unverified",
+        workspaceReady: true,
+        dataScopeRecorded: true,
+        sourceMaterialsRecorded: true,
+        pinConstraintsComplete: false,
+        electricalConstraintsComplete: false,
+        clockConstraintsComplete: false,
+        constraintsComplete: false,
+        toolchainProfileHash: sha256Hex("toolchain-nogov"),
+        constraintRevisionIds: [],
+        generatedBy: { type: "runtime", id: "no-governance" },
+        confirmedBy: { id: "developer-no-governance", at: "1970-01-01T00:00:00.000Z" },
+      },
     };
   }
   async listGateSubmissions(): Promise<readonly GateSubmissionSummary[]> {
@@ -603,6 +704,10 @@ export interface AgentState {
   readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
   /** Registered RTL revision (rtl_build stage). */
   readonly rtlRevision?: RegisteredRevision;
+  /** Registered testbench revision (tb stage). */
+  readonly tbRevision?: RegisteredRevision;
+  /** Registered XDC constraint revision (xdc stage). */
+  readonly xdcRevision?: RegisteredRevision;
   /** Persisted RTL sources so tool stages can resume without re-calling the model. */
   readonly rtlArtifacts?: { readonly topModule: string; readonly sources: readonly ArtifactFile[] };
   /** Persisted testbench so simulate stage can resume. */
@@ -613,6 +718,10 @@ export interface AgentState {
   readonly gateSubmissions?: Readonly<Partial<Record<GateId, string>>>;
   /** Gate decisions: approved / rejected / withdrawn. */
   readonly gateDecisions?: Readonly<Partial<Record<GateId, "approved" | "rejected" | "withdrawn">>>;
+  /** Durable P4 formal-input/job/evidence/evaluation continuation state. */
+  readonly formalFlow?: FormalFlowProgressV1;
+  /** Durable Core-evaluation continuation state for modern G1-G3. */
+  readonly evaluatedGateFlows?: Readonly<Partial<Record<P4GateId, EvaluatedGateFlowProgressV1>>>;
   readonly endedReason?: string;
   /** Structured cause for terminal failure (drives resume eligibility). */
   readonly terminalCause?: TerminalCause;

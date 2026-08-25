@@ -155,6 +155,8 @@ async function main(): Promise<void> {
     const coreCfg = resolveCoreApiConfig(process.env);
     governance = new CoreGovernanceClient({
       baseUrl: coreCfg.baseUrl, token: coreCfg.token, projectId: args.project,
+      taskRuntimeToken: process.env.SYNTHIA_TASK_RUNTIME_TOKEN,
+      taskId: process.env.SYNTHIA_TASK_ID,
       processInstanceId: process.env.SYNTHIA_PROCESS_INSTANCE_ID ?? "pi-default",
     });
     process.stderr.write(`[runtime] governance=core-api (${coreCfg.baseUrl})\n`);

@@ -27,6 +27,20 @@ import type { ConnectorCapability, EvidenceManifest } from "../connector/index.t
 import { sha256Hex } from "../core/src/hashing.ts";
 import type { ArtifactType, GateId } from "../core/src/domain/enums.ts";
 import {
+  loadModernProcessProfile,
+  ProcessProfileValidationError,
+  type P4GateId,
+} from "./process-profile.ts";
+import {
+  assertModernProcessReady,
+  assertModernToolModelPolicyHash,
+  buildRuntimeProcessPlan,
+  firstStageForGate,
+  ProcessReadinessError,
+  stageAfterGate as profileStageAfterGate,
+  type RuntimeProcessPlan,
+} from "./process-execution.ts";
+import {
   WHITELISTED_OPERATIONS,
   GJB_GATES,
   GATE_AFTER_STAGE,
@@ -51,26 +65,18 @@ import {
   type UpstreamArtifacts,
   type UpstreamSection,
   type XdcGeneration,
-  type EvidenceSummary,
-  type GovernanceClient,
-  type GjbGate,
-  type LoopAction,
-  type LoopConnector,
-  type LoopModel,
-  type LoopPhase,
-  type LoopResult,
-  type LoopStatus,
-  type TerminalCause,
-  type RegisteredRevision,
-  type AgentState,
-  type RtlGeneration,
-  type StageId,
-  type TbGeneration,
-  type XdcGeneration,
   type VivadoResult,
   type VivadoSubmission,
   type WhitelistedOperation,
+  type ProcessStateV1,
 } from "./types.ts";
+import {
+  EvaluatedGateOrchestrator,
+  FormalFlowError,
+  FormalFlowOrchestrator,
+  isFormalFlowClient,
+  type FormalFlowProgressV1,
+} from "./formal-flow.ts";
 
 export const VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
 export const DEFAULT_MAX_REPAIR_ROUNDS = 3;
@@ -150,6 +156,9 @@ export class LoopExecutor {
   private seq = 0;
   private agentId?: string;
   private agentState?: AgentState;
+  private processPlan?: RuntimeProcessPlan;
+  private coreCurrentGate?: P4GateId;
+  private coreProcessState?: ProcessStateV1;
 
   constructor(deps: LoopDeps) { this.deps = deps; }
 
@@ -162,14 +171,28 @@ export class LoopExecutor {
     this.agentId = opts?.agentId;
     this.agentState = opts?.agentState;
     try {
+      const completed = await this.loadModernProcessContext();
+      if (completed) {
+        await this.verifyCompletedFormalFlow();
+        return this.finish("succeeded", "Core reports the G0-G4 process is already completed");
+      }
       if (this.agentState && this.agentState.status === "awaiting_approval" && this.agentState.awaitingGate) {
         // Resume: check the pending gate first.
         return await this.resumeFromGate();
       }
-      return await this.executeChain(opts?.agentState?.currentStage ?? "intake");
+      let startStage = opts?.agentState?.currentStage ?? "intake";
+      if (
+        this.processPlan &&
+        this.coreCurrentGate &&
+        (opts?.agentState?.docs === undefined || Object.keys(opts.agentState.docs).length === 0) &&
+        (opts?.agentState?.gateSubmissions === undefined || Object.keys(opts.agentState.gateSubmissions).length === 0)
+      ) {
+        startStage = firstStageForGate(this.processPlan, this.coreCurrentGate) ?? "intake";
+      }
+      return await this.executeChain(startStage);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
-      const status: LoopStatus = e instanceof FailClosedError || e instanceof PermissionDeniedError ? "fail_closed" : "failed";
+      const status: LoopStatus = e instanceof FailClosedError || e instanceof PermissionDeniedError || e instanceof FormalFlowError ? "fail_closed" : "failed";
       return this.finish(status, reason, undefined, "execution_error");
     }
   }
@@ -183,10 +206,15 @@ export class LoopExecutor {
     this.agentId = agentState.agentId;
     this.agentState = agentState;
     try {
+      const completed = await this.loadModernProcessContext();
+      if (completed) {
+        await this.verifyCompletedFormalFlow();
+        return this.finish("succeeded", "Core reports the G0-G4 process is already completed");
+      }
       return await this.resumeFromGate();
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
-      const status: LoopStatus = e instanceof FailClosedError || e instanceof PermissionDeniedError ? "fail_closed" : "failed";
+      const status: LoopStatus = e instanceof FailClosedError || e instanceof PermissionDeniedError || e instanceof FormalFlowError ? "fail_closed" : "failed";
       return this.finish(status, reason, undefined, "execution_error");
     }
   }
@@ -199,6 +227,49 @@ export class LoopExecutor {
     gateSubmissions: {},
   };
 
+  /** Load and verify the Core-owned profile/state before modern engineering. */
+  private async loadModernProcessContext(): Promise<boolean> {
+    const binding = {
+      projectType: this.agentState?.projectType,
+      processVersionId: this.agentState?.processVersionId,
+      processProfileId: this.agentState?.processProfileId,
+      processProfileVersion: this.agentState?.processProfileVersion,
+    };
+    try {
+      const profile = await loadModernProcessProfile(this.deps.governance, binding);
+      if (profile === null) return false;
+      if (typeof this.deps.governance.getProcessState !== "function") {
+        throw new ProcessReadinessError(
+          "governance client cannot read the modern process state",
+          "PROCESS_STATE_UNAVAILABLE",
+        );
+      }
+      const state = await this.deps.governance.getProcessState(this.deps.projectId);
+      assertModernProcessReady({
+        state,
+        profile,
+        projectId: this.deps.projectId,
+        processInstanceId: this.deps.processInstanceId,
+      });
+      assertModernToolModelPolicyHash(this.deps.toolModelPolicyHash);
+      this.processPlan = buildRuntimeProcessPlan(profile);
+      this.coreCurrentGate = state.currentGate;
+      this.coreProcessState = state;
+      return state.completed;
+    } catch (error) {
+      if (error instanceof ProcessProfileValidationError || error instanceof ProcessReadinessError) {
+        throw new FailClosedError(error.message, error.code);
+      }
+      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : "PROCESS_CONTEXT_UNAVAILABLE";
+      throw new FailClosedError(
+        `failed to load the Core-owned process context: ${error instanceof Error ? error.message : String(error)}`,
+        code,
+      );
+    }
+  }
+
   /** Execute stages from `startStage` onward, stopping at the next gate. */
   private async executeChain(startStage: StageId): Promise<LoopResult> {
     const { model, skillPrompts } = this.deps;
@@ -207,7 +278,7 @@ export class LoopExecutor {
     const baseSubmission = { runClass: "exploratory" as const, projectId, part };
 
     // Determine starting point in the ordered stage list.
-    const STAGES: readonly StageId[] = [
+    const STAGES: readonly StageId[] = this.processPlan?.stages ?? [
       "intake", "behavior_wave", "architecture", "register_spec",
       "rtl_build", "validate", "tb", "simulate", "xdc", "synthesize", "implement",
     ];
@@ -264,6 +335,7 @@ export class LoopExecutor {
           if (!this.chainCtx.rtl) throw new FailClosedError("tb stage reached without RTL", "STATE_ERROR");
           this.chainCtx.tb = await this.callModel("generate_testbench", () => model.generateTestbench(this.chainCtx.rtl!.sources, this.chainCtx.rtl!.topModule, skillPrompts.tb, this.upstreamFor("tb")));
           this.auditModel("generate_testbench", "testbench generated", this.chainCtx.tb.testbenchModule, "ok");
+          await this.registerTbArtifact();
           break;
         }
         case "simulate": {
@@ -274,6 +346,7 @@ export class LoopExecutor {
         case "xdc": {
           if (!this.chainCtx.rtl) throw new FailClosedError("xdc stage reached without RTL", "STATE_ERROR");
           this.chainCtx.xdc = await this.callModel("generate_xdc", () => model.generateXdc(this.chainCtx.rtl!.topModule, part, skillPrompts.xdc, false, this.upstreamFor("xdc")));
+          await this.registerXdcArtifact();
           break;
         }
         case "synthesize": {
@@ -354,6 +427,10 @@ export class LoopExecutor {
 
   /** Determine which gate (if any) follows the given stage. */
   private gateAfterStage(stage: StageId): GjbGate | undefined {
+    if (this.processPlan) {
+      const gate = this.processPlan.gateAfterStage[stage];
+      return gate && gate !== "G0" ? gate : undefined;
+    }
     for (const g of GJB_GATES) {
       if (GATE_AFTER_STAGE[g] === stage) return g;
     }
@@ -378,7 +455,7 @@ export class LoopExecutor {
     if (memberRevs.length === 0) return undefined; // nothing to review
 
     this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: creating snapshot (${memberRevs.length} revisions)`, result: "ok" });
-    const { snapshotId } = await gov.createSnapshot({
+    const { snapshotId, manifestHash } = await gov.createSnapshot({
       memberRevisionIds: memberRevs,
       toolModelPolicyHash: this.deps.toolModelPolicyHash,
     });
@@ -389,6 +466,14 @@ export class LoopExecutor {
       snapshotId,
     });
     this.chainCtx.gateSubmissions[gate] = submissionId;
+    await this.syncChainContextToState({});
+
+    if (this.processPlan) {
+      if (gate === "G4") {
+        return await this.advanceModernFormalFlow({ snapshotId, manifestHash, submissionId });
+      }
+      return await this.advanceModernEvaluatedGate({ gate, snapshotId, manifestHash, submissionId });
+    }
 
     this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: submitting for review`, result: "ok", detail: submissionId });
     const { state: submitState } = await gov.submitGate(submissionId);
@@ -416,9 +501,51 @@ export class LoopExecutor {
       return await this.executeChain(this.agentState?.currentStage ?? "intake");
     }
     const gate = this.agentState.awaitingGate;
+    if (!GJB_GATES.includes(gate as GjbGate)) {
+      return this.finish("fail_closed", `resume: unsupported pending gate ${gate}`, this.allArtifacts(), "governance_rejected");
+    }
+    const gjbGate = gate as GjbGate;
     const submissionId = this.agentState.gateSubmissions?.[gate];
     if (!submissionId) {
       return this.finish("failed", `resume: no submission id for pending gate ${gate}`);
+    }
+
+    this.restoreChainContext();
+    if (
+      gate === "G4" &&
+      this.processPlan &&
+      this.agentState.formalFlow?.status !== "awaiting_gate_approval"
+    ) {
+      return await this.advanceModernFormalFlow({
+        snapshotId: this.agentState.formalFlow?.snapshotId ?? "",
+        manifestHash: this.agentState.formalFlow?.snapshotManifestHash ?? "",
+        submissionId,
+      });
+    }
+    if (gjbGate !== "G4" && this.processPlan) {
+      const progress = this.agentState.evaluatedGateFlows?.[gjbGate];
+      if (!progress) {
+        return this.finish(
+          "fail_closed",
+          `resume: modern ${gate} has no durable evaluation binding`,
+          this.allArtifacts(),
+          "execution_error",
+        );
+      }
+      if (!progress.submitted) {
+        const result = await this.advanceModernEvaluatedGate({
+          gate: gjbGate,
+          snapshotId: progress.snapshotId,
+          manifestHash: progress.snapshotManifestHash,
+          submissionId,
+        });
+        if (result) return result;
+        const nextStage = this.stageAfterGate(gjbGate);
+        await this.updateState({ status: "running", awaitingGate: undefined });
+        return nextStage
+          ? await this.executeChain(nextStage)
+          : this.finish("succeeded", `all gates approved (resumed from ${gate})`, this.allArtifacts());
+      }
     }
 
     this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: polling approval status`, result: "ok", detail: submissionId });
@@ -426,10 +553,14 @@ export class LoopExecutor {
 
     if (state === "approved") {
       this.pushAudit({ category: "gate", phase: "gate_review", action: `${gate}: approved — continuing`, result: "ok" });
-      // Restore chain context from agent-state.
-      this.restoreChainContext();
+      if (gate === "G4" && this.agentState.formalFlow) {
+        const client = this.requireFormalFlowClient();
+        const orchestrator = new FormalFlowOrchestrator(client);
+        await orchestrator.verifyReleased(this.agentState.formalFlow);
+        this.pushAudit({ category: "governance", phase: "gate_review", action: "G4 delivery release verified", result: "ok", detail: `submission=${submissionId}` });
+      }
       // Move to the stage AFTER the gate.
-      const nextStage = this.stageAfterGate(gate);
+      const nextStage = this.stageAfterGate(gjbGate);
       await this.updateState({ status: "running", awaitingGate: undefined });
       if (!nextStage) {
         return this.finish("succeeded", `all gates approved (resumed from ${gate})`, this.allArtifacts());
@@ -442,11 +573,12 @@ export class LoopExecutor {
     }
     // Still in_review / preparing / checking — still waiting.
     this.deps.onAwaitingApproval?.(gate, submissionId, this.agentId ?? "unknown");
-    return this.finishAwaiting(gate, submissionId);
+    return this.finishAwaiting(gjbGate, submissionId);
   }
 
   /** Determine the stage that follows a gate. */
   private stageAfterGate(gate: GjbGate): StageId | undefined {
+    if (this.processPlan) return profileStageAfterGate(this.processPlan, gate);
     switch (gate) {
       case "G1": return "behavior_wave";
       case "G2": return "architecture";
@@ -455,8 +587,192 @@ export class LoopExecutor {
     }
   }
 
+  private requireFormalFlowClient() {
+    if (!isFormalFlowClient(this.deps.governance)) {
+      throw new FormalFlowError(
+        "governance client does not implement the P4 formal-flow contract",
+        "FORMAL_FLOW_UNAVAILABLE",
+      );
+    }
+    return this.deps.governance;
+  }
+
+  /** A completed Core projection must still match this Runtime's persisted G4 flow. */
+  private async verifyCompletedFormalFlow(): Promise<void> {
+    const progress = this.agentState?.formalFlow;
+    if (!progress) return;
+    const release = await new FormalFlowOrchestrator(this.requireFormalFlowClient())
+      .verifyReleased(progress);
+    this.pushAudit({
+      category: "governance",
+      phase: "gate_review",
+      action: "completed G4 delivery release verified",
+      result: "ok",
+      detail: `release=${release.id} submission=${progress.gateSubmissionId}`,
+    });
+  }
+
+  private async requireModernWorkVersionId(): Promise<string> {
+    const processState = this.coreProcessState;
+    const readinessId = processState?.readiness?.id;
+    if (!processState || !readinessId) {
+      throw new FormalFlowError("modern gate has no confirmed readiness", "G0_READINESS_REQUIRED");
+    }
+    const rows = await this.requireFormalFlowClient().listReadiness();
+    const readiness = rows.find((row) => row.id === readinessId);
+    if (
+      !readiness ||
+      readiness.projectId !== this.deps.projectId ||
+      readiness.processInstanceId !== this.deps.processInstanceId ||
+      readiness.workVersionId !== processState.workVersionId ||
+      !readiness.ready ||
+      readiness.status !== "confirmed"
+    ) {
+      throw new FormalFlowError("confirmed readiness row is unavailable", "G0_READINESS_REQUIRED");
+    }
+    return processState.workVersionId;
+  }
+
+  private async advanceModernEvaluatedGate(input: {
+    gate: "G1" | "G2" | "G3";
+    snapshotId: string;
+    manifestHash: string;
+    submissionId: string;
+  }): Promise<LoopResult | undefined> {
+    try {
+      if (!this.agentState || !this.deps.onStateChange || !this.processPlan) {
+        throw new FormalFlowError(
+          "modern gate evaluation requires durable Runtime state",
+          "GATE_EVALUATION_STATE_UNAVAILABLE",
+        );
+      }
+      const client = this.requireFormalFlowClient();
+      const orchestrator = new EvaluatedGateOrchestrator(client, async (gateFlow) => {
+        await this.updateState({
+          evaluatedGateFlows: {
+            ...this.agentState?.evaluatedGateFlows,
+            [input.gate]: gateFlow,
+          },
+          status: "awaiting_approval",
+          awaitingGate: input.gate,
+        });
+      });
+      let progress = this.agentState.evaluatedGateFlows?.[input.gate];
+      if (!progress) {
+        progress = await orchestrator.initialize({
+          gate: input.gate,
+          projectId: this.deps.projectId,
+          submissionId: input.submissionId,
+          workVersionId: await this.requireModernWorkVersionId(),
+          snapshotId: input.snapshotId,
+          snapshotManifestHash: input.manifestHash,
+          profileHash: this.processPlan.profileHash,
+        });
+      } else if (
+        progress.submissionId !== input.submissionId ||
+        progress.snapshotId !== input.snapshotId ||
+        progress.snapshotManifestHash !== input.manifestHash ||
+        progress.profileHash !== this.processPlan.profileHash
+      ) {
+        throw new FormalFlowError(
+          `${input.gate} durable evaluation binding diverged from the current submission`,
+          "GATE_EVALUATION_BINDING_MISMATCH",
+        );
+      }
+      progress = await orchestrator.advance(progress);
+      if (progress.submitted?.state === "approved") {
+        await this.updateState({ status: "running", awaitingGate: undefined });
+        return undefined;
+      }
+      await this.syncChainContextToState({ status: "awaiting_approval", awaitingGate: input.gate });
+      this.deps.onAwaitingApproval?.(input.gate, input.submissionId, this.agentId ?? "unknown");
+      this.pushAudit({
+        category: "gate",
+        phase: "gate_review",
+        action: `${input.gate}: Core evaluation passed; awaiting human approval`,
+        result: "ok",
+        detail: `submission=${input.submissionId} evaluation=${progress.evaluationId}`,
+      });
+      return this.finishAwaiting(input.gate, input.submissionId);
+    } catch (error) {
+      if (error instanceof FormalFlowError) throw new FailClosedError(error.message, error.code);
+      throw error;
+    }
+  }
+
+  private async advanceModernFormalFlow(input: {
+    snapshotId: string;
+    manifestHash: string;
+    submissionId: string;
+  }): Promise<LoopResult> {
+    try {
+      if (!this.agentState || !this.deps.onStateChange) {
+        throw new FormalFlowError("P4 formal execution requires durable Runtime state", "FORMAL_STATE_UNAVAILABLE");
+      }
+      const client = this.requireFormalFlowClient();
+      const orchestrator = new FormalFlowOrchestrator(client, async (formalFlow) => {
+        await this.updateState({
+          formalFlow,
+          status: "awaiting_approval",
+          awaitingGate: "G4",
+        });
+      });
+      let progress: FormalFlowProgressV1;
+      if (this.agentState.formalFlow) {
+        progress = this.agentState.formalFlow;
+      } else {
+        const readinessId = this.coreProcessState?.readiness?.id;
+        if (!readinessId) throw new FormalFlowError("G4 has no confirmed readiness", "G0_READINESS_REQUIRED");
+        if (!this.agentState.taskId || this.agentState.taskKind === "side") {
+          throw new FormalFlowError("formal G4 requires a Core-owned main task", "FORMAL_MAIN_TASK_REQUIRED");
+        }
+        const workVersionId = await this.requireModernWorkVersionId();
+        progress = await orchestrator.initialize({
+          projectId: this.deps.projectId,
+          gateSubmissionId: input.submissionId,
+          workVersionId,
+          snapshotId: input.snapshotId,
+          snapshotManifestHash: input.manifestHash,
+          profileHash: this.processPlan!.profileHash,
+          readinessId,
+          authorizedTaskId: this.agentState.taskId,
+        });
+        this.pushAudit({
+          category: "governance",
+          phase: "gate_review",
+          action: "G4 formal input preview prepared",
+          result: "ok",
+          detail: `approval=${progress.approvalId} preview=${progress.preview.previewHash} input=${progress.preview.inputHash}`,
+        });
+      }
+      const advanced = await orchestrator.advance(progress);
+      const detail = advanced.blockedOn === "input_confirmation"
+        ? `confirm formal input ${advanced.progress.approvalId} for preview ${advanced.progress.preview.previewHash}`
+        : advanced.blockedOn === "job"
+          ? "formal G4 job is still running"
+          : `G4 submission ${input.submissionId} awaits human gate approval`;
+      this.pushAudit({ category: "governance", phase: "gate_review", action: `G4 formal flow awaiting ${advanced.blockedOn}`, result: "ok", detail });
+      this.deps.onAwaitingApproval?.("G4", input.submissionId, this.agentId ?? "unknown");
+      return this.finishFormalAwaiting(advanced.progress, detail);
+    } catch (error) {
+      if (error instanceof FormalFlowError) throw new FailClosedError(error.message, error.code);
+      throw error;
+    }
+  }
+
   /** Which registered revisions belong in a gate's snapshot. */
   private revisionsForGate(gate: GjbGate): string[] {
+    if (this.processPlan) {
+      const revs: string[] = [];
+      for (const stage of this.processPlan.stagesByGate[gate]) {
+        const doc = this.chainCtx.docRevisions[stage];
+        if (doc) revs.push(doc.revisionId);
+        if (stage === "rtl_build" && this.chainCtx.rtlRevision) revs.push(this.chainCtx.rtlRevision.revisionId);
+        if (stage === "tb" && this.chainCtx.tbRevision) revs.push(this.chainCtx.tbRevision.revisionId);
+        if (stage === "xdc" && this.chainCtx.xdcRevision) revs.push(this.chainCtx.xdcRevision.revisionId);
+      }
+      return [...new Set(revs)];
+    }
     const revs: string[] = [];
     switch (gate) {
       case "G1":
@@ -471,6 +787,8 @@ export class LoopExecutor {
         break;
       case "G4":
         if (this.chainCtx.rtlRevision) revs.push(this.chainCtx.rtlRevision.revisionId);
+        if (this.chainCtx.tbRevision) revs.push(this.chainCtx.tbRevision.revisionId);
+        if (this.chainCtx.xdcRevision) revs.push(this.chainCtx.xdcRevision.revisionId);
         // Also include all doc revisions for final review.
         for (const key of ["intake", "behavior_wave", "architecture", "register_spec"] as const) {
           const r = this.chainCtx.docRevisions[key];
@@ -522,6 +840,47 @@ export class LoopExecutor {
     await this.updateState({ rtlRevision: rev });
   }
 
+  private async registerTbArtifact(): Promise<void> {
+    if (!this.chainCtx.tb) return;
+    const artifactId = `art-tb-${sha256Hex(`${this.agentId ?? ""}:${this.task}`).slice(0, 8)}`;
+    const version = (this.chainCtx.tbRevision?.version ?? 0) + 1;
+    const file = this.chainCtx.tb.testbench;
+    const raw = await this.deps.governance.registerCandidateArtifact({
+      artifactId,
+      artifactType: "TB_SOURCE_SET",
+      title: `Testbench top=${this.chainCtx.tb.testbenchModule}`,
+      content: file.content,
+      contentLocation: file.path,
+      changeReason: "Generated by tb stage",
+      version,
+    });
+    const rev: RegisteredRevision = { ...raw, contentLocation: file.path };
+    this.chainCtx.tbRevision = rev;
+    this.pushAudit({ category: "governance", phase: "governance", action: `registered TB artifact: ${rev.revisionId}`, result: "ok", detail: `top=${this.chainCtx.tb.testbenchModule} path=${file.path}` });
+    await this.updateState({ tbRevision: rev });
+  }
+
+  private async registerXdcArtifact(): Promise<void> {
+    if (!this.chainCtx.xdc) return;
+    const artifactId = `art-xdc-${sha256Hex(`${this.agentId ?? ""}:${this.task}`).slice(0, 8)}`;
+    const version = (this.chainCtx.xdcRevision?.version ?? 0) + 1;
+    const content = this.chainCtx.xdc.constraints.map((file) => file.content).join("\n");
+    const contentLocation = this.chainCtx.xdc.constraints[0]?.path ?? "constr/top.xdc";
+    const raw = await this.deps.governance.registerCandidateArtifact({
+      artifactId,
+      artifactType: "XDC_CANDIDATE",
+      title: `XDC constraints for ${this.deps.part}`,
+      content,
+      contentLocation,
+      changeReason: "Generated by xdc stage",
+      version,
+    });
+    const rev: RegisteredRevision = { ...raw, contentLocation };
+    this.chainCtx.xdcRevision = rev;
+    this.pushAudit({ category: "governance", phase: "governance", action: `registered XDC artifact: ${rev.revisionId}`, result: "ok", detail: `part=${this.deps.part} path=${contentLocation}` });
+    await this.updateState({ xdcRevision: rev });
+  }
+
   // ----- agent-state persistence -----
 
   private async updateState(patch: Partial<AgentState>): Promise<void> {
@@ -551,6 +910,8 @@ export class LoopExecutor {
       docs,
       gateSubmissions: gateSubs,
       ...(this.chainCtx.rtlRevision ? { rtlRevision: this.chainCtx.rtlRevision } : {}),
+      ...(this.chainCtx.tbRevision ? { tbRevision: this.chainCtx.tbRevision } : {}),
+      ...(this.chainCtx.xdcRevision ? { xdcRevision: this.chainCtx.xdcRevision } : {}),
       ...(this.chainCtx.rtl ? { rtlArtifacts: { topModule: this.chainCtx.rtl.topModule, sources: this.chainCtx.rtl.sources } } : {}),
       ...(this.chainCtx.tb ? { tbArtifacts: { testbenchModule: this.chainCtx.tb.testbenchModule, testbench: this.chainCtx.tb.testbench } } : {}),
       ...(this.chainCtx.xdc ? { xdcArtifacts: { constraints: this.chainCtx.xdc.constraints } } : {}),
@@ -567,6 +928,12 @@ export class LoopExecutor {
     }
     if (this.agentState.rtlRevision) {
       this.chainCtx.rtlRevision = this.agentState.rtlRevision;
+    }
+    if (this.agentState.tbRevision) {
+      this.chainCtx.tbRevision = this.agentState.tbRevision;
+    }
+    if (this.agentState.xdcRevision) {
+      this.chainCtx.xdcRevision = this.agentState.xdcRevision;
     }
     if (this.agentState.rtlArtifacts) {
       this.chainCtx.rtl = { phase: "generate_rtl", reasoning: "restored from agent-state", topModule: this.agentState.rtlArtifacts.topModule, sources: this.agentState.rtlArtifacts.sources };
@@ -716,7 +1083,9 @@ export class LoopExecutor {
       }
     }
 
-    return problems.length === 0 ? { ok: true, problems: [] } : { ok: false, problems, failingDocPhases };
+    return problems.length === 0
+      ? { ok: true, problems: [], failingDocPhases: [] }
+      : { ok: false, problems, failingDocPhases };
   }
 
   /** Regenerate the offending artifact(s) carrying the conformity feedback. */
@@ -777,7 +1146,7 @@ export class LoopExecutor {
     try {
       result = await this.deps.connector.submit(submission);
     } catch (e) {
-      const code = e instanceof Error && e.name === "RemoteConnectorError" ? (e as { code: string }).code : "CONNECTOR_ERROR";
+      const code = e instanceof Error && e.name === "RemoteConnectorError" ? (e as unknown as { code: string }).code : "CONNECTOR_ERROR";
       this.pushAudit({ category: "tool_call", phase: operation, action: "submit threw", inputSha256: inputSha, result: "fail_closed", errorCode: code, detail: e instanceof Error ? e.message : String(e) });
       throw new FailClosedError(`connector submit for ${operation} failed: ${e instanceof Error ? e.message : String(e)}`, code);
     }
@@ -883,6 +1252,21 @@ export class LoopExecutor {
     };
   }
 
+  private finishFormalAwaiting(progress: FormalFlowProgressV1, reason: string): LoopResult {
+    this.pushAudit({ category: "loop", phase: "loop", action: "loop paused in G4 formal flow", result: "ok", detail: reason });
+    return {
+      status: "failed",
+      task: this.task,
+      part: this.deps.part,
+      ...this.allArtifacts(),
+      evidence: this.evidence,
+      audit: this.audit,
+      endedReason: reason,
+      ...(this.agentId ? { agentId: this.agentId } : {}),
+      awaitingGate: "G4",
+    };
+  }
+
   private finish(status: LoopStatus, reason: string, artifacts?: {
     rtl?: RtlGeneration; testbench?: TbGeneration; xdc?: XdcGeneration; docs?: DocGeneration[];
   }, cause?: TerminalCause): LoopResult {
@@ -910,6 +1294,8 @@ interface ChainContext {
   tb?: TbGeneration;
   xdc?: XdcGeneration;
   rtlRevision?: RegisteredRevision;
+  tbRevision?: RegisteredRevision;
+  xdcRevision?: RegisteredRevision;
 }
 /** Result of a content-conformity check. */
 interface ConformityResult {

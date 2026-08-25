@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 import { CoreGovernanceClient, MockGovernanceClient, GovernanceError } from "./governance-client.ts";
 import { NoGovernanceClient } from "./types.ts";
 
@@ -28,12 +29,14 @@ describe("MockGovernanceClient", () => {
 
   test("createSnapshot records member revisions", async () => {
     const gov = new MockGovernanceClient();
-    const { snapshotId } = await gov.createSnapshot({
+    const { snapshotId, manifestHash } = await gov.createSnapshot({
       memberRevisionIds: ["rev-1", "rev-2"],
       toolModelPolicyHash: "policy-v1",
     });
     expect(snapshotId).toBeTruthy();
+    expect(manifestHash).toMatch(/^[0-9a-f]{64}$/);
     expect(gov.snapshots).toHaveLength(1);
+    expect(gov.snapshots[0]!.manifestHash).toBe(manifestHash);
     expect(gov.snapshots[0]!.memberRevisionIds).toEqual(["rev-1", "rev-2"]);
     expect(gov.snapshots[0]!.toolModelPolicyHash).toBe("policy-v1");
   });
@@ -104,6 +107,44 @@ function canonicalSearch(items: readonly Record<string, unknown>[], query = ""):
   };
 }
 
+function canonicalReadiness(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "ready-1",
+    status: "confirmed",
+    ready: true,
+    readinessHash: "b".repeat(64),
+    targetPart: "xc7k70tfbv676-1",
+    boardRef: "board-kc705-v1",
+    workspaceReady: true,
+    dataScopeRecorded: true,
+    sourceMaterialsRecorded: true,
+    pinConstraintsComplete: false,
+    electricalConstraintsComplete: false,
+    clockConstraintsComplete: true,
+    constraintsComplete: false,
+    toolchainProfileHash: "c".repeat(64),
+    constraintRevisionIds: ["rev-xdc"],
+    generatedBy: { type: "runtime", id: "runtime-1" },
+    confirmedBy: { id: "human-1", at: "2026-08-24T10:00:00.000Z" },
+    ...overrides,
+  };
+}
+
+function canonicalProcessState(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: "process-state.v1",
+    projectId: "p1",
+    processInstanceId: "pi-1",
+    workVersionId: "wv-1",
+    profileId: "GJB_REF_V1",
+    profileHash: GJB_REF_V1_PROFILE.profileHash,
+    currentGate: "G0",
+    completed: false,
+    readiness: canonicalReadiness(),
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // NoGovernanceClient — auto-approves everything
 // ---------------------------------------------------------------------------
@@ -122,11 +163,23 @@ describe("NoGovernanceClient", () => {
     expect(rev.contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(rev.version).toBe(1);
 
-    const { snapshotId } = await gov.createSnapshot({
+    const { snapshotId, manifestHash } = await gov.createSnapshot({
       memberRevisionIds: [rev.revisionId],
       toolModelPolicyHash: "policy",
     });
     expect(snapshotId).toContain("nogov");
+    expect(manifestHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const profile = await gov.getProcessProfile("GJB_REF_V1");
+    expect(profile.profileHash).toBe(GJB_REF_V1_PROFILE.profileHash);
+    const processState = await gov.getProcessState("offline-project");
+    expect(processState).toMatchObject({
+      schema: "process-state.v1",
+      profileId: "GJB_REF_V1",
+      currentGate: "G0",
+      completed: false,
+      readiness: { status: "confirmed", ready: true, constraintsComplete: false },
+    });
 
     const { submissionId } = await gov.createGateSubmission({
       processInstanceId: "pi", gate: "G1", snapshotId,
@@ -184,19 +237,36 @@ describe("CoreGovernanceClient", () => {
     let capturedBody: Record<string, unknown> = {};
     const fetchImpl = async (_url: string, init: RequestInit) => {
       capturedBody = JSON.parse(init.body as string);
-      return new Response(JSON.stringify({ data: { id: "snap-1" } }), { status: 201 });
+      return new Response(JSON.stringify({ data: { id: "snap-1", manifestHash: "a".repeat(64) } }), { status: 201 });
     };
     const gov = new CoreGovernanceClient({
       baseUrl: "http://core", token: "t", projectId: "p1",
       processInstanceId: "pi-1", fetchImpl,
     });
-    const { snapshotId } = await gov.createSnapshot({
+    const { snapshotId, manifestHash } = await gov.createSnapshot({
       memberRevisionIds: ["rev-a", "rev-b"],
       toolModelPolicyHash: "hash123",
     });
     expect(snapshotId).toBe("snap-1");
+    expect(manifestHash).toBe("a".repeat(64));
     expect(capturedBody.member_revision_ids).toEqual(["rev-a", "rev-b"]);
     expect(capturedBody.tool_model_policy_hash).toBe("hash123");
+  });
+
+  test("createSnapshot rejects an omitted or malformed manifestHash", async () => {
+    const responses = [
+      { data: { id: "snap-1" } },
+      { data: { id: "snap-1", manifestHash: "NOT-A-HASH" } },
+    ];
+    let index = 0;
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      fetchImpl: async () => new Response(JSON.stringify(responses[index++]!), { status: 201 }),
+    });
+    for (const _response of responses) {
+      await expect(gov.createSnapshot({ memberRevisionIds: ["rev-a"], toolModelPolicyHash: "policy" }))
+        .rejects.toMatchObject({ code: "SNAPSHOT_RESPONSE_INVALID" });
+    }
   });
 
   test("createGateSubmission POSTs gate + snapshot_id + process_instance_id", async () => {
@@ -344,6 +414,87 @@ describe("CoreGovernanceClient", () => {
     ] as const) {
       expect(Object.hasOwn(omitted, key)).toBe(false);
     }
+  });
+
+  test("getProcessProfile reads the global endpoint and strictly verifies the Core profile", async () => {
+    let capturedUrl = "";
+    let capturedMethod = "";
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      fetchImpl: async (url, init) => {
+        capturedUrl = String(url);
+        capturedMethod = init?.method ?? "";
+        return new Response(JSON.stringify({ data: GJB_REF_V1_PROFILE }), { status: 200 });
+      },
+    });
+
+    const profile = await gov.getProcessProfile("GJB_REF_V1");
+
+    expect(capturedUrl).toBe("http://core/api/v1/process-versions/GJB_REF_V1/profile");
+    expect(capturedMethod).toBe("GET");
+    expect(profile.profileHash).toBe(GJB_REF_V1_PROFILE.profileHash);
+    expect(profile.nodes.map((node) => node.id)).toEqual(["G0", "G1", "G2", "G3", "G4"]);
+  });
+
+  test("getProcessProfile rejects malformed profiles and unsafe ids fail before fetch", async () => {
+    let calls = 0;
+    const invalidProfile = structuredClone(GJB_REF_V1_PROFILE) as unknown as Record<string, unknown>;
+    invalidProfile.profileHash = "0".repeat(64);
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      fetchImpl: async () => {
+        calls++;
+        return new Response(JSON.stringify({ data: invalidProfile }), { status: 200 });
+      },
+    });
+    await expect(gov.getProcessProfile("GJB_REF_V1")).rejects.toMatchObject({ code: "PROCESS_PROFILE_INVALID" });
+    expect(calls).toBe(1);
+    await expect(gov.getProcessProfile("../GJB_REF_V1")).rejects.toMatchObject({ code: "validation" });
+    expect(calls).toBe(1);
+  });
+
+  test("getProcessState maps the exact camelCase v1 projection including readiness", async () => {
+    let capturedUrl = "";
+    const state = canonicalProcessState();
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      fetchImpl: async (url) => {
+        capturedUrl = String(url);
+        return new Response(JSON.stringify({ data: state }), { status: 200 });
+      },
+    });
+
+    const result = await gov.getProcessState("p1");
+
+    expect(capturedUrl).toBe("http://core/api/v1/projects/p1/process-state");
+    expect(result).toEqual(state);
+    expect(result.readiness?.status === "confirmed" && result.readiness.ready).toBe(true);
+    expect(result.readiness?.constraintsComplete).toBe(false);
+  });
+
+  test("getProcessState fails closed on cross-project, missing work, G5+, and inconsistent readiness", async () => {
+    const states = [
+      canonicalProcessState({ projectId: "p-other" }),
+      canonicalProcessState({ workVersionId: undefined }),
+      canonicalProcessState({ currentGate: "G5" }),
+      canonicalProcessState({ readiness: { ...canonicalReadiness(), constraintsComplete: true } }),
+    ];
+    let index = 0;
+    let calls = 0;
+    const gov = new CoreGovernanceClient({
+      baseUrl: "http://core", token: "t", projectId: "p1",
+      fetchImpl: async () => {
+        calls++;
+        return new Response(JSON.stringify({ data: states[index++]! }), { status: 200 });
+      },
+    });
+    await expect(gov.getProcessState("p1")).rejects.toMatchObject({ code: "PROJECT_OWNERSHIP_MISMATCH" });
+    await expect(gov.getProcessState("p1")).rejects.toMatchObject({ code: "PROCESS_STATE_INVALID" });
+    await expect(gov.getProcessState("p1")).rejects.toMatchObject({ code: "PROCESS_STATE_INVALID" });
+    await expect(gov.getProcessState("p1")).rejects.toMatchObject({ code: "PROCESS_STATE_INVALID" });
+    expect(calls).toBe(4);
+    await expect(gov.getProcessState("p-other")).rejects.toMatchObject({ code: "PROJECT_OWNERSHIP_MISMATCH" });
+    expect(calls).toBe(4);
   });
 
   test("searchImportedMaterials calls the project-scoped P2 endpoint and maps file rows", async () => {

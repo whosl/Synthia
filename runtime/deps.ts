@@ -158,11 +158,17 @@ export function buildCoreApiConnector(
 export function buildCoreGovernanceClient(
   projectId: string,
   processInstanceId: string,
+  taskId: string | undefined,
   env: Record<string, string | undefined> = process.env,
 ): CoreGovernanceClient {
   const cfg = resolveCoreApiConfig(env);
   return new CoreGovernanceClient({
-    baseUrl: cfg.baseUrl, token: cfg.token, projectId, processInstanceId,
+    baseUrl: cfg.baseUrl,
+    token: cfg.token,
+    taskRuntimeToken: env.SYNTHIA_TASK_RUNTIME_TOKEN,
+    taskId,
+    projectId,
+    processInstanceId,
   });
 }
 

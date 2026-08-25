@@ -25,7 +25,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { sha256Hex } from "../core/src/hashing.ts";
+import { computeManifestHash, hashPayload, sha256Hex } from "../core/src/hashing.ts";
+import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 import type {
   ArtifactRevisionState,
   ArtifactType,
@@ -40,15 +41,45 @@ import type {
   ImportedMaterialSummary,
   ProjectEventSummary,
   ProjectInfo,
+  ProcessReadinessV1,
+  ProcessStateV1,
   RegisteredRevision,
   WorkspaceFileContent,
   WorkspaceRegisteredFile,
   WorkspaceWriteResult,
 } from "./types.ts";
+import { parseProcessProfile, ProcessProfileValidationError } from "./process-profile.ts";
+import type { ProcessProfileV1 } from "./process-profile.ts";
+import {
+  parseEvaluatedGateSubmission,
+  parseBitstreamResult,
+  parseDeliveryRelease,
+  parseFormalInputApproval,
+  parseFormalInputPreview,
+  parseFormalJobBinding,
+  parseFrozenEvidenceManifest,
+  parseGateEvaluation,
+  parseProjectReadinessRecord,
+  FormalFlowError,
+  type EvaluatedGateSubmissionV1,
+  type BitstreamResultV1,
+  type DeliveryReleaseV1,
+  type FormalG4Operation,
+  type FormalInputApprovalV1,
+  type FormalInputPreviewV1,
+  type FormalJobBindingV1,
+  type FrozenEvidenceManifestV1,
+  type GateEvaluationV1,
+  type ProjectReadinessRecordV1,
+} from "./formal-flow.ts";
 
 export interface CoreGovernanceConfig {
   readonly baseUrl: string;
   readonly token: string;
+  /** Dedicated singleton core:task-runtime credential for task-bound formal submit. */
+  readonly taskRuntimeToken?: string;
+  /** Core-issued main task identity bound to formal submissions. */
+  readonly taskId?: string;
   readonly projectId: string;
   readonly processInstanceId?: string;
   readonly fetchImpl?: typeof fetch;
@@ -160,6 +191,149 @@ function firstDefined<T>(...values: readonly (T | undefined)[]): T | undefined {
     if (value !== undefined) return value;
   }
   return undefined;
+}
+
+const LOWER_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const SAFE_CORE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const PROCESS_STATE_KEYS = ["completed", "currentGate", "processInstanceId", "profileHash", "profileId", "projectId", "readiness", "schema", "workVersionId"] as const;
+const READINESS_KEYS = ["boardRef", "clockConstraintsComplete", "confirmedBy", "constraintRevisionIds", "constraintsComplete", "dataScopeRecorded", "electricalConstraintsComplete", "generatedBy", "id", "pinConstraintsComplete", "readinessHash", "ready", "sourceMaterialsRecorded", "status", "targetPart", "toolchainProfileHash", "workspaceReady"] as const;
+const IDENTITY_KEYS = ["id", "type"] as const;
+const CONFIRMATION_KEYS = ["at", "id"] as const;
+
+function processShapeError(message: string): GovernanceError {
+  return new GovernanceError(message, "PROCESS_STATE_INVALID", 502, false);
+}
+
+function strictProcessRecord(value: unknown, keys: readonly string[], path: string): Record<string, unknown> {
+  const row = asRecord(value);
+  if (!row) throw processShapeError(`${path} must be an object`);
+  const actual = Object.keys(row).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw processShapeError(`${path} has unexpected or missing fields`);
+  }
+  return row;
+}
+
+function strictProcessString(value: unknown, path: string, id = false): string {
+  if (typeof value !== "string" || value.trim().length === 0 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)) {
+    throw processShapeError(`${path} must be a non-empty safe string`);
+  }
+  if (new TextEncoder().encode(value).length > 512 || id && !SAFE_CORE_ID_PATTERN.test(value)) {
+    throw processShapeError(`${path} is invalid`);
+  }
+  return value;
+}
+
+function strictProcessBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw processShapeError(`${path} must be a boolean`);
+  return value;
+}
+
+function strictProcessHash(value: unknown, path: string): string {
+  if (typeof value !== "string" || !LOWER_SHA256_PATTERN.test(value)) {
+    throw processShapeError(`${path} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
+function parseProcessReadiness(value: unknown): ProcessReadinessV1 | null {
+  if (value === null) return null;
+  const row = strictProcessRecord(value, READINESS_KEYS, "processState.readiness");
+  const status = row.status;
+  if (status !== "draft" && status !== "confirmed") {
+    throw processShapeError("processState.readiness.status is invalid");
+  }
+  const ready = strictProcessBoolean(row.ready, "processState.readiness.ready");
+  if (ready && status !== "confirmed") {
+    throw processShapeError("a ready processState.readiness must be confirmed");
+  }
+  const pinConstraintsComplete = strictProcessBoolean(row.pinConstraintsComplete, "processState.readiness.pinConstraintsComplete");
+  const electricalConstraintsComplete = strictProcessBoolean(row.electricalConstraintsComplete, "processState.readiness.electricalConstraintsComplete");
+  const clockConstraintsComplete = strictProcessBoolean(row.clockConstraintsComplete, "processState.readiness.clockConstraintsComplete");
+  const constraintsComplete = strictProcessBoolean(row.constraintsComplete, "processState.readiness.constraintsComplete");
+  if (constraintsComplete !== (pinConstraintsComplete && electricalConstraintsComplete && clockConstraintsComplete)) {
+    throw processShapeError("processState.readiness.constraintsComplete disagrees with its three constraint classes");
+  }
+  if (!Array.isArray(row.constraintRevisionIds)) {
+    throw processShapeError("processState.readiness.constraintRevisionIds must be an array");
+  }
+  const constraintRevisionIds = row.constraintRevisionIds.map((revisionId, index) =>
+    strictProcessString(revisionId, `processState.readiness.constraintRevisionIds[${index}]`, true));
+  if (new Set(constraintRevisionIds).size !== constraintRevisionIds.length) {
+    throw processShapeError("processState.readiness.constraintRevisionIds must be unique");
+  }
+  const generated = strictProcessRecord(row.generatedBy, IDENTITY_KEYS, "processState.readiness.generatedBy");
+  const generatedBy = {
+    type: strictProcessString(generated.type, "processState.readiness.generatedBy.type", true),
+    id: strictProcessString(generated.id, "processState.readiness.generatedBy.id", true),
+  };
+  let confirmedBy: ProcessReadinessV1["confirmedBy"] = null;
+  if (row.confirmedBy !== null) {
+    const confirmed = strictProcessRecord(row.confirmedBy, CONFIRMATION_KEYS, "processState.readiness.confirmedBy");
+    const at = strictProcessString(confirmed.at, "processState.readiness.confirmedBy.at");
+    if (Number.isNaN(Date.parse(at))) throw processShapeError("processState.readiness.confirmedBy.at must be a timestamp");
+    confirmedBy = { id: strictProcessString(confirmed.id, "processState.readiness.confirmedBy.id", true), at };
+  }
+  if (status === "confirmed" && confirmedBy === null || status === "draft" && confirmedBy !== null) {
+    throw processShapeError("processState.readiness confirmation fact disagrees with its status");
+  }
+  const toolchainProfileHash = row.toolchainProfileHash === null
+    ? null
+    : strictProcessHash(row.toolchainProfileHash, "processState.readiness.toolchainProfileHash");
+  if (ready && toolchainProfileHash === null) {
+    throw processShapeError("a ready processState.readiness must have a bound toolchain profile hash");
+  }
+  return {
+    id: strictProcessString(row.id, "processState.readiness.id", true),
+    status,
+    ready,
+    readinessHash: strictProcessHash(row.readinessHash, "processState.readiness.readinessHash"),
+    targetPart: strictProcessString(row.targetPart, "processState.readiness.targetPart"),
+    boardRef: strictProcessString(row.boardRef, "processState.readiness.boardRef"),
+    workspaceReady: strictProcessBoolean(row.workspaceReady, "processState.readiness.workspaceReady"),
+    dataScopeRecorded: strictProcessBoolean(row.dataScopeRecorded, "processState.readiness.dataScopeRecorded"),
+    sourceMaterialsRecorded: strictProcessBoolean(row.sourceMaterialsRecorded, "processState.readiness.sourceMaterialsRecorded"),
+    pinConstraintsComplete,
+    electricalConstraintsComplete,
+    clockConstraintsComplete,
+    constraintsComplete,
+    toolchainProfileHash,
+    constraintRevisionIds,
+    generatedBy,
+    confirmedBy,
+  };
+}
+
+function parseProcessState(value: unknown, expectedProjectId: string): ProcessStateV1 {
+  const row = strictProcessRecord(value, PROCESS_STATE_KEYS, "processState");
+  if (row.schema !== "process-state.v1") throw processShapeError("processState.schema must be process-state.v1");
+  const projectId = strictProcessString(row.projectId, "processState.projectId", true);
+  if (projectId !== expectedProjectId) {
+    throw new GovernanceError(
+      `Core returned process state for ${projectId} while ${expectedProjectId} was requested`,
+      "PROJECT_OWNERSHIP_MISMATCH",
+      502,
+      false,
+    );
+  }
+  if (row.profileId !== "GJB_REF_V1") throw processShapeError("processState.profileId must be GJB_REF_V1");
+  if (typeof row.currentGate !== "string" || !["G0", "G1", "G2", "G3", "G4"].includes(row.currentGate)) {
+    throw processShapeError("processState.currentGate must be one of G0-G4");
+  }
+  const completed = strictProcessBoolean(row.completed, "processState.completed");
+  if (completed && row.currentGate !== "G4") throw processShapeError("a completed processState must remain at G4");
+  return {
+    schema: "process-state.v1",
+    projectId,
+    processInstanceId: strictProcessString(row.processInstanceId, "processState.processInstanceId", true),
+    workVersionId: strictProcessString(row.workVersionId, "processState.workVersionId", true),
+    profileId: "GJB_REF_V1",
+    profileHash: strictProcessHash(row.profileHash, "processState.profileHash"),
+    currentGate: row.currentGate as ProcessStateV1["currentGate"],
+    completed,
+    readiness: parseProcessReadiness(row.readiness),
+  };
 }
 
 function arrayField(row: Record<string, unknown>, ...keys: readonly string[]): readonly unknown[] {
@@ -278,6 +452,8 @@ function mapImportedMaterial(
 export class CoreGovernanceClient implements GovernanceClient {
   private readonly baseUrl: string;
   private readonly token: string;
+  private readonly taskRuntimeToken: string | undefined;
+  private readonly taskId: string | undefined;
   private readonly projectId: string;
   private readonly processInstanceId: string | undefined;
   private readonly fetchImpl: typeof fetch;
@@ -286,6 +462,8 @@ export class CoreGovernanceClient implements GovernanceClient {
   constructor(config: CoreGovernanceConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.token = config.token;
+    this.taskRuntimeToken = config.taskRuntimeToken?.trim() || undefined;
+    this.taskId = config.taskId?.trim() || undefined;
     this.projectId = config.projectId;
     this.processInstanceId = config.processInstanceId;
     this.fetchImpl = config.fetchImpl ?? fetch;
@@ -388,7 +566,7 @@ export class CoreGovernanceClient implements GovernanceClient {
   async createSnapshot(input: {
     memberRevisionIds: readonly string[];
     toolModelPolicyHash: string;
-  }): Promise<{ snapshotId: string }> {
+  }): Promise<{ snapshotId: string; manifestHash: string }> {
     const snapshotId = `snap_${randomUUID()}`;
     const body = {
       id: snapshotId,
@@ -400,8 +578,19 @@ export class CoreGovernanceClient implements GovernanceClient {
       `/api/v1/projects/${this.projectId}/snapshots`,
       body,
       `snap-${snapshotId}`,
-    ) as { id: string };
-    return { snapshotId: data.id };
+    );
+    const row = asRecord(data);
+    const returnedId = row?.id;
+    const manifestHash = row?.manifestHash;
+    if (typeof returnedId !== "string" || returnedId.length === 0 || typeof manifestHash !== "string" || !LOWER_SHA256_PATTERN.test(manifestHash)) {
+      throw new GovernanceError(
+        "Core returned an invalid configuration snapshot identity",
+        "SNAPSHOT_RESPONSE_INVALID",
+        502,
+        false,
+      );
+    }
+    return { snapshotId: returnedId, manifestHash };
   }
 
   async createGateSubmission(input: {
@@ -444,6 +633,37 @@ export class CoreGovernanceClient implements GovernanceClient {
   }
 
   // ----- read-only queries (project status snapshot) -----
+
+  async getProcessProfile(processVersionId: string): Promise<ProcessProfileV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(processVersionId)) {
+      throw new GovernanceError("processVersionId is invalid", "validation", 400, false);
+    }
+    const data = await this.request(
+      "GET",
+      `/api/v1/process-versions/${encodeURIComponent(processVersionId)}/profile`,
+    );
+    try {
+      return parseProcessProfile(data, processVersionId);
+    } catch (error) {
+      if (error instanceof ProcessProfileValidationError) {
+        throw new GovernanceError(error.message, error.code, 502, false);
+      }
+      throw error;
+    }
+  }
+
+  async getProcessState(projectId: string): Promise<ProcessStateV1> {
+    if (projectId !== this.projectId) {
+      throw new GovernanceError(
+        `governance client for ${this.projectId} cannot query process state for ${projectId}`,
+        "PROJECT_OWNERSHIP_MISMATCH",
+        403,
+        false,
+      );
+    }
+    const data = await this.request("GET", `/api/v1/projects/${projectId}/process-state`);
+    return parseProcessState(data, projectId);
+  }
 
   async getProjectInfo(projectId: string): Promise<ProjectInfo> {
     const data = asRecord(await this.request("GET", `/api/v1/projects/${projectId}`)) ?? {};
@@ -662,6 +882,233 @@ export class CoreGovernanceClient implements GovernanceClient {
     return query.limit === undefined ? rows : rows.slice(0, query.limit);
   }
 
+  // ----- P4 readiness, formal input, formal runs, evidence and evaluation -----
+
+  async prepareReadiness(input: {
+    id: string;
+    workVersionId: string;
+    engineeringConfig: Readonly<Record<string, unknown>>;
+    sourceSnapshotIds: readonly string[];
+    workspaceExpectedCommit: string;
+    workspaceManifestHash: string;
+    reason: string;
+  }): Promise<ProjectReadinessRecordV1> {
+    const body = {
+      id: input.id,
+      work_version_id: input.workVersionId,
+      engineering_config: input.engineeringConfig,
+      source_snapshot_ids: [...input.sourceSnapshotIds],
+      workspace_expected_commit: input.workspaceExpectedCommit,
+      workspace_manifest_hash: input.workspaceManifestHash,
+      reason: input.reason,
+    };
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/readiness`,
+      body,
+      `readiness-${input.id}-${hashPayload(body).slice(0, 24)}`,
+    );
+    return parseProjectReadinessRecord(data, this.projectId);
+  }
+
+  async confirmReadiness(id: string, reason: string): Promise<ProjectReadinessRecordV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(id)) throw new GovernanceError("readiness id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/readiness/${encodeURIComponent(id)}/confirm`,
+      { reason },
+      `confirm-readiness-${id}`,
+    );
+    return parseProjectReadinessRecord(data, this.projectId);
+  }
+
+  async listReadiness(): Promise<readonly ProjectReadinessRecordV1[]> {
+    const data = await this.request("GET", `/api/v1/projects/${this.projectId}/readiness`);
+    if (!Array.isArray(data)) throw new GovernanceError("Core returned an invalid readiness list", "FORMAL_FLOW_RESPONSE_INVALID", 502, false);
+    return data.map((row) => parseProjectReadinessRecord(row, this.projectId));
+  }
+
+  async previewFormalInput(input: {
+    workVersionId: string;
+    snapshotId: string;
+    readinessId: string;
+    authorizedTaskId: string;
+  }): Promise<FormalInputPreviewV1> {
+    const body = {
+      work_version_id: input.workVersionId,
+      snapshot_id: input.snapshotId,
+      readiness_id: input.readinessId,
+      authorized_task_id: input.authorizedTaskId,
+    };
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/formal-input-approvals/preview`,
+      body,
+      `formal-preview-${hashPayload(body).slice(0, 40)}`,
+    );
+    return parseFormalInputPreview(data);
+  }
+
+  async confirmFormalInput(input: {
+    id: string;
+    workVersionId: string;
+    snapshotId: string;
+    readinessId: string;
+    authorizedTaskId: string;
+    purpose: "g4_delivery";
+    previewHash: string;
+  }): Promise<FormalInputApprovalV1> {
+    const body = {
+      id: input.id,
+      work_version_id: input.workVersionId,
+      snapshot_id: input.snapshotId,
+      readiness_id: input.readinessId,
+      authorized_task_id: input.authorizedTaskId,
+      purpose: input.purpose,
+      preview_hash: input.previewHash,
+    };
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/formal-input-approvals`,
+      body,
+      `formal-confirm-${input.id}`,
+    );
+    return parseFormalInputApproval(data);
+  }
+
+  async getFormalInputApproval(id: string): Promise<FormalInputApprovalV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(id)) throw new GovernanceError("formal input approval id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/formal-input-approvals/${encodeURIComponent(id)}`,
+    );
+    return parseFormalInputApproval(data);
+  }
+
+  async submitFormalJob(
+    operation: FormalG4Operation,
+    formalInputApprovalId: string,
+    idempotencyKey: string,
+  ): Promise<FormalJobBindingV1> {
+    if (!this.taskRuntimeToken) {
+      throw new FormalFlowError(
+        "formal Job submit requires SYNTHIA_TASK_RUNTIME_TOKEN with singleton core:task-runtime scope",
+        "TASK_RUNTIME_TOKEN_REQUIRED",
+      );
+    }
+    if (!this.taskId || !SAFE_CORE_ID_PATTERN.test(this.taskId)) {
+      throw new FormalFlowError(
+        "formal Job submit requires the Core-issued main task id",
+        "TASK_RUNTIME_TASK_ID_REQUIRED",
+      );
+    }
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/jobs`,
+      {
+        operation,
+        run_class_intent: "formal",
+        formal_input_approval_id: formalInputApprovalId,
+      },
+      idempotencyKey,
+      this.taskRuntimeToken,
+      this.taskId,
+    );
+    return parseFormalJobBinding(data);
+  }
+
+  async getFormalJob(jobId: string): Promise<FormalJobBindingV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(jobId)) throw new GovernanceError("job id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/jobs/${encodeURIComponent(jobId)}`,
+    );
+    return parseFormalJobBinding(data);
+  }
+
+  async freezeFormalEvidence(
+    jobId: string,
+    idempotencyKey: string,
+    manifestHash?: string,
+  ): Promise<FrozenEvidenceManifestV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(jobId)) throw new GovernanceError("job id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/jobs/${encodeURIComponent(jobId)}/evidence/freeze`,
+      manifestHash === undefined ? {} : { manifest_hash: manifestHash },
+      idempotencyKey,
+    );
+    return parseFrozenEvidenceManifest(data, this.projectId);
+  }
+
+  async getFormalEvidence(jobId: string): Promise<FrozenEvidenceManifestV1> {
+    if (!SAFE_CORE_ID_PATTERN.test(jobId)) throw new GovernanceError("job id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/jobs/${encodeURIComponent(jobId)}/evidence`,
+    );
+    return parseFrozenEvidenceManifest(data, this.projectId);
+  }
+
+  async createGateEvaluation(input: {
+    submissionId: string;
+    evaluationId: string;
+    workVersionId: string;
+    expectedSnapshotManifestHash: string;
+  }): Promise<GateEvaluationV1> {
+    const body = {
+      evaluation_id: input.evaluationId,
+      work_version_id: input.workVersionId,
+      expected_snapshot_manifest_hash: input.expectedSnapshotManifestHash,
+    };
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/gate-submissions/${encodeURIComponent(input.submissionId)}/evaluations`,
+      body,
+      `gate-evaluation-${input.evaluationId}`,
+    );
+    return parseGateEvaluation(data, this.projectId);
+  }
+
+  async listGateEvaluations(submissionId: string): Promise<readonly GateEvaluationV1[]> {
+    if (!SAFE_CORE_ID_PATTERN.test(submissionId)) throw new GovernanceError("submission id is invalid", "validation", 400, false);
+    const data = await this.request(
+      "GET",
+      `/api/v1/projects/${this.projectId}/gate-submissions/${encodeURIComponent(submissionId)}/evaluations`,
+    );
+    if (!Array.isArray(data)) throw new GovernanceError("Core returned an invalid evaluation list", "FORMAL_FLOW_RESPONSE_INVALID", 502, false);
+    return data.map((row) => parseGateEvaluation(row, this.projectId));
+  }
+
+  async submitEvaluatedGate(input: {
+    submissionId: string;
+    evaluationId: string;
+    resultHash: string;
+  }): Promise<EvaluatedGateSubmissionV1> {
+    const data = await this.request(
+      "POST",
+      `/api/v1/projects/${this.projectId}/gate-submissions/${encodeURIComponent(input.submissionId)}/submit`,
+      {
+        gate_check_evaluation_id: input.evaluationId,
+        check_results_hash: input.resultHash,
+      },
+      `submit-evaluated-gate-${input.submissionId}-${input.evaluationId}`,
+    );
+    return parseEvaluatedGateSubmission(data, this.projectId);
+  }
+
+  async listBitstreams(): Promise<readonly BitstreamResultV1[]> {
+    const data = await this.request("GET", `/api/v1/projects/${this.projectId}/bitstreams`);
+    if (!Array.isArray(data)) throw new GovernanceError("Core returned an invalid bitstream list", "FORMAL_FLOW_RESPONSE_INVALID", 502, false);
+    return data.map((row) => parseBitstreamResult(row, this.projectId));
+  }
+
+  async listDeliveryReleases(): Promise<readonly DeliveryReleaseV1[]> {
+    const data = await this.request("GET", `/api/v1/projects/${this.projectId}/delivery-releases`);
+    if (!Array.isArray(data)) throw new GovernanceError("Core returned an invalid delivery release list", "FORMAL_FLOW_RESPONSE_INVALID", 502, false);
+    return data.map((row) => parseDeliveryRelease(row, this.projectId));
+  }
+
   // ----- internals -----
 
   private async request(
@@ -669,11 +1116,13 @@ export class CoreGovernanceClient implements GovernanceClient {
     path: string,
     body?: unknown,
     idempotencyKey?: string,
+    authorizationToken?: string,
+    taskId?: string,
   ): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const init = this.buildInit(method, body, idempotencyKey);
+        const init = this.buildInit(method, body, idempotencyKey, authorizationToken, taskId);
         const res = await this.fetchImpl(url, init);
         const text = await res.text();
         let json: unknown;
@@ -711,8 +1160,15 @@ export class CoreGovernanceClient implements GovernanceClient {
     throw new GovernanceError("request failed after retry", "request_failed", 0, false);
   }
 
-  private buildInit(method: HttpMethod, body: unknown, idempotencyKey?: string): RequestInit {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+  private buildInit(
+    method: HttpMethod,
+    body: unknown,
+    idempotencyKey?: string,
+    authorizationToken = this.token,
+    taskId?: string,
+  ): RequestInit {
+    const headers: Record<string, string> = { Authorization: `Bearer ${authorizationToken}` };
+    if (taskId) headers["X-Synthia-Task-Id"] = taskId;
     if (method !== "GET") {
       headers["Content-Type"] = "application/json";
       if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
@@ -742,7 +1198,7 @@ export class MockGovernanceClient implements GovernanceClient {
     revisionId: string;
     version: number;
   }> = [];
-  readonly snapshots: Array<{ snapshotId: string; memberRevisionIds: readonly string[]; toolModelPolicyHash: string }> = [];
+  readonly snapshots: Array<{ snapshotId: string; manifestHash: string; memberRevisionIds: readonly string[]; toolModelPolicyHash: string }> = [];
   readonly submissions: Array<{ submissionId: string; processInstanceId: string; gate: GateId; snapshotId: string }> = [];
   /** Seedable P2 rows returned by the default historical-material search. */
   importedMaterials: ImportedMaterialSummary[] = [];
@@ -918,10 +1374,15 @@ export class MockGovernanceClient implements GovernanceClient {
   async createSnapshot(input: {
     memberRevisionIds: readonly string[];
     toolModelPolicyHash: string;
-  }): Promise<{ snapshotId: string }> {
+  }): Promise<{ snapshotId: string; manifestHash: string }> {
     const snapshotId = this.nextId("snap");
-    this.snapshots.push({ snapshotId, memberRevisionIds: [...input.memberRevisionIds], toolModelPolicyHash: input.toolModelPolicyHash });
-    return { snapshotId };
+    const members = input.memberRevisionIds.map((id) => ({
+      id,
+      sha256: this.registeredArtifacts.find((artifact) => artifact.revisionId === id)?.contentHash ?? sha256Hex(`mock-missing:${id}`),
+    }));
+    const manifestHash = computeManifestHash(members);
+    this.snapshots.push({ snapshotId, manifestHash, memberRevisionIds: [...input.memberRevisionIds], toolModelPolicyHash: input.toolModelPolicyHash });
+    return { snapshotId, manifestHash };
   }
 
   async createGateSubmission(input: {
@@ -947,6 +1408,43 @@ export class MockGovernanceClient implements GovernanceClient {
 
   // ----- read-only queries (derived from recorded state) -----
 
+  async getProcessProfile(processVersionId: string): Promise<ProcessProfileV1> {
+    return parseProcessProfile(structuredClone(GJB_REF_V1_PROFILE), processVersionId);
+  }
+
+  async getProcessState(projectId: string): Promise<ProcessStateV1> {
+    const processInstanceId = this.submissions[0]?.processInstanceId ?? `pi-mock-${projectId}`;
+    return {
+      schema: "process-state.v1",
+      projectId,
+      processInstanceId,
+      workVersionId: `wv-mock-${projectId}`,
+      profileId: "GJB_REF_V1",
+      profileHash: GJB_REF_V1_PROFILE.profileHash,
+      currentGate: "G0",
+      completed: false,
+      readiness: {
+        id: `readiness-mock-${projectId}`,
+        status: "confirmed",
+        ready: true,
+        readinessHash: sha256Hex(`readiness-mock:${projectId}`),
+        targetPart: "mock-unverified",
+        boardRef: "mock-unverified",
+        workspaceReady: true,
+        dataScopeRecorded: true,
+        sourceMaterialsRecorded: true,
+        pinConstraintsComplete: false,
+        electricalConstraintsComplete: false,
+        clockConstraintsComplete: false,
+        constraintsComplete: false,
+        toolchainProfileHash: sha256Hex("toolchain-mock"),
+        constraintRevisionIds: [],
+        generatedBy: { type: "runtime", id: "mock-governance" },
+        confirmedBy: { id: "developer-mock", at: "1970-01-01T00:00:00.000Z" },
+      },
+    };
+  }
+
   async getProjectInfo(projectId: string): Promise<ProjectInfo> {
     const piIds = new Set(this.submissions.map((s) => s.processInstanceId));
     return {
@@ -960,7 +1458,7 @@ export class MockGovernanceClient implements GovernanceClient {
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
       processProfileId: "GJB_REF_V1",
-      processProfileName: "GJB reference flow",
+      processProfileName: GJB_REF_V1_PROFILE.name,
       processProfileVersion: "GJB_REF_V1",
       processInstances: [...piIds].map((id) => ({ id, currentGate: "", gateProfileVersion: "" })),
     };
