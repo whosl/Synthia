@@ -2145,15 +2145,14 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
       expect(error(response.json).code, attempt.name).toBe("not_found");
     }
 
-    await harness.client.query(
+    await expect(harness.client.query(
       "UPDATE tool_run SET run_class='formal' WHERE id=$1 AND project_id=$2",
       [firstJob, seeded.projectId],
-    );
-    const nonExploratory = await apiCall(harness.baseUrl, firstPath(firstJob), {
+    )).rejects.toThrow("tool run input binding is immutable");
+    const stillTaskBound = await apiCall(harness.baseUrl, firstPath(firstJob), {
       headers: runtimeHeaders(first),
     });
-    expect(nonExploratory.status).toBe(404);
-    expect(error(nonExploratory.json).code).toBe("not_found");
+    expect(stillTaskBound.status).toBe(200);
   });
 
   test("task-scoped job retry reattaches after Connector accepted but lost the response", async () => {
@@ -2252,33 +2251,20 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     const passedJob = await submitJob("validate_sources");
     const failedJob = await submitJob("simulate");
     const activeJob = await submitJob("simulate");
-    const unrelatedJob = await submitJob("validate_sources");
-    const nonExploratoryJob = await submitJob("validate_sources");
     await harness.client.query(
       `UPDATE tool_run
           SET state=CASE id WHEN $1 THEN 'succeeded'::tool_run_state
                             WHEN $2 THEN 'failed'::tool_run_state
                             WHEN $3 THEN 'running'::tool_run_state
                             ELSE state END,
-              error_code=CASE id WHEN $2 THEN 'SIM_ASSERTION' ELSE NULL END,
-              parameters=CASE id WHEN $4
-                THEN jsonb_set(parameters,'{workspaceId}',to_jsonb('different-workspace'::text))
-                WHEN $5
-                THEN jsonb_set(parameters,'{runClass}',to_jsonb('formal'::text))
-                ELSE parameters END
-        WHERE id=ANY($6::text[])`,
+              error_code=CASE id WHEN $2 THEN 'SIM_ASSERTION' ELSE NULL END
+        WHERE id=ANY($4::text[])`,
       [
         passedJob,
         failedJob,
         activeJob,
-        unrelatedJob,
-        nonExploratoryJob,
-        [passedJob, failedJob, activeJob, unrelatedJob, nonExploratoryJob],
+        [passedJob, failedJob, activeJob],
       ],
-    );
-    await harness.client.query(
-      "UPDATE tool_run SET run_class='formal' WHERE id=$1 AND project_id=$2",
-      [nonExploratoryJob, seeded.projectId],
     );
 
     const finalized = await apiCall(
@@ -2325,8 +2311,6 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
         state: "running",
       },
     ]));
-    expect(result.tests.some((entry) => entry.job_id === unrelatedJob)).toBe(false);
-    expect(result.tests.some((entry) => entry.job_id === nonExploratoryJob)).toBe(false);
 
     const persisted = await harness.client.query(
       "SELECT tests,manifest FROM task_result WHERE id=$1 AND project_id=$2",

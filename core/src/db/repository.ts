@@ -51,11 +51,12 @@ export async function transitionRevisionState(
 export async function createSnapshot(client: Client, snap: ConfigurationSnapshot): Promise<void> {
   await client.query(
     `INSERT INTO configuration_snapshot
-       (id, project_id, member_revision_ids, trace_relation_ids,
+       (id, project_id, work_version_id, member_revision_ids, trace_relation_ids,
         gate_profile_version, tool_model_policy_hash, manifest_hash, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [snap.id, snap.projectId, snap.memberRevisionIds, snap.traceRelationIds,
-     snap.gateProfileVersion, snap.toolModelPolicyHash, snap.manifestHash, snap.createdBy],
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [snap.id, snap.projectId, snap.workVersionId ?? null,
+     snap.memberRevisionIds, snap.traceRelationIds, snap.gateProfileVersion,
+     snap.toolModelPolicyHash, snap.manifestHash, snap.createdBy],
   );
 }
 
@@ -68,6 +69,7 @@ export async function getSnapshot(client: Client, id: string): Promise<Configura
   const r = rows[0];
   return {
     id: r.id, projectId: r.project_id,
+    workVersionId: r.work_version_id ?? null,
     memberRevisionIds: r.member_revision_ids,
     traceRelationIds: r.trace_relation_ids,
     gateProfileVersion: r.gate_profile_version,

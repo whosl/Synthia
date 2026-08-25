@@ -774,17 +774,18 @@ describe("RemoteConnectorAdapter — lease reconnect + parameters mapping", () =
     runClass: "exploratory",
     idempotencyKey: "key-1",
     correlationId: "corr-1",
+    inputHash: "b".repeat(64),
     actor: { actorType: "service", actorId: "core" },
     parameters: { sources: [{ path: "top.v", content: "module top; endmodule" }], top: "top", part: "xc7k70t", constraints: [] },
     ...overrides,
   });
 
-  test("submitJob maps parameters correctly: input=manifest:jobId, parameters repeats operation/jobId/projectId/runClass + sources", async () => {
+  test("submitJob sends the canonical input hash and repeats the execution binding in parameters", async () => {
     const mock = new MockRemoteClient();
     const adapter = makeAdapter(mock);
     await adapter.submitJob(baseParams());
     expect(mock.submitCalls).toBe(1);
-    expect(mock.lastRequest!.input).toBe("manifest:job-test-1");
+    expect(mock.lastRequest!.input).toBe("b".repeat(64));
     const params = mock.lastRequest!.parameters as Record<string, unknown>;
     expect(params.operation).toBe("synthesize");
     expect(params.jobId).toBe("job-test-1");

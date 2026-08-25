@@ -10,6 +10,8 @@ export interface CoreFeatureFlags {
   readonly historicalMaterials: boolean;
   /** P3 side-task workspaces and adoption writes. */
   readonly sideTasks: boolean;
+  /** P4 formal G0-G4 execution, bitstream classification, and delivery writes. */
+  readonly formalDelivery: boolean;
 }
 
 export interface CoreFeatureFlagOptions {
@@ -22,6 +24,7 @@ export interface CoreFeatureFlagOptions {
 export const DISABLED_CORE_FEATURE_FLAGS: CoreFeatureFlags = Object.freeze({
   historicalMaterials: false,
   sideTasks: false,
+  formalDelivery: false,
 });
 
 /** Parse a boolean environment flag without accepting ambiguous spellings. */
@@ -50,5 +53,13 @@ export function resolveCoreFeatureFlags(options: CoreFeatureFlagOptions = {}): C
     "SYNTHIA_FEATURE_SIDE_TASKS",
     (options.env ?? process.env).SYNTHIA_FEATURE_SIDE_TASKS,
   );
-  return Object.freeze({ historicalMaterials, sideTasks });
+  const injectedFormalDelivery = options.features?.formalDelivery;
+  if (injectedFormalDelivery !== undefined && typeof injectedFormalDelivery !== "boolean") {
+    throw new TypeError("features.formalDelivery must be a boolean");
+  }
+  const formalDelivery = injectedFormalDelivery ?? parseBooleanFeatureFlag(
+    "SYNTHIA_FEATURE_FORMAL_DELIVERY",
+    (options.env ?? process.env).SYNTHIA_FEATURE_FORMAL_DELIVERY,
+  );
+  return Object.freeze({ historicalMaterials, sideTasks, formalDelivery });
 }

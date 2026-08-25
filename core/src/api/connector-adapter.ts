@@ -24,6 +24,7 @@ import {
   type ConnectorJobSnapshot,
   type ConnectorPort,
   type EvidenceContent,
+  type EvidenceContentOptions,
   type EvidenceManifest,
   type SubmitJobParams,
 } from "./connector-port.ts";
@@ -84,6 +85,7 @@ interface RemoteEvidenceManifest {
  *  (POST /jobs/evidence/content response). Does not echo `name` back. */
 interface RemoteEvidenceContent {
   content: string;
+  bytes?: Uint8Array;
   sha256: string;
   truncated: boolean;
   mediaType: string;
@@ -111,7 +113,11 @@ interface RemoteClientLike {
   submit(req: RemoteJobRequest, approval?: RemoteApproval): Promise<RemoteJob>;
   status(id: string): Promise<RemoteJob>;
   evidence(id: string): Promise<RemoteEvidenceManifest>;
-  fetchEvidenceContent(id: string, name: string): Promise<RemoteEvidenceContent>;
+  fetchEvidenceContent(
+    id: string,
+    name: string,
+    options?: { complete?: boolean },
+  ): Promise<RemoteEvidenceContent>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
 }
@@ -166,8 +172,12 @@ function buildRemoteParameters(params: SubmitJobParams): Record<string, unknown>
     jobId: params.jobId,
     projectId: params.projectId,
     runClass: params.runClass,
+    inputHash: params.inputHash,
     sources: p.sources,
   };
+  if (params.toolchainProfileHash !== undefined) {
+    base.toolchainHash = params.toolchainProfileHash;
+  }
   if (p.top !== undefined) base.top = p.top;
   if (p.part !== undefined) base.part = p.part;
   if (p.testbench !== undefined) base.testbench = p.testbench;
@@ -337,7 +347,11 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       if (client.hasCapabilityDrift) {
         throw new ConnectorError("CAPABILITY_DRIFT", "capability drift detected during discover", false);
       }
-      return { capabilities: d.capabilities, drift: false };
+      return {
+        capabilities: d.capabilities,
+        drift: false,
+        toolchainProfileHash: d.toolchain_profile_hash,
+      };
     });
   }
 
@@ -349,7 +363,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
         projectId: params.projectId,
         operation: params.operation,
         runClass: params.runClass,
-        input: `manifest:${params.jobId}`,
+        input: params.inputHash,
         correlationId: params.correlationId,
         parameters: buildRemoteParameters(params),
       };
@@ -372,10 +386,24 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     });
   }
 
-  async fetchEvidenceContent(projectId: string, jobId: string, name: string): Promise<EvidenceContent> {
+  async fetchEvidenceContent(
+    projectId: string,
+    jobId: string,
+    name: string,
+    options?: EvidenceContentOptions,
+  ): Promise<EvidenceContent> {
     return this.withClient(projectId, async (client) => {
-      const c = await client.fetchEvidenceContent(jobId, name);
-      return { name, content: c.content, sha256: c.sha256, truncated: c.truncated, mediaType: c.mediaType };
+      const c = await client.fetchEvidenceContent(jobId, name, {
+        complete: options?.requireFull === true,
+      });
+      return {
+        name,
+        content: c.content,
+        ...(c.bytes ? { bytes: c.bytes } : {}),
+        sha256: c.sha256,
+        truncated: c.truncated,
+        mediaType: c.mediaType,
+      };
     });
   }
 }

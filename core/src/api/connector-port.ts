@@ -13,6 +13,10 @@
 
 import type { RunClass, ToolRunState } from "../domain/enums.ts";
 
+export const MAX_EVIDENCE_ENTRY_BYTES = 64 * 1024 * 1024;
+export const MAX_EVIDENCE_ENTRIES = 64;
+export const MAX_EVIDENCE_TOTAL_BYTES = 128 * 1024 * 1024;
+
 // ─── submission input ────────────────────────────────────────────────────────
 
 /** A source or constraint file attached to a Job submission. */
@@ -50,6 +54,14 @@ export interface SubmitJobParams {
   readonly runClass: RunClass;
   readonly idempotencyKey: string;
   readonly correlationId: string;
+  /**
+   * Canonical input digest sent verbatim to the Connector. For P4 formal runs
+   * this is the confirmed formal-input.v1 hash; it must never be replaced by
+   * a job-id placeholder.
+   */
+  readonly inputHash: string;
+  /** Frozen discovery identity; mandatory for P4 formal runs. */
+  readonly toolchainProfileHash?: string;
   readonly actor: { readonly actorType: string; readonly actorId: string };
   readonly parameters: JobParameters;
   /** Authorization context for gate_check/formal runs (undefined for exploratory). */
@@ -84,6 +96,8 @@ export interface EvidenceContent {
   readonly name: string;
   /** UTF-8 decoded content (may be truncated for large artifacts). */
   readonly content: string;
+  /** Exact decoded bytes when the Connector supports binary-safe retrieval. */
+  readonly bytes?: Uint8Array;
   readonly sha256: string;
   readonly truncated: boolean;
   readonly mediaType: string;
@@ -98,6 +112,13 @@ export interface DiscoveredCapability {
 export interface ConnectorDiscovery {
   readonly capabilities: readonly DiscoveredCapability[];
   readonly drift: boolean;
+  /** Immutable toolchain identity returned by Connector discovery. */
+  readonly toolchainProfileHash?: string;
+}
+
+export interface EvidenceContentOptions {
+  /** Request the complete artifact bytes instead of the UI preview window. */
+  readonly requireFull?: boolean;
 }
 
 // ─── port ────────────────────────────────────────────────────────────────────
@@ -118,7 +139,12 @@ export interface ConnectorPort {
   /** Fetch the frozen evidence manifest for a terminal Job. */
   fetchEvidence(projectId: string, jobId: string): Promise<EvidenceManifest>;
   /** Fetch the decoded content of a single evidence artifact for a terminal Job. */
-  fetchEvidenceContent(projectId: string, jobId: string, name: string): Promise<EvidenceContent>;
+  fetchEvidenceContent(
+    projectId: string,
+    jobId: string,
+    name: string,
+    options?: EvidenceContentOptions,
+  ): Promise<EvidenceContent>;
 }
 
 // ─── error model ─────────────────────────────────────────────────────────────

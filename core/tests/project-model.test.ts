@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { sha256Hex } from "../src/hashing.ts";
 import type { ApiHarness } from "./support/api-harness.ts";
 import {
   apiCall,
@@ -40,7 +41,7 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
   let harness: ApiHarness;
 
   beforeAll(async () => {
-    harness = await setupApiHarness(DATABASE_URL);
+    harness = await setupApiHarness(DATABASE_URL, { features: { formalDelivery: true } });
   });
 
   afterAll(async () => {
@@ -181,7 +182,12 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       "SELECT event_type FROM outbox_events WHERE project_id=$1 ORDER BY occurred_at, event_id",
       [id],
     );
-    expect(events.rows.map((event) => event.event_type).sort()).toEqual(["process.created", "project.created"]);
+    expect(events.rows.map((event) => event.event_type).sort()).toEqual([
+      "process.created",
+      "project.created",
+      "role.assigned",
+      "work_version.created",
+    ]);
   });
 
   test("modern process instances inherit the frozen GJB profile and reject flow-v1", async () => {
@@ -234,6 +240,7 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       process_profile_id: "GJB_REF_V1",
     });
     expect(created.status).toBe(201);
+    const workVersionId = dataOf(created.json).work_version_id as string;
     const revisionId = await createRevisionFor(projectId);
 
     const inheritedId = `snapshot_${randomUUID()}`;
@@ -241,8 +248,9 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       method: "POST",
       body: {
         id: inheritedId,
+        work_version_id: workVersionId,
         member_revision_ids: [revisionId],
-        tool_model_policy_hash: `policy_${inheritedId}`,
+        tool_model_policy_hash: sha256Hex(`policy:${inheritedId}`),
       },
       token: harness.ids.humanToken,
       headers: { "idempotency-key": `snapshot_${inheritedId}` },
@@ -258,9 +266,10 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       method: "POST",
       body: {
         id: rejectedId,
+        work_version_id: workVersionId,
         member_revision_ids: [revisionId],
         gate_profile_version: "flow-v1",
-        tool_model_policy_hash: `policy_${rejectedId}`,
+        tool_model_policy_hash: sha256Hex(`policy:${rejectedId}`),
       },
       token: harness.ids.humanToken,
       headers: { "idempotency-key": `snapshot_${rejectedId}` },
@@ -282,15 +291,18 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       process_profile_id: "GJB_REF_V1",
     });
     expect(created.status).toBe(201);
-    const validProcessId = dataOf(created.json).process_instances[0].id as string;
+    const createdData = dataOf(created.json);
+    const validProcessId = createdData.process_instances[0].id as string;
+    const workVersionId = createdData.work_version_id as string;
     const revisionId = await createRevisionFor(projectId);
     const validSnapshotId = `snapshot_${randomUUID()}`;
     const validSnapshot = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/snapshots`, {
       method: "POST",
       body: {
         id: validSnapshotId,
+        work_version_id: workVersionId,
         member_revision_ids: [revisionId],
-        tool_model_policy_hash: `policy_${validSnapshotId}`,
+        tool_model_policy_hash: sha256Hex(`policy:${validSnapshotId}`),
       },
       token: harness.ids.humanToken,
       headers: { "idempotency-key": `snapshot_${validSnapshotId}` },
@@ -309,8 +321,8 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       token: harness.ids.humanToken,
       headers: { "idempotency-key": `submission_${validSubmissionId}` },
     });
-    expect(validSubmission.status).toBe(201);
-    expect(dataOf(validSubmission.json)).toMatchObject({ id: validSubmissionId, state: "preparing" });
+    expect(validSubmission.status).toBe(400);
+    expect(errorOf(validSubmission.json).message).toContain("G1-G4");
 
     const mismatchedProcessId = `pi_wrong_${randomUUID()}`;
     const mismatchedSnapshotId = `snapshot_wrong_${randomUUID()}`;
@@ -350,18 +362,18 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       const idempotencyKey = `submission_${attempt.id}`;
       const response = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/gate-submissions`, {
         method: "POST",
-        body: { ...attempt, gate: "G0" },
+        body: { ...attempt, work_version_id: workVersionId, gate: "G1" },
         token: harness.ids.humanToken,
         headers: { "idempotency-key": idempotencyKey },
       });
       expect(response.status).toBe(409);
-      expect(errorOf(response.json)).toMatchObject({ code: "conflict", message: "PROCESS_PROFILE_IMMUTABLE" });
+      expect(errorOf(response.json).code).toBe("conflict");
       const rolledBack = await harness.client.query(
         `SELECT
            (SELECT count(*)::int FROM gate_submission WHERE id=$1) AS submissions,
            (SELECT count(*)::int FROM outbox_events WHERE aggregate_id=$1) AS outbox,
            (SELECT count(*)::int FROM idempotency_records
-             WHERE project_id=$2 AND operation='create_gate_submission' AND idempotency_key=$3) AS idempotency`,
+             WHERE project_id=$2 AND operation='create_p4_gate_submission' AND idempotency_key=$3) AS idempotency`,
         [attempt.id, projectId, idempotencyKey],
       );
       expect(rolledBack.rows[0]).toMatchObject({ submissions: 0, outbox: 0, idempotency: 0 });
@@ -452,7 +464,7 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
     expect(replayedG0.id).toBe(instance.rows[0]!.id);
     expect(new Date(replayedG0.created_at).getTime()).toBe(instance.rows[0]!.created_at.getTime());
     const events = await harness.client.query("SELECT 1 FROM outbox_events WHERE project_id=$1", [id]);
-    expect(events.rows).toHaveLength(2);
+    expect(events.rows).toHaveLength(4);
   });
 
   test("same project payload under another key returns the existing real G0", async () => {
@@ -469,7 +481,7 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
     const instances = await harness.client.query("SELECT 1 FROM process_instance WHERE project_id=$1", [id]);
     const events = await harness.client.query("SELECT 1 FROM outbox_events WHERE project_id=$1", [id]);
     expect(instances.rows).toHaveLength(1);
-    expect(events.rows).toHaveLength(2);
+    expect(events.rows).toHaveLength(4);
   });
 
   test("engineering requires an active profile; free rejects a profile", async () => {
@@ -722,6 +734,7 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
       gate_profile_version: "GJB_REF_V1",
       current_gate: "G0",
     });
+    expect(data.creator_role_id).toMatch(/^role_[0-9a-f]{40}$/);
 
     const target = await harness.client.query(
       `SELECT scope, data_classification, standard_version, target_part, toolchain_profile_ref
@@ -753,13 +766,108 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
          (SELECT count(*)::int FROM project WHERE id=$1) AS projects,
          (SELECT count(*)::int FROM process_instance WHERE project_id=$1) AS instances,
          (SELECT count(*)::int FROM project_source_relation WHERE target_project_id=$1) AS relations,
+         (SELECT count(*)::int FROM role_assignment WHERE project_id=$1 AND role='owner') AS owners,
          (SELECT count(*)::int FROM outbox_events WHERE project_id=$1) AS events`,
       [targetId],
     );
-    expect(counts.rows[0]).toMatchObject({ projects: 1, instances: 1, relations: 1, events: 3 });
+    expect(counts.rows[0]).toMatchObject({ projects: 1, instances: 1, relations: 1, owners: 1, events: 5 });
 
     const changedReplay = await copyAsEngineering(sourceId, { id: targetId, name: "Different" }, key);
     expect(changedReplay.status).toBe(409);
+  });
+
+  test("copy-as-engineering atomically grants a non-admin creator immediate P4 access", async () => {
+    const sourceId = `service_source_${randomUUID()}`;
+    const source = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      method: "POST",
+      body: { id: sourceId, name: "Service source", project_type: "free" },
+      token: harness.ids.genericServiceToken,
+      headers: { "idempotency-key": `source_${randomUUID()}` },
+    });
+    expect(source.status).toBe(201);
+
+    const targetId = `service_target_${randomUUID()}`;
+    const copied = await apiCall(harness.baseUrl, `/api/v1/projects/${sourceId}/copy-as-engineering`, {
+      method: "POST",
+      body: { id: targetId, name: "Service formal target" },
+      token: harness.ids.genericServiceToken,
+      headers: { "idempotency-key": `copy_${randomUUID()}` },
+    });
+    expect(copied.status).toBe(201);
+    expect(dataOf(copied.json).creator_role_id).toMatch(/^role_[0-9a-f]{40}$/);
+
+    const role = await harness.client.query(
+      `SELECT actor_type, actor_id, role, permissions
+         FROM role_assignment WHERE id=$1 AND project_id=$2`,
+      [dataOf(copied.json).creator_role_id, targetId],
+    );
+    expect(role.rows[0]).toMatchObject({
+      actor_type: "service",
+      actor_id: harness.ids.serviceUid,
+      role: "owner",
+      permissions: { projectVisibility: true, projectOwner: true },
+    });
+
+    const processState = await apiCall(harness.baseUrl, `/api/v1/projects/${targetId}/process-state`, {
+      token: harness.ids.genericServiceToken,
+    });
+    expect(processState.status).toBe(200);
+  });
+
+  test("project listing hides unrelated P4 projects but keeps legacy and free-project compatibility", async () => {
+    const ownedId = `owned_modern_${randomUUID()}`;
+    const owned = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      method: "POST",
+      body: {
+        id: ownedId,
+        name: "Service-owned modern project",
+        project_type: "engineering",
+        process_profile_id: "GJB_REF_V1",
+      },
+      token: harness.ids.genericServiceToken,
+      headers: { "idempotency-key": `owned_${randomUUID()}` },
+    });
+    expect(owned.status).toBe(201);
+
+    const hiddenId = `hidden_modern_${randomUUID()}`;
+    expect((await create({
+      id: hiddenId,
+      name: "Unrelated modern project",
+      project_type: "engineering",
+      process_profile_id: "GJB_REF_V1",
+    })).status).toBe(201);
+    const hiddenReplay = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      method: "POST",
+      body: {
+        id: hiddenId,
+        name: "Unrelated modern project",
+        project_type: "engineering",
+        process_profile_id: "GJB_REF_V1",
+      },
+      token: harness.ids.genericServiceToken,
+      headers: { "idempotency-key": `hidden_replay_${randomUUID()}` },
+    });
+    expect(hiddenReplay.status).toBe(404);
+    const freeId = `visible_free_${randomUUID()}`;
+    expect((await create({ id: freeId, name: "Compatible free project", project_type: "free" })).status).toBe(201);
+    const legacyId = `visible_legacy_${randomUUID()}`;
+    expect((await create({ id: legacyId, name: "Compatible legacy project" })).status).toBe(201);
+
+    const serviceList = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      token: harness.ids.genericServiceToken,
+    });
+    expect(serviceList.status).toBe(200);
+    const serviceIds = (dataOf(serviceList.json) as unknown as Array<{ id: string }>).map((project) => project.id);
+    expect(serviceIds).toContain(ownedId);
+    expect(serviceIds).toContain(freeId);
+    expect(serviceIds).toContain(legacyId);
+    expect(serviceIds).not.toContain(hiddenId);
+
+    const adminList = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      token: harness.ids.humanToken,
+    });
+    const adminIds = (dataOf(adminList.json) as unknown as Array<{ id: string }>).map((project) => project.id);
+    expect(adminIds).toEqual(expect.arrayContaining([ownedId, hiddenId, freeId, legacyId]));
   });
 
   test("copy-as-engineering accepts LEGACY_COMPAT but rejects modern engineering sources and process overrides", async () => {

@@ -29,6 +29,7 @@ import {
   initRepo,
   isRepo,
   listTree,
+  listTreeEntries,
   recoverWorkspacePublish,
   showAt,
   statusMap,
@@ -144,6 +145,51 @@ export async function readAtLocation(projectId: string, location: string): Promi
   const dir = projectWorkspaceDir(validateProjectId(projectId));
   const bytes = await showAt(dir, parsed.commit, parsed.path);
   return bytes === null ? null : new TextDecoder().decode(bytes);
+}
+
+/**
+ * Read immutable input bytes only when a governed Git location names a regular
+ * file.  Formal delivery must distinguish an ordinary blob from a symlink
+ * (120000) or gitlink/submodule (160000); `git show` alone does not preserve
+ * that security-relevant distinction.  A syntactically valid Git location
+ * that no longer resolves is an integrity failure, not permission to fall back
+ * to a mutable database/worktree copy.
+ */
+export async function readRegularFileAtLocation(
+  projectId: string,
+  location: string,
+): Promise<Uint8Array | null> {
+  const parsed = parseGitLocation(location);
+  if (!parsed) return null;
+  const dir = projectWorkspaceDir(validateProjectId(projectId));
+  const entry = (await listTreeEntries(dir, parsed.commit))
+    .find((candidate) => candidate.path === parsed.path);
+  if (!entry) {
+    throw new WorkspaceError(
+      "CONTENT_HASH_MISMATCH",
+      `正式输入的 Git 位置无法解析：${parsed.path}`,
+      { commit: parsed.commit, path: parsed.path },
+    );
+  }
+  if (
+    entry.objectType !== "blob"
+    || (entry.mode !== "100644" && entry.mode !== "100755")
+  ) {
+    throw new WorkspaceError(
+      "WORKSPACE_PATH_INVALID",
+      `正式输入拒绝符号链接或 Git submodule：${parsed.path}`,
+      { commit: parsed.commit, path: parsed.path, mode: entry.mode, objectType: entry.objectType },
+    );
+  }
+  const bytes = await showAt(dir, parsed.commit, parsed.path);
+  if (bytes === null || entry.sizeBytes === null || bytes.byteLength !== entry.sizeBytes) {
+    throw new WorkspaceError(
+      "CONTENT_HASH_MISMATCH",
+      `正式输入的 Git 字节不可用：${parsed.path}`,
+      { commit: parsed.commit, path: parsed.path, expectedSize: entry.sizeBytes },
+    );
+  }
+  return bytes;
 }
 
 // ─── 状态 ────────────────────────────────────────────────────────────────────

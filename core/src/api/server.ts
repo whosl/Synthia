@@ -49,9 +49,9 @@ export interface SynthiaServerOptions {
    */
   readonly runtimeActorId?: string;
   /**
-   * Explicit Core feature overrides. P2/P3 writes default off; when omitted,
-   * SYNTHIA_FEATURE_HISTORICAL_MATERIALS and SYNTHIA_FEATURE_SIDE_TASKS are
-   * parsed strictly.
+   * Explicit Core feature overrides. P2/P3/P4 writes default off; when omitted,
+   * SYNTHIA_FEATURE_HISTORICAL_MATERIALS, SYNTHIA_FEATURE_SIDE_TASKS, and
+   * SYNTHIA_FEATURE_FORMAL_DELIVERY are parsed strictly.
    */
   readonly features?: Readonly<Partial<CoreFeatureFlags>>;
 }
@@ -79,8 +79,8 @@ export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}):
     ),
   });
   return {
-    port: server.port,
-    hostname: server.hostname,
+    port: server.port ?? (opts.port ?? 0),
+    hostname: server.hostname ?? (opts.hostname ?? "127.0.0.1"),
     stop: () => server.stop(true),
   };
 }

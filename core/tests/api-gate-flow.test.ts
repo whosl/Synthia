@@ -217,9 +217,10 @@ describe.skipIf(!DATABASE_URL)("gate flow — real PostgreSQL behavior", () => {
       const res = await apiCall(baseUrl, `/api/v1/projects/${g.projectId}/gate-submissions/${g.submissionId}`, { token: humanToken });
       expect(res.status).toBe(200);
       const data = envelopeData(res.json);
-      for (const field of ["id", "project_id", "process_instance_id", "gate", "snapshot_id", "state", "submitter_id", "check_results", "issues", "submitted_at", "created_at"]) {
+      for (const field of ["id", "project_id", "process_instance_id", "work_version_id", "gate", "snapshot_id", "state", "submitter_id", "check_results", "issues", "submitted_at", "created_at"]) {
         expect(field in data).toBe(true);
       }
+      expect(data.work_version_id).toBeNull();
       expect(data.state).toBe("in_review");
       expect(data.gate).toBe("G2");
     });

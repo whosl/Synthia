@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,6 +36,7 @@ import {
   listWorkspace,
   pendingChanges,
   readAtLocation,
+  readRegularFileAtLocation,
   readWorkingFile,
   writeAndCommit,
   writeWorkingFile,
@@ -172,6 +173,45 @@ describe("建区与读写", () => {
     const v2 = await writeAndCommit("p1", [{ path: "rtl/pwm.v", content: "v2\n" }], "v2", AUTHOR);
     expect(await readAtLocation("p1", formatGitLocation(v1.commit!, "rtl/pwm.v"))).toBe("v1\n");
     expect(await readAtLocation("p1", formatGitLocation(v2.commit!, "rtl/pwm.v"))).toBe("v2\n");
+  });
+
+  test("正式输入的 Git 读取只接受普通文件，拒绝 symlink 和 gitlink", async () => {
+    const regular = await writeAndCommit(
+      "p4-regular-input",
+      [{ path: "rtl/top.sv", content: "module top; endmodule\n" }],
+      "regular",
+      AUTHOR,
+    );
+    const regularBytes = await readRegularFileAtLocation(
+      "p4-regular-input",
+      formatGitLocation(regular.commit!, "rtl/top.sv"),
+    );
+    expect(regularBytes).not.toBeNull();
+    expect(new TextDecoder().decode(regularBytes!)).toBe("module top; endmodule\n");
+
+    const symlinkRoot = await ensureWorkspace("p4-symlink-input");
+    await writeFile(join(symlinkRoot, "rtl", "real.sv"), "module real; endmodule\n", "utf8");
+    await symlink("real.sv", join(symlinkRoot, "rtl", "top.sv"));
+    await git(symlinkRoot, ["add", "--", "rtl/real.sv", "rtl/top.sv"]);
+    await git(symlinkRoot, ["commit", "--no-verify", "--quiet", "-m", "symlink input"]);
+    await expect(readRegularFileAtLocation(
+      "p4-symlink-input",
+      formatGitLocation((await headSha(symlinkRoot))!, "rtl/top.sv"),
+    )).rejects.toThrow(/符号链接|submodule/);
+
+    const gitlinkRoot = await ensureWorkspace("p4-gitlink-input");
+    const targetCommit = (await headSha(gitlinkRoot))!;
+    await git(gitlinkRoot, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${targetCommit},rtl/vendor`,
+    ]);
+    await git(gitlinkRoot, ["commit", "--no-verify", "--quiet", "-m", "gitlink input"]);
+    await expect(readRegularFileAtLocation(
+      "p4-gitlink-input",
+      formatGitLocation((await headSha(gitlinkRoot))!, "rtl/vendor"),
+    )).rejects.toThrow(/符号链接|submodule/);
   });
 
   test("非 git scheme 或取不到的对象返回 null（调用方据此回落归档副本）", async () => {

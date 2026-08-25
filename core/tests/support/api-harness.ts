@@ -23,6 +23,18 @@ import { applyMigrations } from "./approval-harness.ts";
 
 /** Domain tables wiped per test (identity tables are intentionally NOT here). */
 const DOMAIN_TABLES = [
+  "delivery_release_item",
+  "delivery_release",
+  "change_request",
+  "bitstream_result",
+  "tool_run_evidence_entry",
+  "tool_run_evidence_manifest",
+  "gate_check_item",
+  "gate_check_evaluation",
+  "formal_input_approval",
+  "formal_input_content",
+  "project_readiness",
+  "project_work_version",
   "task_adoption_file",
   "task_adoption",
   "task_result",

@@ -103,6 +103,8 @@ export interface ArtifactRevision {
 export interface ConfigurationSnapshot {
   id: string;
   projectId: string;
+  /** P4 snapshots are owned by one active work version; legacy snapshots stay null. */
+  workVersionId?: string | null;
   memberRevisionIds: string[];   // frozen list of artifact revision IDs
   traceRelationIds: string[];    // frozen trace relation IDs
   gateProfileVersion: string;

@@ -6,28 +6,39 @@ import {
 
 describe("Core feature flags", () => {
   test("historical materials are explicit opt-in", () => {
-    expect(resolveCoreFeatureFlags({ env: {} })).toEqual({ historicalMaterials: false, sideTasks: false });
+    expect(resolveCoreFeatureFlags({ env: {} })).toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "" } }))
-      .toEqual({ historicalMaterials: false, sideTasks: false });
+      .toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "1" } }))
-      .toEqual({ historicalMaterials: true, sideTasks: false });
+      .toEqual({ historicalMaterials: true, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "true" } }))
-      .toEqual({ historicalMaterials: true, sideTasks: false });
+      .toEqual({ historicalMaterials: true, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "0" } }))
-      .toEqual({ historicalMaterials: false, sideTasks: false });
+      .toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "false" } }))
-      .toEqual({ historicalMaterials: false, sideTasks: false });
+      .toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: false });
   });
 
   test("side tasks are independently opt-in", () => {
     expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_SIDE_TASKS: "1" } }))
-      .toEqual({ historicalMaterials: false, sideTasks: true });
+      .toEqual({ historicalMaterials: false, sideTasks: true, formalDelivery: false });
     expect(resolveCoreFeatureFlags({
       env: {
         SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "true",
         SYNTHIA_FEATURE_SIDE_TASKS: "false",
       },
-    })).toEqual({ historicalMaterials: true, sideTasks: false });
+    })).toEqual({ historicalMaterials: true, sideTasks: false, formalDelivery: false });
+  });
+
+  test("formal delivery is independently opt-in", () => {
+    expect(resolveCoreFeatureFlags({ env: { SYNTHIA_FEATURE_FORMAL_DELIVERY: "1" } }))
+      .toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: true });
+    expect(resolveCoreFeatureFlags({
+      env: {
+        SYNTHIA_FEATURE_FORMAL_DELIVERY: "true",
+        SYNTHIA_FEATURE_SIDE_TASKS: "1",
+      },
+    })).toEqual({ historicalMaterials: false, sideTasks: true, formalDelivery: true });
   });
 
   test("rejects ambiguous environment spellings", () => {
@@ -40,17 +51,21 @@ describe("Core feature flags", () => {
     expect(resolveCoreFeatureFlags({
       features: { historicalMaterials: true },
       env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "invalid" },
-    })).toEqual({ historicalMaterials: true, sideTasks: false });
+    })).toEqual({ historicalMaterials: true, sideTasks: false, formalDelivery: false });
     expect(resolveCoreFeatureFlags({
       features: { historicalMaterials: false },
       env: { SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "1" },
-    })).toEqual({ historicalMaterials: false, sideTasks: false });
+    })).toEqual({ historicalMaterials: false, sideTasks: false, formalDelivery: false });
     expect(() => resolveCoreFeatureFlags({
       features: { historicalMaterials: "true" as unknown as boolean },
       env: {},
     })).toThrow("must be a boolean");
     expect(() => resolveCoreFeatureFlags({
       features: { sideTasks: "true" as unknown as boolean },
+      env: {},
+    })).toThrow("must be a boolean");
+    expect(() => resolveCoreFeatureFlags({
+      features: { formalDelivery: "true" as unknown as boolean },
       env: {},
     })).toThrow("must be a boolean");
   });

@@ -24,7 +24,12 @@
 
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { createRevision, type TransactionClient } from "../db/repository.ts";
+import { collectWorkspaceFacts } from "../services/workspace-facts.ts";
+import {
+  createRevision,
+  withTransaction,
+  type TransactionClient,
+} from "../db/repository.ts";
 import type { DataClassification } from "../domain/enums.ts";
 import { sha256Hex } from "../hashing.ts";
 import {
@@ -50,6 +55,13 @@ import {
 import { headSha } from "../workspace/git.ts";
 import { notFoundError, validationError } from "./errors.ts";
 import {
+  acquireP4ProjectMutationSessionLock,
+  isModernP4Project,
+  releaseP4ProjectMutationSessionLock,
+  requireP4ChangeWorkVersion,
+  type P4ProjectMutationLockOwner,
+} from "./p4-write-guard.ts";
+import {
   asClient,
   asObject,
   MAX_CONTENT_BYTES,
@@ -57,6 +69,7 @@ import {
   outboxEvent,
   requireProject,
   runIdempotent,
+  runIdempotentInTransaction,
   type HandlerResult,
   type RequestContext,
 } from "./handlers.ts";
@@ -145,6 +158,27 @@ async function requireProjectExists(pool: Pool, projectId: string): Promise<void
   if (rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
 }
 
+async function withP4WorkspaceMutationLock<T>(
+  ctx: RequestContext,
+  projectId: string,
+  owner: P4ProjectMutationLockOwner,
+  work: (connection: TransactionClient) => Promise<T>,
+): Promise<T> {
+  const connection = await ctx.pool.connect();
+  let locked = false;
+  try {
+    await acquireP4ProjectMutationSessionLock(connection, projectId, owner);
+    locked = true;
+    return await work(connection as unknown as TransactionClient);
+  } finally {
+    if (locked) {
+      await releaseP4ProjectMutationSessionLock(connection, projectId)
+        .catch(() => undefined);
+    }
+    connection.release();
+  }
+}
+
 // ─── GET /workspace/tree ─────────────────────────────────────────────────────
 
 export async function getWorkspaceTreeHandler(ctx: RequestContext): Promise<HandlerResult> {
@@ -170,13 +204,15 @@ export async function getWorkspaceTreeHandler(ctx: RequestContext): Promise<Hand
     };
   });
 
+  const facts = await collectWorkspaceFacts(projectId);
   return {
     status: 200,
     data: {
       project_id: projectId,
-      head_commit: await headSha(projectWorkspaceDir(projectId)),
+      head_commit: facts.commit,
+      workspace_manifest_hash: facts.manifestHash,
       files,
-      pending_count: files.filter((f) => f.status === "dirty" || f.status === "untracked").length,
+      pending_count: facts.pending.length,
     },
   };
 }
@@ -241,8 +277,20 @@ export async function putWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
 
   // 项目必须先存在，否则会在盘上凭空建出一个没有对应项目的工作区。
   await requireProjectExists(ctx.pool, projectId);
-  await ensureWorkspace(projectId);
-  const changed = await writeWorkingFile(projectId, path, body.content);
+  const modernP4 = await isModernP4Project(ctx.pool, projectId);
+  const changed = modernP4
+    ? await withP4WorkspaceMutationLock(ctx, projectId, "workspace.put", async (connection) => {
+      await withTransaction(connection, async (tx) => {
+        await requireP4ChangeWorkVersion(tx, projectId);
+      });
+      await ensureWorkspace(projectId);
+      return writeWorkingFile(projectId, path, body.content as string);
+    })
+    : await (async () => {
+      await requireP4ChangeWorkVersion(ctx.pool, projectId);
+      await ensureWorkspace(projectId);
+      return writeWorkingFile(projectId, path, body.content as string);
+    })();
 
   return { status: 200, data: { path, changed, content_hash: sha256Hex(body.content) } };
 }
@@ -408,6 +456,48 @@ export async function registerWorkspaceHandler(ctx: RequestContext): Promise<Han
   const commitMessage = changeReason.length > 0
     ? `登记：${changeReason}\n\nby: ${ctx.identity.actorId}`
     : `登记工作区改动\n\nby: ${ctx.identity.actorId}`;
+  if (await isModernP4Project(ctx.pool, projectId)) {
+    const write = await withP4WorkspaceMutationLock(
+      ctx,
+      projectId,
+      "workspace.register",
+      (connection) => withTransaction(connection, async (tx) => (
+        runIdempotentInTransaction(
+          ctx,
+          tx,
+          "register_workspace",
+          projectId,
+          async (writeTx) => {
+            const outcome = await commitPending(
+              projectId,
+              commitMessage,
+              gitAuthor(ctx.identity.actorId),
+            );
+            if (!outcome.commit) {
+              throw new WorkspaceError(
+                "WORKSPACE_GIT_FAILED",
+                `工作区没有任何提交，可能已损坏：${projectId}`,
+                { projectId },
+              );
+            }
+            const snapshot = await readTreeAt(projectId, outcome.commit);
+            const reconciled = await reconcileIntoRevisions(writeTx, ctx, projectId, snapshot, {
+              changeReason,
+              artifactTypeOverride,
+            });
+            return { commit: snapshot.commit, committed: outcome.changed, ...reconciled };
+          },
+          async (authorizeTx) => {
+            await requireProject(authorizeTx, projectId);
+            await requireP4ChangeWorkVersion(authorizeTx, projectId);
+          },
+        )
+      )),
+    );
+    return { status: 200, data: write.result };
+  }
+
+  await requireP4ChangeWorkVersion(ctx.pool, projectId);
   const outcome = await commitPending(projectId, commitMessage, gitAuthor(ctx.identity.actorId));
   if (!outcome.commit) {
     // 建区时就有 initial commit，走到这里说明 .git 被外部删了或损坏了。
@@ -454,6 +544,50 @@ export async function writeWorkspaceFilesHandler(ctx: RequestContext): Promise<H
   const commitMessage = changeReason.length > 0
     ? `候选产出：${changeReason}\n\nby: ${ctx.identity.actorId}`
     : `agent 写入工作区\n\nby: ${ctx.identity.actorId}`;
+  if (await isModernP4Project(ctx.pool, projectId)) {
+    const write = await withP4WorkspaceMutationLock(
+      ctx,
+      projectId,
+      "workspace.files",
+      (connection) => withTransaction(connection, async (tx) => (
+        runIdempotentInTransaction(
+          ctx,
+          tx,
+          "write_workspace_files",
+          projectId,
+          async (writeTx) => {
+            const outcome = await writeAndCommit(
+              projectId,
+              files,
+              commitMessage,
+              gitAuthor(ctx.identity.actorId),
+            );
+            if (!outcome.commit) {
+              throw new WorkspaceError(
+                "WORKSPACE_GIT_FAILED",
+                `工作区没有任何提交，可能已损坏：${projectId}`,
+                { projectId },
+              );
+            }
+            const snapshot = await readTreeAt(projectId, outcome.commit);
+            const reconciled = await reconcileIntoRevisions(writeTx, ctx, projectId, snapshot, {
+              changeReason,
+              artifactTypeOverride,
+              onlyPaths: files.map((file) => file.path),
+            });
+            return { commit: snapshot.commit, committed: outcome.changed, ...reconciled };
+          },
+          async (authorizeTx) => {
+            await requireProject(authorizeTx, projectId);
+            await requireP4ChangeWorkVersion(authorizeTx, projectId);
+          },
+        )
+      )),
+    );
+    return { status: 200, data: write.result };
+  }
+
+  await requireP4ChangeWorkVersion(ctx.pool, projectId);
   const outcome = await writeAndCommit(projectId, files, commitMessage, gitAuthor(ctx.identity.actorId));
   if (!outcome.commit) {
     throw new WorkspaceError("WORKSPACE_GIT_FAILED", `工作区没有任何提交，可能已损坏：${projectId}`, { projectId });

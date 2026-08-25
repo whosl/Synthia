@@ -50,6 +50,12 @@ import {
   type RuntimeCreateResponse,
 } from "./task-proxy.ts";
 import { reconcileIntoRevisions } from "./workspace-handlers.ts";
+import {
+  acquireP4ProjectMutationSessionLock,
+  isModernP4Project,
+  releaseP4ProjectMutationSessionLock,
+  requireP4ChangeWorkVersion,
+} from "./p4-write-guard.ts";
 
 const MAX_FILES_PER_WRITE = 32;
 const MAX_AUTHORIZED_WRITE_PATHS = 32;
@@ -617,6 +623,7 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
         runClass,
         idempotencyKey: dispatch.idempotencyKey,
         correlationId: dispatch.correlationId,
+        inputHash: inputManifestHash,
         actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
         parameters: {
           sources,
@@ -944,12 +951,26 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
     key: ctx.idempotencyKey,
   };
   const requestHash = canonicalRequestHash(ctx.body);
-  const lockKey = `task-adoption:${projectId}`;
   const conn = await ctx.pool.connect();
+  let lockKind: "p4" | "legacy" | null = null;
   try {
-    await conn.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
+    if (await isModernP4Project(conn as unknown as TransactionClient, projectId)) {
+      await acquireP4ProjectMutationSessionLock(
+        conn,
+        projectId,
+        "side-task.adopt",
+      );
+      lockKind = "p4";
+    } else {
+      await conn.query(
+        "SELECT pg_advisory_lock(hashtext($1))",
+        [`task-adoption:${projectId}`],
+      );
+      lockKind = "legacy";
+    }
     const prepared = await withTransaction(conn as unknown as TransactionClient, async (tx) => {
       await requireProjectAccess(ctx, tx, projectId);
+      await requireP4ChangeWorkVersion(tx, projectId);
       const claim = await claimIdempotencySlot(tx, idempotencyScope, requestHash);
       if (!claim.owned) {
         if (!claim.existing) throw internalError("IDEMPOTENCY_UNEXPECTED_STATE");
@@ -1301,7 +1322,15 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
     });
     return { status: 201, data: response };
   } finally {
-    await conn.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => undefined);
+    if (lockKind === "p4") {
+      await releaseP4ProjectMutationSessionLock(conn, projectId)
+        .catch(() => undefined);
+    } else if (lockKind === "legacy") {
+      await conn.query(
+        "SELECT pg_advisory_unlock(hashtext($1))",
+        [`task-adoption:${projectId}`],
+      ).catch(() => undefined);
+    }
     conn.release();
   }
 }

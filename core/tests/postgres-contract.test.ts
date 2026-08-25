@@ -6,6 +6,8 @@ const migration = readFileSync(new URL("../src/db/migrations/0001_d1_hardening.s
 const initialMigration = readFileSync(new URL("../src/db/migrations/0000_initial_schema.sql", import.meta.url), "utf8");
 const projectHardeningMigration = readFileSync(new URL("../src/db/migrations/0007_project_profile_constraints.sql", import.meta.url), "utf8");
 const taskWorkspacesMigration = readFileSync(new URL("../src/db/migrations/0009_task_workspaces.sql", import.meta.url), "utf8");
+const processGateChecksMigration = readFileSync(new URL("../src/db/migrations/0010_process_gate_checks.sql", import.meta.url), "utf8");
+const deliveryReleaseMigration = readFileSync(new URL("../src/db/migrations/0011_delivery_release.sql", import.meta.url), "utf8");
 const freshSchema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
 describe("PostgreSQL D1 contracts", () => {
   test("initial numbered migration creates fresh core schema", () => {
@@ -32,6 +34,8 @@ describe("PostgreSQL D1 contracts", () => {
       "0007_project_profile_constraints",
       "0008_import_snapshots",
       "0009_task_workspaces",
+      "0010_process_gate_checks",
+      "0011_delivery_release",
     ]) {
       expect(freshSchema).toContain(`('${version}')`);
     }
@@ -106,6 +110,25 @@ describe("PostgreSQL D1 contracts", () => {
       ]) {
         expect(sql).toContain(trigger);
       }
+    }
+  });
+  test("P4 numbered migrations and fresh schema preserve the same sealed-release boundary", () => {
+    for (const sql of [processGateChecksMigration, freshSchema]) {
+      expect(sql).toContain("CREATE TABLE IF NOT EXISTS formal_input_content");
+      expect(sql).toContain("formal_input_content_append_only");
+      expect(sql).toContain("managed formal input bytes do not match sha256");
+      expect(sql).toContain("CREATE TABLE IF NOT EXISTS formal_input_approval");
+      expect(sql).toContain("CREATE TABLE IF NOT EXISTS tool_run_evidence_manifest");
+      expect(sql).toContain("tool_run_evidence_manifest_append_only");
+    }
+    for (const sql of [deliveryReleaseMigration, freshSchema]) {
+      expect(sql).toContain("CREATE TABLE IF NOT EXISTS delivery_release");
+      expect(sql).toMatch(/state\s+text NOT NULL DEFAULT 'sealed'[\s\S]*CHECK \(state = 'sealed'\)/);
+      expect(sql).toContain("delivery_release_append_only");
+      expect(sql).toContain("delivery_release_item_append_only");
+      expect(sql).toContain("delivery_release_complete_guard");
+      expect(sql).toContain("newer.version > r.version");
+      expect(sql).toContain("change request must bind the latest sealed delivery");
     }
   });
   test("migration append-only table names are guarded", () => {

@@ -459,10 +459,16 @@ describe.skipIf(!DATABASE_URL)("P2 import snapshots API — real PostgreSQL", ()
     const imported = await importFiles(projectId, [{ path: "doc/x.md", content: "x" }]);
     expect(imported.response.status).toBe(201);
     const token = randomBytes(32).toString("hex");
-    const user = await harness.client.query("SELECT id FROM user_account WHERE uid=$1", [harness.ids.humanUid]);
+    const userId = `usr_${randomUUID()}`;
+    const userUid = `human_no_role_${randomUUID()}`;
+    await harness.client.query(
+      `INSERT INTO user_account(id,uid,cn,display_name,mail,actor_type,status)
+       VALUES ($1,$2,'No Role Tester','No Role Tester',$3,'human','active')`,
+      [userId, userUid, `${userUid}@test.local`],
+    );
     await harness.client.query(
       "INSERT INTO auth_token(token_hash,user_id,scope) VALUES ($1,$2,$3)",
-      [sha256Hex(token), user.rows[0]!.id, ["core:read", "core:write", "core:approve"]],
+      [sha256Hex(token), userId, ["core:read", "core:write", "core:approve"]],
     );
 
     const detail = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/import-snapshots/${imported.id}`, { token });

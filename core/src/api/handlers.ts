@@ -59,6 +59,11 @@ import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
 import { ensureWorkspace, readAtLocation } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
 import type { CoreFeatureFlags } from "./feature-flags.ts";
+import { requireP4ProjectVisibility } from "./p4-project-access.ts";
+import {
+  acquireP4ProjectMutationTransactionLockIfModern,
+  requireP4ChangeWorkVersion,
+} from "./p4-write-guard.ts";
 
 // ─── shared request context ──────────────────────────────────────────────────
 
@@ -112,7 +117,7 @@ export function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function requireString(obj: Record<string, unknown>, key: string): string {
+export function requireString(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
   if (typeof v !== "string" || v.length === 0) throw validationError(`field '${key}' must be a non-empty string`);
   return v;
@@ -125,14 +130,14 @@ export function optionalString(obj: Record<string, unknown>, key: string, fallba
   return v;
 }
 
-function optionalNullableString(obj: Record<string, unknown>, key: string): string | null {
+export function optionalNullableString(obj: Record<string, unknown>, key: string): string | null {
   const v = obj[key];
   if (v === undefined || v === null || v === "") return null;
   if (typeof v !== "string") throw validationError(`field '${key}' must be a string or null`);
   return v;
 }
 
-function optionalStringArray(obj: Record<string, unknown>, key: string): string[] {
+export function optionalStringArray(obj: Record<string, unknown>, key: string): string[] {
   const v = obj[key];
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) {
@@ -141,7 +146,7 @@ function optionalStringArray(obj: Record<string, unknown>, key: string): string[
   return v as string[];
 }
 
-function optionalObject(obj: Record<string, unknown>, key: string): unknown {
+export function optionalObject(obj: Record<string, unknown>, key: string): unknown {
   const v = obj[key];
   if (v === undefined || v === null) return null;
   if (typeof v !== "object" || Array.isArray(v)) throw validationError(`field '${key}' must be a JSON object`);
@@ -273,6 +278,30 @@ export async function runIdempotent<T>(
   work: (tx: TransactionClient) => Promise<T>,
   authorize?: (tx: TransactionClient) => Promise<void>,
 ): Promise<{ result: T; replayed: boolean }> {
+  const conn = await ctx.pool.connect();
+  try {
+    return await withTransaction(conn as unknown as TransactionClient, (tx) => (
+      runIdempotentInTransaction(ctx, tx, operation, projectId, work, authorize)
+    ));
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * Connection-local form of `runIdempotent`. Git-backed P4 writes already hold
+ * a session advisory lock on one PoolClient; acquiring another connection here
+ * would self-deadlock when the pool has one slot and would split the lock from
+ * the DB convergence transaction.
+ */
+export async function runIdempotentInTransaction<T>(
+  ctx: RequestContext,
+  tx: TransactionClient,
+  operation: string,
+  projectId: string,
+  work: (tx: TransactionClient) => Promise<T>,
+  authorize?: (tx: TransactionClient) => Promise<void>,
+): Promise<{ result: T; replayed: boolean }> {
   if (!ctx.idempotencyKey) throw validationError("Idempotency-Key header is required for writes");
 
   const scope = {
@@ -284,29 +313,69 @@ export async function runIdempotent<T>(
   };
   const requestHash = canonicalRequestHash(ctx.body);
 
-  const conn = await ctx.pool.connect();
-  try {
-    return await withTransaction(conn as unknown as TransactionClient, async (tx) => {
-      // Authorization is deliberately evaluated before the idempotency claim.
-      // A completed replay must not return a cached response after the actor's
-      // project access is revoked or the project becomes ineligible for the
-      // operation. Keeping this check in the same transaction also avoids a
-      // handler-level preflight racing with claim/replay.
-      if (authorize) await authorize(tx);
-      const claim = await claimIdempotencySlot(tx, scope, requestHash);
-      if (claim.owned) {
-        const result = await work(tx);
-        await completeIdempotencySlot(tx, scope, requestHash, result);
-        return { result, replayed: false };
-      }
-      if (!claim.existing) throw internalError("IDEMPOTENCY_UNEXPECTED_STATE");
-      if (claim.existing.requestHash !== requestHash) throw conflictApiError("IDEMPOTENCY_CONFLICT", { operation });
-      if (claim.existing.status !== "completed") throw conflictApiError("IDEMPOTENCY_IN_PROGRESS", { operation }, true);
-      return { result: decodeResponse<T>(claim.existing.response), replayed: true };
-    });
-  } finally {
-    conn.release();
+  // Authorization is deliberately evaluated before the idempotency claim.
+  // A completed replay must not return a cached response after the actor's
+  // project access is revoked or the project becomes ineligible for the
+  // operation. Keeping this check in the same transaction also avoids a
+  // handler-level preflight racing with claim/replay.
+  if (authorize) await authorize(tx);
+  const claim = await claimIdempotencySlot(tx, scope, requestHash);
+  if (claim.owned) {
+    const result = await work(tx);
+    await completeIdempotencySlot(tx, scope, requestHash, result);
+    return { result, replayed: false };
   }
+  if (!claim.existing) throw internalError("IDEMPOTENCY_UNEXPECTED_STATE");
+  if (claim.existing.requestHash !== requestHash) {
+    throw conflictApiError("IDEMPOTENCY_CONFLICT", { operation });
+  }
+  if (claim.existing.status !== "completed") {
+    throw conflictApiError("IDEMPOTENCY_IN_PROGRESS", { operation }, true);
+  }
+  return { result: decodeResponse<T>(claim.existing.response), replayed: true };
+}
+
+async function ensureServerOwnedInitialWorkVersion(
+  tx: TransactionClient,
+  ctx: RequestContext,
+  projectId: string,
+  processInstanceId: string,
+): Promise<string> {
+  const existing = await tx.query(
+    `SELECT id FROM project_work_version
+      WHERE project_id = $1 ORDER BY version DESC LIMIT 1`,
+    [projectId],
+  );
+  const existingId = (existing.rows[0] as { id?: string } | undefined)?.id;
+  if (existingId) return existingId;
+
+  const workVersionId = `wv_${sha256Hex(`initial\0${projectId}\0${processInstanceId}`).slice(0, 40)}`;
+  await tx.query(
+    `INSERT INTO project_work_version
+      (id, project_id, process_instance_id, version, origin, start_gate,
+       current_gate, state, created_by_type, created_by)
+     VALUES ($1,$2,$3,1,'initial','G0','G0','working',$4,$5)`,
+    [workVersionId, projectId, processInstanceId, ctx.identity.actorType, ctx.identity.actorId],
+  );
+  await appendOutboxEventInTx(tx, {
+    eventId: randomUUID(),
+    aggregateType: "project_work_version",
+    aggregateId: workVersionId,
+    eventType: "work_version.created",
+    projectId,
+    payload: {
+      id: workVersionId,
+      projectId,
+      processInstanceId,
+      version: 1,
+      origin: "initial",
+      currentGate: "G0",
+    },
+    correlationId: ctx.correlationId,
+    causationId: null,
+    classification: ctx.classification,
+  });
+  return workVersionId;
 }
 
 function decodeResponse<T>(response: unknown): T {
@@ -466,12 +535,23 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         row.process_version_id === (requestedProfile ?? null) &&
         row.process_profile_id === (requestedProfile ?? null);
       if (!same) throw conflictApiError("PROJECT_ALREADY_EXISTS_DIFFERENT_PAYLOAD", { id });
+      if (
+        row.project_type === "engineering"
+        && row.process_version_id === GJB_REF_V1.id
+        && row.process_profile_id === GJB_REF_V1.id
+      ) {
+        await requireP4ProjectVisibility(tx, ctx.identity, id);
+      }
       // Same payload: idempotent — return the stored project, no new outbox event.
       const existingProcess = await tx.query(
         `SELECT id, gate_profile_version, current_gate, created_at
            FROM process_instance WHERE project_id = $1 ORDER BY created_at`,
         [id],
       );
+      const existingProcessId = (existingProcess.rows[0] as { id?: string } | undefined)?.id;
+      const workVersionId = !legacyCompatibility && requestedProfile === GJB_REF_V1.id && existingProcessId
+        ? await ensureServerOwnedInitialWorkVersion(tx, ctx, id, existingProcessId)
+        : null;
       return {
         id,
         name: row.name as string,
@@ -483,9 +563,11 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         process_version_id: row.process_version_id,
         target_part: row.target_part,
         process_instances: existingProcess.rows,
+        work_version_id: workVersionId,
       };
     }
     let createdProcessInstances: unknown[] = [];
+    let initialWorkVersionId: string | null = null;
     if (projectType === "engineering" && !legacyCompatibility) {
       const pi = `pi_${id}_G0`;
       const processInsert = await tx.query(
@@ -498,6 +580,7 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         throw conflictApiError("PROCESS_INSTANCE_ID_CONFLICT", { id: pi, projectId: id });
       }
       createdProcessInstances = processInsert.rows;
+      initialWorkVersionId = await ensureServerOwnedInitialWorkVersion(tx, ctx, id, pi);
       await appendOutboxEventInTx(tx, {
         eventId: randomUUID(),
         aggregateType: "process_instance",
@@ -505,6 +588,40 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         eventType: "process.created",
         projectId: id,
         payload: { id: pi, projectId: id, gateProfile: requestedProfile, currentGate: "G0" },
+        correlationId: ctx.correlationId,
+        causationId: null,
+        classification: ctx.classification,
+      });
+    }
+    let creatorRoleId: string | null = null;
+    if (projectType === "engineering" && requestedProfile === GJB_REF_V1.id) {
+      creatorRoleId = `role_${sha256Hex(`creator\0${id}\0${ctx.identity.actorType}\0${ctx.identity.actorId}`).slice(0, 40)}`;
+      await tx.query(
+        `INSERT INTO role_assignment
+          (id, project_id, actor_type, actor_id, role, permissions)
+         VALUES ($1,$2,$3,$4,'owner',$5::jsonb)`,
+        [
+          creatorRoleId,
+          id,
+          ctx.identity.actorType,
+          ctx.identity.actorId,
+          JSON.stringify({ projectVisibility: true, projectOwner: true }),
+        ],
+      );
+      await appendOutboxEventInTx(tx, {
+        eventId: randomUUID(),
+        aggregateType: "role_assignment",
+        aggregateId: creatorRoleId,
+        eventType: "role.assigned",
+        projectId: id,
+        payload: {
+          id: creatorRoleId,
+          projectId: id,
+          actorType: ctx.identity.actorType,
+          actorId: ctx.identity.actorId,
+          role: "owner",
+          source: "project_creation",
+        },
         correlationId: ctx.correlationId,
         causationId: null,
         classification: ctx.classification,
@@ -532,6 +649,8 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
       process_profile_name: profile?.name ?? null,
       target_part: targetPart,
       process_instances: createdProcessInstances,
+      work_version_id: initialWorkVersionId,
+      creator_role_id: creatorRoleId,
     };
   });
 
@@ -652,6 +771,18 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
         [id],
       );
       const relation = relationResult.rows[0] as Record<string, unknown> | undefined;
+      const creatorRoleId = relation
+        ? `role_${sha256Hex(`creator\0${id}\0${String(relation.created_by_type)}\0${String(relation.created_by)}`).slice(0, 40)}`
+        : null;
+      const creatorRoleResult = creatorRoleId
+        ? await tx.query(
+          `SELECT id, actor_type, actor_id, role
+             FROM role_assignment
+            WHERE id = $1 AND project_id = $2`,
+          [creatorRoleId, id],
+        )
+        : { rows: [] };
+      const creatorRole = creatorRoleResult.rows[0] as Record<string, unknown> | undefined;
       const processResult = await tx.query(
         `SELECT id, gate_profile_version, current_gate, created_at
            FROM process_instance WHERE project_id = $1 ORDER BY created_at, id`,
@@ -674,14 +805,23 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
         relation?.source_project_id === sourceProjectId &&
         relation?.target_project_id === id &&
         relation?.relation_kind === "copied_as_engineering" &&
+        relation?.created_by_type === ctx.identity.actorType &&
+        relation?.created_by === ctx.identity.actorId &&
+        creatorRole?.id === creatorRoleId &&
+        creatorRole?.actor_type === ctx.identity.actorType &&
+        creatorRole?.actor_id === ctx.identity.actorId &&
+        creatorRole?.role === "owner" &&
         processResult.rows.length === 1 &&
         process?.id === `pi_${id}_G0` &&
         process?.gate_profile_version === GJB_REF_V1.id &&
         process?.current_gate === "G0";
       if (!same) throw conflictApiError("PROJECT_ALREADY_EXISTS_DIFFERENT_PAYLOAD", { id });
+      const workVersionId = await ensureServerOwnedInitialWorkVersion(tx, ctx, id, String(process!.id));
       return {
         ...existing,
         process_instances: processResult.rows,
+        work_version_id: workVersionId,
+        creator_role_id: creatorRoleId,
         source_relation: relation,
         workspace_content_copied: false,
       };
@@ -697,6 +837,7 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
     if (processInsert.rows.length !== 1) {
       throw conflictApiError("PROCESS_INSTANCE_ID_CONFLICT", { id: processId, projectId: id });
     }
+    const workVersionId = await ensureServerOwnedInitialWorkVersion(tx, ctx, id, processId);
     const relationInsert = await tx.query(
       `INSERT INTO project_source_relation (
          target_project_id, source_project_id, relation_kind, created_by_type, created_by
@@ -706,6 +847,19 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
       [id, sourceProjectId, ctx.identity.actorType, ctx.identity.actorId],
     );
     const relation = relationInsert.rows[0];
+    const creatorRoleId = `role_${sha256Hex(`creator\0${id}\0${ctx.identity.actorType}\0${ctx.identity.actorId}`).slice(0, 40)}`;
+    await tx.query(
+      `INSERT INTO role_assignment
+        (id, project_id, actor_type, actor_id, role, permissions)
+       VALUES ($1,$2,$3,$4,'owner',$5::jsonb)`,
+      [
+        creatorRoleId,
+        id,
+        ctx.identity.actorType,
+        ctx.identity.actorId,
+        JSON.stringify({ projectVisibility: true, projectOwner: true }),
+      ],
+    );
 
     await appendOutboxEventInTx(tx, {
       eventId: randomUUID(),
@@ -714,6 +868,24 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
       eventType: "process.created",
       projectId: id,
       payload: { id: processId, projectId: id, gateProfile: GJB_REF_V1.id, currentGate: "G0" },
+      correlationId: ctx.correlationId,
+      causationId: null,
+      classification: ctx.classification,
+    });
+    await appendOutboxEventInTx(tx, {
+      eventId: randomUUID(),
+      aggregateType: "role_assignment",
+      aggregateId: creatorRoleId,
+      eventType: "role.assigned",
+      projectId: id,
+      payload: {
+        id: creatorRoleId,
+        projectId: id,
+        actorType: ctx.identity.actorType,
+        actorId: ctx.identity.actorId,
+        role: "owner",
+        source: "project_copy_as_engineering",
+      },
       correlationId: ctx.correlationId,
       causationId: null,
       classification: ctx.classification,
@@ -758,6 +930,8 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
       process_profile_name: profile.name,
       target_part: targetPart,
       process_instances: processInsert.rows,
+      work_version_id: workVersionId,
+      creator_role_id: creatorRoleId,
       source_relation: relation,
       workspace_content_copied: false,
     };
@@ -804,10 +978,42 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
  */
 export async function getProjects(ctx: RequestContext): Promise<HandlerResult> {
   const { rows } = await ctx.pool.query(
-    `SELECT id, name, status, data_classification, created_at, project_type,
-            target_part, process_profile_id, process_profile_version, process_profile_name,
-            process_version_id
-       FROM project ORDER BY created_at DESC`,
+    `SELECT p.id, p.name, p.status, p.data_classification, p.created_at,
+            p.project_type, p.target_part, p.process_profile_id,
+            p.process_profile_version, p.process_profile_name,
+            p.process_version_id
+       FROM project p
+      WHERE NOT (
+              p.project_type = 'engineering'
+          AND p.process_version_id = 'GJB_REF_V1'
+          AND p.process_profile_id = 'GJB_REF_V1'
+            )
+         OR $1::boolean
+         OR EXISTS (
+              SELECT 1 FROM role_assignment role
+               WHERE role.project_id = p.id
+                 AND role.actor_type = $2
+                 AND role.actor_id = $3
+            )
+         OR (
+              $4::boolean
+          AND EXISTS (
+                SELECT 1 FROM agent_task task
+                 WHERE task.project_id = p.id
+                   AND task.project_type = 'engineering'
+                   AND task.kind = 'main'
+                   AND task.runtime_actor_id = $3
+                   AND task.status = ANY($5::text[])
+              )
+            )
+      ORDER BY p.created_at DESC`,
+    [
+      ctx.identity.scopes.includes("core:admin"),
+      ctx.identity.actorType,
+      ctx.identity.actorId,
+      ctx.identity.actorType === "service",
+      ["queued", "running", "awaiting_user"],
+    ],
   );
   const processRows = rows.length === 0 ? { rows: [] } : await ctx.pool.query(
     `SELECT id, project_id, gate_profile_version, current_gate, created_at
@@ -929,7 +1135,6 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
   requireEnum(optionalString(body, "data_classification", "D1"), "data_classification", CLASSIFICATION_VALUES);
 
   const { result } = await runIdempotent(ctx, "create_revision", projectId, async (tx) => {
-    await requireProject(tx, projectId);
 
     // Upsert the artifact container (first revision creates it).
     await tx.query(
@@ -987,6 +1192,14 @@ export async function createRevisionHandler(ctx: RequestContext): Promise<Handle
     await createRevision(asClient(tx), revRow);
     await outboxEvent(tx, ctx, { type: "artifact_revision", id }, "revision.created", { id, artifactId, projectId, version: versionNum, state: "candidate" });
     return { id, artifactId, projectId, version: versionNum, state: "candidate" };
+  }, async (tx) => {
+    await requireProject(tx, projectId);
+    await acquireP4ProjectMutationTransactionLockIfModern(
+      tx,
+      projectId,
+      "revision.create",
+    );
+    await requireP4ChangeWorkVersion(tx, projectId);
   });
 
   return { status: 201, data: result };
@@ -1098,10 +1311,41 @@ export async function createSnapshotHandler(ctx: RequestContext): Promise<Handle
   const id = requireString(body, "id");
   const memberRevisionIds = optionalStringArray(body, "member_revision_ids");
   if (memberRevisionIds.length === 0) throw validationError("field 'member_revision_ids' must be a non-empty array");
+  if (new Set(memberRevisionIds).size !== memberRevisionIds.length) {
+    throw validationError("field 'member_revision_ids' must contain unique ids");
+  }
 
   const { result } = await runIdempotent(ctx, "create_snapshot", projectId, async (tx) => {
     const project = await requireProjectProcessBinding(tx, projectId);
     const gateProfileVersion = resolveGateProfileVersion(body, frozenModernProcessProfile(project));
+    const modernP4 = project.project_type === "engineering"
+      && project.process_profile_id === GJB_REF_V1.id;
+    let workVersionId: string | null = null;
+    if (modernP4) {
+      const workResult = await tx.query(
+        `SELECT id FROM project_work_version
+          WHERE project_id = $1 AND state IN ('working','in_review')
+          ORDER BY version DESC LIMIT 1 FOR UPDATE`,
+        [projectId],
+      );
+      workVersionId = (workResult.rows[0] as { id?: string } | undefined)?.id ?? null;
+      if (workVersionId === null) {
+        const released = await tx.query(
+          "SELECT id FROM delivery_release WHERE project_id = $1 ORDER BY version DESC LIMIT 1",
+          [projectId],
+        );
+        if (released.rows.length > 0) throw conflictApiError("CHANGE_REQUEST_REQUIRED");
+        throw conflictApiError("P4_WORK_VERSION_REQUIRED");
+      }
+      if (body.work_version_id !== undefined && body.work_version_id !== workVersionId) {
+        throw conflictApiError("WORK_VERSION_MISMATCH", {
+          expected: workVersionId,
+          received: body.work_version_id,
+        });
+      }
+    } else if (body.work_version_id !== undefined && body.work_version_id !== null) {
+      throw validationError("work_version_id is only valid for GJB_REF_V1 snapshots");
+    }
 
     // Resolve member content hashes from the committed revisions (freeze binding).
     const revResult = await tx.query(
@@ -1114,21 +1358,38 @@ export async function createSnapshotHandler(ctx: RequestContext): Promise<Handle
     }
     const manifestHash = computeManifestHash(revRows.map((r) => ({ id: r.id, sha256: r.content_hash })));
     const traceRelationIds = optionalStringArray(body, "trace_relation_ids");
+    if (new Set(traceRelationIds).size !== traceRelationIds.length) {
+      throw validationError("field 'trace_relation_ids' must contain unique ids");
+    }
+    if (traceRelationIds.length > 0) {
+      const traceResult = await tx.query(
+        "SELECT id FROM trace_relation WHERE project_id = $1 AND id = ANY($2::text[])",
+        [projectId, traceRelationIds],
+      );
+      if (traceResult.rows.length !== traceRelationIds.length) {
+        throw validationError("one or more trace_relation_ids not found in project", { traceRelationIds });
+      }
+    }
+    const toolModelPolicyHash = requireString(body, "tool_model_policy_hash");
+    if (modernP4 && !/^[0-9a-f]{64}$/.test(toolModelPolicyHash)) {
+      throw validationError("field 'tool_model_policy_hash' must be a lowercase SHA-256 digest");
+    }
 
     const snapRow = {
       id,
       projectId,
+      workVersionId,
       memberRevisionIds,
       traceRelationIds,
       gateProfileVersion,
-      toolModelPolicyHash: requireString(body, "tool_model_policy_hash"),
+      toolModelPolicyHash,
       manifestHash,
       createdBy: ctx.identity.actorId,
       createdAt: new Date().toISOString(),
     };
     await createSnapshot(asClient(tx), snapRow);
     await outboxEvent(tx, ctx, { type: "configuration_snapshot", id }, "snapshot.created", { id, projectId, manifestHash, memberRevisionIds });
-    return { id, projectId, manifestHash, memberRevisionIds };
+    return { id, projectId, workVersionId, manifestHash, memberRevisionIds };
   });
 
   return { status: 201, data: result };
@@ -1195,7 +1456,7 @@ const SUBMIT_PIPELINE: readonly GateSubmissionState[] = ["preparing", "submitted
 
 /** Column set returned for a gate_submission (stable contract). */
 const SUBMISSION_SELECT_COLUMNS =
-  "id, project_id, process_instance_id, gate, snapshot_id, state, submitter_id, check_results, issues, submitted_at, created_at";
+  "id, project_id, process_instance_id, work_version_id, gate, snapshot_id, state, submitter_id, check_results, issues, submitted_at, created_at";
 
 /**
  * Lock + load a submission scoped to a project. Throws 404 when the submission
@@ -1304,7 +1565,7 @@ export async function getGateSubmissions(ctx: RequestContext): Promise<HandlerRe
   const projectId = ctx.params.projectId!;
   const state = ctx.url.searchParams.get("state");
   const { rows } = await ctx.pool.query(
-    `SELECT id, gate, state, snapshot_id, process_instance_id, submitter_id, submitted_at, created_at
+    `SELECT id, gate, state, snapshot_id, process_instance_id, work_version_id, submitter_id, submitted_at, created_at
        FROM gate_submission
       WHERE project_id = $1 AND ($2::text IS NULL OR state::text = $2)
       ORDER BY created_at`,
@@ -1606,13 +1867,11 @@ function validateSourceList(obj: Record<string, unknown>, key: string): SourceIn
     if (typeof content !== "string") {
       throw validationError(`field '${key}[${i}].content' must be a string`);
     }
-    const entry: SourceInput = { path, content };
     const mediaType = o.mediaType;
     if (mediaType !== undefined && mediaType !== null) {
       if (typeof mediaType !== "string") throw validationError(`field '${key}[${i}].mediaType' must be a string`);
-      entry.mediaType = mediaType;
     }
-    out.push(entry);
+    out.push({ path, content, ...(typeof mediaType === "string" ? { mediaType } : {}) });
   }
   return out;
 }
@@ -1717,14 +1976,44 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
     const inputManifestHash = canonicalRequestHash(ctx.body);
     const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part, constraints, timeoutMs };
     const authorizationContext = buildAuthorizationContext(body);
+    const projectFactsResult = await tx.query(
+      "SELECT project_type, process_version_id, process_profile_id FROM project WHERE id = $1",
+      [projectId],
+    );
+    const projectFacts = projectFactsResult.rows[0] as Record<string, unknown> | undefined;
+    const modernExploratory = runClass === "exploratory"
+      && projectFacts?.project_type === "engineering"
+      && projectFacts.process_version_id === "GJB_REF_V1"
+      && projectFacts.process_profile_id === "GJB_REF_V1";
+    let exploratoryToolchainHash: string | null = null;
+    if (modernExploratory) {
+      try {
+        const discovery = await connector.discover(projectId);
+        if (
+          discovery.drift
+          || typeof discovery.toolchainProfileHash !== "string"
+          || !/^[0-9a-f]{64}$/.test(discovery.toolchainProfileHash)
+        ) {
+          throw capabilityUnavailableError("connector: TOOLCHAIN_DISCOVERY_UNAVAILABLE");
+        }
+        exploratoryToolchainHash = discovery.toolchainProfileHash;
+      } catch (err) {
+        throw mapConnectorError(err);
+      }
+    }
 
     await tx.query(
       `INSERT INTO tool_run (id, project_id, operation, capability_version, run_class, state,
-                              input_manifest_hash, authorization_context, parameters, connector_id, correlation_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)`,
+                              input_manifest_hash, authorization_context, parameters, connector_id, correlation_id,
+                              input_hash, toolchain_profile_hash, submitted_by_type, submitted_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14,$15)`,
       [
         jobId, projectId, operation, "v1", runClass, "submitted", inputManifestHash,
         JSON.stringify(authorizationContext), JSON.stringify(parameters), connector.connectorId, ctx.correlationId,
+        modernExploratory ? inputManifestHash : null,
+        exploratoryToolchainHash,
+        modernExploratory ? ctx.identity.actorType : null,
+        modernExploratory ? ctx.identity.actorId : null,
       ],
     );
     await outboxEvent(tx, ctx, { type: "tool_run", id: jobId }, "tool_run.submitted", {
@@ -1743,6 +2032,8 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
         runClass,
         idempotencyKey: ctx.idempotencyKey!,
         correlationId: ctx.correlationId,
+        inputHash: inputManifestHash,
+        toolchainProfileHash: exploratoryToolchainHash ?? undefined,
         actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
         parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, timeoutMs },
         approval: Object.keys(authorizationContext).length > 0 ? authorizationContext : undefined,
