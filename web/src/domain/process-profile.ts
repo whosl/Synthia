@@ -1,159 +1,263 @@
 /**
- * 顶栏阶段进度条的数据驱动 profile（spec §3.1，D18）。
- *
- * - 第一轮只有 `fpga-full` 一套 profile，节点直接取自 `domain/tasks.ts:STAGE_CHAIN`
- *   （15 节点），不重复定义阶段链本身。
- * - **关键约束**：执行链上的门只有 G1/G2/G3/G4；其中里程碑门是 G1/G3/G4（G2 是普通
- *   门）。`gates.ts:MILESTONE_GATES` 含 G7/G9，但那两个不在执行链上，顶栏绝不渲染
- *   它们——本文件不 import gates.ts 的 MILESTONE_GATES，避免误用。
- * - PC 端把 15 节点按里程碑门切成三段（`STAGE_SEGMENTS`），每段的「中间节点」折叠
- *   显示为一条带进度的短轨，终点是里程碑门（实心菱形）。
+ * P4 process projection. The browser owns no stage list: node order, copy and
+ * required checks all come from Core's immutable process-profile.v1 response.
  */
+import type {
+  P4GateId,
+  ProcessProfileCheckV1,
+  ProcessProfileNodeV1,
+  ProcessProfileV1,
+  ProcessReadinessV1,
+  ProcessStateV1,
+} from "../api/types.ts";
+import { sha256Hex } from "../util/sha256.ts";
 
-import { STAGE_CHAIN, type StageChainNode, type StageNode, type StageNodeStatus } from "./tasks.ts";
+const HASH_RE = /^[0-9a-f]{64}$/;
+const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const GATES: readonly P4GateId[] = ["G0", "G1", "G2", "G3", "G4"];
 
-// ─── profile ────────────────────────────────────────────────────────────
-
-export interface ProcessProfile {
-  readonly id: string;
-  readonly name: string;
-  readonly nodes: readonly StageNode[];
+export class ProcessContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProcessContractError";
+  }
 }
 
-/** 第一轮唯一 profile：FPGA 全流程（16 节点见 STAGE_CHAIN 注释，实为 15）。 */
-export const FPGA_FULL_PROFILE: ProcessProfile = {
-  id: "fpga-full",
-  name: "FPGA 全流程",
-  nodes: STAGE_CHAIN,
-};
-
-export const PROCESS_PROFILES: readonly ProcessProfile[] = [FPGA_FULL_PROFILE];
-
-// ─── 分段（里程碑门为锚点） ─────────────────────────────────────────────────
-
-/** 执行链上的里程碑门（仅 G1/G3/G4；G7/G9 不在执行链上，顶栏不显示）。 */
-export type ExecMilestoneGateId = "G1" | "G3" | "G4";
-
-export const EXEC_MILESTONE_GATES: readonly ExecMilestoneGateId[] = ["G1", "G3", "G4"];
-
-export interface StageSegment {
-  /** 1-based 段序号，移动端摘要用「①②③」展示。 */
-  readonly index: number;
-  /** 段名（折叠短轨文案前缀，如「设计 3/4」的「设计」）。 */
-  readonly label: string;
-  /** 段内除终点里程碑门以外的节点 id，按 STAGE_CHAIN 顺序（可能含普通门如 G2）。 */
-  readonly middleNodeIds: readonly string[];
-  /** 段终点：里程碑门 id。 */
-  readonly gateId: ExecMilestoneGateId;
+function record(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProcessContractError(`${path} 必须是对象`);
+  }
+  return value as Record<string, unknown>;
 }
 
-/** spec §3.1 表格的三段切分：段1→G1，段2(含G2)→G3，段3→G4。 */
-export const STAGE_SEGMENTS: readonly StageSegment[] = [
-  { index: 1, label: "需求", middleNodeIds: ["intake"], gateId: "G1" },
-  {
-    index: 2,
-    label: "设计",
-    middleNodeIds: ["behavior_wave", "G2", "architecture", "register_spec"],
-    gateId: "G3",
-  },
-  {
-    index: 3,
-    label: "实现",
-    middleNodeIds: ["rtl", "validate", "tb", "simulate", "xdc", "synthesize", "implement"],
-    gateId: "G4",
-  },
-];
-
-/** 段内全部节点 id（中间节点 + 终点门），按顺序，供 hover 浮层展开列表用。 */
-export function segmentAllNodeIds(segment: StageSegment): readonly string[] {
-  return [...segment.middleNodeIds, segment.gateId];
+function exactRecord(value: unknown, keys: readonly string[], path: string): Record<string, unknown> {
+  const row = record(value, path);
+  const actual = Object.keys(row).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new ProcessContractError(`${path} 字段不符合 v1 契约`);
+  }
+  return row;
 }
 
-/** 给定节点 id 所属的段序号（1-based）；未知 id 兜底返回 1（不应发生）。 */
-export function segmentIndexOf(nodeId: string): number {
-  const seg = STAGE_SEGMENTS.find((s) => segmentAllNodeIds(s).includes(nodeId));
-  return seg ? seg.index : 1;
+function text(value: unknown, path: string, safeId = false): string {
+  if (typeof value !== "string" || !value.trim() || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)) {
+    throw new ProcessContractError(`${path} 必须是非空安全字符串`);
+  }
+  if (safeId && !SAFE_ID_RE.test(value)) throw new ProcessContractError(`${path} 不是安全标识`);
+  return value;
 }
 
-function nodeStatus(chain: readonly StageChainNode[], id: string): StageNodeStatus | undefined {
-  return chain.find((c) => c.node.id === id)?.status;
+function hash(value: unknown, path: string): string {
+  if (typeof value !== "string" || !HASH_RE.test(value)) throw new ProcessContractError(`${path} 不是 SHA-256`);
+  return value;
 }
 
-function chainNode(chain: readonly StageChainNode[], id: string): StageChainNode | undefined {
-  return chain.find((c) => c.node.id === id);
+function bool(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw new ProcessContractError(`${path} 必须是布尔值`);
+  return value;
 }
 
-/** 由 STAGE_CHAIN 静态取门节点对象（供 StageRail 渲染菱形节点用）。 */
-export function gateNode(gateId: ExecMilestoneGateId): StageNode {
-  const node = STAGE_CHAIN.find((n) => n.id === gateId);
-  if (!node) throw new Error(`未知里程碑门 id：${gateId}`);
-  return node;
+function parseCheck(value: unknown, path: string): ProcessProfileCheckV1 {
+  const row = exactRecord(value, ["code", "severity"], path);
+  const severity = row.severity;
+  if (severity !== "hard" && severity !== "advisory") throw new ProcessContractError(`${path}.severity 非法`);
+  return { code: text(row.code, `${path}.code`), severity };
 }
 
-// ─── 进度推导 ───────────────────────────────────────────────────────────
-
-export interface SegmentProgress {
-  /** 段内中间节点（不含终点门）已完成数。 */
-  readonly done: number;
-  /** 段内中间节点（不含终点门）总数。 */
-  readonly total: number;
-  readonly label: string;
-}
-
-/** 折叠段短轨进度，如「设计 3/4」（只统计中间节点，终点门单独用菱形展示）。 */
-export function segmentProgress(segment: StageSegment, chain: readonly StageChainNode[]): SegmentProgress {
-  const total = segment.middleNodeIds.length;
-  const done = segment.middleNodeIds.filter((id) => nodeStatus(chain, id) === "done").length;
-  return { done, total, label: segment.label };
-}
-
-/** 折叠段整体视觉状态（中间节点 + 终点门合并判定，优先级 failed > waiting > running > done > pending）。 */
-export function segmentStatus(segment: StageSegment, chain: readonly StageChainNode[]): StageNodeStatus {
-  const statuses = segmentAllNodeIds(segment).map((id) => nodeStatus(chain, id) ?? "pending");
-  if (statuses.some((s) => s === "failed")) return "failed";
-  if (statuses.some((s) => s === "waiting")) return "waiting";
-  if (statuses.some((s) => s === "running")) return "running";
-  if (statuses.every((s) => s === "done")) return "done";
-  return "pending";
-}
-
-/** 整体进度，如「8/15」。 */
-export function overallProgress(chain: readonly StageChainNode[]): { readonly done: number; readonly total: number } {
-  return { done: chain.filter((c) => c.status === "done").length, total: chain.length };
-}
-
-// ─── 移动端摘要 ─────────────────────────────────────────────────────────
-
-export interface CurrentStageSummary {
-  /** 当前节点所属段序号（① ② ③）。 */
-  readonly segmentIndex: number;
-  readonly node: StageNode;
-  readonly status: StageNodeStatus;
-  /** 整体进度。 */
-  readonly done: number;
-  readonly total: number;
-}
-
-/**
- * 移动端一行摘要所需数据：「③ RTL 生成 · 进行中 · 8/15」。
- *
- * 当前节点优先取「进行中/等待批准/失败」的活跃节点；若全部节点要么完成要么
- * 未开始（无活跃节点），退化为取最后一个已完成节点；若全部未开始，取第一个
- * 节点（intake）。chain 为 null（尚无 run）时返回 null，调用方应显示「尚无任务」。
- */
-export function currentStageSummary(chain: readonly StageChainNode[] | null): CurrentStageSummary | null {
-  if (!chain || chain.length === 0) return null;
-  const { done, total } = overallProgress(chain);
-  const active = chain.find((c) => c.status === "running" || c.status === "waiting" || c.status === "failed");
-  const lastDone = [...chain].reverse().find((c) => c.status === "done");
-  const current = active ?? lastDone ?? chain[0];
+function parseNode(value: unknown, index: number): ProcessProfileNodeV1 {
+  const path = `profile.nodes[${index}]`;
+  const row = exactRecord(
+    value,
+    ["activities", "goal", "id", "kind", "milestoneBaseline", "name", "ordinal", "requiredChecks"],
+    path,
+  );
+  if (row.id !== GATES[index]) throw new ProcessContractError(`${path}.id/ordinal 必须连续覆盖 G0-G4`);
+  const id = GATES[index]!;
+  if (row.kind !== "gate" || row.ordinal !== index) throw new ProcessContractError(`${path} 不是规范 gate 节点`);
+  if (!Array.isArray(row.activities) || row.activities.length === 0) throw new ProcessContractError(`${path}.activities 不能为空`);
+  if (!Array.isArray(row.requiredChecks) || row.requiredChecks.length === 0) throw new ProcessContractError(`${path}.requiredChecks 不能为空`);
+  const activities = row.activities.map((item, at) => text(item, `${path}.activities[${at}]`));
+  const requiredChecks = row.requiredChecks.map((item, at) => parseCheck(item, `${path}.requiredChecks[${at}]`));
+  if (new Set(activities).size !== activities.length || new Set(requiredChecks.map((item) => item.code)).size !== requiredChecks.length) {
+    throw new ProcessContractError(`${path} 含重复活动或检查`);
+  }
+  const expectedBaseline = id === "G1" ? "B0" : id === "G3" ? "B1" : id === "G4" ? "B2" : null;
+  if (row.milestoneBaseline !== expectedBaseline) throw new ProcessContractError(`${path}.milestoneBaseline 非法`);
   return {
-    segmentIndex: segmentIndexOf(current.node.id),
-    node: current.node,
-    status: current.status,
-    done,
-    total,
+    id,
+    kind: "gate",
+    ordinal: index,
+    name: text(row.name, `${path}.name`),
+    goal: text(row.goal, `${path}.goal`),
+    activities,
+    requiredChecks,
+    milestoneBaseline: expectedBaseline,
   };
 }
 
-export { chainNode };
+export function parseProcessProfile(value: unknown): ProcessProfileV1 {
+  const row = exactRecord(value, ["id", "name", "nodes", "profileHash", "schema", "version"], "profile");
+  if (row.schema !== "process-profile.v1" || row.id !== "GJB_REF_V1" || row.version !== "GJB_REF_V1") {
+    throw new ProcessContractError("Core 返回了不支持的流程 profile");
+  }
+  if (!Array.isArray(row.nodes) || row.nodes.length !== GATES.length) {
+    throw new ProcessContractError("GJB_REF_V1 必须且只能包含 G0-G4");
+  }
+  return {
+    schema: "process-profile.v1",
+    id: "GJB_REF_V1",
+    version: "GJB_REF_V1",
+    name: text(row.name, "profile.name"),
+    nodes: row.nodes.map(parseNode),
+    profileHash: hash(row.profileHash, "profile.profileHash"),
+  };
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(source).sort().map((key) => [key, sortKeys(source[key])]));
+  }
+  return value;
+}
+
+export async function parseAndVerifyProcessProfile(value: unknown): Promise<ProcessProfileV1> {
+  const profile = parseProcessProfile(value);
+  const { profileHash, ...body } = profile;
+  const computed = await sha256Hex(JSON.stringify(sortKeys(body)));
+  if (computed !== profileHash) throw new ProcessContractError("流程定义摘要校验失败，已停止展示正式流程");
+  return profile;
+}
+
+function parseReadiness(value: unknown): ProcessReadinessV1 | null {
+  if (value === null) return null;
+  const keys = [
+    "boardRef", "clockConstraintsComplete", "confirmedBy", "constraintRevisionIds", "constraintsComplete",
+    "dataScopeRecorded", "electricalConstraintsComplete", "generatedBy", "id", "pinConstraintsComplete",
+    "readinessHash", "ready", "sourceMaterialsRecorded", "status", "targetPart", "toolchainProfileHash", "workspaceReady",
+  ];
+  const row = exactRecord(value, keys, "processState.readiness");
+  if (row.status !== "draft" && row.status !== "confirmed") throw new ProcessContractError("readiness.status 非法");
+  if (!Array.isArray(row.constraintRevisionIds)) throw new ProcessContractError("readiness.constraintRevisionIds 必须是数组");
+  const generated = exactRecord(row.generatedBy, ["id", "type"], "readiness.generatedBy");
+  const pin = bool(row.pinConstraintsComplete, "readiness.pinConstraintsComplete");
+  const electrical = bool(row.electricalConstraintsComplete, "readiness.electricalConstraintsComplete");
+  const clock = bool(row.clockConstraintsComplete, "readiness.clockConstraintsComplete");
+  const complete = bool(row.constraintsComplete, "readiness.constraintsComplete");
+  if (complete !== (pin && electrical && clock)) throw new ProcessContractError("readiness 约束结论自相矛盾");
+  let confirmedBy: ProcessReadinessV1["confirmedBy"] = null;
+  if (row.confirmedBy !== null) {
+    const confirmed = exactRecord(row.confirmedBy, ["at", "id"], "readiness.confirmedBy");
+    const at = text(confirmed.at, "readiness.confirmedBy.at");
+    if (Number.isNaN(Date.parse(at))) throw new ProcessContractError("readiness 确认时间非法");
+    confirmedBy = { id: text(confirmed.id, "readiness.confirmedBy.id", true), at };
+  }
+  if ((row.status === "confirmed") !== (confirmedBy !== null)) throw new ProcessContractError("readiness 确认事实不一致");
+  const ready = bool(row.ready, "readiness.ready");
+  if (ready && row.status !== "confirmed") throw new ProcessContractError("未确认的 readiness 不能 ready");
+  const revisionIds = row.constraintRevisionIds.map((item, index) => text(item, `readiness.constraintRevisionIds[${index}]`, true));
+  if (new Set(revisionIds).size !== revisionIds.length) throw new ProcessContractError("readiness 含重复约束修订");
+  const toolchainProfileHash = row.toolchainProfileHash === null
+    ? null
+    : hash(row.toolchainProfileHash, "readiness.toolchainProfileHash");
+  if (ready && toolchainProfileHash === null) throw new ProcessContractError("ready readiness 缺少工具链绑定");
+  return {
+    id: text(row.id, "readiness.id", true),
+    status: row.status,
+    ready,
+    readinessHash: hash(row.readinessHash, "readiness.readinessHash"),
+    targetPart: text(row.targetPart, "readiness.targetPart"),
+    boardRef: text(row.boardRef, "readiness.boardRef"),
+    workspaceReady: bool(row.workspaceReady, "readiness.workspaceReady"),
+    dataScopeRecorded: bool(row.dataScopeRecorded, "readiness.dataScopeRecorded"),
+    sourceMaterialsRecorded: bool(row.sourceMaterialsRecorded, "readiness.sourceMaterialsRecorded"),
+    pinConstraintsComplete: pin,
+    electricalConstraintsComplete: electrical,
+    clockConstraintsComplete: clock,
+    constraintsComplete: complete,
+    toolchainProfileHash,
+    constraintRevisionIds: revisionIds,
+    generatedBy: {
+      type: text(generated.type, "readiness.generatedBy.type", true),
+      id: text(generated.id, "readiness.generatedBy.id", true),
+    },
+    confirmedBy,
+  };
+}
+
+export function parseProcessState(value: unknown, expectedProjectId: string): ProcessStateV1 {
+  const row = exactRecord(
+    value,
+    ["completed", "currentGate", "processInstanceId", "profileHash", "profileId", "projectId", "readiness", "schema", "workVersionId"],
+    "processState",
+  );
+  if (row.schema !== "process-state.v1" || row.profileId !== "GJB_REF_V1") {
+    throw new ProcessContractError("Core 返回了不支持的流程状态");
+  }
+  const projectId = text(row.projectId, "processState.projectId", true);
+  if (projectId !== expectedProjectId) throw new ProcessContractError("Core 返回了其他项目的流程状态");
+  if (typeof row.currentGate !== "string" || !GATES.includes(row.currentGate as P4GateId)) {
+    throw new ProcessContractError("currentGate 必须是 G0-G4");
+  }
+  const completed = bool(row.completed, "processState.completed");
+  if (completed && row.currentGate !== "G4") throw new ProcessContractError("完成态必须停在 G4");
+  return {
+    schema: "process-state.v1",
+    projectId,
+    processInstanceId: text(row.processInstanceId, "processState.processInstanceId", true),
+    profileId: "GJB_REF_V1",
+    profileHash: hash(row.profileHash, "processState.profileHash"),
+    workVersionId: text(row.workVersionId, "processState.workVersionId", true),
+    currentGate: row.currentGate as P4GateId,
+    completed,
+    readiness: parseReadiness(row.readiness),
+  };
+}
+
+export type ProcessGateStatus = "done" | "current" | "gated" | "failed" | "pending";
+
+export interface ProcessGateView {
+  readonly node: ProcessProfileNodeV1;
+  readonly status: ProcessGateStatus;
+}
+
+export function deriveProcessGateChain(
+  profile: ProcessProfileV1 | null,
+  state: ProcessStateV1 | null,
+  latestSubmissionState: Readonly<Partial<Record<P4GateId, string>>> = {},
+): readonly ProcessGateView[] | null {
+  if (!profile || !state) return null;
+  if (profile.id !== state.profileId || profile.profileHash !== state.profileHash) {
+    throw new ProcessContractError("流程定义与项目状态摘要不一致");
+  }
+  const current = profile.nodes.findIndex((node) => node.id === state.currentGate);
+  return profile.nodes.map((node, index) => {
+    let status: ProcessGateStatus = index < current || state.completed ? "done" : index > current ? "pending" : "current";
+    const submission = latestSubmissionState[node.id];
+    if (index === current && (submission === "rejected" || submission === "failed")) status = "failed";
+    else if (index === current && (submission === "in_review" || submission === "checking" || submission === "submitted")) status = "gated";
+    else if (node.id === "G0" && index === current && state.readiness && !state.readiness.ready) status = "failed";
+    return { node, status };
+  });
+}
+
+export const PROCESS_GATE_STATUS_TEXT: Readonly<Record<ProcessGateStatus, string>> = {
+  done: "已完成",
+  current: "进行中",
+  gated: "等待确认",
+  failed: "被阻断",
+  pending: "未开始",
+};
+
+export function processProgress(chain: readonly ProcessGateView[]): { readonly done: number; readonly total: number } {
+  return { done: chain.filter((entry) => entry.status === "done").length, total: chain.length };
+}
+
+export function currentProcessGate(chain: readonly ProcessGateView[] | null): ProcessGateView | null {
+  if (!chain?.length) return null;
+  return chain.find((entry) => entry.status === "current" || entry.status === "gated" || entry.status === "failed")
+    ?? [...chain].reverse().find((entry) => entry.status === "done")
+    ?? chain[0]!;
+}

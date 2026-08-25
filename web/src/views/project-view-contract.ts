@@ -19,7 +19,7 @@
 import type { ArtifactRevision, JobEvidenceContent, TaskAgentSummary, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
-import type { StageChainNode } from "../domain/tasks.ts";
+import type { ProcessGateView } from "../domain/process-profile.ts";
 import type { StreamPhase } from "../domain/task-stream.ts";
 import type { Theme } from "../domain/theme.ts";
 import type { ApprovalCardState, ApprovalMember, DecisionFailure } from "../domain/unified.ts";
@@ -190,13 +190,8 @@ export const ARTIFACT_DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" 
 export interface TopBarProps {
   /** 项目名称，来自 `GET /projects/:id`.name。 */
   readonly projectName: string;
-  /**
-   * 当前选中 run 的阶段链推导结果（`domain/tasks.ts:deriveStageChain` 的输出，
-   * 15 个节点，顺序与 `STAGE_CHAIN` 一致）。项目尚无任何 run 时为 null——顶栏应
-   * 显示「尚无任务」占位，不渲染阶段条（不要传空数组，null 明确表达“不存在”
-   * 与“存在但全部 pending”的区别，后者是合法状态，前者不是）。
-   */
-  readonly stageChain: readonly StageChainNode[] | null;
+  /** Core process-profile.v1 + process-state.v1 的 G0-G4 投影；绝不从任务阶段推导。 */
+  readonly stageChain: readonly ProcessGateView[] | null;
   /** 项目没有新版工程阶段链时的准确占位文案。 */
   readonly stageEmptyText: string;
   /**

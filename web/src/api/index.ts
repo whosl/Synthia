@@ -18,6 +18,12 @@ import type {
   GateSubmission,
   GateSubmissionDetail,
   CreateImportSnapshotRequest,
+  CreateChangeRequestV1,
+  CreateFormalInputPreviewRequestV1,
+  ConfirmFormalInputRequestV1,
+  CreateFormalJobRequestV1,
+  CreateReadinessRequestV1,
+  ConfirmReadinessRequestV1,
   CopyHistoricalMaterialRequest,
   CopyHistoricalMaterialResult,
   DenyImportSnapshotRequest,
@@ -31,6 +37,20 @@ import type {
   Project,
   ProjectDetail,
   ProcessVersion,
+  ProcessProfileV1,
+  ProcessStateV1,
+  ProjectReadinessRecord,
+  GateCheckEvaluationV1,
+  FormalInputPreviewV1,
+  FormalInputApprovalV1,
+  FormalJobBindingV1,
+  BitstreamResultV1,
+  DeliveryReleaseSummaryV1,
+  DeliveryReleaseDetailV1,
+  DeliveryManifestV1,
+  DeliveryReleaseContentV1,
+  ChangeRequestV1,
+  ProjectWorkVersionV1,
   RevisionContent,
   SendMessageResult,
   SideTaskAdoptionResult,
@@ -75,6 +95,193 @@ export function createProject(client: ApiClient, body: CreateProjectRequest, ide
 /** Core 注册的 active 工程流程版本；调用方必须对加载失败和空列表 fail closed。 */
 export function listProcessVersions(client: ApiClient): Promise<ProcessVersion[]> {
   return client<ProcessVersion[]>(`${V1}/process-versions`);
+}
+
+/** P4 versioned profile; validated by domain/process-profile before use. */
+export function getProcessProfile(client: ApiClient, processVersionId: string): Promise<ProcessProfileV1> {
+  return client<ProcessProfileV1>(`${V1}/process-versions/${encodeURIComponent(processVersionId)}/profile`);
+}
+
+/** P4 Core-owned projection; never derive this from Runtime task text. */
+export function getProcessState(client: ApiClient, projectId: string): Promise<ProcessStateV1> {
+  return client<ProcessStateV1>(`${V1}/projects/${encodeURIComponent(projectId)}/process-state`);
+}
+
+export function listProjectReadiness(client: ApiClient, projectId: string): Promise<ProjectReadinessRecord[]> {
+  return client<ProjectReadinessRecord[]>(`${V1}/projects/${encodeURIComponent(projectId)}/readiness`);
+}
+
+export function createProjectReadiness(
+  client: ApiClient,
+  projectId: string,
+  body: CreateReadinessRequestV1,
+  idempotencyKey: string,
+): Promise<ProjectReadinessRecord> {
+  return client<ProjectReadinessRecord>(`${V1}/projects/${encodeURIComponent(projectId)}/readiness`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+export function confirmProjectReadiness(
+  client: ApiClient,
+  projectId: string,
+  readinessId: string,
+  body: ConfirmReadinessRequestV1,
+  idempotencyKey: string,
+): Promise<ProjectReadinessRecord> {
+  return client<ProjectReadinessRecord>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/readiness/${encodeURIComponent(readinessId)}/confirm`,
+    { method: "POST", body, headers: { "idempotency-key": idempotencyKey } },
+  );
+}
+
+export function previewFormalInput(
+  client: ApiClient,
+  projectId: string,
+  body: CreateFormalInputPreviewRequestV1,
+  idempotencyKey: string,
+): Promise<FormalInputPreviewV1> {
+  return client<FormalInputPreviewV1>(`${V1}/projects/${encodeURIComponent(projectId)}/formal-input-approvals/preview`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+export function confirmFormalInput(
+  client: ApiClient,
+  projectId: string,
+  body: ConfirmFormalInputRequestV1,
+  idempotencyKey: string,
+): Promise<FormalInputApprovalV1> {
+  return client<FormalInputApprovalV1>(`${V1}/projects/${encodeURIComponent(projectId)}/formal-input-approvals`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+/** Reload an immutable confirmation after Runtime has persisted its approval id. */
+export function getFormalInputApproval(
+  client: ApiClient,
+  projectId: string,
+  approvalId: string,
+): Promise<FormalInputApprovalV1> {
+  return client<FormalInputApprovalV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/formal-input-approvals/${encodeURIComponent(approvalId)}`,
+  );
+}
+
+export function createFormalJob(
+  client: ApiClient,
+  projectId: string,
+  body: CreateFormalJobRequestV1,
+  idempotencyKey: string,
+): Promise<FormalJobBindingV1> {
+  return client<FormalJobBindingV1>(`${V1}/projects/${encodeURIComponent(projectId)}/jobs`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+export function freezeJobEvidence(
+  client: ApiClient,
+  projectId: string,
+  jobId: string,
+  idempotencyKey: string,
+): Promise<JobEvidenceManifest> {
+  return client<JobEvidenceManifest>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/evidence/freeze`,
+    { method: "POST", body: {}, headers: { "idempotency-key": idempotencyKey } },
+  );
+}
+
+export function listBitstreams(client: ApiClient, projectId: string): Promise<BitstreamResultV1[]> {
+  return client<BitstreamResultV1[]>(`${V1}/projects/${encodeURIComponent(projectId)}/bitstreams`);
+}
+
+export function listDeliveryReleases(client: ApiClient, projectId: string): Promise<DeliveryReleaseSummaryV1[]> {
+  return client<DeliveryReleaseSummaryV1[]>(`${V1}/projects/${encodeURIComponent(projectId)}/delivery-releases`);
+}
+
+export function getDeliveryRelease(client: ApiClient, projectId: string, releaseId: string): Promise<DeliveryReleaseDetailV1> {
+  return client<DeliveryReleaseDetailV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/delivery-releases/${encodeURIComponent(releaseId)}`,
+  );
+}
+
+export function getDeliveryManifest(client: ApiClient, projectId: string, releaseId: string): Promise<DeliveryManifestV1> {
+  return client<DeliveryManifestV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/delivery-releases/${encodeURIComponent(releaseId)}/manifest`,
+  );
+}
+
+export function getDeliveryReleaseContent(
+  client: ApiClient,
+  projectId: string,
+  releaseId: string,
+  path: string,
+): Promise<DeliveryReleaseContentV1> {
+  return client<DeliveryReleaseContentV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/delivery-releases/${encodeURIComponent(releaseId)}/content?path=${encodeURIComponent(path)}`,
+  );
+}
+
+export function listChangeRequests(client: ApiClient, projectId: string): Promise<ChangeRequestV1[]> {
+  return client<ChangeRequestV1[]>(`${V1}/projects/${encodeURIComponent(projectId)}/change-requests`);
+}
+
+export function createChangeRequest(
+  client: ApiClient,
+  projectId: string,
+  body: CreateChangeRequestV1,
+  idempotencyKey: string,
+): Promise<ChangeRequestV1> {
+  return client<ChangeRequestV1>(`${V1}/projects/${encodeURIComponent(projectId)}/change-requests`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
+}
+
+export function withdrawChangeRequest(
+  client: ApiClient,
+  projectId: string,
+  changeRequestId: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<ChangeRequestV1> {
+  return client<ChangeRequestV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/change-requests/${encodeURIComponent(changeRequestId)}/withdraw`,
+    {
+      method: "POST",
+      body: { reason },
+      headers: { "idempotency-key": idempotencyKey },
+    },
+  );
+}
+
+export function getProjectWorkVersion(
+  client: ApiClient,
+  projectId: string,
+  workVersionId: string,
+): Promise<ProjectWorkVersionV1> {
+  return client<ProjectWorkVersionV1>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/work-versions/${encodeURIComponent(workVersionId)}`,
+  );
+}
+
+export function listGateEvaluations(
+  client: ApiClient,
+  projectId: string,
+  submissionId: string,
+): Promise<GateCheckEvaluationV1[]> {
+  return client<GateCheckEvaluationV1[]>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/gate-submissions/${encodeURIComponent(submissionId)}/evaluations`,
+  );
 }
 
 /** Formalize a free/legacy project by creating a new engineering project in Core. */
@@ -266,6 +473,11 @@ export interface ApproveRequest {
   readonly signature_method: string;
   readonly reason?: string;
   readonly baseline_id: string | null;
+  /** Every modern G1-G4 approval binds the exact passed Core evaluation. */
+  readonly gate_check_evaluation_id?: string;
+  /** G4-only sealed-delivery fields; omitted for G1-G3 and legacy approvals. */
+  readonly candidate_manifest_hash?: string;
+  readonly delivery_release_id?: string;
 }
 
 /** 批准（里程碑门必须带 baseline_id；写操作必须带 Idempotency-Key）。 */

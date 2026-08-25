@@ -58,6 +58,15 @@ import {
   normalizeSideTaskWritePath,
 } from "../domain/side-tasks.ts";
 import { sha256Bytes } from "../util/sha256.ts";
+import {
+  MOCK_P4_PROFILE,
+  mockP4Artifact,
+  mockP4ArtifactContent,
+  mockP4ArtifactRevision,
+  mockP4TaskOverlay,
+  mockP4WorkspaceManifestHash,
+  routeMockP4,
+} from "./p4.ts";
 
 /** 假装有网络：让 loading 态真的能被看见，而不是同步瞬间填满。 */
 const LATENCY_MS = 80;
@@ -383,13 +392,21 @@ function publicMockImportSnapshot(snapshot: HistoricalMaterialSnapshot): Histori
 
 function projectArtifacts(projectId: string): readonly Artifact[] {
   const fixture = projectId === MOCK_PROJECT.id ? MOCK_ARTIFACTS : [];
-  return [...fixture, ...(mockState.importArtifacts[projectId] ?? [])];
+  const project = findProject(projectId);
+  // The preloaded p1 demo has one approved XDC revision so the P4 browser
+  // walkthrough can record complete constraints. Fresh projects remain truly
+  // empty until the user imports or creates their own revision.
+  const p4 = project?.id === MOCK_PROJECT.id && project.process_profile_id === "GJB_REF_V1"
+    ? [mockP4Artifact(projectId)]
+    : [];
+  return [...fixture, ...p4, ...(mockState.importArtifacts[projectId] ?? [])];
 }
 
 function artifactRevisions(projectId: string, artifactId: string): readonly ArtifactRevision[] {
   if (!projectArtifacts(projectId).some((artifact) => artifact.id === artifactId)) return [];
   const fixture = projectId === MOCK_PROJECT.id ? MOCK_REVISIONS[artifactId] ?? [] : [];
-  return [...fixture, ...(mockState.importRevisions[artifactId] ?? [])]
+  const p4 = artifactId === mockP4Artifact(projectId).id ? [mockP4ArtifactRevision(projectId)] : [];
+  return [...fixture, ...p4, ...(mockState.importRevisions[artifactId] ?? [])]
     .sort((a, b) => a.version - b.version);
 }
 
@@ -1087,6 +1104,11 @@ async function route(
     }
     return ok(MOCK_PROCESS_VERSIONS);
   }
+  if (seg.length === 3 && seg[0] === "process-versions" && seg[2] === "profile" && method === "GET") {
+    return seg[1] === "GJB_REF_V1"
+      ? ok(MOCK_P4_PROFILE)
+      : fail(404, "not_found", "流程 profile 不存在");
+  }
 
   // /projects
   if (seg.length === 1 && seg[0] === "projects" && method === "GET") {
@@ -1109,6 +1131,17 @@ async function route(
   if (rest.length === 1 && rest[0] === "copy-as-engineering" && method === "POST") {
     return copyMockProjectAsEngineering(projectId, body);
   }
+
+  const p4Response = routeMockP4({
+    project,
+    mainTaskId: fixtureProject ? LIVE_AGENT_ID : null,
+    rest,
+    method,
+    body,
+    headers,
+    searchParams,
+  });
+  if (p4Response) return p4Response;
 
   // /projects/:id/import-snapshots[/:snapshotId[/confirm|deny|copy]]
   // Search is intentionally nested below the project so Core can enforce project
@@ -1146,6 +1179,8 @@ async function route(
       files: [],
       pending_count: 0,
       head_commit: mockState.projectHeadCommits[projectId] ?? MOCK_PROJECT_HEAD_COMMIT,
+      manifest_hash: project.process_profile_id === "GJB_REF_V1" ? mockP4WorkspaceManifestHash(projectId) : null,
+      workspace_manifest_hash: project.process_profile_id === "GJB_REF_V1" ? mockP4WorkspaceManifestHash(projectId) : null,
     });
   }
 
@@ -1158,7 +1193,11 @@ async function route(
     if (rest.length === 3 && rest[2] === "revisions" && method === "GET") return ok(revisions);
     if (rest.length === 5 && rest[2] === "revisions" && rest[4] === "content" && method === "GET") {
       const revision = revisions.find((r) => r.id === rest[3]);
-      const content = revision ? MOCK_CONTENT[revision.id] ?? mockState.importRevisionContent[revision.id] : undefined;
+      const content = revision
+        ? MOCK_CONTENT[revision.id]
+          ?? mockState.importRevisionContent[revision.id]
+          ?? mockP4ArtifactContent(projectId, revision.id)
+        : undefined;
       if (!revision || content === undefined) return fail(404, "not_found", "修订不存在");
       return ok({ content, content_hash: revision.content_hash });
     }
@@ -1183,9 +1222,16 @@ async function route(
     if (rest.length === 1) {
       if (method === "GET") {
         advanceCreatedMockSideTasks(projectId);
+        const overlay = mockP4TaskOverlay(project);
+        const mainAgents = fixtureProject ? mockAgents().map((agent) => overlay ? {
+          ...agent,
+          status: overlay.status,
+          awaiting_gate: overlay.awaitingGate,
+          formal_input: overlay.formalInput,
+        } : agent) : [];
         return sideListRequest
           ? ok({ tasks: sideTasks(projectId) })
-          : ok({ agents: fixtureProject ? mockAgents() : [], tasks: sideTasks(projectId) });
+          : ok({ agents: mainAgents, tasks: sideTasks(projectId) });
       }
       if (method === "POST") {
         if (sideRequest) return createMockSideTask(projectId, body, headers.get("idempotency-key"));
@@ -1235,7 +1281,13 @@ async function route(
     const agentId = rest[1]!;
     if (rest.length === 2 && method === "GET") {
       const detail = mockAgentDetail(agentId);
-      return detail ? ok(detail) : fail(404, "not_found", "run 不存在");
+      const overlay = mockP4TaskOverlay(project);
+      return detail ? ok(overlay ? {
+        ...detail,
+        status: overlay.status,
+        awaiting_gate: overlay.awaitingGate,
+        formal_input: overlay.formalInput,
+      } : detail) : fail(404, "not_found", "run 不存在");
     }
     if (rest.length === 3 && rest[2] === "stream" && method === "GET") return liveStream(agentId, signal);
     if (rest.length === 3 && rest[2] === "message" && method === "POST") {

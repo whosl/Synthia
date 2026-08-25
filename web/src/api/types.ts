@@ -85,6 +85,8 @@ export interface GateSubmission {
   readonly state: string;
   readonly snapshot_id: string;
   readonly process_instance_id: string;
+  /** P4 submissions always carry this; null/omitted is legacy read compatibility only. */
+  readonly work_version_id?: string | null;
   readonly submitter_id: string;
   readonly submitted_at: string | null;
   readonly created_at: string;
@@ -311,6 +313,13 @@ export interface WorkspaceTree {
   readonly pending_count: number;
   /** P3 创建探索副本时必须绑定的项目当前 Git HEAD。旧 Core 可暂时省略。 */
   readonly head_commit?: string | null;
+  /**
+   * Core 用与 P4 readiness 完全同源的算法计算的工作区清单摘要。
+   * Web 不从 files 反向猜测，因为 Core 的清单还包含 skippedBinary 事实。
+   */
+  readonly manifest_hash?: string | null;
+  /** Preferred explicit P4 response name (compatibly accept manifest_hash above). */
+  readonly workspace_manifest_hash?: string | null;
 }
 
 /**
@@ -391,6 +400,8 @@ export interface TaskAgentSummary {
   readonly status: string;
   readonly current_stage: string | null;
   readonly awaiting_gate: string | null;
+  /** P4 Runtime 持久化的正式输入等待态；旧 Runtime 可省略。 */
+  readonly formal_input?: TaskFormalInputState | null;
   /** 任务创建时冻结的输入提交；可作为 side task 的可信 base_commit。 */
   readonly base_commit?: string | null;
   readonly created_at: string;
@@ -445,6 +456,22 @@ export interface TaskAgentDetail extends TaskAgentSummary {
   readonly audit: readonly TaskAuditEvent[];
   readonly evidence: readonly TaskEvidenceSummary[];
   readonly reason?: string | null;
+}
+
+export interface TaskFormalInputState {
+  readonly status: "awaiting_input_confirmation" | "running" | "awaiting_gate_approval";
+  /** Runtime 为这份 preview 固定的 approval id，Web 确认时必须原样使用。 */
+  readonly approval_id: string;
+  readonly preview: FormalInputPreviewV1;
+  /** Runtime 是四项正式运行的唯一编排者；Web 只展示这些持久化事实。 */
+  readonly jobs?: Readonly<Partial<Record<FormalOperationV1, TaskFormalJobStateV1>>>;
+}
+
+export interface TaskFormalJobStateV1 {
+  readonly job_id: string;
+  readonly state: string;
+  readonly evidence_manifest_id?: string;
+  readonly evidence_manifest_hash?: string;
 }
 
 // ─── P3 独立探索任务 / 临时工作区 / 正式采纳 ───────────────────────────────
@@ -652,6 +679,356 @@ export interface ProcessVersion {
   readonly process_profile_id: string;
   readonly process_profile_version: string;
   readonly process_profile_name: string;
+}
+
+// ─── P4：Core-owned G0-G4、正式输入、码流与交付 ─────────────────────
+
+export type P4GateId = "G0" | "G1" | "G2" | "G3" | "G4";
+
+export interface ProcessProfileCheckV1 {
+  readonly code: string;
+  readonly severity: "hard" | "advisory";
+}
+
+export interface ProcessProfileNodeV1 {
+  readonly id: P4GateId;
+  readonly kind: "gate";
+  readonly ordinal: number;
+  readonly name: string;
+  readonly goal: string;
+  readonly activities: readonly string[];
+  readonly requiredChecks: readonly ProcessProfileCheckV1[];
+  readonly milestoneBaseline: "B0" | "B1" | "B2" | null;
+}
+
+/** GET /process-versions/:id/profile. This is the only modern UI stage definition. */
+export interface ProcessProfileV1 {
+  readonly schema: "process-profile.v1";
+  readonly id: "GJB_REF_V1";
+  readonly version: "GJB_REF_V1";
+  readonly name: string;
+  readonly nodes: readonly ProcessProfileNodeV1[];
+  readonly profileHash: string;
+}
+
+export interface ProcessReadinessV1 {
+  readonly id: string;
+  readonly status: "draft" | "confirmed";
+  readonly ready: boolean;
+  readonly readinessHash: string;
+  readonly targetPart: string;
+  readonly boardRef: string;
+  readonly workspaceReady: boolean;
+  readonly dataScopeRecorded: boolean;
+  readonly sourceMaterialsRecorded: boolean;
+  readonly pinConstraintsComplete: boolean;
+  readonly electricalConstraintsComplete: boolean;
+  readonly clockConstraintsComplete: boolean;
+  readonly constraintsComplete: boolean;
+  readonly toolchainProfileHash: string | null;
+  readonly constraintRevisionIds: readonly string[];
+  readonly generatedBy: { readonly type: string; readonly id: string };
+  readonly confirmedBy: { readonly id: string; readonly at: string } | null;
+}
+
+/** GET /projects/:id/process-state exact v1 projection. */
+export interface ProcessStateV1 {
+  readonly schema: "process-state.v1";
+  readonly projectId: string;
+  readonly processInstanceId: string;
+  readonly profileId: "GJB_REF_V1";
+  readonly profileHash: string;
+  /** Core-owned active work version, or the latest released version in completed state. */
+  readonly workVersionId: string;
+  readonly currentGate: P4GateId;
+  readonly completed: boolean;
+  readonly readiness: ProcessReadinessV1 | null;
+}
+
+/** GET /projects/:id/readiness row; Core may expose both naming styles during migration. */
+export interface ProjectReadinessRecord {
+  readonly id: string;
+  readonly project_id?: string;
+  readonly projectId?: string;
+  readonly process_instance_id?: string;
+  readonly process_version_id?: string;
+  readonly profile_definition_hash?: string;
+  readonly work_version_id?: string;
+  readonly workVersionId?: string;
+  readonly sequence?: number;
+  readonly supersedes_readiness_id?: string | null;
+  readonly engineering_config?: EngineeringConfigV1;
+  readonly engineering_config_hash?: string;
+  readonly source_snapshot_ids?: readonly string[];
+  readonly workspace_commit?: string;
+  readonly workspace_manifest_hash?: string;
+  readonly check_results?: readonly ReadinessCheckV1[];
+  readonly checks?: readonly ReadinessCheckV1[];
+  readonly state?: "ready" | "blocked";
+  readonly status?: "draft" | "confirmed";
+  readonly ready?: boolean;
+  readonly constraints_complete?: boolean;
+  readonly target_part?: string | null;
+  readonly board_ref?: string | null;
+  readonly workspace_ready?: boolean;
+  readonly data_scope_recorded?: boolean;
+  readonly source_materials_recorded?: boolean;
+  readonly pin_constraints_complete?: boolean;
+  readonly electrical_constraints_complete?: boolean;
+  readonly clock_constraints_complete?: boolean;
+  readonly constraint_revision_ids?: readonly string[];
+  readonly toolchain_profile_hash?: string | null;
+  readonly confirmed_by?: string | null;
+  readonly confirmed_at?: string | null;
+  readonly result_hash?: string;
+  readonly readiness_hash?: string;
+  readonly created_at?: string;
+}
+
+export interface ReadinessCheckV1 {
+  readonly code: string;
+  readonly severity: "hard";
+  readonly passed: boolean;
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
+export type EngineeringPresenceState = "identified" | "missing";
+export type EngineeringConstraintState = "complete" | "partial" | "missing";
+
+export interface EngineeringConfigV1 {
+  readonly schema: "engineering-config.v1";
+  readonly targetPart: {
+    readonly value: string | null;
+    readonly state: EngineeringPresenceState;
+  };
+  readonly board: {
+    readonly ref: string | null;
+    readonly state: EngineeringPresenceState;
+  };
+  readonly constraints: {
+    readonly pin: { readonly state: EngineeringConstraintState; readonly revisionIds: readonly string[] };
+    readonly electrical: { readonly state: EngineeringConstraintState; readonly revisionIds: readonly string[] };
+    readonly clock: { readonly state: EngineeringConstraintState; readonly revisionIds: readonly string[] };
+  };
+  readonly dataScope: {
+    readonly classification: "D1" | "D2" | "D3" | "D4" | "UNCLASSIFIED";
+    readonly description: string;
+  };
+  readonly sourcePolicy: { readonly confirmedOnly: true };
+}
+
+export interface GateCheckItemV1 {
+  readonly id: string;
+  readonly check_code: string;
+  readonly severity: "hard" | "advisory";
+  readonly passed: boolean;
+  readonly details: Readonly<Record<string, unknown>>;
+  readonly evidence_refs: readonly unknown[];
+}
+
+export interface GateCheckEvaluationV1 {
+  readonly id: string;
+  readonly project_id: string;
+  readonly work_version_id: string;
+  readonly gate_submission_id: string;
+  readonly snapshot_id: string;
+  readonly profile_hash: string;
+  readonly result_hash: string;
+  readonly passed: boolean;
+  readonly sealed_projection_hash: string | null;
+  /** G4 sealed projection 固定的待建 release 身份；其他 gate 为 null。 */
+  readonly delivery_release_id: string | null;
+  readonly delivery_release_version: number | null;
+  readonly supersedes_release_id: string | null;
+  readonly evaluated_at: string;
+  readonly items: readonly GateCheckItemV1[];
+}
+
+export interface FormalInputFileV1 {
+  readonly revision_id: string;
+  readonly path: string;
+  readonly sha256: string;
+  readonly size_bytes: number;
+  readonly storage_uri: string;
+  readonly role: string;
+}
+
+export interface FormalInputPreviewV1 {
+  readonly schema: "formal-input-preview.v1";
+  readonly work_version_id: string;
+  readonly snapshot_id: string;
+  readonly readiness_id: string;
+  readonly authorized_task_id: string;
+  readonly prerequisite_baseline_id: string;
+  readonly target_part: string;
+  readonly toolchain_profile_hash: string;
+  readonly constraints_complete: boolean;
+  readonly purpose: "g4_delivery";
+  readonly allowed_operations: readonly string[];
+  readonly files: readonly FormalInputFileV1[];
+  readonly input_hash: string;
+  readonly preview_hash: string;
+}
+
+export interface FormalInputApprovalV1 extends FormalInputPreviewV1 {
+  readonly id: string;
+  readonly confirmed_by: string;
+  readonly confirmed_at: string;
+}
+
+export interface CreateReadinessRequestV1 {
+  readonly id: string;
+  readonly work_version_id: string;
+  readonly engineering_config: EngineeringConfigV1;
+  readonly source_snapshot_ids: readonly string[];
+  readonly workspace_expected_commit: string;
+  readonly workspace_manifest_hash: string;
+  readonly reason: string;
+}
+
+export interface ConfirmReadinessRequestV1 {
+  readonly reason: string;
+}
+
+export interface CreateFormalInputPreviewRequestV1 {
+  readonly work_version_id: string;
+  readonly snapshot_id: string;
+  readonly readiness_id: string;
+  readonly authorized_task_id: string;
+}
+
+export interface ConfirmFormalInputRequestV1 extends CreateFormalInputPreviewRequestV1 {
+  readonly id: string;
+  readonly purpose: "g4_delivery";
+  readonly preview_hash: string;
+}
+
+export type FormalOperationV1 = "validate_sources" | "simulate" | "synthesize" | "implement";
+
+export interface CreateFormalJobRequestV1 {
+  readonly operation: FormalOperationV1;
+  readonly run_class_intent: "formal";
+  readonly formal_input_approval_id: string;
+}
+
+/** POST /projects/:id/jobs 在 P4 formal 路径的不可变绑定回显。 */
+export interface FormalJobBindingV1 {
+  readonly jobId: string;
+  readonly state: string;
+  readonly operation: FormalOperationV1;
+  readonly runClass: "formal";
+  readonly formalInputApprovalId: string;
+  readonly inputSnapshotId: string;
+  readonly inputHash: string;
+  readonly toolchainProfileHash: string;
+  readonly errorCode?: string;
+  readonly outputSha256?: string;
+}
+
+export interface BitstreamResultV1 {
+  readonly id: string;
+  readonly project_id: string;
+  readonly work_version_id: string;
+  readonly tool_run_id: string;
+  readonly class: "trial" | "formal";
+  readonly formal_input_approval_id: string | null;
+  readonly snapshot_id: string | null;
+  readonly input_hash: string;
+  readonly target_part: string;
+  readonly sha256: string;
+  readonly size_bytes: number;
+  readonly generated_at: string;
+}
+
+export type DeliveryReleaseState = "sealed";
+
+export interface DeliveryReleaseSummaryV1 {
+  readonly id: string;
+  readonly project_id: string;
+  readonly version: number;
+  readonly supersedes_release_id: string | null;
+  readonly work_version_id: string;
+  readonly manifest_hash: string;
+  readonly item_count: number;
+  readonly state: DeliveryReleaseState;
+  readonly confirmed_by: string | null;
+  readonly released_at: string | null;
+}
+
+export interface DeliveryReleaseItemV1 {
+  readonly id: string;
+  readonly category: "rtl" | "tb" | "constraint" | "document" | "run_result" | "raw_evidence" | "confirmation" | "source" | "bitstream";
+  readonly path: string;
+  readonly source_type: string;
+  readonly source_id: string;
+  readonly sha256: string;
+  readonly size_bytes: number;
+  readonly media_type: string;
+}
+
+export interface DeliveryManifestV1 {
+  readonly schema: "delivery-manifest.v1";
+  readonly project_id: string;
+  readonly release_id: string;
+  readonly version: number;
+  readonly work_version_id: string;
+  readonly input_hash: string;
+  readonly items: readonly DeliveryReleaseItemV1[];
+  readonly manifest_hash: string;
+}
+
+export interface DeliveryReleaseDetailV1 extends DeliveryReleaseSummaryV1 {
+  readonly formal_input_approval_id: string;
+  readonly bitstream_result_id: string;
+  readonly gate_check_evaluation_id: string;
+  readonly candidate_manifest_hash: string;
+  readonly items: readonly DeliveryReleaseItemV1[];
+}
+
+export interface DeliveryReleaseContentV1 {
+  readonly path: string;
+  readonly content: string;
+  readonly encoding: "utf8" | "base64";
+  readonly media_type: string;
+  readonly sha256: string;
+  readonly file_name: string;
+}
+
+export interface ChangeRequestV1 {
+  readonly id: string;
+  readonly project_id: string;
+  readonly base_delivery_release_id: string;
+  readonly project_work_version_id: string;
+  readonly reason: string;
+  readonly affected_paths: readonly string[];
+  readonly impact_gate: Exclude<P4GateId, "G0">;
+  readonly state: "open" | "released" | "withdrawn";
+  readonly confirmed_by: string;
+  readonly confirmed_at: string;
+}
+
+export interface CreateChangeRequestV1 {
+  readonly id: string;
+  readonly work_version_id: string;
+  readonly base_delivery_release_id: string;
+  readonly reason: string;
+  readonly affected_paths: readonly string[];
+  readonly impact_gate: Exclude<P4GateId, "G0">;
+}
+
+export interface ProjectWorkVersionV1 {
+  readonly id: string;
+  readonly project_id: string;
+  readonly process_instance_id: string;
+  readonly version: number;
+  readonly origin: "initial" | "change_request";
+  readonly change_request_id: string | null;
+  readonly base_delivery_release_id: string | null;
+  readonly start_gate: P4GateId;
+  readonly current_gate: P4GateId;
+  readonly state: "working" | "in_review" | "released" | "abandoned";
+  readonly created_at: string;
+  readonly released_at: string | null;
 }
 
 /** GET /projects/:id/jobs 列表项（tool_run 行镜像；startTime/endTime 可为 null）。 */

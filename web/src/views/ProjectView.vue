@@ -19,15 +19,26 @@ import {
   adoptSideTask,
   approveGateSubmission,
   confirmImportSnapshot,
+  confirmFormalInput,
+  confirmProjectReadiness,
+  createChangeRequest,
   copyHistoricalMaterial,
   createImportSnapshot,
+  createProjectReadiness,
   createSideTask,
   createTask,
   denyImportSnapshot,
   getGateSubmission,
+  getDeliveryManifest,
+  getDeliveryRelease,
+  getDeliveryReleaseContent,
+  getFormalInputApproval,
   getImportSnapshot,
   getJobEvidenceContent,
   getProject,
+  getProcessProfile,
+  getProcessState,
+  getProjectWorkVersion,
   getRevisionContent,
   getSideTask,
   getSideTaskDiff,
@@ -37,16 +48,23 @@ import {
   getWorkspaceFile,
   getWorkspaceTree,
   listArtifacts,
+  listBitstreams,
+  listChangeRequests,
+  listDeliveryReleases,
+  listGateEvaluations,
   listGateSubmissions,
   listImportSnapshots,
   listRevisions,
+  listProjectReadiness,
   listSideTasks,
   listTasks,
   putWorkspaceFile,
+  previewFormalInput,
   registerWorkspace,
   rejectGateSubmission,
   searchHistoricalMaterials,
   sendMessage,
+  withdrawChangeRequest,
 } from "../api/index.ts";
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
 import type { ApproveRequest } from "../api/index.ts";
@@ -54,13 +72,28 @@ import type {
   AdoptSideTaskRequest,
   Artifact,
   ArtifactRevision,
+  BitstreamResultV1,
+  ChangeRequestV1,
   CopyHistoricalMaterialRequest,
+  CreateChangeRequestV1,
+  CreateReadinessRequestV1,
   CreateImportSnapshotRequest,
   CreateSideTaskRequest,
   GateSubmissionDetail,
+  GateCheckEvaluationV1,
+  DeliveryManifestV1,
+  DeliveryReleaseDetailV1,
+  DeliveryReleaseSummaryV1,
+  FormalInputApprovalV1,
+  FormalInputPreviewV1,
+  GateSubmission,
   HistoricalMaterialSearchResult,
   HistoricalMaterialSnapshot,
   ProjectDetail,
+  ProcessProfileV1,
+  ProcessStateV1,
+  ProjectReadinessRecord,
+  ProjectWorkVersionV1,
   SideTaskAdoptionResult,
   SideTaskConversationEvent,
   SideTaskDiff,
@@ -73,7 +106,6 @@ import type {
 } from "../api/types.ts";
 import {
   createPoller,
-  deriveStageChain,
   isTerminalStatus,
   prepareTaskAbortAttempt,
   resolveMainTaskId,
@@ -111,7 +143,9 @@ import { resolveTheme, toggleTheme, type Theme } from "../domain/theme.ts";
 import { processVersionText, projectType, projectTypeText } from "../domain/project.ts";
 import {
   HISTORICAL_MATERIALS_FEATURE_ENABLED,
+  FORMAL_DELIVERY_FEATURE_ENABLED,
   SIDE_TASKS_FEATURE_ENABLED,
+  shouldShowFormalDelivery,
   shouldShowHistoricalMaterials,
   shouldShowSideTasks,
 } from "../domain/feature-flags.ts";
@@ -124,6 +158,25 @@ import {
   type SideTaskAdoptionAttempt,
   type SideTaskCreateAttempt,
 } from "../domain/side-tasks.ts";
+import {
+  deriveProcessGateChain,
+  parseAndVerifyProcessProfile,
+  parseProcessState,
+  ProcessContractError,
+} from "../domain/process-profile.ts";
+import {
+  deliveryContentBytes,
+  deliveryContentMatchesHash,
+  deliveryManifestBytes,
+  deliveryManifestMatchesHash,
+  deriveG4Checks,
+  formalInputBlockers,
+  latestPassedEvaluation,
+  resolveFormalInputContext,
+  type ReadinessPreparationInput,
+} from "../domain/formal-delivery.ts";
+import { sha256Hex } from "../util/sha256.ts";
+import { ApiError } from "../api/client.ts";
 import type {
   ApprovalCardProps,
   ChatComposerMode,
@@ -146,6 +199,7 @@ import ChatFeed from "../components/chat/ChatFeed.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
 import HistoricalMaterialsPanel from "../components/materials/HistoricalMaterialsPanel.vue";
 import SideTasksPanel from "../components/tasks/SideTasksPanel.vue";
+import FormalDeliveryPanel from "../components/formal/FormalDeliveryPanel.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -164,6 +218,11 @@ const historicalMaterialsEnabled = computed(() => shouldShowHistoricalMaterials(
 const sideTasksEnabled = computed(() => shouldShowSideTasks(
   SIDE_TASKS_FEATURE_ENABLED,
   project.value?.project_type,
+));
+const formalDeliveryEnabled = computed(() => shouldShowFormalDelivery(
+  FORMAL_DELIVERY_FEATURE_ENABLED,
+  project.value?.project_type,
+  project.value?.process_profile_id ?? project.value?.process_version_id,
 ));
 const agents = ref<readonly TaskAgentSummary[]>([]);
 const initialRequestedAgentId = typeof route.query.run === "string" ? route.query.run : null;
@@ -228,6 +287,63 @@ let sideTaskCreateAttempt: SideTaskCreateAttempt | null = null;
 let sideTaskAdoptionAttempt: SideTaskAdoptionAttempt | null = null;
 let sideTaskMessageAttempt: { readonly taskId: string; readonly text: string; readonly key: string } | null = null;
 
+// ─────────────────────────────────────────────────────────────────────
+// P4 Core-owned G0-G4 / formal input / delivery
+// ─────────────────────────────────────────────────────────────────────
+
+const formalDeliveryOpen = ref(false);
+const processProfile = ref<ProcessProfileV1 | null>(null);
+const processState = ref<ProcessStateV1 | null>(null);
+const processSubmissions = ref<readonly GateSubmission[]>([]);
+const processProjectionLoading = ref(false);
+const processProjectionError = ref<string | null>(null);
+const readinessRows = ref<readonly ProjectReadinessRecord[]>([]);
+const gateEvaluation = ref<GateCheckEvaluationV1 | null>(null);
+const formalPreview = ref<FormalInputPreviewV1 | null>(null);
+const formalApproval = ref<FormalInputApprovalV1 | null>(null);
+const formalApprovalId = ref<string | null>(null);
+const bitstreams = ref<readonly BitstreamResultV1[]>([]);
+const deliveryReleases = ref<readonly DeliveryReleaseSummaryV1[]>([]);
+const selectedDeliveryReleaseId = ref<string | null>(null);
+const selectedDeliveryRelease = ref<DeliveryReleaseDetailV1 | null>(null);
+const deliveryManifest = ref<DeliveryManifestV1 | null>(null);
+const changeRequests = ref<readonly ChangeRequestV1[]>([]);
+const projectWorkVersion = ref<ProjectWorkVersionV1 | null>(null);
+const readinessSourceOptions = ref<readonly { readonly id: string; readonly label: string }[]>([]);
+const formalDeliveryLoading = ref(false);
+const formalDeliveryOperating = ref(false);
+const formalDeliveryError = ref<string | null>(null);
+const formalDeliveryNotice = ref<string | null>(null);
+let processProjectionSerial = 0;
+let formalDeliverySerial = 0;
+let formalNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
+
+interface WriteAttempt<T> {
+  readonly signature: string;
+  readonly key: string;
+  readonly body: T;
+}
+
+let readinessPrepareAttempt: WriteAttempt<CreateReadinessRequestV1> | null = null;
+let readinessConfirmAttempt: WriteAttempt<{ readonly readinessId: string; readonly reason: string }> | null = null;
+let formalPreviewAttempt: WriteAttempt<{
+  readonly work_version_id: string;
+  readonly snapshot_id: string;
+  readonly readiness_id: string;
+  readonly authorized_task_id: string;
+}> | null = null;
+let formalConfirmAttempt: WriteAttempt<{
+  readonly id: string;
+  readonly work_version_id: string;
+  readonly snapshot_id: string;
+  readonly readiness_id: string;
+  readonly authorized_task_id: string;
+  readonly purpose: "g4_delivery";
+  readonly preview_hash: string;
+}> | null = null;
+let changeRequestAttempt: WriteAttempt<CreateChangeRequestV1> | null = null;
+let withdrawChangeRequestAttempt: WriteAttempt<{ readonly changeRequestId: string; readonly reason: string }> | null = null;
+
 const loading = ref(true);
 const loadErrorText = ref<string | null>(null);
 
@@ -281,6 +397,8 @@ async function refresh(): Promise<void> {
     loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
     void syncApproval();
+    await loadProcessProjection();
+    if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
   } catch (err) {
     loadErrorText.value = humanizeLoadError(err);
   } finally {
@@ -342,6 +460,7 @@ async function loadMaterials(): Promise<void> {
 
 function openMaterials(): void {
   if (!historicalMaterialsEnabled.value) return;
+  closeFormalDelivery();
   closeSideTasks();
   materialsOpen.value = true;
   if (materialSnapshots.value.length === 0 && !materialsLoading.value && !materialsError.value) void loadMaterials();
@@ -567,6 +686,7 @@ watch(
 
 function openSideTasks(): void {
   if (!sideTasksEnabled.value) return;
+  closeFormalDelivery();
   closeMaterials();
   recordsOpen.value = false;
   sideTasksOpen.value = true;
@@ -709,6 +829,537 @@ async function onSendSideTaskMessage(textInput: string): Promise<void> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// P4 正式流程编排（Core 事实 + 明确人工动作）
+// ─────────────────────────────────────────────────────────────────────
+
+const latestSubmissionStates = computed<Readonly<Partial<Record<"G0" | "G1" | "G2" | "G3" | "G4", string>>>>(() => {
+  const result: Partial<Record<"G0" | "G1" | "G2" | "G3" | "G4", string>> = {};
+  const gates = new Set(["G0", "G1", "G2", "G3", "G4"]);
+  for (const row of [...processSubmissions.value].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
+    if (gates.has(row.gate) && result[row.gate as "G0" | "G1" | "G2" | "G3" | "G4"] === undefined) {
+      result[row.gate as "G0" | "G1" | "G2" | "G3" | "G4"] = row.state;
+    }
+  }
+  return result;
+});
+
+const processGateChain = computed(() => {
+  try {
+    return deriveProcessGateChain(processProfile.value, processState.value, latestSubmissionStates.value);
+  } catch {
+    return null;
+  }
+});
+
+const formalInputContext = computed(() => resolveFormalInputContext({
+  state: processState.value,
+  readinessRows: readinessRows.value,
+  submissions: processSubmissions.value,
+  authorizedTaskId: detail.value?.task_id ?? detail.value?.agent_id ?? null,
+}));
+const formalFlowProgress = computed(() => (
+  detail.value?.formal_input
+  ?? agents.value.find((row) => (row.task_id ?? row.agent_id) === currentAgentId.value)?.formal_input
+  ?? null
+));
+const formalInputBlockerRows = computed(() => formalInputBlockers(processState.value, formalInputContext.value));
+const g4Checks = computed(() => deriveG4Checks(processProfile.value, gateEvaluation.value));
+const readinessWorkspaceManifestHash = computed(() => (
+  workspace.value?.workspace_manifest_hash ?? workspace.value?.manifest_hash ?? null
+));
+const workspaceReadyForReadiness = computed(() => Boolean(
+  workspace.value?.head_commit
+  && readinessWorkspaceManifestHash.value
+  && workspace.value.pending_count === 0,
+));
+const constraintRevisionOptions = computed(() => artifacts.value.flatMap((artifact) => {
+  if (artifact.artifact_type !== "XDC_CANDIDATE" && artifact.artifact_type !== "CONSTRAINT_DESIGN") return [];
+  return (revisionsByArtifact.value[artifact.id] ?? []).map((revision) => ({
+    id: revision.id,
+    label: `${artifact.artifact_type} · v${revision.version} · ${revision.id}`,
+  }));
+}));
+
+function formalErrorText(err: unknown): string {
+  if (err instanceof ProcessContractError) return err.message;
+  if (err instanceof ApiError) {
+    if (err.status === 404 || err.status === 503) return "Core 尚未提供完整的 P4 正式能力；所有正式操作已保持锁定。";
+    if (err.status === 409) return `前置事实已变化：${err.message}`;
+    if (err.status === 403) return "当前账号没有查看或执行正式工程操作的权限。";
+  }
+  return humanizeLoadError(err);
+}
+
+function clearFormalNoticeLater(): void {
+  if (formalNoticeTimer !== null) window.clearTimeout(formalNoticeTimer);
+  formalNoticeTimer = window.setTimeout(() => {
+    formalDeliveryNotice.value = null;
+    formalNoticeTimer = null;
+  }, 5200);
+}
+
+async function loadProcessProjection(): Promise<boolean> {
+  const value = project.value;
+  if (
+    !value
+    || projectType(value) !== "engineering"
+    || (value.process_profile_id ?? value.process_version_id) !== "GJB_REF_V1"
+  ) {
+    processProfile.value = null;
+    processState.value = null;
+    processSubmissions.value = [];
+    processProjectionError.value = null;
+    return false;
+  }
+  const serial = ++processProjectionSerial;
+  processProjectionLoading.value = true;
+  try {
+    const [rawProfile, rawState] = await Promise.all([
+      getProcessProfile(api, "GJB_REF_V1"),
+      getProcessState(api, projectId),
+    ]);
+    const profile = await parseAndVerifyProcessProfile(rawProfile);
+    const state = parseProcessState(rawState, projectId);
+    // Force the profile/state hash and gate-domain invariant before publishing
+    // either object to the rail. A mismatch clears both facts below.
+    deriveProcessGateChain(profile, state);
+    if (serial !== processProjectionSerial) return false;
+    processProfile.value = profile;
+    processState.value = state;
+    processProjectionError.value = null;
+    try {
+      const submissions = await listGateSubmissions(api, projectId);
+      if (serial === processProjectionSerial) processSubmissions.value = submissions;
+    } catch {
+      // Profile + process-state remain a complete Core projection. Submission
+      // state only refines the current gate to waiting/failed.
+      if (serial === processProjectionSerial) processSubmissions.value = [];
+    }
+    return true;
+  } catch (err) {
+    if (serial !== processProjectionSerial) return false;
+    processProfile.value = null;
+    processState.value = null;
+    processSubmissions.value = [];
+    processProjectionError.value = formalErrorText(err);
+    return false;
+  } finally {
+    if (serial === processProjectionSerial) processProjectionLoading.value = false;
+  }
+}
+
+function latestG4Submission(rows: readonly GateSubmission[], workVersionId: string): GateSubmission | null {
+  return [...rows]
+    .filter((row) => row.gate === "G4" && row.work_version_id === workVersionId)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null;
+}
+
+function activeWorkVersionId(rows: readonly ProjectReadinessRecord[], changes: readonly ChangeRequestV1[]): string | null {
+  if (processState.value?.workVersionId) return processState.value.workVersionId;
+  const readinessId = processState.value?.readiness?.id;
+  const currentReadiness = readinessId ? rows.find((row) => row.id === readinessId) : undefined;
+  return currentReadiness?.work_version_id
+    ?? currentReadiness?.workVersionId
+    ?? changes.find((change) => change.state === "open")?.project_work_version_id
+    ?? formalPreview.value?.work_version_id
+    ?? rows[0]?.work_version_id
+    ?? rows[0]?.workVersionId
+    ?? deliveryReleases.value[0]?.work_version_id
+    ?? null;
+}
+
+async function loadSelectedDeliveryRelease(releaseId: string | null, serial = formalDeliverySerial): Promise<void> {
+  selectedDeliveryReleaseId.value = releaseId;
+  if (!releaseId) {
+    selectedDeliveryRelease.value = null;
+    deliveryManifest.value = null;
+    return;
+  }
+  const [release, manifest] = await Promise.all([
+    getDeliveryRelease(api, projectId, releaseId),
+    getDeliveryManifest(api, projectId, releaseId),
+  ]);
+  if (serial !== formalDeliverySerial || selectedDeliveryReleaseId.value !== releaseId) return;
+  if (manifest.release_id !== release.id || manifest.manifest_hash !== release.manifest_hash) {
+    throw new ProcessContractError("交付版本与 manifest 摘要不一致");
+  }
+  selectedDeliveryRelease.value = release;
+  deliveryManifest.value = manifest;
+}
+
+async function loadFormalDelivery(includeProjection = true): Promise<void> {
+  if (!formalDeliveryEnabled.value || formalDeliveryLoading.value) return;
+  const serial = ++formalDeliverySerial;
+  formalDeliveryLoading.value = true;
+  formalDeliveryError.value = null;
+  try {
+    if (includeProjection) await loadProcessProjection();
+    if (!processProfile.value || !processState.value) {
+      throw new ProcessContractError(processProjectionError.value ?? "Core 流程事实尚不可用");
+    }
+    const [readiness, submissions, streams, releases, changes] = await Promise.all([
+      listProjectReadiness(api, projectId),
+      listGateSubmissions(api, projectId),
+      listBitstreams(api, projectId),
+      listDeliveryReleases(api, projectId),
+      listChangeRequests(api, projectId),
+    ]);
+    if (serial !== formalDeliverySerial) return;
+    readinessRows.value = readiness;
+    processSubmissions.value = submissions;
+    bitstreams.value = streams.filter((row) => row.work_version_id === processState.value!.workVersionId);
+    deliveryReleases.value = [...releases].sort((a, b) => b.version - a.version);
+    changeRequests.value = changes;
+
+    const g4Submission = latestG4Submission(submissions, processState.value.workVersionId);
+    if (g4Submission) {
+      const evaluations = await listGateEvaluations(api, projectId, g4Submission.id);
+      if (serial !== formalDeliverySerial) return;
+      gateEvaluation.value = [...evaluations]
+        .sort((a, b) => b.evaluated_at.localeCompare(a.evaluated_at))[0] ?? null;
+    } else {
+      gateEvaluation.value = null;
+    }
+
+    const runtimeFormal = formalFlowProgress.value;
+    formalPreview.value = null;
+    formalApproval.value = null;
+    formalApprovalId.value = null;
+    if (runtimeFormal?.preview.work_version_id === processState.value.workVersionId) {
+      if (runtimeFormal.preview.schema !== "formal-input-preview.v1") {
+        throw new ProcessContractError("Runtime 返回了不支持的正式输入 preview");
+      }
+      formalPreview.value = runtimeFormal.preview;
+      formalApprovalId.value = runtimeFormal.approval_id;
+      try {
+        formalApproval.value = await getFormalInputApproval(api, projectId, runtimeFormal.approval_id);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) formalApproval.value = null;
+        else throw err;
+      }
+    }
+
+    const workVersionId = activeWorkVersionId(readiness, changes);
+    projectWorkVersion.value = workVersionId
+      ? await getProjectWorkVersion(api, projectId, workVersionId)
+      : null;
+
+    const preferredRelease = selectedDeliveryReleaseId.value && releases.some((row) => row.id === selectedDeliveryReleaseId.value)
+      ? selectedDeliveryReleaseId.value
+      : deliveryReleases.value[0]?.id ?? null;
+    await loadSelectedDeliveryRelease(preferredRelease, serial);
+    if (
+      !formalApproval.value
+      && selectedDeliveryRelease.value?.work_version_id === processState.value.workVersionId
+    ) {
+      formalApproval.value = await getFormalInputApproval(
+        api,
+        projectId,
+        selectedDeliveryRelease.value.formal_input_approval_id,
+      );
+      formalPreview.value = formalApproval.value;
+      formalApprovalId.value = formalApproval.value.id;
+    }
+
+    try {
+      const sources = materialSnapshots.value.length > 0
+        ? materialSnapshots.value
+        : await listImportSnapshots(api, projectId);
+      if (serial === formalDeliverySerial) {
+        readinessSourceOptions.value = sources
+          .filter((row) => row.status === "confirmed" && row.valid)
+          .map((row) => ({ id: row.id, label: `${row.source_name ?? row.id} · ${row.files.length} 个文件` }));
+      }
+    } catch {
+      if (serial === formalDeliverySerial) readinessSourceOptions.value = [];
+    }
+  } catch (err) {
+    if (serial === formalDeliverySerial) formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    if (serial === formalDeliverySerial) formalDeliveryLoading.value = false;
+  }
+}
+
+function openFormalDelivery(): void {
+  if (!formalDeliveryEnabled.value) return;
+  closeMaterials();
+  closeSideTasks();
+  recordsOpen.value = false;
+  formalDeliveryOpen.value = true;
+  void loadFormalDelivery();
+}
+
+function closeFormalDelivery(): void {
+  formalDeliveryOpen.value = false;
+  formalDeliverySerial += 1;
+  formalDeliveryLoading.value = false;
+}
+
+function signatureOf(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+async function onPrepareReadiness(input: ReadinessPreparationInput): Promise<void> {
+  const commit = workspace.value?.head_commit;
+  const manifestHash = readinessWorkspaceManifestHash.value;
+  if (!commit || !manifestHash || workspace.value?.pending_count !== 0 || formalDeliveryOperating.value) {
+    formalDeliveryError.value = "工作区尚未完全登记，或 Core 尚未返回同源 manifest。";
+    return;
+  }
+  const existingWorkVersionId = activeWorkVersionId(readinessRows.value, changeRequests.value);
+  if (!existingWorkVersionId) {
+    formalDeliveryError.value = "Core 尚未返回 active work version，不能准备 G0。";
+    return;
+  }
+  const signature = signatureOf({ input, commit, manifestHash, existingWorkVersionId });
+  if (!readinessPrepareAttempt || readinessPrepareAttempt.signature !== signature) {
+    readinessPrepareAttempt = {
+      signature,
+      key: crypto.randomUUID(),
+      body: {
+        id: `ready-${crypto.randomUUID()}`,
+        work_version_id: existingWorkVersionId,
+        engineering_config: input.engineeringConfig,
+        source_snapshot_ids: input.sourceSnapshotIds,
+        workspace_expected_commit: commit,
+        workspace_manifest_hash: manifestHash,
+        reason: input.reason,
+      },
+    };
+  }
+  const attempt = readinessPrepareAttempt;
+  if (!attempt) return;
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    await createProjectReadiness(api, projectId, attempt.body, attempt.key);
+    readinessPrepareAttempt = null;
+    formalDeliveryNotice.value = "G0 准备清单已由 Core 评估；只有全部 hard check 通过才可人工确认。";
+    await loadProcessProjection();
+    await loadFormalDelivery(false);
+    clearFormalNoticeLater();
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+async function onConfirmReadiness(reason: string): Promise<void> {
+  const row = readinessRows.value[0];
+  if (!row || row.state !== "ready" || row.status === "confirmed" || formalDeliveryOperating.value) return;
+  const signature = signatureOf({ readinessId: row.id, reason });
+  if (!readinessConfirmAttempt || readinessConfirmAttempt.signature !== signature) {
+    readinessConfirmAttempt = {
+      signature,
+      key: crypto.randomUUID(),
+      body: { readinessId: row.id, reason },
+    };
+  }
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    await confirmProjectReadiness(
+      api,
+      projectId,
+      readinessConfirmAttempt.body.readinessId,
+      { reason: readinessConfirmAttempt.body.reason },
+      readinessConfirmAttempt.key,
+    );
+    readinessConfirmAttempt = null;
+    // Runtime may immediately materialize the next formal-input wait state.
+    // Refresh the Core-owned task projection instead of leaving the panel on
+    // stale pre-confirmation facts until a background poll happens to run.
+    await refresh();
+    await loadFormalDelivery(false);
+    formalDeliveryNotice.value = `G0 已由当前账号确认；当前阶段为 ${processState.value?.currentGate ?? "后续阶段"}。`;
+    clearFormalNoticeLater();
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+async function onPreviewFormalInput(): Promise<void> {
+  const context = formalInputContext.value;
+  if (!context || formalInputBlockerRows.value.length > 0 || formalDeliveryOperating.value) return;
+  const body = {
+    work_version_id: context.workVersionId,
+    snapshot_id: context.snapshotId,
+    readiness_id: context.readinessId,
+    authorized_task_id: context.authorizedTaskId,
+  };
+  const signature = signatureOf(body);
+  if (!formalPreviewAttempt || formalPreviewAttempt.signature !== signature) {
+    formalPreviewAttempt = { signature, key: crypto.randomUUID(), body };
+  }
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    formalPreview.value = await previewFormalInput(api, projectId, formalPreviewAttempt.body, formalPreviewAttempt.key);
+    formalPreviewAttempt = null;
+    formalApproval.value = null;
+    formalApprovalId.value = null;
+    formalDeliveryNotice.value = "预览已生成；请核对每个文件、器件、约束与用途后再确认。";
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+async function onConfirmFormalInput(): Promise<void> {
+  const preview = formalPreview.value;
+  if (!preview || formalDeliveryOperating.value) return;
+  const approvalId = formalApprovalId.value
+    ?? `fia-${(await sha256Hex(`${projectId}\0${preview.preview_hash}\0${preview.authorized_task_id}`)).slice(0, 48)}`;
+  const body = {
+    id: approvalId,
+    work_version_id: preview.work_version_id,
+    snapshot_id: preview.snapshot_id,
+    readiness_id: preview.readiness_id,
+    authorized_task_id: preview.authorized_task_id,
+    purpose: "g4_delivery" as const,
+    preview_hash: preview.preview_hash,
+  };
+  const signature = signatureOf(body);
+  if (!formalConfirmAttempt || formalConfirmAttempt.signature !== signature) {
+    formalConfirmAttempt = { signature, key: crypto.randomUUID(), body };
+  }
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    formalApproval.value = await confirmFormalInput(api, projectId, formalConfirmAttempt.body, formalConfirmAttempt.key);
+    formalApprovalId.value = approvalId;
+    formalConfirmAttempt = null;
+    formalDeliveryNotice.value = "正式输入已人工确认；后续四项正式运行只能消费这份不可变 bundle。";
+    // Confirmation wakes Runtime. Pull its persisted four-job/G4 projection
+    // now so a terminal or paused poller cannot strand the approval card.
+    await refresh();
+    await loadFormalDelivery(false);
+    clearFormalNoticeLater();
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+async function onSelectDeliveryRelease(releaseId: string): Promise<void> {
+  if (formalDeliveryOperating.value) return;
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    await loadSelectedDeliveryRelease(releaseId);
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+function triggerDownload(bytes: Uint8Array, fileName: string, mediaType: string): void {
+  const blob = new Blob([bytes as BlobPart], { type: mediaType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function onDownloadDeliveryItem(path: string): Promise<void> {
+  const releaseId = selectedDeliveryReleaseId.value;
+  if (!releaseId || formalDeliveryOperating.value) return;
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    const content = await getDeliveryReleaseContent(api, projectId, releaseId, path);
+    const item = selectedDeliveryRelease.value?.items.find((row) => row.path === path);
+    if (!item || !deliveryContentMatchesHash(content, item.sha256)) {
+      throw new ProcessContractError("下载字节与密封 manifest 摘要不一致");
+    }
+    triggerDownload(deliveryContentBytes(content), content.file_name, content.media_type);
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+function onDownloadDeliveryManifest(): void {
+  const manifest = deliveryManifest.value;
+  if (!manifest) return;
+  if (!deliveryManifestMatchesHash(manifest)) {
+    formalDeliveryError.value = "下载清单与 Core 密封的 manifest 摘要不一致";
+    return;
+  }
+  triggerDownload(
+    deliveryManifestBytes(manifest),
+    `delivery-v${manifest.version}-manifest.json`,
+    "application/json",
+  );
+}
+
+async function onCreateChangeRequest(body: CreateChangeRequestV1): Promise<void> {
+  if (formalDeliveryOperating.value) return;
+  const signature = signatureOf({
+    base_delivery_release_id: body.base_delivery_release_id,
+    work_version_id: body.work_version_id,
+    reason: body.reason,
+    affected_paths: body.affected_paths,
+    impact_gate: body.impact_gate,
+  });
+  if (!changeRequestAttempt || changeRequestAttempt.signature !== signature) {
+    changeRequestAttempt = { signature, key: crypto.randomUUID(), body };
+  }
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    const created = await createChangeRequest(api, projectId, changeRequestAttempt.body, changeRequestAttempt.key);
+    changeRequestAttempt = null;
+    formalDeliveryNotice.value = `变更请求已开启，新工作版本将从 ${created.impact_gate} 重新验证；旧 release 保持只读。`;
+    await loadProcessProjection();
+    await loadFormalDelivery(false);
+    clearFormalNoticeLater();
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
+async function onWithdrawChangeRequest(changeRequestId: string, reason: string): Promise<void> {
+  if (formalDeliveryOperating.value) return;
+  const body = { changeRequestId, reason };
+  const signature = signatureOf(body);
+  if (!withdrawChangeRequestAttempt || withdrawChangeRequestAttempt.signature !== signature) {
+    withdrawChangeRequestAttempt = { signature, key: crypto.randomUUID(), body };
+  }
+  formalDeliveryOperating.value = true;
+  formalDeliveryError.value = null;
+  try {
+    await withdrawChangeRequest(
+      api,
+      projectId,
+      withdrawChangeRequestAttempt.body.changeRequestId,
+      withdrawChangeRequestAttempt.body.reason,
+      withdrawChangeRequestAttempt.key,
+    );
+    withdrawChangeRequestAttempt = null;
+    formalDeliveryNotice.value = "变更请求已撤回；未发布工作版本已废弃，当前视图恢复到最新密封版本。";
+    await loadProcessProjection();
+    await loadFormalDelivery(false);
+    clearFormalNoticeLater();
+  } catch (err) {
+    formalDeliveryError.value = formalErrorText(err);
+  } finally {
+    formalDeliveryOperating.value = false;
+  }
+}
+
 onMounted(async () => {
   try {
     project.value = await getProject(api, projectId);
@@ -737,6 +1388,10 @@ onBeforeUnmount(() => {
   materialsNoticeTimer = null;
   if (sideTasksNoticeTimer !== null) window.clearTimeout(sideTasksNoticeTimer);
   sideTasksNoticeTimer = null;
+  if (formalNoticeTimer !== null) window.clearTimeout(formalNoticeTimer);
+  formalNoticeTimer = null;
+  processProjectionSerial += 1;
+  formalDeliverySerial += 1;
   stopSideTaskPolling();
   sideTasksRequestSerial += 1;
   sideTaskDetailSerial += 1;
@@ -1153,16 +1808,15 @@ const isGjbReferenceProject = computed(() => {
   if (!value || projectType(value) !== "engineering") return false;
   return (value.process_profile_id ?? value.process_version_id) === "GJB_REF_V1";
 });
-const stageChain = computed(() =>
-  detail.value && isGjbReferenceProject.value ? deriveStageChain(detail.value) : null,
-);
+const stageChain = computed(() => isGjbReferenceProject.value ? processGateChain.value : null);
 const stageEmptyText = computed(() => {
   const value = project.value;
   if (!value) return "加载项目…";
   if (projectType(value) === "free") return "自由项目 · 无固定阶段";
   if (!isGjbReferenceProject.value) return "兼容旧流程 · 无新版阶段链";
-  const gate = value.process_instances[0]?.current_gate;
-  return gate === "G0" ? "G0 · 项目准备" : "尚无任务";
+  if (processProjectionError.value) return "Core 正式流程事实不可用";
+  if (processProjectionLoading.value) return "正在读取 G0–G4 流程…";
+  return "Core 尚未返回流程状态";
 });
 const projectTypeLabel = computed(() => (project.value ? projectTypeText(projectType(project.value)) : ""));
 const projectProfileLabel = computed(() =>
@@ -1182,6 +1836,9 @@ function onSelectAgent(agentId: string): void {
   openRevisionId.value = null;
   fileContent.value = null;
   diffAgainst.value = null;
+  formalPreview.value = null;
+  formalApproval.value = null;
+  formalApprovalId.value = null;
   clearApproval(); // 审批卡是「当前 agent 的当前门」，切 agent 必须整块作废
   void refresh();
 }
@@ -1202,6 +1859,9 @@ function onNewAgent(): void {
   openRevisionId.value = null;
   fileContent.value = null;
   diffAgainst.value = null;
+  formalPreview.value = null;
+  formalApproval.value = null;
+  formalApprovalId.value = null;
   clearApproval();
   forceNewTask.value = true;
 }
@@ -1327,6 +1987,7 @@ const recordEntryContent = ref<Record<string, RecordEntryContentState>>({});
 const recordJobs = computed(() => (detail.value ? buildRecordJobs(detail.value) : []));
 
 function onOpenRecords(jobId: string | null): void {
+  closeFormalDelivery();
   closeSideTasks();
   recordsFocusJobId.value = jobId;
   recordsOpen.value = true;
@@ -1486,11 +2147,55 @@ async function onApprove(): Promise<void> {
   decisionError.value = null;
   try {
     if (!shouldReuseApproveAttempt(approveAttempt, sub.id)) {
-      approveAttempt = { subId: sub.id, key: crypto.randomUUID(), body: await buildApproveBody(sub) };
+      const base = await buildApproveBody(sub);
+      if (isGjbReferenceProject.value) {
+        const evaluations = await listGateEvaluations(api, projectId, sub.id);
+        const evaluation = latestPassedEvaluation(evaluations, sub.snapshot_id);
+        if (!evaluation) {
+          decisionError.value = {
+            text: `${sub.gate} 尚无与当前快照匹配的 passed Core evaluation，不能批准。`,
+            hint: "请先完成该门的 Core hard checks 并重新提交审查。",
+          };
+          return;
+        }
+        gateEvaluation.value = evaluation;
+        let modernBody: ApproveRequest;
+        if (sub.gate === "G4") {
+          if (!evaluation.sealed_projection_hash || !evaluation.delivery_release_id) {
+            decisionError.value = {
+              text: "G4 evaluation 尚未同时密封交付投影与 release 身份，不能批准。",
+              hint: "请先完成四项正式运行、证据冻结与 G4 检查。",
+            };
+            return;
+          }
+          modernBody = {
+            ...base,
+            check_results_hash: evaluation.result_hash,
+            gate_check_evaluation_id: evaluation.id,
+            candidate_manifest_hash: evaluation.sealed_projection_hash,
+            delivery_release_id: evaluation.delivery_release_id,
+          };
+        } else {
+          modernBody = {
+            ...base,
+            check_results_hash: evaluation.result_hash,
+            gate_check_evaluation_id: evaluation.id,
+          };
+        }
+        approveAttempt = {
+          subId: sub.id,
+          key: crypto.randomUUID(),
+          body: modernBody,
+        };
+      } else {
+        approveAttempt = { subId: sub.id, key: crypto.randomUUID(), body: base };
+      }
     }
     await approveGateSubmission(api, projectId, sub.id, approveAttempt.body, approveAttempt.key);
     approveAttempt = null;
+    if (sub.gate === "G4") selectedDeliveryReleaseId.value = null;
     await afterDecision(sub.id);
+    if (formalDeliveryOpen.value) await loadFormalDelivery();
   } catch (err) {
     decisionError.value = humanizeDecisionError(err, "批准");
   } finally {
@@ -1684,7 +2389,17 @@ function onToggleChatOverlay(): void {
       <span>{{ projectTypeLabel }}</span>
       <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
       <span v-if="project.target_part">器件：{{ project.target_part }}</span>
-      <div v-if="sideTasksEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
+      <div v-if="formalDeliveryEnabled || sideTasksEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
+        <button
+          v-if="formalDeliveryEnabled"
+          type="button"
+          class="project-view-formal-button"
+          :aria-expanded="formalDeliveryOpen"
+          @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
+        >
+          正式流程
+          <span v-if="processState" class="project-view-materials-count">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
+        </button>
         <button
           v-if="sideTasksEnabled"
           type="button"
@@ -1807,6 +2522,50 @@ function onToggleChatOverlay(): void {
     </Transition>
 
     <Transition name="project-view-veil-fade">
+      <div v-if="formalDeliveryEnabled && formalDeliveryOpen" class="project-view-veil project-view-veil-end" @click.self="closeFormalDelivery">
+        <FormalDeliveryPanel
+          :open="formalDeliveryOpen"
+          :loading="formalDeliveryLoading"
+          :operating="formalDeliveryOperating"
+          :error="formalDeliveryError"
+          :notice="formalDeliveryNotice"
+          :profile="processProfile"
+          :state="processState"
+          :gate-chain="processGateChain"
+          :readiness-rows="readinessRows"
+          :formal-input-blockers="formalInputBlockerRows"
+          :preview="formalPreview"
+          :approval="formalApproval"
+          :formal-progress="formalFlowProgress"
+          :g4-checks="g4Checks"
+          :bitstreams="bitstreams"
+          :releases="deliveryReleases"
+          :selected-release-id="selectedDeliveryReleaseId"
+          :selected-release="selectedDeliveryRelease"
+          :manifest="deliveryManifest"
+          :change-requests="changeRequests"
+          :work-version="projectWorkVersion"
+          :project-target-part="project?.target_part ?? null"
+          :data-classification="project?.data_classification ?? 'D1'"
+          :constraint-revision-options="constraintRevisionOptions"
+          :source-snapshot-options="readinessSourceOptions"
+          :workspace-ready-for-readiness="workspaceReadyForReadiness"
+          @close="closeFormalDelivery"
+          @refresh="loadFormalDelivery()"
+          @prepare-readiness="onPrepareReadiness"
+          @confirm-readiness="onConfirmReadiness"
+          @preview-formal="onPreviewFormalInput"
+          @confirm-formal="onConfirmFormalInput"
+          @select-release="onSelectDeliveryRelease"
+          @download-item="onDownloadDeliveryItem"
+          @download-manifest="onDownloadDeliveryManifest"
+          @create-change-request="onCreateChangeRequest"
+          @withdraw-change-request="onWithdrawChangeRequest"
+        />
+      </div>
+    </Transition>
+
+    <Transition name="project-view-veil-fade">
       <div v-if="sideTasksEnabled && sideTasksOpen" class="project-view-veil project-view-veil-end" @click.self="closeSideTasks">
         <SideTasksPanel
           :open="sideTasksOpen"
@@ -1877,6 +2636,7 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-materials-button,
+.project-view-formal-button,
 .project-view-side-tasks-button {
   display: inline-flex;
   align-items: center;
@@ -1891,6 +2651,7 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-materials-button:hover,
+.project-view-formal-button:hover,
 .project-view-side-tasks-button:hover {
   background: var(--accent-subtle);
 }

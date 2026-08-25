@@ -13,6 +13,10 @@ export const SIDE_TASKS_FEATURE_ENABLED = parseExplicitFeatureFlag(
   import.meta.env.VITE_FEATURE_SIDE_TASKS,
 );
 
+export const FORMAL_DELIVERY_FEATURE_ENABLED = parseExplicitFeatureFlag(
+  import.meta.env.VITE_FEATURE_FORMAL_DELIVERY,
+);
+
 /** 历史资料库同时受发布开关和工程项目类型约束。 */
 export function shouldShowHistoricalMaterials(
   featureEnabled: boolean,
@@ -27,4 +31,13 @@ export function shouldShowSideTasks(
   type: ProjectType | string | null | undefined,
 ): boolean {
   return featureEnabled && (type === "engineering" || type === "free");
+}
+
+/** P4 write surface is only exposed for its immutable engineering profile. */
+export function shouldShowFormalDelivery(
+  featureEnabled: boolean,
+  type: ProjectType | string | null | undefined,
+  processVersionId: string | null | undefined,
+): boolean {
+  return featureEnabled && type === "engineering" && processVersionId === "GJB_REF_V1";
 }
