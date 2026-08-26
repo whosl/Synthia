@@ -95,16 +95,159 @@ const commonMarkers = [
 
 const standardContracts = [
   {
+    baseName: "GBT11457-2006",
+    sha256: "7d7af3dfb969bb7639c213396d9338f50fd425b028d26874240f43f094b83f91",
+    pageCount: 263,
+    sourceKind: "official-full-text",
+    directlyReferences: [],
+    markers: ["信息技术 软件工程术语", "## 2 术语定义及缩略语", "2.1859", "### PDF 第 263 页"],
+  },
+  {
+    baseName: "GJB2786A-2009",
+    sha256: "05e05d4a325292cac939aaf34065db13c79d74d99db1028b811af554e80bc18c",
+    pageCount: 42,
+    sourceKind: "public-preview-reconstruction",
+    directlyReferences: ["GBT11457-2006", "GJB438B-2009"],
+    markers: ["军用软件开发通用要求", "## 4 一般要求", "## 5 详细要求", "### PDF 第 42 页"],
+  },
+  {
     baseName: "GJB9764-2020",
     sha256: "b37a6b48c8e07ff3f1fc0a8ff65208c44117f79b6a876760720a53531b07411b",
+    pageCount: 46,
+    sourceKind: "user-supplied-scan",
+    directlyReferences: ["GBT11457-2006", "GJB438B-2009", "GJB9432-2018"],
     markers: ["军用可编程逻辑器件软件文档编制规范", "GJB 438B-2009", "## 4 一般要求", "## 5 详细要求"],
   },
   {
     baseName: "GJB438B-2009",
     sha256: "564413d0dc71b02824942fea469f483bb558539166b5bc35d6429cad1019e010",
+    pageCount: 98,
+    sourceKind: "user-supplied-scan",
+    directlyReferences: ["GBT11457-2006", "GJB2786A-2009"],
     markers: ["军用软件开发文档通用要求", "## 4 一般要求", "## 附录 G（规范性）", "## 附录 BB（资料性）"],
   },
+  {
+    baseName: "GJB5235-2004",
+    sha256: "7f2f6429643bcae81bc7d669d77a21307f5cb4238576af724e0116abe5392fa5",
+    pageCount: 14,
+    sourceKind: "public-preview-reconstruction",
+    directlyReferences: ["GBT8566-2022", "GBT11457-2006"],
+    markers: ["军用软件配置管理", "## 6 软件配置标识", "## 10 软件的发行管理和交付", "### PDF 第 14 页"],
+  },
+  {
+    baseName: "GJB9433-2018",
+    sha256: "d397cf357d394ed0341758a986f11b34afab1e245070cd62a674f7e918e7937b",
+    pageCount: 14,
+    sourceKind: "public-preview-reconstruction",
+    directlyReferences: ["GBT11457-2006", "GJB9432-2018"],
+    markers: ["军用可编程逻辑器件软件测试要求", "## 5 详细要求", "## 附录 A～C", "### PDF 第 14 页"],
+  },
 ] as const;
+
+interface StandardManifestEntry {
+  readonly id?: unknown;
+  readonly status?: unknown;
+  readonly pageCount?: unknown;
+  readonly expectedPageCount?: unknown;
+  readonly sha256?: unknown;
+  readonly pdfFile?: unknown;
+  readonly markdownFile?: unknown;
+  readonly source?: { readonly kind?: unknown; readonly fragmentPageCount?: unknown; readonly fragmentSha256?: unknown };
+  readonly corroboration?: {
+    readonly kind?: unknown;
+    readonly pageCount?: unknown;
+    readonly sha256?: unknown;
+    readonly result?: unknown;
+  };
+  readonly directlyReferences?: unknown;
+}
+
+const corroborationContracts = new Map([
+  ["GJB2786A-2009", { pageCount: 42, sha256: "c43dfa87ff36b96d105cd263518d216ae99969f5f372fb1aa10f9c58e0b7c86f" }],
+  ["GJB5235-2004", { pageCount: 14, sha256: "7ee5d13d5dea89e603efa3c349178cc9961c6e3939cd5efc0070ca79ad61a273" }],
+  ["GJB9433-2018", { pageCount: 14, sha256: "60dd9265b95adda950cd8d6160aa837284fcbebe53f55e3a8bd156cbca79996f" }],
+] as const);
+
+function sameStringArray(actual: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && actual.every((value, index) => value === expected[index]);
+}
+
+async function checkStandardsManifest(standardsDir: string): Promise<Gjb9764Issue[]> {
+  const issues: Gjb9764Issue[] = [];
+  const manifestPath = resolve(standardsDir, "standards.json");
+  let parsed: { readonly schemaVersion?: unknown; readonly standards?: unknown };
+  try {
+    parsed = JSON.parse(await readFile(manifestPath, "utf8")) as typeof parsed;
+  } catch (error) {
+    return [{ file: "standards.json", message: `无法读取或解析机器清单：${error instanceof Error ? error.message : String(error)}` }];
+  }
+  if (parsed.schemaVersion !== 1) {
+    issues.push({ file: "standards.json", message: "schemaVersion 必须为 1" });
+  }
+  if (!Array.isArray(parsed.standards)) {
+    return [...issues, { file: "standards.json", message: "standards 必须为数组" }];
+  }
+
+  const entries = parsed.standards as StandardManifestEntry[];
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  if (byId.size !== entries.length) {
+    issues.push({ file: "standards.json", message: "标准 id 缺失或重复" });
+  }
+  for (const contract of standardContracts) {
+    const entry = byId.get(contract.baseName);
+    if (!entry) {
+      issues.push({ file: "standards.json", message: `缺少标准条目：${contract.baseName}` });
+      continue;
+    }
+    if (entry.status !== "available") issues.push({ file: "standards.json", message: `${contract.baseName} 状态必须为 available` });
+    if (entry.pageCount !== contract.pageCount) issues.push({ file: "standards.json", message: `${contract.baseName} 页数不匹配` });
+    if (entry.sha256 !== contract.sha256) issues.push({ file: "standards.json", message: `${contract.baseName} SHA-256 不匹配` });
+    if (entry.pdfFile !== `${contract.baseName}.pdf`) issues.push({ file: "standards.json", message: `${contract.baseName} PDF 文件名不匹配` });
+    if (entry.markdownFile !== `${contract.baseName}.md`) issues.push({ file: "standards.json", message: `${contract.baseName} Markdown 文件名不匹配` });
+    if (entry.source?.kind !== contract.sourceKind) issues.push({ file: "standards.json", message: `${contract.baseName} 来源类型不匹配` });
+    if (!sameStringArray(entry.directlyReferences, contract.directlyReferences)) {
+      issues.push({ file: "standards.json", message: `${contract.baseName} 直接引用关系不匹配` });
+    }
+    const corroboration = corroborationContracts.get(contract.baseName);
+    if (corroboration && (
+      entry.corroboration?.kind !== "user-supplied-complete-copy"
+      || entry.corroboration.pageCount !== corroboration.pageCount
+      || entry.corroboration.sha256 !== corroboration.sha256
+      || typeof entry.corroboration.result !== "string"
+      || !entry.corroboration.result.includes("match")
+    )) {
+      issues.push({ file: "standards.json", message: `${contract.baseName} 用户完整副本交叉核对证据不匹配` });
+    }
+  }
+
+  const gjb9432 = byId.get("GJB9432-2018");
+  if (!gjb9432
+    || gjb9432.status !== "missing"
+    || gjb9432.expectedPageCount !== 11
+    || gjb9432.source?.kind !== "verified-fragment"
+    || gjb9432.source.fragmentPageCount !== 3
+    || gjb9432.source.fragmentSha256 !== "4a021d3f0b81d5adfceec0a5ac5e0120f17d475015855a2c8e89b16ee795e3f2"
+    || !sameStringArray(gjb9432.directlyReferences, ["GBT11457-2006", "GJB5235-2004", "GJB9433-2018"])) {
+    issues.push({ file: "standards.json", message: "GJB9432-2018 缺失状态、残件证据或引用关系不匹配" });
+  }
+  const gbt8566 = byId.get("GBT8566-2022");
+  if (!gbt8566 || gbt8566.status !== "missing" || gbt8566.source?.kind !== "not-acquired") {
+    issues.push({ file: "standards.json", message: "GB/T 8566 必须登记为尚未取得且待版本评审" });
+  }
+  if (byId.size !== standardContracts.length + 2) {
+    issues.push({ file: "standards.json", message: "机器清单存在未纳入校验契约的标准条目" });
+  }
+
+  const directoryEntries = await readdir(resolve(standardsDir));
+  for (const forbidden of ["GJB9432-2018.pdf", "GJB9432-2018.md", "GBT8566-2022.pdf", "GBT8566-2022.md"]) {
+    if (directoryEntries.includes(forbidden)) {
+      issues.push({ file: forbidden, message: "缺失标准不得提交残件或伪完整转写" });
+    }
+  }
+  return issues;
+}
 
 export async function checkGjbStandardReferences(
   standardsDir = "skills/fpga/references/standards",
@@ -120,7 +263,7 @@ export async function checkGjbStandardReferences(
     } catch (error) {
       issues.push({
         file: contract.baseName,
-        message: `无法读取权威扫描件或检索转写：${error instanceof Error ? error.message : String(error)}`,
+        message: `无法读取标准 PDF 或检索转写：${error instanceof Error ? error.message : String(error)}`,
       });
       continue;
     }
@@ -135,6 +278,34 @@ export async function checkGjbStandardReferences(
       }
     }
   }
+  const catalogPath = resolve(standardsDir, "document-catalog.md");
+  try {
+    const catalog = await readFile(catalogPath, "utf8");
+    const requiredCatalogMarkers = [
+      "GJB 9764-2020 文档矩阵",
+      "22 类中当前覆盖 6 类、缺 16 类",
+      "PLDSFARAR",
+      "PLDSDTD",
+      "PLDSVTP",
+      "PLDSVTD",
+      "PLDSVTR",
+      "PLDSDSR",
+      "SCMR",
+      "SQAR",
+      "按需系统级文档",
+    ];
+    for (const marker of requiredCatalogMarkers) {
+      if (!catalog.includes(marker)) {
+        issues.push({ file: "document-catalog.md", message: `文档目录缺少必需标记：${marker}` });
+      }
+    }
+  } catch (error) {
+    issues.push({
+      file: "document-catalog.md",
+      message: `无法读取文档目录：${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  issues.push(...await checkStandardsManifest(standardsDir));
   return issues;
 }
 
