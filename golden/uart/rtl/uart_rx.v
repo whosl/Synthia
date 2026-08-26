@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 //============================================================================
 // 模块名称 : uart_rx
-// 功能描述 : UART 接收状态机。帧格式 8N1。对输入做单级寄存器同步；检测
+// 功能描述 : UART 接收状态机。帧格式 8N1。对输入做两级寄存器同步；检测
 //            起始位下降沿后延时半位到达起始位中点确认，再每隔整位在数据
 //            位中点采样，提高采样裕度（对波特率偏差的容差）。
 // 接口      : rxd       - 串行接收数据线
@@ -22,32 +22,52 @@ module uart_rx #(
     output reg        frame_err
 );
 
-    localparam CLKS_PER_BIT = (CLK_FREQ + (BAUD_RATE >> 1)) / BAUD_RATE;
+    function integer clog2;
+        input integer value;
+        integer work;
+        begin
+            work = value - 1;
+            clog2 = 1;
+            while (work > 1) begin
+                work = work >> 1;
+                clog2 = clog2 + 1;
+            end
+        end
+    endfunction
+
+    localparam integer CLKS_PER_BIT = CLK_FREQ / BAUD_RATE;
+    localparam integer COUNTER_WIDTH = clog2(CLKS_PER_BIT);
 
     // 状态编码
-    localparam [1:0] IDLE  = 2'd0;
-    localparam [1:0] START = 2'd1;
-    localparam [1:0] DATA  = 2'd2;
-    localparam [1:0] STOP  = 2'd3;
+    // 采用 3 bit 显式编码，保留 4 个非法码供状态完整性检查和故障恢复。
+    localparam [2:0] IDLE  = 3'd0;
+    localparam [2:0] START = 3'd1;
+    localparam [2:0] DATA  = 3'd2;
+    localparam [2:0] STOP  = 3'd3;
 
-    reg  [1:0]  state;
-    reg  [15:0] clk_cnt;
+    (* fsm_encoding = "none" *) reg [2:0] state;
+    reg  [COUNTER_WIDTH-1:0] clk_cnt;
     reg  [2:0]  bit_idx;
     reg  [7:0]  data_reg;
-    reg         rxd_sync;           // 输入同步寄存器
+    (* ASYNC_REG = "TRUE" *) reg rxd_meta;
+    (* ASYNC_REG = "TRUE" *) reg rxd_sync;
 
-    // 输入同步（复位置 1 = 线路空闲电平，避免误触发起始位）
+    // 两级输入同步（复位置 1 = 线路空闲电平，避免误触发起始位）。
+    // 只有第二级 rxd_sync 可被功能逻辑消费。
     always @(posedge clk) begin
-        if (rst)
+        if (rst) begin
+            rxd_meta <= 1'b1;
             rxd_sync <= 1'b1;
-        else
-            rxd_sync <= rxd;
+        end else begin
+            rxd_meta <= rxd;
+            rxd_sync <= rxd_meta;
+        end
     end
 
     always @(posedge clk) begin
         if (rst) begin
             state     <= IDLE;
-            clk_cnt   <= 16'd0;
+            clk_cnt   <= {COUNTER_WIDTH{1'b0}};
             bit_idx   <= 3'd0;
             data_reg  <= 8'd0;
             rx_data   <= 8'd0;
@@ -59,7 +79,7 @@ module uart_rx #(
             case (state)
                 //--------------------------------------------
                 IDLE: begin
-                    clk_cnt <= 16'd0;
+                    clk_cnt <= {COUNTER_WIDTH{1'b0}};
                     bit_idx <= 3'd0;
                     if (rxd_sync == 1'b0) begin   // 检测到起始位下降沿
                         state <= START;
@@ -70,20 +90,20 @@ module uart_rx #(
                     // 计数半位，到达起始位中点
                     if (clk_cnt == (CLKS_PER_BIT - 1) / 2) begin
                         if (rxd_sync == 1'b0) begin
-                            clk_cnt <= 16'd0;     // 确认起始位有效
+                            clk_cnt <= {COUNTER_WIDTH{1'b0}}; // 确认起始位有效
                             state   <= DATA;
                         end else begin
                             state <= IDLE;        // 假起始位，回退
                         end
                     end else begin
-                        clk_cnt <= clk_cnt + 16'd1;
+                        clk_cnt <= clk_cnt + {{(COUNTER_WIDTH-1){1'b0}}, 1'b1};
                     end
                 end
                 //--------------------------------------------
                 DATA: begin
                     // 每整位在中点采样
                     if (clk_cnt == CLKS_PER_BIT - 1) begin
-                        clk_cnt           <= 16'd0;
+                        clk_cnt           <= {COUNTER_WIDTH{1'b0}};
                         data_reg[bit_idx] <= rxd_sync;
                         if (bit_idx == 3'd7) begin
                             bit_idx <= 3'd0;
@@ -92,24 +112,31 @@ module uart_rx #(
                             bit_idx <= bit_idx + 3'd1;
                         end
                     end else begin
-                        clk_cnt <= clk_cnt + 16'd1;
+                        clk_cnt <= clk_cnt + {{(COUNTER_WIDTH-1){1'b0}}, 1'b1};
                     end
                 end
                 //--------------------------------------------
                 STOP: begin
                     // 在停止位中点采样
                     if (clk_cnt == CLKS_PER_BIT - 1) begin
-                        clk_cnt   <= 16'd0;
+                        clk_cnt   <= {COUNTER_WIDTH{1'b0}};
                         rx_data   <= data_reg;
                         rx_done   <= 1'b1;
                         frame_err <= ~rxd_sync;   // 停止位应为 1
                         state     <= IDLE;
                     end else begin
-                        clk_cnt <= clk_cnt + 16'd1;
+                        clk_cnt <= clk_cnt + {{(COUNTER_WIDTH-1){1'b0}}, 1'b1};
                     end
                 end
                 //--------------------------------------------
-                default: state <= IDLE;
+                default: begin
+                    state     <= IDLE;
+                    clk_cnt   <= {COUNTER_WIDTH{1'b0}};
+                    bit_idx   <= 3'd0;
+                    data_reg  <= 8'd0;
+                    rx_done   <= 1'b0;
+                    frame_err <= 1'b0;
+                end
             endcase
         end
     end

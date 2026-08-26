@@ -23,15 +23,14 @@ module uart_tx #(
     output reg        tx_done
 );
 
-    localparam CLKS_PER_BIT = (CLK_FREQ + (BAUD_RATE >> 1)) / BAUD_RATE;
-
     // 状态编码
-    localparam [1:0] IDLE  = 2'd0;
-    localparam [1:0] START = 2'd1;
-    localparam [1:0] DATA  = 2'd2;
-    localparam [1:0] STOP  = 2'd3;
+    // 采用 3 bit 显式编码，保留 4 个非法码供状态完整性检查和故障恢复。
+    localparam [2:0] IDLE  = 3'd0;
+    localparam [2:0] START = 3'd1;
+    localparam [2:0] DATA  = 3'd2;
+    localparam [2:0] STOP  = 3'd3;
 
-    reg  [1:0]  state;
+    (* fsm_encoding = "none" *) reg [2:0] state;
     reg  [2:0]  bit_idx;       // 当前数据位序号 0..7
     reg  [7:0]  data_reg;      // 发送数据移位寄存器
     wire        baud_tick;
@@ -60,7 +59,9 @@ module uart_tx #(
             case (state)
                 //--------------------------------------------
                 IDLE: begin
-                    txd <= 1'b1;       // 线路空闲为高
+                    txd     <= 1'b1;   // 线路空闲为高
+                    tx_busy <= 1'b0;
+                    bit_idx <= 3'd0;
                     if (tx_start) begin
                         data_reg <= tx_data;
                         tx_busy  <= 1'b1;
@@ -96,7 +97,14 @@ module uart_tx #(
                     end
                 end
                 //--------------------------------------------
-                default: state <= IDLE;
+                default: begin
+                    state    <= IDLE;
+                    bit_idx  <= 3'd0;
+                    data_reg <= 8'd0;
+                    txd      <= 1'b1;
+                    tx_busy  <= 1'b0;
+                    tx_done  <= 1'b0;
+                end
             endcase
         end
     end

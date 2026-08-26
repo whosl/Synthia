@@ -4,12 +4,12 @@
 |---|---|
 | 文档编号 | UART-DOC-002 |
 | 制品类型 | PLDS_SRS（见 ARTIFACT-CONTRACTS §4.2） |
-| 版本/状态 | v1.0 / 已批准（黄金模板 G2 阶段结果成员） |
-| 拟制 | 需求工程角色 |
-| 审核 | PLDS 设计角色、验证角色 |
-| 批准 | PLDS 设计负责人 |
-| 批准日期 | 2026-08-13 |
-| 上游 | UART-DOC-001《开发技术要求》v1.0 |
+| 版本/状态 | v1.1 / candidate（未经人工批准） |
+| 候选拟制 | Agent 辅助生成，已进行技术整改 |
+| 待审核 | PLDS 设计、验证角色 |
+| 待批准 | PLDS 设计负责人 |
+| 修订日期 | 2026-08-26 |
+| 上游 | UART-DOC-001《开发技术要求》v1.1 candidate |
 | 下游 | UART-DOC-003《结构设计说明》、UART-DOC-004《详细设计说明》、UART-DOC-005《测试计划与说明》、UART-DOC-006《追踪矩阵》 |
 
 ## 1. 范围
@@ -23,7 +23,7 @@
 
 ### 1.2 PLDS 概述
 
-UART 收发器 PLDS 在单一 100 MHz 时钟域内实现 9600 8N1 全双工异步串行收发。发送通道由 `uart_tx`（内含波特率节拍发生器 `baud_gen`）将并行字节转换为 8N1 串行帧输出至 txd；接收通道 `uart_rx` 对 rxd 做寄存器同步，检测起始位后经半位偏移在每位中点采样，恢复并行字节并指示帧错误。位时基准由参数化分频产生（每帧/每位以系统时钟计数，无独立过采样时钟）。
+UART 收发器 PLDS 在单一 100 MHz 时钟域内实现 9600 8N1 全双工异步串行收发。发送通道由 `uart_tx`（内含波特率节拍发生器 `baud_gen`）将并行字节转换为 8N1 串行帧输出至 txd；接收通道 `uart_rx` 对 rxd 做两级同步，检测起始位后经半位偏移在每位中点采样，恢复并行字节并指示帧错误。位时基准由参数化分频产生（每帧/每位以系统时钟计数，无独立过采样时钟）。
 
 ### 1.3 需求编号规则
 
@@ -31,7 +31,7 @@ UART 收发器 PLDS 在单一 100 MHz 时钟域内实现 9600 8N1 全双工异�
 
 ### 1.4 基线
 
-本文档 v1.0 为 G2 批准阶段结果成员，供 G3 精确引用，并纳入设计输入基线 B1。
+本文档 v1.1 仅是 G2 候选输入。它尚未经过冻结快照检查和授权人类批准，不属于批准阶段结果，也未纳入 B1。
 
 ## 2. 引用文件
 
@@ -48,9 +48,9 @@ UART 收发器 PLDS 在单一 100 MHz 时钟域内实现 9600 8N1 全双工异�
 | UART-SRS-FUN-003 | 发送进行中出现的 tx_start 脉冲应被忽略，不得打断正在进行的帧发送（tx_start 仅在 IDLE 状态被采样）。 | UART-DRQ-IF-001 | 审查 |
 | UART-SRS-FUN-004 | 接收通道应对同步后的 rxd（rxd_sync）进行起始位检测：在 IDLE 检测到 rxd_sync 为低电平后，计数半位时间到达起始位中点再次采样；若仍为低电平则确认起始位有效，否则判定为假起始位（毛刺）并返回 IDLE。 | UART-DRQ-FUN-003、UART-DRQ-REL-003 | 审查、分析、仿真（旁证） |
 | UART-SRS-FUN-005 | 接收通道应在每个数据位的中点采样（起始位中点确认后每隔一个整位时间采样一次），共采样 8 位，LSB 先收，组成接收字节。 | UART-DRQ-FUN-003 | 仿真 |
-| UART-SRS-FUN-006 | 接收通道应在停止位中点采样并完成帧接收：完成当拍产生单时钟周期 rx_done 脉冲并将接收字节更新至 rx_data；若停止位中点采样为低电平，同拍产生单时钟周期 frame_err 脉冲。rx_done 与 frame_err 相互独立，外部逻辑据 frame_err 判定该字节有效性。 | UART-DRQ-FUN-003、UART-DRQ-FUN-004、UART-DRQ-IF-002 | 仿真、审查 |
+| UART-SRS-FUN-006 | 接收通道应在停止位中点采样并完成帧接收：完成当拍产生单时钟周期 rx_done 脉冲并将接收字节更新至 rx_data；若停止位中点采样为低电平，同拍产生单时钟周期 frame_err 脉冲。frame_err 由 rx_done 限定，外部逻辑在 rx_done 当拍据其判定该字节有效性。 | UART-DRQ-FUN-003、UART-DRQ-FUN-004、UART-DRQ-IF-002 | 仿真、审查 |
 | UART-SRS-FUN-007 | 无论停止位校验结果如何，接收通道均应在帧完成当拍返回 IDLE，能够继续接收后续帧，不得死锁。 | UART-DRQ-FUN-004、UART-DRQ-REL-003 | 审查 |
-| UART-SRS-FUN-008 | 发送通道与接收通道应相互独立，允许同时收发（全双工）。 | UART-DRQ-FUN-001 | 仿真（环回同时收发） |
+| UART-SRS-FUN-008 | 发送通道与接收通道应相互独立，允许同时发送和接收不同字节（全双工）。 | UART-DRQ-FUN-001 | 仿真（独立 TX/RX 激励） |
 | UART-SRS-FUN-009 | 串行线路空闲及复位状态下 txd 应输出高电平；rxd_sync 复位值为高电平（线路空闲），复位后接收通道保持空闲监视。 | UART-DRQ-FUN-005 | 仿真、审查 |
 
 ### 3.2 接口需求
@@ -67,15 +67,15 @@ UART 收发器 PLDS 在单一 100 MHz 时钟域内实现 9600 8N1 全双工异�
 |---|---|---|---|
 | UART-SRS-CKR-001 | PLDS 内部应为单一时钟域，全部时序逻辑使用 clk 上升沿；标称频率 100 MHz。 | UART-DRQ-PERF-002 | 静态检查、STA |
 | UART-SRS-CKR-002 | 复位 rst 为同步、高有效，在 clk 上升沿采样；复位期间全部状态寄存器和输出应处于确定初始值：state=IDLE，txd=1，tx_busy=0，tx_done=0，rx_data=8'h00，rx_done=0，frame_err=0，rxd_sync=1，各计数器=0。 | UART-DRQ-IF-004、UART-DRQ-REL-002 | 仿真、审查 |
-| UART-SRS-CKR-003 | rxd 为异步输入，进入内部逻辑前应经单级寄存器（rxd_sync）同步，复位值取线路空闲电平（高）；tx_start、tx_data 按同步输入处理（由外部系统时钟域保证）。 | UART-DRQ-REL-001 | 审查、静态检查（CDC） |
+| UART-SRS-CKR-003 | rxd 为异步输入，进入功能逻辑前应依次经过 `rxd_meta`、`rxd_sync` 两级寄存器，两级均标记 `ASYNC_REG=TRUE` 且复位为高；状态机不得直接使用 rxd 或 rxd_meta。tx_start、tx_data 按同步输入处理，由外部接口集成负责保证。 | UART-DRQ-REL-001 | 审查、静态检查（CDC） |
 
 ### 3.4 时序需求
 
 | 编号 | 需求文本 | 来源 | 验证方法 |
 |---|---|---|---|
-| UART-SRS-TIM-001 | 位时基准由分频常数 `CLKS_PER_BIT = (CLK_FREQ + BAUD_RATE/2) / BAUD_RATE`（四舍五入到最近整数）产生；默认参数 CLK_FREQ=100_000_000、BAUD_RATE=9600 时 CLKS_PER_BIT=10417，位时间为 10417 个时钟周期（104.17 µs），实际波特率 ≈ 9599.69 bit/s，相对误差约 −0.003%，满足 ±0.5% 要求。 | UART-DRQ-PERF-001、UART-DRQ-PERF-002 | 分析、仿真 |
-| UART-SRS-TIM-002 | 发送位时间应严格等于 CLKS_PER_BIT 个时钟周期；帧内各位时间一致，无累积误差（由 baud_gen 节拍保证）。 | UART-DRQ-PERF-001 | 分析、审查 |
-| UART-SRS-TIM-003 | 在 ±2% 对端波特率偏差下，接收通道应能正确接收连续帧（最坏采样点在第 10 位中点，距起始位前沿 9.5 位，累积偏差 0.19 位，小于中点采样 0.5 位余量）。 | UART-DRQ-PERF-001 | 分析 |
+| UART-SRS-TIM-001 | 位时基准由 `CLKS_PER_BIT = CLK_FREQ / BAUD_RATE`（整数向下取整）产生；默认参数下 CLKS_PER_BIT=10416、位时间 104.16 µs、实际波特率约 9600.61 bit/s、相对误差约 +0.0064%，满足 ±0.5%。选择向下取整同时为 960 byte/s 最低吞吐要求保留确定余量。 | UART-DRQ-PERF-001、UART-DRQ-PERF-002 | 分析、仿真 |
+| UART-SRS-TIM-002 | 发送每一位应保持 CLKS_PER_BIT 个时钟周期；baud_tick 应作为同拍组合使能被发送状态机消费，不得因注册 tick 引入额外周期。连续控制下相邻帧起始沿间隔应不大于 1,041,666 ns。 | UART-DRQ-PERF-001、UART-DRQ-PERF-003 | 分析、仿真 |
+| UART-SRS-TIM-003 | 在对端相对标称波特率偏差 +2% 和 −2% 两个端点，接收通道均应正确接收且不报告帧错误；至少以独立外部串行激励动态验证。 | UART-DRQ-PERF-001 | 分析、仿真 |
 | UART-SRS-TIM-004 | 设计应在 xc7k70tfbv676-1 上以 ≥100 MHz 收敛时序；组合逻辑级数应保持最小（计数器比较 + 状态译码级别）。 | UART-DRQ-PERF-002、UART-DRQ-DEV-001 | 分析、STA |
 
 ### 3.5 资源需求

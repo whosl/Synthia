@@ -158,7 +158,7 @@ All user specified timing constraints are met.
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test("writes XDC constraints into the workspace and reads them before synthesis", async () => {
+  test("writes the fail-closed XDC into the workspace and reads it before synthesis", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
       const goldenXdc = await readFile(join(import.meta.dir, "../golden/uart/xdc/uart.xdc"), "utf8");
@@ -170,7 +170,8 @@ All user specified timing constraints are met.
       expect(tcl).toContain("pins.xdc");
       const xdc = await readFile(join(result.workspace, "input", "xdc", "pins.xdc"), "utf8");
       expect(xdc).toContain("create_clock");
-      expect(xdc).toContain("get_drc_checks NSTD-1");
+      expect(xdc).toContain("本文件故意不降低 NSTD-1/UCIO-1 严重度");
+      expect(xdc).not.toContain("set_property SEVERITY WARNING");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
