@@ -86,6 +86,7 @@ import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
+import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
 import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
@@ -2590,6 +2591,7 @@ export class RuntimeServer {
     const deps: FreeAgentDeps = {
       model,
       tools: [
+        assembleWorkspaceReadTool(),
         ...await assembleSkillTools(),
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
         assembleVivadoTool(),
