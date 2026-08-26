@@ -39,7 +39,7 @@ if (_inheritedProxy) process.stderr.write(`[runtime] WARNING: proxy env detected
 for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) delete process.env[k];
 
 import { SkillLoader } from "./skill-loader.ts";
-import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
+import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
 import { LoopExecutor, FakeVivadoConnector, successBehavior, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import { resolveCoreApiConfig } from "./core-api-connector.ts";
 import { CoreGovernanceClient } from "./governance-client.ts";
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   const skillLoader = new SkillLoader();
   const skillPrompts = await skillLoader.buildPrompts();
 
-  const model: LoopModel = args.offline ? new CounterScriptedModel() : new ModelClient(modelConfigFromEnv());
+  const model: LoopModel = args.offline ? new CounterScriptedModel() : createRuntimeModelFromEnv();
 
   let connector;
   if (args.offline) {

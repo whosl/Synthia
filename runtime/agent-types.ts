@@ -6,7 +6,8 @@
  * 但对外只暴露本契约。
  *
  * 设计取向（见 plan.md 基座修正）：不引入 pi-agent-core/dsh/Cordis。
- * 在现有自带 ModelClient 上自建自由 tool-calling 循环，GJB 三层钩子自控。
+ * Synthia 自建自由 tool-calling 循环、掌握 GJB 三层钩子；模型传输层可使用
+ * pi-ai 的 provider adapter，但不得把工具执行或治理控制交给第三方 agent loop。
  */
 
 import type { ArtifactType, GateId, GovernanceClient, LoopConnector } from "./types.ts";

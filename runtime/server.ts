@@ -25,6 +25,7 @@
  *                                   GJB_REF_V1 requires explicit lowercase SHA-256)
  *   SYNTHIA_RUNS_DIR           override .runs/ directory (tests)
  *   SYNTHIA_MODEL_URL / KEY / NAME  (real model, non-offline mode)
+ *   SYNTHIA_MODEL_API               chat-completions | responses (default chat-completions)
  *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort. 当前保 xhigh，
  *                                    见 specs/agent-stream-benchmark.md §4.2)
  *   SYNTHIA_MODEL_CHAT_MAX_TOKENS   (free-agent 对话轮的可见 token 上限, default 16384)
@@ -70,7 +71,7 @@ import {
   buildCoreTaskConversationClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
-import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
+import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
 import { SkillLoader } from "./skill-loader.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 
@@ -947,7 +948,7 @@ export class RuntimeServer {
     private readonly config: ServerConfig,
     private readonly depsFactory: DepsFactory,
     private readonly conversationalModelFactory: ConversationalModelFactory = () =>
-      new ModelClient(modelConfigFromEnv(process.env)),
+      createRuntimeModelFromEnv(process.env),
     private readonly messageIdempotencyStore: RuntimeMessageIdempotencyStore =
       diskMessageIdempotencyStore,
   ) {}
@@ -3150,7 +3151,7 @@ export function createEnvDepsFactory(
     const model: LoopModel =
       mode === "offline"
         ? new CounterScriptedModel()
-        : new ModelClient(modelConfigFromEnv(env));
+        : createRuntimeModelFromEnv(env);
 
     // Connector
     let connector: LoopConnector;

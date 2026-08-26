@@ -393,6 +393,7 @@ class ScriptedStreamModel implements ConversationalModel {
 describe("RuntimeServer SSE (mode=agent full chain)", () => {
   let agentsDir: string;
   let server: RuntimeServer;
+  let previousModelApi: string | undefined;
   const agentIds: string[] = [];
 
   const DEFAULT_TEXT_SSE = [
@@ -428,6 +429,8 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     process.env.SYNTHIA_MODEL_KEY = "test-key";
     process.env.SYNTHIA_MODEL_NAME = "mock-model";
     process.env.SYNTHIA_MODEL_PROTOCOL = "tools";
+    previousModelApi = process.env.SYNTHIA_MODEL_API;
+    process.env.SYNTHIA_MODEL_API = "chat-completions";
 
     const governance = new NoGovernanceClient();
     const factory: DepsFactory = async () => ({
@@ -450,6 +453,8 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     delete process.env.SYNTHIA_MODEL_KEY;
     delete process.env.SYNTHIA_MODEL_NAME;
     delete process.env.SYNTHIA_MODEL_PROTOCOL;
+    if (previousModelApi === undefined) delete process.env.SYNTHIA_MODEL_API;
+    else process.env.SYNTHIA_MODEL_API = previousModelApi;
     await rm(agentsDir, { recursive: true, force: true });
     for (const agentId of agentIds) StreamHub.drop(agentId);
   });

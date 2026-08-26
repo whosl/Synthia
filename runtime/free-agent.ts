@@ -1,8 +1,9 @@
 /**
  * Synthia Runtime — Free Agent session (spec 001-agent-freedom, Slice A).
  *
- * A self-contained free tool-calling loop built on the existing ModelClient's
- * {@link ConversationalModel.chat} primitive. No pi-agent-core / dsh / Cordis.
+ * A self-contained free tool-calling loop built on the
+ * {@link ConversationalModel.chat} primitive. A model provider adapter may be
+ * used underneath it, but there is no pi-agent-core / dsh / Cordis agent loop.
  *
  * The session exposes {@link FreeAgentSession.prompt} / {@link FreeAgentSession.steer}
  * / {@link FreeAgentSession.abort} and enforces the GJB three-layer compliance
