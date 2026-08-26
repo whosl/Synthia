@@ -271,6 +271,8 @@ describe("free-agent: gate submission + system-level lock", () => {
     expect(submitResult!.submissionId).toBe("sub-mock-3");
     expect(submitResult!.state).toBe("in_review");
     expect(submitResult!.locked).toBe(true);
+    expect(gov.snapshots).toHaveLength(1);
+    expect(gov.snapshots[0]!.toolModelPolicyHash).toMatch(/^[0-9a-f]{64}$/);
 
     // The skill tool was hard-blocked (NOT executed).
     const blockedResult = parseJSON(toolResultFor(model, "tc4"));
