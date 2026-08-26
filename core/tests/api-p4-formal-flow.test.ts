@@ -546,6 +546,38 @@ describe.skipIf(!DATABASE_URL)("P4 formal flow API — real PostgreSQL", () => {
     expect((await harness.client.query("SELECT count(*)::int AS count FROM approved_gate_result WHERE project_id=$1", [projectId])).rows[0].count).toBe(0);
   });
 
+  test("a G1 submission while the work version is still at G0 reports gate order, not inactivity", async () => {
+    const projectId = `p4-g0-order-${randomUUID()}`;
+    await createModernProject(projectId);
+    const stateResponse = await call(`/api/v1/projects/${projectId}/process-state`);
+    const state = envelopeData(stateResponse.json);
+    const revisionId = `rev-g0-order-${randomUUID()}`;
+    const snapshotId = `snap-g0-order-${randomUUID()}`;
+    await createRevision(projectId, revisionId, "DEVELOPMENT_REQUIREMENTS", "doc/requirements.md", "UART requirement");
+    await createSnapshot(
+      projectId,
+      state.workVersionId,
+      snapshotId,
+      [revisionId],
+      sha256Hex("g0-order-policy"),
+    );
+
+    const response = await call(`/api/v1/projects/${projectId}/gate-submissions`, "POST", {
+      id: `sub-g0-order-${randomUUID()}`,
+      process_instance_id: state.processInstanceId,
+      work_version_id: state.workVersionId,
+      gate: "G1",
+      snapshot_id: snapshotId,
+    });
+
+    expect(response.status).toBe(409);
+    expect((response.json as any).error).toMatchObject({
+      code: "conflict",
+      message: "GATE_OUT_OF_SEQUENCE",
+      details: { expectedGate: "G0", receivedGate: "G1", workState: "working" },
+    });
+  });
+
   test("P4 project ACL reflects roles, admin authority, and active Runtime binding without enumeration", async () => {
     const projectId = `p4-acl-${randomUUID()}`;
     await createModernProject(projectId);

@@ -1306,10 +1306,15 @@ export async function createP4GateSubmissionHandler(ctx: RequestContext): Promis
       !work
       || (requestedWorkVersionId !== null && work.id !== requestedWorkVersionId)
       || work.process_instance_id !== processInstanceId
-      || work.state !== "working"
-      || work.current_gate !== gate
     ) {
       throw conflictApiError("WORK_VERSION_INACTIVE");
+    }
+    if (work.state !== "working" || work.current_gate !== gate) {
+      throw conflictApiError("GATE_OUT_OF_SEQUENCE", {
+        expectedGate: work.current_gate,
+        receivedGate: gate,
+        workState: work.state,
+      });
     }
     const snapshot = await tx.query(
       `SELECT 1 FROM configuration_snapshot
