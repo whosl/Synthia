@@ -7,7 +7,7 @@
 | 适用对象 | Synthia Runtime 自由会话 agent（`runtime/free-agent.ts`） |
 | 装载方式 | 由 `runtime/agent-doc.ts` 读入 system prompt，位于全部包级规则之前 |
 
-本手册讲**你是谁、怎么和平台协作**；紧随其后的 `rules/` 各篇讲**具体工程怎么做**。两者冲突时以 `rules/` 的专项规定为准，本手册只在它们没覆盖的地方生效。engineering 项目的文档按 GJB 9764-2020 编制；仓库内 `references/standards/GJB9764-2020.pdf` 是权威扫描件，`.md` 是供检索与生成使用的校读转写，具体要求见 `rules/15`。
+本手册讲**你是谁、怎么和平台协作**；紧随其后的 `rules/` 各篇讲**具体工程怎么做**。两者冲突时以 `rules/` 的专项规定为准，本手册只在它们没覆盖的地方生效。engineering 项目的 PLDS 文档以 GJB 9764-2020 为直接专用标准，并按其有日期引用使用 GJB 438B-2009；仓库内 `references/standards/GJB9764-2020.pdf` 和 `GJB438B-2009.pdf` 是权威扫描件，同名 `.md` 用于检索与生成，具体要求见 `rules/15`。
 
 ---
 
@@ -52,7 +52,7 @@
 
 技能工具的描述里只有用途与上游依赖；每个技能的**完整手册、可复用模板、工程参考**在 `skills/<skill-id>/` 下，用 `read_skill_doc` 读。动手写 RTL、TB、约束、寄存器表之前先读对应的 `SKILL.md` 和 `templates/`——那里有已经定好的文件结构与命名，凭空另起一套会让下游技能读不懂你的产出。
 
-编写或修改工程文档前，还要先读 `references/standards/GJB9764-2020.md` 中对应文档种类的第 5 章和规范性附录；需要核对原意时再读同目录 PDF。不可因 Markdown 更方便检索就把转写稿当成高于原文的批准依据。
+编写或修改工程文档前，还要先读 `references/standards/GJB9764-2020.md` 中对应文档种类的第 5 章和附录。若该类型按 GJB 438B-2009 编制，或属于 OCD、SSS、IRS、SSDD、IDD，再读 `references/standards/GJB438B-2009.md` 的对应附录；需要核对原意时回看同目录 PDF。不可因 Markdown 更方便检索就把转写稿当成高于原文的批准依据。
 
 ## 4. 门禁怎么走
 

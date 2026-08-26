@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -92,6 +93,51 @@ const commonMarkers = [
   "## 目录",
 ];
 
+const standardContracts = [
+  {
+    baseName: "GJB9764-2020",
+    sha256: "b37a6b48c8e07ff3f1fc0a8ff65208c44117f79b6a876760720a53531b07411b",
+    markers: ["军用可编程逻辑器件软件文档编制规范", "GJB 438B-2009", "## 4 一般要求", "## 5 详细要求"],
+  },
+  {
+    baseName: "GJB438B-2009",
+    sha256: "564413d0dc71b02824942fea469f483bb558539166b5bc35d6429cad1019e010",
+    markers: ["军用软件开发文档通用要求", "## 4 一般要求", "## 附录 G（规范性）", "## 附录 BB（资料性）"],
+  },
+] as const;
+
+export async function checkGjbStandardReferences(
+  standardsDir = "skills/fpga/references/standards",
+): Promise<Gjb9764Issue[]> {
+  const issues: Gjb9764Issue[] = [];
+  for (const contract of standardContracts) {
+    const pdfPath = resolve(standardsDir, `${contract.baseName}.pdf`);
+    const markdownPath = resolve(standardsDir, `${contract.baseName}.md`);
+    let pdf: Buffer;
+    let markdown: string;
+    try {
+      [pdf, markdown] = await Promise.all([readFile(pdfPath), readFile(markdownPath, "utf8")]);
+    } catch (error) {
+      issues.push({
+        file: contract.baseName,
+        message: `无法读取权威扫描件或检索转写：${error instanceof Error ? error.message : String(error)}`,
+      });
+      continue;
+    }
+
+    const actualHash = createHash("sha256").update(pdf).digest("hex");
+    if (actualHash !== contract.sha256) {
+      issues.push({ file: `${contract.baseName}.pdf`, message: `SHA-256 不匹配：${actualHash}` });
+    }
+    for (const marker of contract.markers) {
+      if (!markdown.includes(marker)) {
+        issues.push({ file: `${contract.baseName}.md`, message: `转写缺少必需标记：${marker}` });
+      }
+    }
+  }
+  return issues;
+}
+
 export function checkGjb9764DocumentText(contract: DocumentContract, text: string): Gjb9764Issue[] {
   const issues: Gjb9764Issue[] = [];
   const required = [...commonMarkers, contract.documentId, contract.titleMarker, ...contract.sections, ...(contract.extraMarkers ?? [])];
@@ -161,6 +207,7 @@ export async function checkGjb9764Docs(docsDir = "golden/uart/docs"): Promise<Gj
     }
   }
 
+  issues.push(...await checkGjbStandardReferences());
   return issues;
 }
 

@@ -1,9 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { checkGjb9764Docs, checkGjb9764DocumentText } from "../scripts/check-gjb9764-docs.ts";
+import {
+  checkGjb9764Docs,
+  checkGjb9764DocumentText,
+  checkGjbStandardReferences,
+} from "../scripts/check-gjb9764-docs.ts";
 
 describe("GJB 9764 Golden 文档检查", () => {
   test("真实 UART 文档集满足确定性结构契约", async () => {
     expect(await checkGjb9764Docs()).toEqual([]);
+  });
+
+  test("GJB 9764 与 GJB 438B 权威扫描件及检索转写完整", async () => {
+    expect(await checkGjbStandardReferences()).toEqual([]);
   });
 
   test("缺少通用结构、正文或状态时返回可定位问题", () => {

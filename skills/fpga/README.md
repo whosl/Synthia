@@ -54,7 +54,7 @@ skills/fpga/
 |---|---|
 | `rules/00-skill-routing.md` | 技能路由、协议时序敏感判定、生成/编辑分界、候选质量闸门与重试 |
 | `rules/10-intake-gate.md` | 需求入口门禁与快速放行条件 |
-| `rules/15-documentation-standard.md` | GJB 9764-2020 文档种类、结构、裁剪、追踪和证据要求 |
+| `rules/15-documentation-standard.md` | GJB 9764-2020 / GJB 438B-2009 文档种类、结构、裁剪、追踪和证据要求 |
 | `rules/20-file-context.md` | HDL/约束/仿真文件上下文路由 |
 | `rules/25-workspace-layout.md` | 候选工作区布局与路径/数据域契约 |
 | `rules/30-toolchain-and-tcl-boundary.md` | 强类型能力表、post-mvp 未启用项、Tcl 授权边界 |
