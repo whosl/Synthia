@@ -101,7 +101,14 @@ export type LoopAction =
 export interface LoopModel {
   generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration>;
   generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<TbGeneration>;
-  generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration>;
+  generateXdc(
+    topModule: string,
+    part: string,
+    systemPrompt: string,
+    allowPinAssignments: boolean,
+    upstream?: UpstreamArtifacts,
+    topPorts?: readonly string[],
+  ): Promise<XdcGeneration>;
   repair(input: {
     sources: readonly ArtifactFile[];
     testbench?: ArtifactFile;
@@ -678,6 +685,8 @@ export interface AgentState {
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
+  /** Optional evaluator-owned immutable testbench used after the generated TB. */
+  readonly acceptanceTestbench?: TbGeneration;
   /** Frozen project execution context copied from Core at task creation. */
   readonly projectType?: string;
   readonly processVersionId?: string | null;
@@ -704,6 +713,8 @@ export interface AgentState {
     | "fail_closed";
   /** Registered doc artifacts keyed by stage. */
   readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
+  /** Persisted generated documents so no-governance and interrupted runs remain auditable. */
+  readonly docArtifacts?: readonly DocGeneration[];
   /** Registered RTL revision (rtl_build stage). */
   readonly rtlRevision?: RegisteredRevision;
   /** Registered testbench revision (tb stage). */

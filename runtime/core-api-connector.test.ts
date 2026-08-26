@@ -469,7 +469,7 @@ describe("resolveCoreApiConfig", () => {
 
 const RTL: ArtifactFile = { path: "counter.v", content: "module counter(input clk,input rst_n,output reg[7:0] c);always@(posedge clk)if(!rst_n)c<=0;else c<=c+1;endmodule\n" };
 const TB: ArtifactFile = { path: "tb_counter.v", content: "module tb_counter;reg clk=0;reg rst_n=0;wire[7:0] c;counter d(.clk(clk),.rst_n(rst_n),.c(c));always #5 clk=~clk;initial begin rst_n=0;#20;rst_n=1;repeat(3)@(posedge clk);$display(\"PASS\");$finish;end endmodule\n" };
-const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\ncreate_clock -period 10 [get_ports clk]\n" };
+const XDC: ArtifactFile = { path: "synthia.xdc", content: "# Missing board I/O facts remain blocking.\ncreate_clock -period 10 [get_ports clk]\n" };
 
 class ScriptedModel implements LoopModel {
   async generateIntake(): Promise<DocGeneration> { return { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Intake\n## Task\n8-bit counter." }; }
@@ -491,8 +491,37 @@ describe("LoopExecutor over CoreApiConnector (via-core integration)", () => {
         const op = (JSON.parse(body) as { operation: string }).operation;
         return { status: 201, body: { data: { jobId: `job-${op}`, runClass: "exploratory", state: "submitted" } } };
       }
+      if (url.includes("/evidence/content?name=sta.rpt")) {
+        return {
+          status: 200,
+          body: {
+            data: {
+              name: "sta.rpt",
+              content: "Timing Summary Report\nWNS(ns) TNS(ns)\n0.250 0.000\nAll user specified timing constraints are met.\n",
+              sha256: "b".repeat(64),
+              truncated: false,
+              mediaType: "text/plain",
+            },
+          },
+        };
+      }
       if (url.endsWith("/evidence")) {
-        return { status: 200, body: { data: { jobId: "job", entries: [{ name: `${url.split("/")[ -3 ]}.log`, sha256: "b".repeat(64), sizeBytes: 7, mediaType: "text/plain" }] } } };
+        const implement = url.includes("/jobs/job-implement/evidence");
+        const names = implement ? ["sta.rpt", "synthia.bit"] : ["run.log"];
+        return {
+          status: 200,
+          body: {
+            data: {
+              jobId: "job",
+              entries: names.map((name) => ({
+                name,
+                sha256: "b".repeat(64),
+                sizeBytes: 7,
+                mediaType: name.endsWith(".bit") ? "application/octet-stream" : "text/plain",
+              })),
+            },
+          },
+        };
       }
       return { status: 200, body: { data: { jobId: "job", state: "succeeded" } } };
     });

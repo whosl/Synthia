@@ -82,7 +82,7 @@ export function tbCounter(): ArtifactFile {
 export function xdcSmoke(): ArtifactFile {
   return {
     path: "synthia.xdc",
-    content: `# Smoke constraints — downgrade unconstrained-pin DRC so write_bitstream passes\nset_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\ncreate_clock -period 10.0 [get_ports clk]\n`,
+    content: `# Candidate clock constraint only. Missing board I/O facts intentionally remain blocking.\ncreate_clock -period 10.0 [get_ports clk]\n`,
   };
 }
 

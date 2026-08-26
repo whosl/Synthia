@@ -134,7 +134,7 @@ All user specified timing constraints are met.
       const result = await adapter.execute(implementRequest());
       expect(result.status).toBe("succeeded");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
-      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "get_drc_violations", "SYNTHIA_DRC_FAILED", "get_timing_paths", "SYNTHIA_TIMING_FAILED", "write_bitstream -force"];
+      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "get_drc_violations", "SYNTHIA_DRC_FAILED", "get_clocks -quiet", "SYNTHIA_TIMING_UNCONSTRAINED", "get_timing_paths", "SYNTHIA_TIMING_FAILED", "write_bitstream -force"];
       let cursor = -1;
       for (const step of order) { const index = tcl.indexOf(step); expect(index).toBeGreaterThan(cursor); cursor = index; }
       expect(tcl).toContain("synthia.bit");
@@ -210,6 +210,21 @@ All user specified timing constraints are met.
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  test("fails closed when STA has no effective clock constraints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const unconstrainedSta = `${passingSta}\nThere are 71 register/latch pins with no clock driven by root clock pin: clock (HIGH)\nThere are no user specified timing constraints.\n`;
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd, { sta: unconstrainedSta });
+        return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ jobId: "impl-unconstrained" }));
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_TIMING_UNCONSTRAINED");
+      expect(result.evidence.entries.some((entry) => entry.name === "synthia.bit")).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test("requires both implementation reports and a conclusive pass judgment", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
@@ -244,6 +259,8 @@ All user specified timing constraints are met.
         "set_property PACKAGE_PIN W5 [get_ports $target]\n",
         "set_property PACKAGE_PIN W5 [get_ports [exec whoami]]\n",
         "set_property PACKAGE_PIN W5 [get_ports clk] \\\nexec whoami\n",
+        "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\n",
+        "set_property -dict {SEVERITY Warning} [get_drc_checks {UCIO-1}]\n",
       ]) {
         await expect(adapter.execute(implementRequest({ constraints: [{ path: "xdc/hostile.xdc", content }] }))).rejects.toThrow("XDC");
       }

@@ -75,6 +75,26 @@ describe("Cloudflare Access remote transport", () => {
     expect(result.body).toMatchObject({ error_code: "ACCESS_DENIED" });
   });
 
+  test("maps a Cloudflare HTML access page to ACCESS_DENIED even with an edge 200", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => new Response("<!doctype html><html><title>Cloudflare Access</title></html>", { status: 200 }),
+    });
+    const result = await transport.request("/discover", { method: "POST", body: envelope });
+    expect(result.body).toMatchObject({ error_code: "ACCESS_DENIED" });
+  });
+
+  test("does not misclassify an unrelated HTML failure as Cloudflare Access", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => new Response("<!doctype html><html><title>Upstream error</title></html>", { status: 502 }),
+    });
+    const result = await transport.request("/discover", { method: "POST", body: envelope });
+    expect(result.body).toMatchObject({ error_code: "REMOTE_PROTOCOL_ERROR" });
+  });
+
   test("maps response body download failures to retryable remote unavailable", async () => {
     const transport = createCloudflareRemoteTransport({
       endpointUrl: "https://connect.wenzhuolin.xyz",

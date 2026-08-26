@@ -173,6 +173,7 @@ export function createAgentState(opts: {
   task: string;
   part: string;
   projectId: string;
+  acceptanceTestbench?: import("./types.ts").TbGeneration;
   processInstanceId?: string;
   projectType?: string;
   processVersionId?: string | null;
@@ -195,6 +196,7 @@ export function createAgentState(opts: {
     task: opts.task,
     part: opts.part,
     projectId: opts.projectId,
+    ...(opts.acceptanceTestbench ? { acceptanceTestbench: opts.acceptanceTestbench } : {}),
     ...(opts.projectType ? { projectType: opts.projectType } : {}),
     ...(opts.processVersionId !== undefined ? { processVersionId: opts.processVersionId } : {}),
     ...(opts.processProfileId !== undefined ? { processProfileId: opts.processProfileId } : {}),

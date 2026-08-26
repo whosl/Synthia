@@ -12,6 +12,7 @@ import {
   VIVADO_CAPABILITY_VERSION,
   FAKE_CAPABILITIES,
   WORKER_RESULT_NAME,
+  fakeEvidence,
   renderFailureDiagnostics,
   extractTopicKeywords,
   extractModulePorts,
@@ -37,7 +38,7 @@ import {
 
 const RTL: ArtifactFile = { path: "counter.v", content: "module counter(input clk,input rst_n,output reg[7:0] c);always@(posedge clk)if(!rst_n)c<=0;else c<=c+1;endmodule\n" };
 const TB: ArtifactFile = { path: "tb_counter.v", content: "module tb_counter;reg clk=0;reg rst_n=0;wire[7:0] c;counter d(.clk(clk),.rst_n(rst_n),.c(c));always #5 clk=~clk;initial begin rst_n=0;#20;rst_n=1;repeat(3)@(posedge clk);$display(\"PASS\");$finish;end endmodule\n" };
-const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\ncreate_clock -period 10 [get_ports clk]\n" };
+const XDC: ArtifactFile = { path: "synthia.xdc", content: "# Missing board I/O facts remain blocking.\ncreate_clock -period 10 [get_ports clk]\n" };
 
 const DOC_INTAKE: DocGeneration = { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Counter 需求梳理摘要\n## Task Summary\n8-bit counter.\n## Acceptance Criteria\nCounts up." };
 const DOC_BEHAVIOR: DocGeneration = { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments on clock." };
@@ -72,6 +73,7 @@ function makeLoop(
   opts: {
     maxRepairRounds?: number;
     governance?: GovernanceClient;
+    acceptanceTestbench?: TbGeneration;
   } = {},
 ) {
   const governance = opts.governance ?? new NoGovernanceClient();
@@ -84,6 +86,7 @@ function makeLoop(
     part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
     toolModelPolicyHash: "policy-v1",
     maxRepairRounds: opts.maxRepairRounds,
+    acceptanceTestbench: opts.acceptanceTestbench,
   });
 }
 
@@ -175,6 +178,62 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
     expect(model.repairs).toHaveLength(1);
     expect(model.repairs[0]!.stderr).toContain("undefined signal");
     expect(model.repairs[0]!.attempt).toBe(1);
+    expect(result.rtl?.sources).toEqual([RTL]);
+    expect(result.testbench?.testbench).toEqual(TB);
+  });
+
+  test("external acceptance failure repairs RTL while the evaluator TB remains immutable", async () => {
+    let simulateCalls = 0;
+    const connector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req, idx) => {
+          if (req.operation === "simulate") {
+            simulateCalls++;
+            if (simulateCalls === 2) {
+              return {
+                status: "failed" as const,
+                jobId: "job-external-fail",
+                operation: req.operation,
+                inputSha256: "external-fail",
+                stderr: "acceptance assertion failed",
+                errorCode: "VIVADO_SIMULATION_FAILED",
+                evidence: { jobId: "job-external-fail", entries: [] },
+              };
+            }
+          }
+          return successBehavior().respond(req, idx);
+        },
+      },
+    });
+    const repairedRtl: ArtifactFile = {
+      path: "counter.v",
+      content: RTL.content.replace("c<=c+1", "c<=c+8'd1"),
+    };
+    const model = new FullChainModel({
+      repairResponse: {
+        phase: "repair",
+        reasoning: "fix DUT only",
+        sources: [repairedRtl],
+        testbench: { path: "tb/weakened.v", content: "module weakened; initial $display(\"PASS\"); endmodule\n" },
+      },
+    });
+    const acceptance: TbGeneration = {
+      phase: "generate_testbench",
+      reasoning: "evaluator-owned",
+      testbenchModule: "acceptance_counter",
+      testbench: { path: "acceptance/counter_tb.sv", content: "module acceptance_counter; initial $display(\"PASS\"); endmodule\n" },
+    };
+    const loop = makeLoop(model, connector, { acceptanceTestbench: acceptance });
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("succeeded");
+    expect(connector.callCount("simulate")).toBe(3);
+    expect(connector.callCount("validate_sources")).toBe(2);
+    expect(result.rtl?.sources).toEqual([repairedRtl]);
+    expect(result.testbench?.testbench).toEqual(TB);
+    expect(result.audit.some((event) => event.action === "external_acceptance failed")).toBe(true);
+    expect(result.audit.some((event) => event.action === "external_acceptance passed")).toBe(true);
+    expect(result.audit.some((event) => event.detail?.includes("evaluator TB unchanged"))).toBe(false);
+    expect(model.repairs[0]?.stderr).toContain("immutable");
   });
 
   test("repair budget exhausted (3) → fail-closed", async () => {
@@ -198,7 +257,7 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
   function failOnceWithWorkerResultBehavior() {
     let failed = false;
     return {
-      respond: (req: { operation: string }, _idx: number) => {
+      respond: (req: { operation: string; top: string }, _idx: number) => {
         if (req.operation === "simulate" && !failed) {
           failed = true;
           return {
@@ -224,7 +283,7 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
           operation: req.operation as never,
           inputSha256: "wr-sha",
           stdout: "PASS",
-          evidence: { jobId: "fake-job-ok", entries: [{ name: "result.txt", sha256: "r".repeat(64), sizeBytes: 4, mediaType: "text/plain" }] },
+          evidence: fakeEvidence(req.operation as never, req.top),
         };
       },
     };
@@ -365,6 +424,29 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
     expect(result.endedReason).toContain("implement");
     expect(result.endedReason).toContain("non-success");
     expect(connector.callCount("implement")).toBe(1);
+  });
+
+  test("Runtime rejects a stale Worker success when sta.rpt is unconstrained", async () => {
+    const unconstrained = `Timing Summary Report
+WNS(ns) TNS(ns)
+0.000 0.000
+All user specified timing constraints are met.
+There are 71 register/latch pins with no clock driven by root clock pin: clock (HIGH)
+There are no user specified timing constraints.
+`;
+    const connector = new FakeVivadoConnector({
+      behavior: successBehavior(),
+      evidenceReader: async (_jobId, name) => ({
+        content: name === "sta.rpt" ? unconstrained : "",
+        sha256: "e".repeat(64),
+        truncated: false,
+        mediaType: "text/plain",
+      }),
+    });
+    const result = await makeLoop(new FullChainModel(), connector).run("计数器");
+    expect(result.status).toBe("fail_closed");
+    expect(result.endedReason).toContain("unconstrained");
+    expect(result.audit.some((event) => event.errorCode === "VIVADO_TIMING_UNCONSTRAINED")).toBe(true);
   });
 
   test("synthesize failed → loop fail_closed (implement not reached)", async () => {
@@ -720,6 +802,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     expect(savedState!.gateSubmissions?.G1).toBeTruthy();
     expect(savedState!.docs?.intake).toBeTruthy();
     expect(savedState!.docs?.intake?.revisionId).toBeTruthy();
+    expect(savedState!.docArtifacts).toEqual([DOC_INTAKE]);
 
     // Simulate loading from disk and resuming.
     const g1Sub = savedState!.gateSubmissions!.G1!;
@@ -849,6 +932,10 @@ describe("extractModulePorts", () => {
   });
   test("bare-name (non-ANSI) port list fallback", () => {
     expect(extractModulePorts("module top(clk, rst, data);", "top")).toEqual(["clk", "rst", "data"]);
+  });
+  test("skips a parameter block before extracting ANSI ports", () => {
+    const src = "module uart_transceiver #(parameter integer CLK_FREQ=100000000)(input wire clock,input wire reset,output wire txd);";
+    expect(extractModulePorts(src, "uart_transceiver")).toEqual(["clock", "reset", "txd"]);
   });
 });
 

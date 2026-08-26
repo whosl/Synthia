@@ -110,7 +110,10 @@ function parseResponse(status: number, text: string): RemoteEnvelope<unknown> | 
   try {
     return JSON.parse(text) as RemoteEnvelope<unknown> | { error_code: string; message?: string };
   } catch {
-    return { error_code: status === 403 ? "ACCESS_DENIED" : "REMOTE_PROTOCOL_ERROR" };
+    // Cloudflare Access can return an HTML login/denial page with a non-403
+    // edge status. Normalize it without exposing the page or credential data.
+    const accessPage = /cloudflare\s+access|cf-access/i.test(text);
+    return { error_code: status === 401 || status === 403 || accessPage ? "ACCESS_DENIED" : "REMOTE_PROTOCOL_ERROR" };
   }
 }
 

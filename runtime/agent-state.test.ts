@@ -19,7 +19,7 @@ import {
   withGateSubmission,
   withGateDecision,
 } from "./agent-state.ts";
-import type { AgentState, RegisteredRevision } from "./types.ts";
+import type { AgentState, DocGeneration, RegisteredRevision, TbGeneration } from "./types.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -41,12 +41,32 @@ describe("agent-state persistence", () => {
   });
 
   test("save + load round-trips state", async () => {
-    const state = createAgentState({ agentId: "r-test-rt", task: "test", part: "xc7", projectId: "p1" });
-    const updated = withAwaitingApproval(state, "G1");
+    const acceptanceTestbench: TbGeneration = {
+      phase: "generate_testbench",
+      reasoning: "evaluator-owned",
+      testbenchModule: "acceptance_tb",
+      testbench: { path: "acceptance/acceptance_tb.sv", content: "module acceptance_tb; endmodule\n" },
+    };
+    const docArtifact: DocGeneration = {
+      phase: "generate_intake",
+      reasoning: "persisted",
+      docPath: "doc/intake/summary.md",
+      content: "# Intake\n",
+    };
+    const state = createAgentState({
+      agentId: "r-test-rt",
+      task: "test",
+      part: "xc7",
+      projectId: "p1",
+      acceptanceTestbench,
+    });
+    const updated = { ...withAwaitingApproval(state, "G1"), docArtifacts: [docArtifact] };
     await saveAgentState(updated);
     const loaded = await loadAgentState("r-test-rt");
     expect(loaded.status).toBe("awaiting_approval");
     expect(loaded.awaitingGate).toBe("G1");
+    expect(loaded.acceptanceTestbench).toEqual(acceptanceTestbench);
+    expect(loaded.docArtifacts).toEqual([docArtifact]);
     await deleteAgent("r-test-rt");
   });
 

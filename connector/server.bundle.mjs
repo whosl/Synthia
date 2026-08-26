@@ -489,6 +489,8 @@ function assertXdcLine(line) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#"))
     return;
+  if (/\bset_property\b/i.test(trimmed) && /\bSEVERITY\b/i.test(trimmed) && /\bget_drc_checks\b/i.test(trimmed) && /\b(?:NSTD-1|UCIO-1)\b/i.test(trimmed))
+    reject("UNSAFE_XDC_DRC_SEVERITY_OVERRIDE");
   if (trimmed.includes("$") || trimmed.includes(";") || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(trimmed))
     reject("UNSAFE_XDC_COMMAND");
   let remainder = "";
@@ -733,7 +735,7 @@ report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
     const constraints = (request.constraints ?? []).map((c) => `read_xdc ${tclQuote(join2(inputDir, c.path))}`).join(`
 `);
     const out = (name) => tclQuote(join2(outputDir, name));
-    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
+    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set timingClocks [get_clocks -quiet]", 'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
 `);
   }
   const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join2(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join2(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
@@ -870,6 +872,8 @@ function judgeDrcReport(report) {
   return rows.length > 0 && summarizedCount === violationCount ? "passed" : "inconclusive";
 }
 function judgeStaReport(report) {
+  if (/There are\s+[1-9]\d*\s+register\/latch pins with no clock driven/i.test(report) || /There are no user specified timing constraints\./i.test(report) || /\bno clocks? found\b/i.test(report) || /\bno timing constraints?\b/i.test(report))
+    return "unconstrained";
   if (/timing constraints are not met/i.test(report) || /Slack\s*\(VIOLATED\)/i.test(report))
     return "failed";
   const lines = report.split(/\r?\n/);
@@ -904,6 +908,8 @@ async function implementationVerdict(outputDir, exitCode, text) {
   } catch {}
   if (drc !== undefined && judgeDrcReport(drc) === "failed" || /SYNTHIA_DRC_FAILED/.test(text))
     return { status: "failed", errorCode: "VIVADO_DRC_FAILED" };
+  if (sta !== undefined && judgeStaReport(sta) === "unconstrained" || /SYNTHIA_TIMING_UNCONSTRAINED/.test(text))
+    return { status: "failed", errorCode: "VIVADO_TIMING_UNCONSTRAINED" };
   if (sta !== undefined && judgeStaReport(sta) === "failed" || /SYNTHIA_TIMING_FAILED/.test(text))
     return { status: "failed", errorCode: "VIVADO_TIMING_FAILED" };
   if (exitCode !== 0)

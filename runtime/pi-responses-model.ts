@@ -543,6 +543,7 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
     systemPrompt: string,
     allowPinAssignments: boolean,
     upstream?: UpstreamArtifacts,
+    topPorts?: readonly string[],
   ): Promise<XdcGeneration> {
     return this.actionClient.generateXdc(
       topModule,
@@ -550,6 +551,7 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
       systemPrompt,
       allowPinAssignments,
       upstream,
+      topPorts,
     );
   }
 

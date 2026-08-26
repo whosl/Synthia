@@ -24,6 +24,7 @@
  */
 
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
+import { judgeStaReport } from "../connector/vivado.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
 import type { ArtifactType, GateId } from "../core/src/domain/enums.ts";
 import {
@@ -77,6 +78,7 @@ import {
   isFormalFlowClient,
   type FormalFlowProgressV1,
 } from "./formal-flow.ts";
+import { makeXdcValidator } from "./model-client.ts";
 
 export const VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
 export const DEFAULT_MAX_REPAIR_ROUNDS = 3;
@@ -138,6 +140,8 @@ export interface LoopDeps {
   readonly governance: GovernanceClient;
   readonly toolModelPolicyHash: string;
   readonly actorId?: string;
+  /** Optional evaluator-owned TB. It is executed after the generated TB and is never model-editable. */
+  readonly acceptanceTestbench?: TbGeneration;
   readonly maxRepairRounds?: number;
   readonly correlationId?: string;
   readonly onEvent?: (e: AuditEvent) => void;
@@ -341,11 +345,29 @@ export class LoopExecutor {
         case "simulate": {
           if (!this.chainCtx.rtl || !this.chainCtx.tb) throw new FailClosedError("simulate stage reached without RTL+TB", "STATE_ERROR");
           await this.runSimulateLoop(baseSubmission);
+          if (this.deps.acceptanceTestbench) {
+            await this.runExternalAcceptanceLoop(baseSubmission, this.deps.acceptanceTestbench);
+          }
           break;
         }
         case "xdc": {
           if (!this.chainCtx.rtl) throw new FailClosedError("xdc stage reached without RTL", "STATE_ERROR");
-          this.chainCtx.xdc = await this.callModel("generate_xdc", () => model.generateXdc(this.chainCtx.rtl!.topModule, part, skillPrompts.xdc, false, this.upstreamFor("xdc")));
+          const topPorts = extractModulePorts(
+            this.chainCtx.rtl.sources.map((source) => source.content).join("\n"),
+            this.chainCtx.rtl.topModule,
+          );
+          const generated = await this.callModel("generate_xdc", () => model.generateXdc(
+            this.chainCtx.rtl!.topModule,
+            part,
+            skillPrompts.xdc,
+            false,
+            this.upstreamFor("xdc"),
+            topPorts,
+          ));
+          // Defense in depth: injected/test models do not necessarily use the
+          // production ModelClient validator. Never register or execute an XDC
+          // that weakens blocking DRCs or references a non-existent RTL port.
+          this.chainCtx.xdc = makeXdcValidator(false, topPorts)(generated) as XdcGeneration;
           await this.registerXdcArtifact();
           break;
         }
@@ -367,6 +389,7 @@ export class LoopExecutor {
           if (impl.status !== "succeeded") {
             return this.finish("fail_closed", `implement ended in non-success state ${impl.status}${impl.errorCode ? ` (${impl.errorCode})` : ""}`, this.toolArtifacts(), "execution_error");
           }
+          await this.verifySuccessfulImplementationEvidence(impl);
           break;
         }
       }
@@ -415,10 +438,110 @@ export class LoopExecutor {
         stderr: diag.stderr, stdout: diag.stdout, attempt: round + 1, systemPrompt: skillPrompts.repair,
       }));
       simSources = repaired.sources;
-      if (repaired.testbench) simTb = repaired.testbench;
+      this.chainCtx.rtl = {
+        ...this.chainCtx.rtl!,
+        reasoning: `${this.chainCtx.rtl!.reasoning}\nRepair round ${round + 1}: ${repaired.reasoning}`,
+        sources: repaired.sources,
+      };
+      await this.registerRtlArtifact();
+      if (repaired.testbench) {
+        simTb = repaired.testbench;
+        this.chainCtx.tb = {
+          ...this.chainCtx.tb!,
+          reasoning: `${this.chainCtx.tb!.reasoning}\nRepair round ${round + 1}: ${repaired.reasoning}`,
+          testbench: repaired.testbench,
+        };
+        await this.registerTbArtifact();
+      }
       this.auditModel("repair", `repair round ${round + 1} applied`, repaired.sources.map(s => s.path).join(","), "ok");
       await this.runTool("validate_sources", {
         ...baseSubmission, operation: "validate_sources", sources: [...simSources, simTb], top: rtl.topModule,
+      });
+    }
+  }
+
+  /**
+   * Execute an evaluator-owned acceptance TB after the model-generated TB.
+   * Failures may repair RTL, but the external TB itself is immutable and is
+   * never registered as a model candidate. This prevents a repair turn from
+   * weakening the acceptance oracle to manufacture a PASS.
+   */
+  private async runExternalAcceptanceLoop(
+    baseSubmission: { runClass: "exploratory"; projectId: string; part: string },
+    acceptance: TbGeneration,
+  ): Promise<void> {
+    const { model, skillPrompts } = this.deps;
+    let simSources = this.chainCtx.rtl!.sources;
+    const maxRounds = this.deps.maxRepairRounds ?? DEFAULT_MAX_REPAIR_ROUNDS;
+    for (let round = 0; round <= maxRounds; round++) {
+      const sim = await this.runTool("simulate", {
+        ...baseSubmission,
+        operation: "simulate",
+        sources: [...simSources, acceptance.testbench],
+        top: this.chainCtx.rtl!.topModule,
+        testbench: acceptance.testbenchModule,
+      });
+      this.pushAudit({
+        category: "gate",
+        phase: "simulate",
+        action: sim.status === "succeeded" ? "external_acceptance passed" : "external_acceptance failed",
+        jobId: sim.jobId,
+        result: sim.status === "succeeded" ? "ok" : "failed",
+        errorCode: sim.errorCode,
+        detail: `immutable testbench=${acceptance.testbench.path}`,
+      });
+      if (sim.status === "succeeded") return;
+      if (sim.status === "unsupported" || sim.status === "unknown_effect" || sim.status === "lost" || sim.status === "timeout") {
+        throw new FailClosedError(
+          `external acceptance ended in non-retryable state ${sim.status}`,
+          sim.errorCode ?? sim.status,
+        );
+      }
+      if (round === maxRounds) {
+        throw new FailClosedError(
+          `external acceptance failed and repair budget (${maxRounds}) exhausted`,
+          "ACCEPTANCE_REPAIR_BUDGET_EXHAUSTED",
+        );
+      }
+      const diag = await this.fetchFailureDiagnostics(sim);
+      this.pushAudit({
+        category: "tool_call",
+        phase: "repair",
+        action: `external_acceptance diagnostics_fetched=${diag.diagnosticsFetched}`,
+        jobId: sim.jobId,
+        result: "ok",
+        detail: diag.diagnosticsFetched ? "immutable acceptance diagnostics injected into repair prompt" : "degraded: bare result fields only",
+      });
+      const repaired = await this.callModel("repair", () => model.repair({
+        sources: simSources,
+        // Include the oracle for interface and failure context, but ignore any
+        // model-proposed replacement below: evaluator content is immutable.
+        testbench: acceptance.testbench,
+        topModule: this.chainCtx.rtl!.topModule,
+        testbenchModule: acceptance.testbenchModule,
+        stderr: `${diag.stderr}\n\nThe supplied external acceptance testbench is immutable. Repair RTL only; do not weaken or replace the testbench.`,
+        stdout: diag.stdout,
+        attempt: round + 1,
+        systemPrompt: skillPrompts.repair,
+      }));
+      simSources = repaired.sources;
+      this.chainCtx.rtl = {
+        ...this.chainCtx.rtl!,
+        reasoning: `${this.chainCtx.rtl!.reasoning}\nExternal acceptance repair ${round + 1}: ${repaired.reasoning}`,
+        sources: repaired.sources,
+      };
+      await this.registerRtlArtifact();
+      this.auditModel(
+        "repair",
+        `external acceptance repair round ${round + 1} applied; evaluator TB unchanged`,
+        repaired.sources.map((source) => source.path).join(","),
+        "ok",
+      );
+      await this.runTool("validate_sources", {
+        ...baseSubmission,
+        operation: "validate_sources",
+        sources: [...simSources, acceptance.testbench],
+        top: this.chainCtx.rtl.topModule,
       });
     }
   }
@@ -908,6 +1031,7 @@ export class LoopExecutor {
       ...this.agentState,
       ...extra,
       docs,
+      ...(this.chainCtx.docs.length > 0 ? { docArtifacts: [...this.chainCtx.docs] } : {}),
       gateSubmissions: gateSubs,
       ...(this.chainCtx.rtlRevision ? { rtlRevision: this.chainCtx.rtlRevision } : {}),
       ...(this.chainCtx.tbRevision ? { tbRevision: this.chainCtx.tbRevision } : {}),
@@ -921,6 +1045,9 @@ export class LoopExecutor {
   }
   private restoreChainContext(): void {
     if (!this.agentState) return;
+    if (this.agentState.docArtifacts) {
+      this.chainCtx.docs = [...this.agentState.docArtifacts];
+    }
     if (this.agentState.docs) {
       for (const [stage, rev] of Object.entries(this.agentState.docs)) {
         if (rev) this.chainCtx.docRevisions[stage as StageId] = rev;
@@ -1176,6 +1303,61 @@ export class LoopExecutor {
   }
 
   /**
+   * Defense-in-depth for rolling Worker upgrades: a remote Worker may claim an
+   * implementation succeeded while returning an unconstrained STA report.
+   * Runtime independently re-reads the immutable report and refuses success.
+   */
+  private async verifySuccessfulImplementationEvidence(result: VivadoResult): Promise<void> {
+    const entry = result.evidence?.entries.find((candidate) => candidate.name === "sta.rpt");
+    if (!entry) {
+      this.pushAudit({
+        category: "gate",
+        phase: "implement",
+        action: "implementation STA evidence missing",
+        jobId: result.jobId,
+        result: "fail_closed",
+        errorCode: "VIVADO_TIMING_EVIDENCE_MISSING",
+      });
+      throw new FailClosedError("implementation succeeded without sta.rpt evidence", "VIVADO_TIMING_EVIDENCE_MISSING");
+    }
+    let content: EvidenceContent;
+    try {
+      content = await this.deps.connector.fetchEvidenceContent(result.jobId, entry.name);
+    } catch (error) {
+      throw new FailClosedError(
+        `failed to fetch implementation STA evidence: ${error instanceof Error ? error.message : String(error)}`,
+        "VIVADO_TIMING_EVIDENCE_UNAVAILABLE",
+      );
+    }
+    const verdict = content.truncated ? "inconclusive" : judgeStaReport(content.content);
+    if (verdict !== "passed") {
+      const code = verdict === "unconstrained"
+        ? "VIVADO_TIMING_UNCONSTRAINED"
+        : verdict === "failed"
+          ? "VIVADO_TIMING_FAILED"
+          : "VIVADO_TIMING_EVIDENCE_INCOMPLETE";
+      this.pushAudit({
+        category: "gate",
+        phase: "implement",
+        action: `implementation STA rejected (${verdict})`,
+        jobId: result.jobId,
+        result: "fail_closed",
+        errorCode: code,
+        detail: `sta.rpt sha256=${entry.sha256}`,
+      });
+      throw new FailClosedError(`implementation STA verdict is ${verdict}`, code);
+    }
+    this.pushAudit({
+      category: "gate",
+      phase: "implement",
+      action: "implementation STA independently verified",
+      jobId: result.jobId,
+      result: "ok",
+      detail: `sta.rpt sha256=${entry.sha256}`,
+    });
+  }
+
+  /**
    * Fetch the worker-result.json evidence content for a failed job and extract
    * its diagnostic fields (exitCode/phase/stdout/stderr) to feed the repair
    * model a richer "失败诊断" section than the bare VivadoResult. Degrades
@@ -1361,8 +1543,29 @@ export function extractModulePorts(content: string, topModule: string): string[]
   const m = content.match(headerRe);
   if (!m) return [];
   const header = m[1]!;
-  const openIdx = header.indexOf("(");
+  let openIdx = header.indexOf("(");
   if (openIdx < 0) return [];
+  // A parameterized header starts with `#(...) (...)`. Skip the balanced
+  // parameter group and select the following port-list group.
+  const beforeFirstOpen = header.slice(0, openIdx);
+  if (/\#\s*$/.test(beforeFirstOpen)) {
+    let parameterDepth = 0;
+    let parameterEnd = -1;
+    for (let i = openIdx; i < header.length; i++) {
+      const ch = header[i]!;
+      if (ch === "(") parameterDepth++;
+      else if (ch === ")") {
+        parameterDepth--;
+        if (parameterDepth === 0) {
+          parameterEnd = i;
+          break;
+        }
+      }
+    }
+    if (parameterEnd < 0) return [];
+    openIdx = header.indexOf("(", parameterEnd + 1);
+    if (openIdx < 0) return [];
+  }
   // Slice the outermost balanced parenthesised group (the port list).
   let depth = 0;
   let end = -1;
@@ -1477,13 +1680,21 @@ export class FakeVivadoConnector implements LoopConnector {
   drift: boolean;
   private readonly behavior: FakeVivadoBehavior;
   private readonly caps: readonly ConnectorCapability[];
+  private readonly evidenceReader?: (jobId: string, name: string) => Promise<EvidenceContent> | EvidenceContent;
   private readonly counts = new Map<WhitelistedOperation, number>();
 
-  constructor(opts: { behavior: FakeVivadoBehavior; id?: string; drift?: boolean; capabilities?: readonly ConnectorCapability[] }) {
+  constructor(opts: {
+    behavior: FakeVivadoBehavior;
+    id?: string;
+    drift?: boolean;
+    capabilities?: readonly ConnectorCapability[];
+    evidenceReader?: (jobId: string, name: string) => Promise<EvidenceContent> | EvidenceContent;
+  }) {
     this.id = opts.id ?? "fake-vivado";
     this.drift = opts.drift ?? false;
     this.behavior = opts.behavior;
     this.caps = opts.capabilities ?? FAKE_CAPABILITIES;
+    this.evidenceReader = opts.evidenceReader;
   }
 
   async discover(): Promise<readonly ConnectorCapability[]> { return this.caps; }
@@ -1500,6 +1711,20 @@ export class FakeVivadoConnector implements LoopConnector {
   }
 
   async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+    if (this.evidenceReader) return await this.evidenceReader(jobId, name);
+    if (name === "sta.rpt") {
+      const report = `Timing Summary Report
+WNS(ns) TNS(ns)
+0.250 0.000
+All user specified timing constraints are met.
+`;
+      return {
+        content: report,
+        sha256: sha256Hex(report),
+        truncated: false,
+        mediaType: "text/plain",
+      };
+    }
     const fakeBody = JSON.stringify({
       jobId, name, phase: "simulate",
       exitCode: 1,
@@ -1571,7 +1796,19 @@ export function unsupportedBehavior(): FakeVivadoBehavior {
 }
 
 export function fakeEvidence(operation: WhitelistedOperation, top: string): EvidenceManifest {
-  const name = operation === "implement" ? "synthia.bit" : operation === "synthesize" ? "resources.rpt" : `${operation}.log`;
+  if (operation === "implement") {
+    return {
+      jobId: "fake-job",
+      entries: ["sta.rpt", "synthia.bit"].map((name) => ({
+        name,
+        uri: `workspace://fake/output/${name}`,
+        sha256: sha256Hex(`${operation}:${top}:${name}:fake`),
+        sizeBytes: 42,
+        mediaType: name.endsWith(".bit") ? "application/octet-stream" : "text/plain",
+      })),
+    };
+  }
+  const name = operation === "synthesize" ? "resources.rpt" : `${operation}.log`;
   return {
     jobId: "fake-job",
     entries: [{ name, uri: `workspace://fake/output/${name}`, sha256: sha256Hex(`${operation}:${top}:fake`), sizeBytes: 42, mediaType: name.endsWith(".bit") ? "application/octet-stream" : "text/plain" }],

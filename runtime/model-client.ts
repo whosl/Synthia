@@ -909,32 +909,34 @@ export class ModelClient implements LoopModel, ConversationalModel {
     return outcome.action as TbGeneration;
   }
 
-  async generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration> {
+  async generateXdc(
+    topModule: string,
+    part: string,
+    systemPrompt: string,
+    allowPinAssignments: boolean,
+    upstream?: UpstreamArtifacts,
+    topPorts?: readonly string[],
+  ): Promise<XdcGeneration> {
     const pinGuidance = allowPinAssignments
       ? "You MAY include PACKAGE_PIN and IOSTANDARD assignments IF AND ONLY IF you have verified pin data from the hardware manual. Do not invent pin numbers."
       : [
           "No verified pin table is available for this target part.",
           "Do NOT output any PACKAGE_PIN or IOSTANDARD assignment — those would be fabricated.",
-          "Instead, output EXACTLY the following template verbatim, changing only the clock port name if your design uses a different clock signal name:",
-          "",
-          "```",
-          "# Flow-validation smoke constraints (no verified pin table for this target)",
-          "create_clock -name sys_clk -period 10.000 [get_ports clk]",
-          "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]",
-          "set_property SEVERITY {Warning} [get_drc_checks UCIO-1]",
-          "```",
-          "",
-          "These constraints downgrade the two DRC checks that fail on unconstrained-pin designs so write_bitstream completes.",
-          "This is a flow-validation smoke design, not a hardware-deployment bitstream.",
+          "Do NOT change the SEVERITY of NSTD-1, UCIO-1, or any other DRC check.",
+          "Generate only constraints justified by the task and the verified RTL ports. A known primary clock may receive create_clock; omit physical pin, I/O standard, Bank-voltage, and external I/O-delay constraints until their facts are supplied.",
+          "The resulting candidate must remain fail-closed: implementation is expected to stop before bitstream generation while required board facts are missing.",
         ].join("\n");
+    const portGuidance = topPorts && topPorts.length > 0
+      ? `Verified RTL top-level ports: ${topPorts.join(", ")}. Every get_ports reference must name one of these ports exactly (bus elements may use an index).`
+      : "The Runtime could not extract the RTL top-level ports. Do not guess a port name; return no get_ports-based constraint unless an upstream interface contract proves it.";
     const outcome = await this.emitAction(
       {
         phase: "generate_xdc", systemPrompt,
-        userMessage: this.withUpstream(`Target part: ${part}\nRTL top module: ${topModule}\n\n${pinGuidance}`, upstream),
+        userMessage: this.withUpstream(`Target part: ${part}\nRTL top module: ${topModule}\n${portGuidance}\n\n${pinGuidance}`, upstream),
         actionName: "generate_xdc", actionDescription: "Produce XDC constraints for the target part.",
         schema: XDC_SCHEMA,
       },
-      makeXdcValidator(allowPinAssignments),
+      makeXdcValidator(allowPinAssignments, topPorts),
     );
     return outcome.action as XdcGeneration;
   }
@@ -1070,7 +1072,7 @@ const SOURCE_EXTS = [".v", ".sv", ".vh"] as const;
 const XDC_EXTS = [".xdc"] as const;
 
 function asFile(v: unknown, field: string): ArtifactFile {
-  return asFiles([v], field, { kind: "source", extensions: SOURCE_EXTS })[0];
+  return asFiles([v], field, { kind: "source", extensions: SOURCE_EXTS })[0]!;
 }
 
 export const RTL_SCHEMA = {
@@ -1124,8 +1126,36 @@ export const XDC_SCHEMA = {
 
 /** Regex detecting PACKAGE_PIN / IOSTANDARD pin assignments in XDC content. */
 const XDC_PIN_RE = /\b(?:set_property\s+(?:PACKAGE_PIN|IOSTANDARD)|PACKAGE_PIN|IOSTANDARD)\b/i;
+/** Missing board facts must never be bypassed by weakening Vivado DRC policy. */
+function overridesBlockingDrcSeverity(content: string): boolean {
+  return content.split(/\r?\n/).some((line) =>
+    /\bset_property\b/i.test(line) &&
+    /\bSEVERITY\b/i.test(line) &&
+    /\bget_drc_checks\b/i.test(line) &&
+    /\b(?:NSTD-1|UCIO-1)\b/i.test(line));
+}
 
-export function makeXdcValidator(allowPinAssignments: boolean): ActionValidator {
+function xdcPortReferences(content: string): string[] {
+  const ports: string[] = [];
+  const re = /\[get_ports\s+(?:\{([^}]*)\}|"([^"]*)"|([^\]]*))\]/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    const raw = match[1] ?? match[2] ?? match[3] ?? "";
+    for (const token of raw.trim().split(/\s+/)) {
+      if (token) ports.push(token);
+    }
+  }
+  return ports;
+}
+
+function basePortName(reference: string): string {
+  return reference.replace(/\[[^\]]+\]$/, "");
+}
+
+export function makeXdcValidator(
+  allowPinAssignments: boolean,
+  topPorts?: readonly string[],
+): ActionValidator {
   return (raw: unknown): LoopAction => {
     if (!raw || typeof raw !== "object") err("xdc action must be an object");
     const o = raw as Record<string, unknown>;
@@ -1134,7 +1164,20 @@ export function makeXdcValidator(allowPinAssignments: boolean): ActionValidator 
     if (!allowPinAssignments) {
       for (const c of constraints) {
         if (XDC_PIN_RE.test(c.content)) {
-          err(`constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target. Use only a clock constraint and the two DRC severity downgrades. Output exactly this template, changing only the clock port name if needed: create_clock -name sys_clk -period 10.000 [get_ports clk] then set_property SEVERITY Warning for DRC checks NSTD-1 and UCIO-1.`);
+          err("constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target");
+        }
+        if (overridesBlockingDrcSeverity(c.content)) {
+          err("constraints content must NOT override NSTD-1 or UCIO-1 severity; missing board facts must remain blocking");
+        }
+      }
+    }
+    if (topPorts !== undefined) {
+      const known = new Set(topPorts);
+      for (const c of constraints) {
+        const unknown = xdcPortReferences(c.content)
+          .filter((reference) => !known.has(basePortName(reference)));
+        if (unknown.length > 0) {
+          err(`constraints content references unknown RTL top-level port(s): ${[...new Set(unknown)].join(", ")}. Verified ports: ${topPorts.join(", ")}`);
         }
       }
     }
