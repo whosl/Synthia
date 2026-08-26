@@ -164,6 +164,7 @@ export function createAgentState(opts: {
   agentId: string;
   taskId?: string;
   taskKind?: RuntimeTaskKind;
+  agentRole?: "project" | "run" | "side";
   parentTaskId?: string;
   workspaceId?: string;
   authorization?: TaskAuthorizationScope;
@@ -185,6 +186,7 @@ export function createAgentState(opts: {
     agentId: opts.agentId,
     ...(opts.taskId ? { taskId: opts.taskId } : {}),
     ...(opts.taskKind ? { taskKind: opts.taskKind } : {}),
+    ...(opts.agentRole ? { agentRole: opts.agentRole } : {}),
     ...(opts.parentTaskId ? { parentTaskId: opts.parentTaskId } : {}),
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
     ...(opts.authorization ? { authorization: opts.authorization } : {}),

@@ -142,12 +142,17 @@ export class CloudflareRemoteTransport implements RemoteTransport {
       init.body = JSON.stringify(request.body);
     }
     let response: Response;
+    let text: string;
     try {
       response = await this.fetcher(url, init);
+      // The timeout signal remains active while the body is consumed. A slow
+      // or interrupted Cloudflare tunnel can therefore reject response.text()
+      // after fetch() itself has already resolved; normalize both phases to
+      // the same retryable transport error.
+      text = await response.text();
     } catch {
       throw new RemoteConnectorError("REMOTE_UNAVAILABLE", "remote request failed", true);
     }
-    const text = await response.text();
     return { status: response.status, body: parseResponse(response.status, text) };
   }
 }

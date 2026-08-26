@@ -2791,7 +2791,7 @@ async function assembleFormalInput(
     `SELECT id, runtime_actor_id
        FROM agent_task
       WHERE id = $1 AND project_id = $2 AND project_type = 'engineering'
-        AND kind = 'main' AND process_instance_id = $3
+        AND kind = 'main' AND agent_role = 'project' AND process_instance_id = $3
         AND status IN ('queued','running','awaiting_user')`,
     [input.authorizedTaskId, projectId, work.process_instance_id],
   );
@@ -3187,7 +3187,8 @@ async function authorizeFormalSubmitter(
   const task = await query.query(
     `SELECT 1 FROM agent_task
       WHERE id = $1 AND project_id = $2 AND kind = 'main'
-        AND runtime_actor_id = $3 AND status IN ('queued','running','awaiting_user')`,
+        AND agent_role = 'project'
+        AND runtime_actor_id = $3 AND status IN ('queued','running','awaiting_user','failed','cancelled','fail_closed')`,
     [approval.authorized_task_id, ctx.params.projectId!, ctx.identity.actorId],
   );
   if (task.rows.length === 0) throw forbiddenError("FORMAL_INPUT_BOUND_RUNTIME_REQUIRED");

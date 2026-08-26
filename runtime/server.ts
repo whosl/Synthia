@@ -77,6 +77,7 @@ import type { SkillPrompts } from "./skill-loader.ts";
 // ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
 import {
   createFreeAgentSession,
+  loadFreeAgentConversation,
   SIDE_TASK_COMPLETION_TOOL,
   type FreeAgentDeps,
 } from "./free-agent.ts";
@@ -119,6 +120,8 @@ export interface AgentHandle {
   readonly agentId: string;
   readonly taskId?: string;
   readonly taskKind?: RuntimeTaskKind;
+  /** Project agents are durable conversations; runs and sides are bounded. */
+  readonly agentRole: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization?: TaskAuthorizationScope;
@@ -320,6 +323,7 @@ class RuntimeProjectConfigError extends Error {
 interface CoreIssuedTaskDescriptor {
   readonly taskId: string;
   readonly kind: RuntimeTaskKind;
+  readonly agentRole: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization: TaskAuthorizationScope;
@@ -340,6 +344,31 @@ function parseCoreIssuedTaskDescriptor(
     throw new RuntimeProjectConfigError(400, "task_descriptor_invalid", "task_kind must be main or side");
   }
   const kind = rawKind;
+  const executionIntent = body.execution_intent;
+  if (
+    executionIntent !== undefined
+    && executionIntent !== "project_agent"
+    && executionIntent !== "run"
+    && executionIntent !== "side_agent"
+  ) {
+    throw new RuntimeProjectConfigError(
+      400,
+      "task_descriptor_invalid",
+      "execution_intent must be project_agent, run, or side_agent",
+    );
+  }
+  const agentRole: "project" | "run" | "side" = kind === "side"
+    ? "side"
+    : executionIntent === "project_agent"
+      ? "project"
+      : "run";
+  if (kind === "side" && executionIntent !== undefined && executionIntent !== "side_agent") {
+    throw new RuntimeProjectConfigError(
+      400,
+      "task_descriptor_invalid",
+      "side task execution_intent must be side_agent",
+    );
+  }
   const parentTaskId = body.parent_task_id === undefined || body.parent_task_id === null
     ? undefined
     : requireTaskIdentifier("parent_task_id", body.parent_task_id);
@@ -369,6 +398,8 @@ function parseCoreIssuedTaskDescriptor(
     taskId,
     projectId,
     kind,
+    agentRole,
+    executionIntent: executionIntent ?? null,
     parentTaskId: parentTaskId ?? null,
     workspaceId: workspaceId ?? null,
     task,
@@ -385,6 +416,7 @@ function parseCoreIssuedTaskDescriptor(
   return {
     taskId,
     kind,
+    agentRole,
     ...(parentTaskId ? { parentTaskId } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     authorization,
@@ -1043,7 +1075,7 @@ export class RuntimeServer {
 
     handle.executionStarted = true;
 
-    if (handle.executionMode === "free") {
+    if (handle.agentRole === "project" || handle.executionMode === "free") {
       const registeredState = handle.currentState;
       if (registeredState) {
         const startedState: AgentState = {
@@ -1245,9 +1277,9 @@ export class RuntimeServer {
         defaultPart: this.config.defaultPart,
       });
       // A side task is always an isolated free-agent conversation. Project
-      // engineering facts still stay frozen on the handle, but can never turn
-      // this task into the formal pipeline.
-      runtime = descriptor?.kind === "side"
+      // Agents keep the project's real execution mode and engineering tools;
+      // their durable conversational lifecycle is selected by agentRole.
+      runtime = descriptor?.agentRole === "side"
         ? { ...resolved, executionMode: "free" }
         : resolved;
     } catch (e) {
@@ -1289,6 +1321,7 @@ export class RuntimeServer {
       ...(descriptor ? {
         taskId: descriptor.taskId,
         taskKind: descriptor.kind,
+        agentRole: descriptor.agentRole,
         ...(descriptor.parentTaskId ? { parentTaskId: descriptor.parentTaskId } : {}),
         ...(descriptor.workspaceId ? { workspaceId: descriptor.workspaceId } : {}),
         authorization: descriptor.authorization,
@@ -1318,6 +1351,7 @@ export class RuntimeServer {
         inputHash: descriptor.inputHash,
         taskDescriptorHash: descriptor.descriptorHash,
       } : {}),
+      agentRole: descriptor?.agentRole ?? "run",
       executionStarted: !deferCoreTaskStart,
       projectId, processInstanceId: runtime.processInstanceId, task, part: runtime.part,
       ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
@@ -1376,6 +1410,7 @@ export class RuntimeServer {
       task_id: h.taskId ?? h.agentId,
       project_id: h.projectId,
       kind: h.taskKind ?? "main",
+      agent_role: h.agentRole,
       parent_task_id: h.parentTaskId ?? null,
       workspace_id: h.workspaceId ?? null,
       input_hash: h.inputHash ?? null,
@@ -1407,6 +1442,7 @@ export class RuntimeServer {
       task_id: h.taskId ?? h.agentId,
       project_id: h.projectId,
       kind: h.taskKind ?? "main",
+      agent_role: h.agentRole,
       parent_task_id: h.parentTaskId ?? null,
       workspace_id: h.workspaceId ?? null,
       authorization_scope: h.authorization ?? null,
@@ -1452,7 +1488,7 @@ export class RuntimeServer {
       h.status === "failed" ||
       h.status === "fail_closed";
 
-    if (!h.busy && resumable) {
+    if (!h.busy && resumable && h.agentRole === "run") {
       this.executeAgent(agentId, "resume").catch((e) => {
         process.stderr.write(`[runtime-server] resume executeAgent error for ${agentId}: ${e}\n`);
       });
@@ -1762,6 +1798,14 @@ export class RuntimeServer {
     // 一个 prompt（session.prompt 自身对 running 抛错，这里是双保险）。
     const hub = StreamHub.for(agentId);
     hub.emit({ type: "status", status: "running", ts: new Date().toISOString() });
+    const startingHandle = this.registry.get(agentId);
+    if (startingHandle?.agentRole === "project") {
+      // Project Agent turns are independent. A callback failure from an older
+      // turn must not poison a later turn after its fresh running event can be
+      // written successfully. Bounded Run/Side tasks retain sticky failure
+      // tracking so result sealing remains fail-closed.
+      this.taskEventFailures.delete(agentId);
+    }
     try {
       await this.appendCoreTaskEvent(
         agentId,
@@ -1856,9 +1900,58 @@ export class RuntimeServer {
         const handle = this.registry.get(agentId);
         const cancelled = session.status() === "cancelled";
         const coreOwnsCancellation = cancelled && this.coreOwnedAbortIntents.delete(agentId);
-        const mustFailClosed = !cancelled && !!(handle?.taskEvents ?? handle?.taskWorkspace);
-        const status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
-        if (mustFailClosed) {
+        const recoverableProjectTurn = !cancelled && handle?.agentRole === "project";
+        const mustFailClosed = !cancelled && !recoverableProjectTurn
+          && !!(handle?.taskEvents ?? handle?.taskWorkspace);
+        let status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
+        if (recoverableProjectTurn) {
+          // A Project Agent is a durable conversation, not a bounded Run. A
+          // model/network failure ends only this turn: persist the visible error
+          // and return the same agent to awaiting_user. If that recovery cannot
+          // be written durably, fall back to fail-closed just like other Core
+          // callback failures.
+          try {
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0assistant-error`).slice(0, 40)}`,
+              "assistant_message",
+              { text: `[error] ${reason}` },
+            );
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user-error`).slice(0, 40)}`,
+              "status",
+              { status: "awaiting_user", reason },
+            );
+            await this.flushCoreTaskEvents(agentId);
+            if (handle) {
+              handle.status = "awaiting_user";
+              delete handle.endedReason;
+              delete handle.terminalCause;
+              if (handle.currentState) {
+                const {
+                  endedReason: _endedReason,
+                  terminalCause: _terminalCause,
+                  ...recoverableState
+                } = handle.currentState;
+                const awaiting: AgentState = {
+                  ...recoverableState,
+                  status: "awaiting_user",
+                  updatedAt: new Date().toISOString(),
+                };
+                await saveAgentState(awaiting);
+                handle.currentState = awaiting;
+              }
+            }
+            status = "awaiting_user";
+          } catch (error) {
+            status = "fail_closed";
+            await this.failClosedCoreTask(
+              agentId,
+              `project-agent turn recovery failed after ${reason}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else if (mustFailClosed) {
           await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
         } else if (!coreOwnsCancellation) {
           await this.appendCoreTaskEvent(
@@ -1885,6 +1978,7 @@ export class RuntimeServer {
     const handle = this.registry.get(agentId);
     if (
       !handle?.taskId ||
+      handle.agentRole === "project" ||
       (handle.status !== "succeeded" &&
         handle.status !== "failed" &&
         handle.status !== "fail_closed")
@@ -2303,6 +2397,7 @@ export class RuntimeServer {
     let processProfileVersion: string | null | undefined;
     let taskId: string | undefined;
     let taskKind: RuntimeTaskKind | undefined;
+    let agentRole: "project" | "run" | "side" = "run";
     let parentTaskId: string | undefined;
     let workspaceId: string | undefined;
     let authorization: TaskAuthorizationScope | undefined;
@@ -2328,6 +2423,7 @@ export class RuntimeServer {
       processProfileVersion = handle.processProfileVersion;
       taskId = handle.taskId;
       taskKind = handle.taskKind;
+      agentRole = handle.agentRole;
       parentTaskId = handle.parentTaskId;
       workspaceId = handle.workspaceId;
       authorization = handle.authorization;
@@ -2353,6 +2449,7 @@ export class RuntimeServer {
       processProfileVersion = state.processProfileVersion;
       taskId = state.taskId;
       taskKind = state.taskKind;
+      agentRole = state.agentRole ?? (state.taskKind === "side" ? "side" : "run");
       parentTaskId = state.parentTaskId;
       workspaceId = state.workspaceId;
       authorization = state.authorization;
@@ -2414,7 +2511,7 @@ export class RuntimeServer {
         requestedPart: part,
         defaultPart: this.config.defaultPart,
       });
-      const runtime = taskKind === "side"
+      const runtime = agentRole === "side"
         ? { ...resolved, executionMode: "free" as const }
         : resolved;
       executionMode = runtime.executionMode;
@@ -2487,6 +2584,8 @@ export class RuntimeServer {
       return null;
     }
 
+    const agentsDir = process.env.SYNTHIA_RUNS_DIR;
+    const initialConversation = await loadFreeAgentConversation(agentId, agentsDir);
     const deps: FreeAgentDeps = {
       model,
       tools: [
@@ -2497,6 +2596,7 @@ export class RuntimeServer {
         ...(taskKind === "side" ? [assembleSideTaskCompletionTool()] : []),
       ],
       systemPrompt,
+      ...(initialConversation ? { initialConversation } : {}),
       ...(executionMode === "engineering" && this.config.historicalMaterialsEnabled === true ? {
         loadReferenceContext: () => buildHistoricalMaterialReferenceContext(
           governance,
@@ -2520,7 +2620,7 @@ export class RuntimeServer {
       connector,
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
-      ...(process.env.SYNTHIA_RUNS_DIR ? { agentsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
+      ...(agentsDir ? { agentsDir } : {}),
     };
 
     const session = createFreeAgentSession(agentId, deps);
@@ -2597,6 +2697,9 @@ export class RuntimeServer {
   ): Promise<void> {
     const h = this.registry.get(agentId);
     if (!h) return;
+    // The governed loop is a bounded Run lifecycle. Project Agents always use
+    // the conversational session, even when the project itself is engineering.
+    if (h.agentRole !== "run") return;
     if (h.busy) return; // concurrent guard
 
     h.busy = true;
@@ -2742,7 +2845,7 @@ export class RuntimeServer {
 
   private async monitorTick(): Promise<void> {
     const awaiting = [...this.registry.values()].filter(
-      (h) => h.status === "awaiting_approval" && !h.busy,
+      (h) => h.agentRole === "run" && h.status === "awaiting_approval" && !h.busy,
     );
     await Promise.allSettled(awaiting.map((h) => this.pollGate(h)));
   }
@@ -2800,6 +2903,7 @@ export class RuntimeServer {
         const wasRunning = !registeredNotStarted && state.status === "running";
         const processInstanceId = state.processInstanceId ?? "pi-default";
         const executionMode = inferExecutionMode(state);
+        const agentRole = state.agentRole ?? (state.taskKind === "side" ? "side" : "run");
 
         const lookupDeps = await this.depsFactory({
           projectId: state.projectId,
@@ -2809,7 +2913,7 @@ export class RuntimeServer {
           ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
           ...(state.authorization ? { authorization: state.authorization } : {}),
         });
-        const runtime = resolveProjectRuntime({
+        const resolvedRuntime = resolveProjectRuntime({
           requestFacts: {
             ...(state.projectType ? { projectType: normalizeKnownProjectType(state.projectType) } : {}),
             ...(state.processVersionId !== undefined ? { processVersionId: state.processVersionId } : {}),
@@ -2825,6 +2929,10 @@ export class RuntimeServer {
           requestedPart: state.part,
           defaultPart: this.config.defaultPart,
         });
+
+        const runtime = agentRole === "side"
+          ? { ...resolvedRuntime, executionMode: "free" as const }
+          : resolvedRuntime;
 
         const deps = await this.depsFactory({
           projectId: state.projectId,
@@ -2842,6 +2950,7 @@ export class RuntimeServer {
 
         const handle: AgentHandle = {
           agentId,
+          agentRole,
           ...(state.taskId ? { taskId: state.taskId } : {}),
           ...(state.taskKind ? { taskKind: state.taskKind } : {}),
           ...(state.parentTaskId ? { parentTaskId: state.parentTaskId } : {}),
@@ -2860,8 +2969,14 @@ export class RuntimeServer {
           ...(runtime.processProfileId !== undefined ? { processProfileId: runtime.processProfileId } : {}),
           ...(runtime.processProfileName !== undefined ? { processProfileName: runtime.processProfileName } : {}),
           ...(runtime.processProfileVersion !== undefined ? { processProfileVersion: runtime.processProfileVersion } : {}),
-          executionMode: state.taskKind === "side" ? "free" : runtime.executionMode,
-          status: registeredNotStarted ? "idle" : wasRunning ? "interrupted" : state.status,
+          executionMode: runtime.executionMode,
+          status: registeredNotStarted
+            ? "idle"
+            : wasRunning && agentRole === "project"
+              ? "awaiting_user"
+              : wasRunning
+                ? "interrupted"
+                : state.status,
           currentStage: state.currentStage,
           // `?? freeAgentLock.gate` 是为**本次修复之前**落盘的自由 agent 状态兜底：
           // 那些文件只写了 freeAgentLock，没有 awaitingGate，直接读会恢复成
@@ -2871,7 +2986,7 @@ export class RuntimeServer {
           audit: [],
           evidence: [],
           docs: { ...(state.docs ?? {}) },
-          endedReason: wasRunning
+          endedReason: wasRunning && agentRole !== "project"
             ? "interrupted by server restart"
             : state.endedReason,
           ...(state.terminalCause ? { terminalCause: state.terminalCause } : {}),
@@ -2893,7 +3008,46 @@ export class RuntimeServer {
         // permanent zombie after Runtime restart. Legacy Runtime-only agents
         // retain the older local interrupted/failed recovery behavior.
         if (wasRunning) {
-          if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
+          if (agentRole === "project") {
+            const {
+              endedReason: _endedReason,
+              terminalCause: _terminalCause,
+              ...recoverableState
+            } = state;
+            const awaiting: AgentState = {
+              ...recoverableState,
+              status: "awaiting_user",
+              updatedAt: new Date().toISOString(),
+            };
+            try {
+              await saveAgentState(awaiting);
+              handle.currentState = awaiting;
+              delete handle.endedReason;
+              delete handle.terminalCause;
+              if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
+                const interruption = "Project Agent turn was interrupted by Runtime restart";
+                const recoveryKey = `${agentId}\0restart-recovery\0${state.updatedAt}`;
+                await this.appendCoreTaskEvent(
+                  agentId,
+                  `te-${sha256Hex(`${recoveryKey}\0assistant`).slice(0, 40)}`,
+                  "assistant_message",
+                  { text: `[error] ${interruption}` },
+                );
+                await this.appendCoreTaskEvent(
+                  agentId,
+                  `te-${sha256Hex(`${recoveryKey}\0status`).slice(0, 40)}`,
+                  "status",
+                  { status: "awaiting_user", reason: interruption },
+                );
+                await this.flushCoreTaskEvents(agentId);
+              }
+            } catch (error) {
+              await this.failClosedCoreTask(
+                agentId,
+                `project-agent restart recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          } else if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
             await this.failClosedCoreTask(
               agentId,
               "task execution interrupted by Runtime restart",

@@ -16,7 +16,7 @@
  * 关联，四个栏位组件与后续开发者不需要、也不应该自己再关联一遍。
  */
 
-import type { ArtifactRevision, JobEvidenceContent, TaskAgentSummary, WorkspaceFileStatus } from "../api/types.ts";
+import type { ArtifactRevision, JobEvidenceContent, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
 import type { ProcessGateView } from "../domain/process-profile.ts";
@@ -184,7 +184,7 @@ export const ARTIFACT_DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" 
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// TopBar（顶栏：项目名 + 阶段条 + 任务切换 + 主题 + 用户）
+// TopBar（顶栏：项目名 + 阶段条 + 主题 + 用户）
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface TopBarProps {
@@ -194,17 +194,6 @@ export interface TopBarProps {
   readonly stageChain: readonly ProcessGateView[] | null;
   /** 项目没有新版工程阶段链时的准确占位文案。 */
   readonly stageEmptyText: string;
-  /**
-   * 当前选中的 run 摘要（`GET .../tasks` 列表项），驱动任务切换器的高亮项。
-   * 自由/兼容项目可以有当前 run 但不展示新版工程 stageChain，因此两个空值不再
-   * 强行绑定。
-   */
-  readonly currentAgent: TaskAgentSummary | null;
-  /** 项目全部 run（`GET .../tasks`，按 created_at 倒序），供任务切换器列出（含仍在后台跑的其它 run）。 */
-  readonly agents: readonly TaskAgentSummary[];
-  /** P1: free projects may open multiple conversations; engineering projects
-   * expose one formal agent until side-task isolation lands in P3. */
-  readonly allowNewAgent: boolean;
   /** 当前生效主题，驱动 ☀/☾ 图标显示哪一个。 */
   readonly theme: Theme;
   /** <1024px 时文件树抽屉是否已展开（驱动汉堡按钮的开合态）。见 spec R3。 */
@@ -214,13 +203,6 @@ export interface TopBarProps {
 }
 
 export interface TopBarEmits {
-  /** 任务切换器选中另一个 run（其它 run 仍在后台继续跑，不受影响）。 */
-  "select-agent": [agentId: string];
-  /**
-   * 任务切换器里点「开始新对话」：项目已有 agent（可能全部卡在终态/锁死），
-   * 用户仍要开一条新会话。旧 agent 不受影响、仍在切换器里可选回去。
-   */
-  "new-agent": [];
   /**
    * 点击阶段/门节点：左栏应联动切换到「阶段」视图并定位到该阶段的产物分组
    * （spec §3.1 末条）。stageId 对齐 `STAGE_CHAIN` 的 node.id（含门节点 G1/G3/G4）。

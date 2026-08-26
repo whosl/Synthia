@@ -697,6 +697,8 @@ CREATE TABLE IF NOT EXISTS agent_task (
     project_id          text NOT NULL,
     project_type        text NOT NULL CHECK (project_type IN ('free','engineering')),
     kind                text NOT NULL CHECK (kind IN ('main','side')),
+    agent_role          text NOT NULL DEFAULT 'run'
+                          CONSTRAINT agent_task_agent_role_check CHECK (agent_role IN ('project','run','side')),
     parent_task_id      text,
     workspace_id        text,
     process_instance_id text,
@@ -751,6 +753,10 @@ CREATE TABLE IF NOT EXISTS agent_task (
         AND awaiting_gate IS NULL
       )
     ),
+    CONSTRAINT agent_task_role_shape CHECK (
+      (kind = 'main' AND agent_role IN ('project','run'))
+      OR (kind = 'side' AND agent_role = 'side')
+    ),
     CONSTRAINT agent_task_terminal_shape CHECK (
       (
         status IN ('queued','running','awaiting_user')
@@ -800,11 +806,15 @@ BEGIN
 END;
 $$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS agent_task_one_active_engineering_main_idx
+CREATE UNIQUE INDEX IF NOT EXISTS agent_task_one_active_engineering_run_idx
   ON agent_task(project_id)
   WHERE project_type = 'engineering'
     AND kind = 'main'
+    AND agent_role = 'run'
     AND status IN ('queued','running','awaiting_user');
+CREATE UNIQUE INDEX IF NOT EXISTS agent_task_one_project_agent_idx
+  ON agent_task(project_id)
+  WHERE agent_role = 'project';
 CREATE UNIQUE INDEX IF NOT EXISTS agent_task_runtime_agent_unique_idx
   ON agent_task(runtime_agent_id) WHERE runtime_agent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS agent_task_project_created_idx
@@ -960,9 +970,9 @@ BEGIN
      WHERE parent.id = NEW.parent_task_id
        AND parent.project_id = NEW.project_id
        AND parent.kind = 'main'
-       AND parent.status IN ('queued','running','awaiting_user')
+       AND parent.agent_role = 'project'
   ) THEN
-    RAISE EXCEPTION 'side task requires an active main parent in the same project' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'side task requires the project agent in the same project' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -1014,6 +1024,7 @@ BEGIN
      OR OLD.project_id IS DISTINCT FROM NEW.project_id
      OR OLD.project_type IS DISTINCT FROM NEW.project_type
      OR OLD.kind IS DISTINCT FROM NEW.kind
+     OR OLD.agent_role IS DISTINCT FROM NEW.agent_role
      OR OLD.parent_task_id IS DISTINCT FROM NEW.parent_task_id
      OR OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
      OR OLD.process_instance_id IS DISTINCT FROM NEW.process_instance_id
@@ -1036,6 +1047,9 @@ BEGIN
   -- terminal. Same-status updates are therefore valid; only transitions out
   -- of a terminal status are forbidden below.
   IF OLD.status = NEW.status THEN
+    NULL;
+  ELSIF OLD.agent_role = 'project'
+        AND NEW.status IN ('running','awaiting_user','failed','cancelled','fail_closed') THEN
     NULL;
   ELSIF OLD.status = 'queued' AND NEW.status IN ('running','failed','cancelled','fail_closed') THEN
     NULL;
@@ -3122,7 +3136,7 @@ INSERT INTO schema_migrations(version)
   VALUES ('0011_delivery_release')
   ON CONFLICT (version) DO NOTHING;
 
--- schema.sql is a complete fresh-install snapshot through 0011. Recording the
+-- schema.sql is a complete fresh-install snapshot through 0012. Recording the
 -- represented migration baseline prevents a later migrate() run from treating
 -- explicit free projects as pre-0006 legacy rows.
 INSERT INTO schema_migrations(version) VALUES
@@ -3137,5 +3151,6 @@ INSERT INTO schema_migrations(version) VALUES
   ('0008_import_snapshots'),
   ('0009_task_workspaces'),
   ('0010_process_gate_checks'),
-  ('0011_delivery_release')
+  ('0011_delivery_release'),
+  ('0012_project_agents')
 ON CONFLICT (version) DO NOTHING;

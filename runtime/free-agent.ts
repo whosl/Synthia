@@ -54,6 +54,8 @@ export interface FreeAgentDeps {
   model: ConversationalModel;
   tools: readonly AgentTool[];
   systemPrompt: string;
+  /** Persisted dialogue restored after Runtime restart; its system prompt is refreshed. */
+  initialConversation?: LoadedFreeAgentConversation;
   /** Refresh low-trust reference data before each model call; never persisted. */
   loadReferenceContext?: () => Promise<string | null>;
   projectId: string;
@@ -348,6 +350,16 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ? `${deps.systemPrompt.trim()}\n\n${REFERENCE_DATA_SYSTEM_POLICY}\n`
       : deps.systemPrompt;
     this.messages.push({ role: "system", content: systemPrompt });
+    const restored = deps.initialConversation;
+    if (restored?.agentId === agentId && Array.isArray(restored.messages)) {
+      const conversation = restored.messages[0]?.role === "system"
+        ? restored.messages.slice(1)
+        : restored.messages;
+      this.messages.push(...conversation);
+      if (Array.isArray(restored.claimChecks)) {
+        this.claimChecks.push(...restored.claimChecks);
+      }
+    }
 
     this.agentState = deps.initialState
       ? { ...deps.initialState }

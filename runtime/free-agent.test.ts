@@ -621,6 +621,36 @@ describe("free-agent: lock persistence across restart", () => {
     expect(convo!.messages.length).toBeGreaterThan(0);
     expect(convo!.messages[0]!.role).toBe("system");
   });
+
+  test("a reconstructed session restores dialogue but refreshes the system prompt", async () => {
+    const gov = new MockGovernanceClient();
+    const firstModel = new ScriptedModel([txt("first reply")]);
+    const { session, agentId } = makeSession({ model: firstModel, governance: gov });
+    await session.prompt("first request");
+    const persisted = await loadFreeAgentConversation(agentId);
+    expect(persisted).not.toBeNull();
+
+    const secondModel = new ScriptedModel([txt("second reply")]);
+    const resumed = createFreeAgentSession(agentId, {
+      model: secondModel,
+      tools: [],
+      systemPrompt: "refreshed system prompt",
+      initialConversation: persisted!,
+      projectId: "project-1",
+      part: "",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+    });
+    await resumed.prompt("second request");
+
+    expect(secondModel.calls[0]!.messages).toEqual([
+      { role: "system", content: "refreshed system prompt" },
+      { role: "user", content: "first request" },
+      { role: "assistant", content: "first reply" },
+      { role: "user", content: "second request" },
+    ]);
+  });
 });
 
 describe("free-agent: conformity module unit checks", () => {

@@ -521,7 +521,7 @@ export function getTask(client: ApiClient, projectId: string, agentId: string): 
   return client<TaskAgentDetail>(`${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}`);
 }
 
-// ─── P3 独立探索任务（Core-owned；不进入主 TaskSwitcher / SSE）──────────────
+// ─── P3 Side Agent（Core-owned；独立工作区与持久化对话）────────────────────
 
 export function createSideTask(
   client: ApiClient,

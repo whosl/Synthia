@@ -173,8 +173,15 @@ function buildRemoteParameters(params: SubmitJobParams): Record<string, unknown>
     projectId: params.projectId,
     runClass: params.runClass,
     inputHash: params.inputHash,
-    sources: p.sources,
   };
+  // Toolchain/part discovery requests have no HDL payload. Including the
+  // API-level default `sources: []` changes the structural Vivado request into
+  // a source-bearing request, which the Worker correctly rejects as
+  // VIVADO_POLICY_REJECTED:NO_SOURCES. Only source-consuming operations should
+  // carry this member across the Connector boundary.
+  if (params.operation !== "discover_toolchain" && params.operation !== "query_parts") {
+    base.sources = p.sources;
+  }
   if (params.toolchainProfileHash !== undefined) {
     base.toolchainHash = params.toolchainProfileHash;
   }

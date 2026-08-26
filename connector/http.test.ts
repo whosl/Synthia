@@ -74,4 +74,17 @@ describe("Cloudflare Access remote transport", () => {
     expect(result.status).toBe(403);
     expect(result.body).toMatchObject({ error_code: "ACCESS_DENIED" });
   });
+
+  test("maps response body download failures to retryable remote unavailable", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => { throw new DOMException("timed out", "TimeoutError"); },
+      }) as Response,
+    });
+    await expect(transport.request("/discover", { method: "POST", body: envelope }))
+      .rejects.toMatchObject({ code: "REMOTE_UNAVAILABLE", retryable: true });
+  });
 });

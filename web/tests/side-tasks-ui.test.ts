@@ -2,20 +2,24 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const component = readFileSync(new URL("../src/components/tasks/SideTasksPanel.vue", import.meta.url), "utf8");
+const tabs = readFileSync(new URL("../src/components/chat/AgentPaneTabs.vue", import.meta.url), "utf8");
 const projectView = readFileSync(new URL("../src/views/ProjectView.vue", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
 };
 
 describe("P3 side-task UI contract", () => {
-  test("uses an independent accessible drawer with Escape and focus restoration", () => {
-    expect(component).toContain("role=\"dialog\"");
-    expect(component).toContain("aria-modal=\"true\"");
-    expect(component).toContain("@keydown.esc=\"emit('close')\"");
+  test("embeds Side Agents in the right pane while preserving the legacy accessible mode", () => {
+    expect(component).toContain(":role=\"embedded ? 'region' : 'dialog'\"");
+    expect(component).toContain(":aria-modal=\"embedded ? undefined : 'true'\"");
+    expect(component).toContain("@keydown.esc=\"embedded ? undefined : emit('close')\"");
     expect(component).toContain("returnFocus?.focus()");
     expect(projectView).toContain("<SideTasksPanel");
-    expect(projectView).toContain("sideTasksOpen");
-    expect(projectView).not.toContain("<TaskSwitcher\n          :side");
+    expect(projectView).toContain("<AgentPaneTabs");
+    expect(projectView).toContain("activeAgentPane");
+    expect(component).toContain("embedded");
+    expect(tabs).toContain("主线");
+    expect(tabs).toContain("添加 Side Agent");
   });
 
   test("renders creation, unadopted, result, diff, conflict, and manual adoption states", () => {
@@ -65,10 +69,11 @@ describe("P3 side-task UI contract", () => {
     expect(projectView).toContain("采纳已成功，但部分页面数据刷新失败");
     expect(component).toContain('emit("cancel-create")');
     expect(projectView).not.toContain("探索任务隔离将在后续版本开放");
-    expect(projectView).toContain("请使用顶部的“探索任务”入口");
+    expect(projectView).toContain("onAddSideAgent");
+    expect(projectView).toContain("onArchiveSideAgent");
   });
 
-  test("polls active side tasks only while the drawer is open", () => {
+  test("polls active side tasks only while a Side Agent pane is open", () => {
     expect(projectView).toContain("let sideTaskPoller: Poller | null = null");
     expect(projectView).toContain("shouldPollSideTasks(sideTasksOpen.value, sideTasks.value)");
     expect(projectView).toContain("void loadSideTasks(selectedSideTaskId.value ?? undefined)");
@@ -79,6 +84,7 @@ describe("P3 side-task UI contract", () => {
     expect(component).toContain("@media (max-width: 720px)");
     expect(component).toContain("grid-template-columns: 1fr");
     expect(component).toContain("width: 100vw");
+    expect(component).toContain(".side-tasks-panel.is-embedded");
   });
 
   test("mock explicitly enables the slice while normal dev/build stay default-off", () => {
@@ -89,7 +95,7 @@ describe("P3 side-task UI contract", () => {
 
   test("entry remains feature-gated for both recognized project types", () => {
     expect(projectView).toContain("sideTasksEnabled");
-    expect(projectView).toContain("v-if=\"sideTasksEnabled\"");
+    expect(projectView).toContain(":can-create-side-agent=\"sideTasksEnabled");
     expect(projectView).toContain("shouldShowSideTasks");
   });
 });

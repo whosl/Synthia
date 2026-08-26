@@ -664,6 +664,8 @@ export interface AgentState {
   /** Core-issued task identity. For P3 tasks taskId === agentId. */
   readonly taskId?: string;
   readonly taskKind?: RuntimeTaskKind;
+  /** Durable lifecycle role. Project agents survive individual turns/runs. */
+  readonly agentRole?: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization?: TaskAuthorizationScope;

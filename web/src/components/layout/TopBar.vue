@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 顶栏（spec §3.1）：返回按钮 + 项目名 + 阶段进度条 + 任务切换器 + 主题切换 + 用户区。
+ * 顶栏（spec §3.1）：返回按钮 + 项目名 + 阶段进度条 + 主题切换 + 用户区。
  *
  * 受控组件：只吃 TopBarProps，只吐 TopBarEmits（views/project-view-contract.ts）。
  * 返回项目列表是纯本地导航，不跨栏耦合数据，因此不走 emit，直接用 router 完成。
@@ -8,7 +8,6 @@
 import { useRouter } from "vue-router";
 import type { TopBarEmits, TopBarProps } from "../../views/project-view-contract.ts";
 import StageRail from "./StageRail.vue";
-import TaskSwitcher from "./TaskSwitcher.vue";
 import Button from "../ui/Button.vue";
 import Tooltip from "../ui/Tooltip.vue";
 
@@ -50,14 +49,6 @@ function onBack(): void {
     </div>
 
     <div class="topbar-right">
-      <TaskSwitcher
-        :agents="props.agents"
-        :current-agent="props.currentAgent"
-        :allow-new-agent="props.allowNewAgent"
-        @select-agent="(id) => emit('select-agent', id)"
-        @new-agent="emit('new-agent')"
-      />
-
       <button
         type="button"
         class="topbar-chat-toggle"

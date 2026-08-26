@@ -112,7 +112,12 @@ import {
   type Poller,
   type TaskAbortAttempt,
 } from "../domain/tasks.ts";
-import { auditToParts, type SynthiaPart, type SynthiaTextPart } from "../domain/parts.ts";
+import {
+  auditToParts,
+  conversationEventsToParts,
+  type SynthiaPart,
+  type SynthiaTextPart,
+} from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
 import {
   applyStreamEvent,
@@ -196,6 +201,7 @@ import TopBar from "../components/layout/TopBar.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
+import AgentPaneTabs from "../components/chat/AgentPaneTabs.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
 import HistoricalMaterialsPanel from "../components/materials/HistoricalMaterialsPanel.vue";
 import SideTasksPanel from "../components/tasks/SideTasksPanel.vue";
@@ -229,14 +235,9 @@ const initialRequestedAgentId = typeof route.query.run === "string" ? route.quer
 // Query ids stay untrusted until the main-task list has been loaded.
 const currentAgentId = ref<string | null>(null);
 let initialRunSelectionPending = true;
-/**
- * 用户在任务切换器点了「开始新对话」：composerMode 应强制走 new-task，直到真的
- * 建出新 agent 为止。必须是独立于 currentAgentId 的标记——下面 refresh() 一发现
- * currentAgentId 为空就会回填成最新的那个 agent（哪怕它已经锁死),仅仅把
- * currentAgentId 置空撑不过下一次 3s 轮询。
- */
-const forceNewTask = ref(false);
 const detail = ref<TaskAgentDetail | null>(null);
+const mainTaskEvents = ref<readonly SideTaskConversationEvent[]>([]);
+let mainTaskEventsAgentId: string | null = null;
 const artifacts = ref<readonly Artifact[]>([]);
 const revisionsByArtifact = ref<Record<string, readonly ArtifactRevision[]>>({});
 /** 磁盘工作区快照（`GET workspace/tree`）；项目还没建出工作区时为 null。 */
@@ -265,6 +266,7 @@ let materialsNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 // ─────────────────────────────────────────────────────────────────────
 
 const sideTasksOpen = ref(false);
+const activeAgentPane = ref<"main" | "new" | string>("main");
 const sideTasks = ref<readonly SideTaskSummary[]>([]);
 const selectedSideTaskId = ref<string | null>(null);
 const selectedSideTask = ref<SideTaskSummary | null>(null);
@@ -286,6 +288,18 @@ let sideTaskPoller: Poller | null = null;
 let sideTaskCreateAttempt: SideTaskCreateAttempt | null = null;
 let sideTaskAdoptionAttempt: SideTaskAdoptionAttempt | null = null;
 let sideTaskMessageAttempt: { readonly taskId: string; readonly text: string; readonly key: string } | null = null;
+const archivedSideAgentStorageKey = `synthia.project.${projectId}.archived-side-agents`;
+const archivedSideAgentIds = ref<ReadonlySet<string>>((() => {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(archivedSideAgentStorageKey) ?? "[]") as unknown;
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+})());
+const visibleSideAgents = computed(() => sideTasks.value.filter(
+  (task) => !archivedSideAgentIds.value.has(task.task_id),
+));
 
 // ─────────────────────────────────────────────────────────────────────
 // P4 Core-owned G0-G4 / formal input / delivery
@@ -385,7 +399,11 @@ async function refresh(): Promise<void> {
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
     const resolvingInitialRun = initialRunSelectionPending;
     const preferredTaskId = resolvingInitialRun ? initialRequestedAgentId : currentAgentId.value;
-    currentAgentId.value = forceNewTask.value ? null : resolveMainTaskId(preferredTaskId, agents.value);
+    currentAgentId.value = resolveMainTaskId(preferredTaskId, agents.value);
+    if (mainTaskEventsAgentId !== currentAgentId.value) {
+      mainTaskEventsAgentId = currentAgentId.value;
+      mainTaskEvents.value = [];
+    }
     initialRunSelectionPending = false;
     if (resolvingInitialRun && initialRequestedAgentId !== currentAgentId.value) {
       const query = { ...route.query };
@@ -393,7 +411,24 @@ async function refresh(): Promise<void> {
       else delete query.run;
       void router.replace({ query });
     }
-    detail.value = currentAgentId.value ? await getTask(api, projectId, currentAgentId.value) : null;
+    if (currentAgentId.value) {
+      const selectedAgentId = currentAgentId.value;
+      const selectedSummary = agents.value.find((agent) => agent.agent_id === selectedAgentId);
+      const after = mainTaskEvents.value.at(-1)?.sequence ?? 0;
+      const [nextDetail, conversation] = await Promise.all([
+        getTask(api, projectId, selectedAgentId),
+        selectedSummary?.agent_role === "project"
+          ? getSideTaskEvents(api, projectId, selectedAgentId, after).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      detail.value = nextDetail;
+      if (conversation && mainTaskEventsAgentId === selectedAgentId) {
+        mainTaskEvents.value = [...mainTaskEvents.value, ...conversation.events];
+      }
+    } else {
+      detail.value = null;
+      mainTaskEvents.value = [];
+    }
     loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
     void syncApproval();
@@ -557,11 +592,9 @@ async function onCopyMaterials(snapshotId: string, body: CopyHistoricalMaterialR
 }
 
 const sideTaskParent = computed<TaskAgentSummary | null>(() => {
-  const isMainTerminal = (status: string): boolean =>
-    isTerminalStatus(status) || status === "cancelled" || status === "aborted";
   const current = agents.value.find((task) => task.agent_id === currentAgentId.value);
-  if (current && current.kind !== "side" && !isMainTerminal(current.status)) return current;
-  return agents.value.find((task) => task.kind !== "side" && !isMainTerminal(task.status)) ?? null;
+  if (current?.agent_role === "project") return current;
+  return agents.value.find((task) => task.agent_role === "project") ?? null;
 });
 
 const sideTaskBaseCommit = computed<string | null>(() =>
@@ -684,17 +717,9 @@ watch(
   { flush: "post" },
 );
 
-function openSideTasks(): void {
-  if (!sideTasksEnabled.value) return;
-  closeFormalDelivery();
-  closeMaterials();
-  recordsOpen.value = false;
-  sideTasksOpen.value = true;
-  if (sideTasks.value.length === 0 && !sideTasksLoading.value) void loadSideTasks();
-}
-
 function closeSideTasks(): void {
   sideTasksOpen.value = false;
+  activeAgentPane.value = "main";
   stopSideTaskPolling();
   sideTaskCreateAttempt = null;
   sideTaskAdoptionAttempt = null;
@@ -704,6 +729,8 @@ function closeSideTasks(): void {
 }
 
 function onSelectSideTask(taskId: string): void {
+  activeAgentPane.value = taskId;
+  sideTasksOpen.value = true;
   sideTasksError.value = null;
   sideTaskAdoptionAttempt = null;
   sideTaskMessageAttempt = null;
@@ -739,6 +766,8 @@ async function onCreateSideTask(request: CreateSideTaskRequest): Promise<void> {
 
   // POST 已明确成功，此后的读取失败不能再表述为“创建失败”。
   sideTaskCreateAttempt = null;
+  activeAgentPane.value = created.task_id;
+  sideTasksOpen.value = true;
   sideTasksNotice.value = "探索任务已在独立副本中创建；运行和结果不会改变主 Agent 或正式阶段。";
   try {
     const refreshed = await loadSideTasks(created.task_id);
@@ -751,6 +780,32 @@ async function onCreateSideTask(request: CreateSideTaskRequest): Promise<void> {
   } finally {
     sideTasksOperating.value = false;
   }
+}
+
+function onSelectAgentPane(pane: "main" | string): void {
+  if (pane === "main") {
+    closeSideTasks();
+    return;
+  }
+  onSelectSideTask(pane);
+}
+
+function onAddSideAgent(): void {
+  if (!sideTasksEnabled.value || !sideTaskParent.value || !sideTaskBaseCommit.value) return;
+  closeFormalDelivery();
+  closeMaterials();
+  recordsOpen.value = false;
+  sideTasksOpen.value = true;
+  activeAgentPane.value = "new";
+  sideTasksError.value = null;
+}
+
+function onArchiveSideAgent(taskId: string): void {
+  const next = new Set(archivedSideAgentIds.value);
+  next.add(taskId);
+  archivedSideAgentIds.value = next;
+  window.localStorage.setItem(archivedSideAgentStorageKey, JSON.stringify([...next]));
+  if (activeAgentPane.value === taskId) closeSideTasks();
 }
 
 async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
@@ -1367,6 +1422,7 @@ onMounted(async () => {
     loadErrorText.value = humanizeLoadError(err);
   }
   await refresh();
+  if (sideTasksEnabled.value) await loadSideTasks();
   // 深链要在 refresh 之后：它需要 agents 已就绪才能找到在等这道门的那个 agent。
   const subId = route.query.sub;
   if (typeof subId === "string" && subId.length > 0) await openSubmissionDeepLink(subId);
@@ -1440,7 +1496,18 @@ watch(
   { immediate: true },
 );
 
-const auditParts = computed<readonly SynthiaPart[]>(() => (detail.value ? auditToParts(detail.value) : []));
+const auditParts = computed<readonly SynthiaPart[]>(() => {
+  if (!detail.value) return [];
+  const legacyParts = auditToParts(detail.value);
+  if (detail.value.agent_role !== "project" || mainTaskEvents.value.length === 0) {
+    return legacyParts;
+  }
+  const durableConversation = conversationEventsToParts(mainTaskEvents.value);
+  return [
+    ...durableConversation,
+    ...legacyParts.filter((part) => part.kind !== "text" && part.kind !== "agent_tool"),
+  ];
+});
 
 /** SSE 打开的流式文本 part（尚未定稿的部分渲染于流尾，见下方 parts 合成）。 */
 const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
@@ -1553,7 +1620,7 @@ function prevRevisionIdOf(doc: TaskDocRef): string | null {
   return entry ? prevRevisionId(entry, doc.revision_id) : null;
 }
 
-const hasAgent = computed(() => agents.value.length > 0);
+const hasAgent = computed(() => currentAgentId.value !== null);
 
 // ─────────────────────────────────────────────────────────────────────
 // 中栏：当前打开的文件 / 版本 / 内容 / 只读态
@@ -1822,49 +1889,8 @@ const projectTypeLabel = computed(() => (project.value ? projectTypeText(project
 const projectProfileLabel = computed(() =>
   project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : "—",
 );
-const currentAgent = computed<TaskAgentSummary | null>(() => agents.value.find((r) => r.agent_id === currentAgentId.value) ?? null);
-
 const viewMode = ref<FileTreeViewMode>("path");
 const focusStageId = ref<string | null>(null);
-
-function onSelectAgent(agentId: string): void {
-  if (agentId === currentAgentId.value) return;
-  if (resolveMainTaskId(agentId, agents.value) !== agentId) return;
-  currentAgentId.value = agentId;
-  detail.value = null;
-  openArtifactId.value = null;
-  openRevisionId.value = null;
-  fileContent.value = null;
-  diffAgainst.value = null;
-  formalPreview.value = null;
-  formalApproval.value = null;
-  formalApprovalId.value = null;
-  clearApproval(); // 审批卡是「当前 agent 的当前门」，切 agent 必须整块作废
-  void refresh();
-}
-
-/**
- * 任务切换器里的「开始新对话」。已有 agent 全部卡在终态/锁死时（如门禁被拒后
- * 硬锁、或批准状态没被session 感知到），这是唯一能继续工作的出口——旧 agent
- * 不受影响，仍留在切换器里可选回去，不是丢弃或撤销它们。
- */
-function onNewAgent(): void {
-  if (projectType(project.value ?? {}) === "engineering" && agents.value.length > 0) {
-    sendError.value = "工程项目只有一个主 Agent；需要并行试验时，请使用顶部的“探索任务”入口。";
-    return;
-  }
-  currentAgentId.value = null;
-  detail.value = null;
-  openArtifactId.value = null;
-  openRevisionId.value = null;
-  fileContent.value = null;
-  diffAgainst.value = null;
-  formalPreview.value = null;
-  formalApproval.value = null;
-  formalApprovalId.value = null;
-  clearApproval();
-  forceNewTask.value = true;
-}
 
 function onSelectStage(stageId: string): void {
   viewMode.value = "stage";
@@ -1907,7 +1933,7 @@ const chatOverlayOpen = ref(false);
 // ─────────────────────────────────────────────────────────────────────
 
 const composerMode = computed<ChatComposerMode>(() => {
-  if (agents.value.length === 0 || forceNewTask.value) return "new-task";
+  if (!currentAgentId.value) return "new-task";
   if (detail.value?.status === "running") return "steer";
   return "prompt";
 });
@@ -1930,10 +1956,6 @@ async function onSend(text: string): Promise<void> {
   sendError.value = null;
   try {
     if (composerMode.value === "new-task") {
-      if (projectType(project.value ?? {}) === "engineering" && agents.value.length > 0) {
-        sendError.value = "工程项目只有一个主 Agent；需要并行试验时，请使用顶部的“探索任务”入口。";
-        return;
-      }
       const attempt = createMainTaskAttempt?.text === text
         ? createMainTaskAttempt
         : { text, key: crypto.randomUUID() };
@@ -1941,7 +1963,6 @@ async function onSend(text: string): Promise<void> {
       const { agentId } = await createTask(api, projectId, { task: attempt.text, mode: "agent" }, attempt.key);
       createMainTaskAttempt = null;
       currentAgentId.value = agentId;
-      forceNewTask.value = false;
     } else if (currentAgentId.value) {
       const attempt = mainTaskMessageAttempt?.taskId === currentAgentId.value
         && mainTaskMessageAttempt.text === text
@@ -2255,13 +2276,6 @@ const topBarProps = computed<TopBarProps>(() => ({
   projectName: project.value?.name ?? "",
   stageChain: stageChain.value,
   stageEmptyText: stageEmptyText.value,
-  currentAgent: currentAgent.value,
-  agents: agents.value,
-  allowNewAgent: projectType(project.value ?? {}) === "free" || !agents.value.some((task) => (
-    !isTerminalStatus(task.status)
-    && task.status !== "cancelled"
-    && task.status !== "aborted"
-  )),
   theme: theme.value,
   treeDrawerOpen: treeDrawerOpen.value,
   chatOverlayOpen: chatOverlayOpen.value,
@@ -2376,8 +2390,6 @@ function onToggleChatOverlay(): void {
     <header class="project-view-topbar">
       <TopBar
         v-bind="topBarProps"
-        @select-agent="onSelectAgent"
-        @new-agent="onNewAgent"
         @select-stage="onSelectStage"
         @toggle-theme="onToggleTheme"
         @toggle-tree-drawer="onToggleTreeDrawer"
@@ -2399,16 +2411,6 @@ function onToggleChatOverlay(): void {
         >
           正式流程
           <span v-if="processState" class="project-view-materials-count">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
-        </button>
-        <button
-          v-if="sideTasksEnabled"
-          type="button"
-          class="project-view-side-tasks-button"
-          :aria-expanded="sideTasksOpen"
-          @click="sideTasksOpen ? closeSideTasks() : openSideTasks()"
-        >
-          探索任务
-          <span v-if="sideTasks.length > 0" class="project-view-materials-count">{{ sideTasks.length }}</span>
         </button>
         <button
           v-if="historicalMaterialsEnabled"
@@ -2450,16 +2452,57 @@ function onToggleChatOverlay(): void {
         />
       </template>
       <template #right>
-        <ChatFeed
-          v-bind="chatFeedProps"
-          @send="onSend"
-          @abort="onAbort"
-          @open-doc="onOpenDoc"
-          @open-diff="onOpenDiff"
-          @open-records="onOpenRecords"
-          @approve="onApprove"
-          @reject="onReject"
-        />
+        <div class="project-agent-workbench">
+          <AgentPaneTabs
+            :active-pane="activeAgentPane"
+            :side-agents="visibleSideAgents"
+            :can-create-side-agent="sideTasksEnabled && sideTaskParent !== null && sideTaskBaseCommit !== null"
+            @select="onSelectAgentPane"
+            @create="onAddSideAgent"
+            @archive="onArchiveSideAgent"
+          />
+          <ChatFeed
+            v-if="activeAgentPane === 'main'"
+            v-bind="chatFeedProps"
+            @send="onSend"
+            @abort="onAbort"
+            @open-doc="onOpenDoc"
+            @open-diff="onOpenDiff"
+            @open-records="onOpenRecords"
+            @approve="onApprove"
+            @reject="onReject"
+          />
+          <SideTasksPanel
+            v-else
+            open
+            embedded
+            :create-only="activeAgentPane === 'new'"
+            :tasks="sideTasks"
+            :selected-task-id="activeAgentPane === 'new' ? null : selectedSideTaskId"
+            :selected-task="activeAgentPane === 'new' ? null : selectedSideTask"
+            :result="activeAgentPane === 'new' ? null : selectedSideTaskResult"
+            :diff="activeAgentPane === 'new' ? null : selectedSideTaskDiff"
+            :events="activeAgentPane === 'new' ? [] : selectedSideTaskEvents"
+            :parent-task-id="sideTaskParent?.task_id ?? sideTaskParent?.agent_id ?? null"
+            :base-commit="sideTaskBaseCommit"
+            :loading="sideTasksLoading"
+            :detail-loading="sideTaskDetailLoading"
+            :operating="sideTasksOperating"
+            :messaging="sideTaskMessaging"
+            :message-text="sideTaskMessageText"
+            :message-error="sideTaskMessageError"
+            :error="sideTasksError"
+            :notice="sideTasksNotice"
+            @close="closeSideTasks"
+            @refresh="loadSideTasks()"
+            @select-task="onSelectSideTask"
+            @create="onCreateSideTask"
+            @cancel-create="onCancelSideTaskCreate"
+            @adopt="onAdoptSideTask"
+            @update:message-text="sideTaskMessageText = $event"
+            @send-message="onSendSideTaskMessage"
+          />
+        </div>
       </template>
     </Splitter>
 
@@ -2482,16 +2525,57 @@ function onToggleChatOverlay(): void {
     <Transition name="project-view-veil-fade">
       <div v-if="rightCollapsed && chatOverlayOpen" class="project-view-veil project-view-veil-end" @click.self="onToggleChatOverlay">
         <div class="project-view-overlay">
-          <ChatFeed
-            v-bind="chatFeedProps"
-            @send="onSend"
-            @abort="onAbort"
-            @open-doc="onOpenDoc"
-            @open-diff="onOpenDiff"
-            @open-records="onOpenRecords"
-            @approve="onApprove"
-            @reject="onReject"
-          />
+          <div class="project-agent-workbench">
+            <AgentPaneTabs
+              :active-pane="activeAgentPane"
+              :side-agents="visibleSideAgents"
+              :can-create-side-agent="sideTasksEnabled && sideTaskParent !== null && sideTaskBaseCommit !== null"
+              @select="onSelectAgentPane"
+              @create="onAddSideAgent"
+              @archive="onArchiveSideAgent"
+            />
+            <ChatFeed
+              v-if="activeAgentPane === 'main'"
+              v-bind="chatFeedProps"
+              @send="onSend"
+              @abort="onAbort"
+              @open-doc="onOpenDoc"
+              @open-diff="onOpenDiff"
+              @open-records="onOpenRecords"
+              @approve="onApprove"
+              @reject="onReject"
+            />
+            <SideTasksPanel
+              v-else
+              open
+              embedded
+              :create-only="activeAgentPane === 'new'"
+              :tasks="sideTasks"
+              :selected-task-id="activeAgentPane === 'new' ? null : selectedSideTaskId"
+              :selected-task="activeAgentPane === 'new' ? null : selectedSideTask"
+              :result="activeAgentPane === 'new' ? null : selectedSideTaskResult"
+              :diff="activeAgentPane === 'new' ? null : selectedSideTaskDiff"
+              :events="activeAgentPane === 'new' ? [] : selectedSideTaskEvents"
+              :parent-task-id="sideTaskParent?.task_id ?? sideTaskParent?.agent_id ?? null"
+              :base-commit="sideTaskBaseCommit"
+              :loading="sideTasksLoading"
+              :detail-loading="sideTaskDetailLoading"
+              :operating="sideTasksOperating"
+              :messaging="sideTaskMessaging"
+              :message-text="sideTaskMessageText"
+              :message-error="sideTaskMessageError"
+              :error="sideTasksError"
+              :notice="sideTasksNotice"
+              @close="closeSideTasks"
+              @refresh="loadSideTasks()"
+              @select-task="onSelectSideTask"
+              @create="onCreateSideTask"
+              @cancel-create="onCancelSideTaskCreate"
+              @adopt="onAdoptSideTask"
+              @update:message-text="sideTaskMessageText = $event"
+              @send-message="onSendSideTaskMessage"
+            />
+          </div>
         </div>
       </div>
     </Transition>
@@ -2565,37 +2649,6 @@ function onToggleChatOverlay(): void {
       </div>
     </Transition>
 
-    <Transition name="project-view-veil-fade">
-      <div v-if="sideTasksEnabled && sideTasksOpen" class="project-view-veil project-view-veil-end" @click.self="closeSideTasks">
-        <SideTasksPanel
-          :open="sideTasksOpen"
-          :tasks="sideTasks"
-          :selected-task-id="selectedSideTaskId"
-          :selected-task="selectedSideTask"
-          :result="selectedSideTaskResult"
-          :diff="selectedSideTaskDiff"
-          :events="selectedSideTaskEvents"
-          :parent-task-id="sideTaskParent?.task_id ?? sideTaskParent?.agent_id ?? null"
-          :base-commit="sideTaskBaseCommit"
-          :loading="sideTasksLoading"
-          :detail-loading="sideTaskDetailLoading"
-          :operating="sideTasksOperating"
-          :messaging="sideTaskMessaging"
-          :message-text="sideTaskMessageText"
-          :message-error="sideTaskMessageError"
-          :error="sideTasksError"
-          :notice="sideTasksNotice"
-          @close="closeSideTasks"
-          @refresh="loadSideTasks()"
-          @select-task="onSelectSideTask"
-          @create="onCreateSideTask"
-          @cancel-create="onCancelSideTaskCreate"
-          @adopt="onAdoptSideTask"
-          @update:message-text="sideTaskMessageText = $event"
-          @send-message="onSendSideTaskMessage"
-        />
-      </div>
-    </Transition>
   </div>
 </template>
 
@@ -2670,6 +2723,21 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.project-agent-workbench {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-panel);
+}
+
+.project-agent-workbench > :last-child {
   flex: 1;
   min-height: 0;
 }

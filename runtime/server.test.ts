@@ -370,6 +370,16 @@ class RecordingConversationalModel implements ConversationalModel {
   }
 }
 
+class FailOnceConversationalModel implements ConversationalModel {
+  readonly calls: Array<{ messages: readonly AgentMessage[]; tools: readonly AgentTool[] }> = [];
+
+  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
+    this.calls.push({ messages: [...messages], tools: [...tools] });
+    if (this.calls.length === 1) throw new Error("temporary model outage");
+    return { kind: "text", content: "recovered on the same project agent" };
+  }
+}
+
 class ToolThenTextConversationalModel implements ConversationalModel {
   readonly calls: Array<{ messages: readonly AgentMessage[]; tools: readonly AgentTool[] }> = [];
   readonly fullArgument = "x".repeat(3_000);
@@ -2222,7 +2232,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     }
   });
 
-  test("Core engineering project facts override mode=agent and run the governed loop", async () => {
+  test("a Core Project Agent preserves engineering facts without starting the governed loop", async () => {
     const gov = new EarlyGateProjectInfoGovernance(projectInfo({
       projectType: "engineering",
       processVersionId: "GJB_REF_V1",
@@ -2231,6 +2241,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       processProfileVersion: "GJB_REF_V1",
       targetPart: "xc7k70tfbv676-1",
     }), "pi-core-eng");
+    const conversationalModel = new RecordingConversationalModel();
     const server = new RuntimeServer(
       makeConfig(),
       makeFactory(
@@ -2238,24 +2249,216 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         new FakeVivadoConnector({ behavior: successBehavior() }),
         gov,
       ),
+      () => conversationalModel,
     );
     await server.start();
     try {
-      const agentId = await postTask(server, {
+      const taskId = `project-agent-${crypto.randomUUID()}`;
+      const create = await postTaskRaw(server, {
         project_id: "p-core-eng",
         process_instance_id: "pi-core-eng",
         task: "Core says engineering",
         mode: "agent",
+        task_id: taskId,
+        task_kind: "main",
+        execution_intent: "project_agent",
+        authorization_scope: MAIN_TASK_AUTHORIZATION,
       });
-      createdAgentIds.push(agentId);
+      expect(create.status).toBe(201);
+      createdAgentIds.push(taskId);
 
-      const body = await waitForStatus(server, agentId, ["awaiting_approval", "succeeded"]);
+      const started = await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" });
+      expect(started.status).toBe(200);
+
+      const body = await waitForStatus(server, taskId, ["awaiting_user", "failed"]);
+      expect(body["status"]).toBe("awaiting_user");
       expect(body["execution_mode"]).toBe("engineering");
+      expect(body["agent_role"]).toBe("project");
       expect(body["project_type"]).toBe("engineering");
       expect(body["process_version_id"]).toBe("GJB_REF_V1");
+      expect(body["awaiting_gate"]).toBeNull();
+      expect(gov.submissions).toHaveLength(0);
       expect(gov.readProjectInfoCount).toBeGreaterThan(0);
+      expect(conversationalModel.calls).toHaveLength(1);
+      expect(conversationalModel.calls[0]!.tools.map((tool) => tool.name)).toContain("core_submit_gate");
     } finally {
       await server.stop();
+    }
+  });
+
+  test("a Project Agent turn failure stays conversational and the same agent accepts the next turn", async () => {
+    const projectId = "p-core-project-turn-recovery";
+    const taskId = `project-agent-${crypto.randomUUID()}`;
+    const events: Array<{ type: string; payload: Readonly<Record<string, unknown>> }> = [];
+    const taskEvents: TaskConversationClient = {
+      projectId,
+      taskId,
+      async appendEvent(input) {
+        events.push({ type: input.type, payload: input.payload });
+        return {
+          taskId,
+          eventId: input.eventId,
+          sequence: events.length,
+          replayed: false,
+        };
+      },
+    };
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: "xc7k70tfbv676-1",
+    }), "pi-project-turn-recovery");
+    const model = new FailOnceConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig(),
+      async () => ({
+        model: new CounterScriptedModel(),
+        connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+        taskEvents,
+      }),
+      () => model,
+    );
+    await server.start();
+    try {
+      const create = await postTaskRaw(server, {
+        project_id: projectId,
+        process_instance_id: "pi-project-turn-recovery",
+        task: "first turn may fail",
+        mode: "agent",
+        task_id: taskId,
+        task_kind: "main",
+        execution_intent: "project_agent",
+        authorization_scope: MAIN_TASK_AUTHORIZATION,
+      });
+      expect(create.status).toBe(201);
+      createdAgentIds.push(taskId);
+
+      const started = await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" });
+      expect(started.status).toBe(200);
+      expect((await waitForStatus(server, taskId, ["awaiting_user", "fail_closed"])).status)
+        .toBe("awaiting_user");
+      expect(events).toContainEqual({
+        type: "assistant_message",
+        payload: { text: "[error] temporary model outage" },
+      });
+      expect(events).toContainEqual({
+        type: "status",
+        payload: { status: "awaiting_user", reason: "temporary model outage" },
+      });
+      expect(await loadAgentState(taskId)).toMatchObject({
+        agentId: taskId,
+        agentRole: "project",
+        runtimeStarted: true,
+        status: "awaiting_user",
+      });
+
+      const followUp = await fetch(`${server.url}/tasks/${taskId}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "retry on this same agent" }),
+      });
+      expect(followUp.status).toBe(200);
+      expect((await waitForStatus(server, taskId, ["awaiting_user", "fail_closed"])).status)
+        .toBe("awaiting_user");
+      expect(model.calls).toHaveLength(2);
+      expect(model.calls[1]!.messages).toContainEqual({
+        role: "user",
+        content: "retry on this same agent",
+      });
+      expect(events).toContainEqual({
+        type: "assistant_message",
+        payload: { text: "recovered on the same project agent" },
+      });
+    } finally {
+      await server.stop();
+      await deleteAgent(taskId).catch(() => {});
+    }
+  });
+
+  test("a Project Agent clears an older callback failure when a later turn reaches Core", async () => {
+    const projectId = "p-core-project-callback-recovery";
+    const taskId = `project-agent-${crypto.randomUUID()}`;
+    let eventCalls = 0;
+    const events: Array<{ type: string; payload: Readonly<Record<string, unknown>> }> = [];
+    const taskEvents: TaskConversationClient = {
+      projectId,
+      taskId,
+      async appendEvent(input) {
+        eventCalls += 1;
+        if (eventCalls === 1) throw new Error("temporary Core callback outage");
+        events.push({ type: input.type, payload: input.payload });
+        return {
+          taskId,
+          eventId: input.eventId,
+          sequence: eventCalls,
+          replayed: false,
+        };
+      },
+    };
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: "xc7k70tfbv676-1",
+    }), "pi-project-callback-recovery");
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig(),
+      async () => ({
+        model: new CounterScriptedModel(),
+        connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+        taskEvents,
+      }),
+      () => model,
+    );
+    await server.start();
+    try {
+      expect((await postTaskRaw(server, {
+        project_id: projectId,
+        process_instance_id: "pi-project-callback-recovery",
+        task: "first callback may fail",
+        mode: "agent",
+        task_id: taskId,
+        task_kind: "main",
+        execution_intent: "project_agent",
+        authorization_scope: MAIN_TASK_AUTHORIZATION,
+      })).status).toBe(201);
+      createdAgentIds.push(taskId);
+
+      const start = await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" });
+      expect(start.status).toBe(503);
+      expect((await getTask(server, taskId)).status).toBe("fail_closed");
+      expect(model.calls).toHaveLength(0);
+
+      const followUp = await fetch(`${server.url}/tasks/${taskId}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "continue after Core recovers" }),
+      });
+      expect(followUp.status).toBe(200);
+      expect((await waitForStatus(server, taskId, ["awaiting_user", "fail_closed"])).status)
+        .toBe("awaiting_user");
+      expect(model.calls).toHaveLength(1);
+      expect(events).toContainEqual({
+        type: "assistant_message",
+        payload: { text: "ok" },
+      });
+      expect(events.at(-1)).toEqual({
+        type: "status",
+        // Runtime's conversational status is idle; Core projects that durable
+        // event to awaiting_user for the Project Agent lifecycle.
+        payload: { status: "idle" },
+      });
+    } finally {
+      await server.stop();
+      await deleteAgent(taskId).catch(() => {});
     }
   });
 
@@ -3083,6 +3286,87 @@ describe("RuntimeServer — restart recovery", () => {
     } finally {
       await server.stop();
       await deleteAgent(seedTaskId).catch(() => {});
+    }
+  });
+
+  test("a restarted Project Agent ends only the interrupted turn and remains messageable", async () => {
+    const projectId = "p-core-project-restart";
+    const taskId = `project-restart-${crypto.randomUUID()}`;
+    const base = createAgentState({
+      agentId: taskId,
+      taskId,
+      taskKind: "main",
+      agentRole: "project",
+      task: "turn interrupted by restart",
+      part: "xc7k70tfbv676-1",
+      projectId,
+      processInstanceId: "pi-project-restart",
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      executionMode: "engineering",
+    });
+    await saveAgentState({ ...base, runtimeStarted: true, status: "running" });
+    const events: Array<{ type: string; payload: Readonly<Record<string, unknown>> }> = [];
+    const taskEvents: TaskConversationClient = {
+      projectId,
+      taskId,
+      async appendEvent(input) {
+        events.push({ type: input.type, payload: input.payload });
+        return { taskId, eventId: input.eventId, sequence: events.length, replayed: false };
+      },
+    };
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: "xc7k70tfbv676-1",
+    }), "pi-project-restart");
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig(),
+      async () => ({
+        model: new CounterScriptedModel(),
+        connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+        taskEvents,
+      }),
+      () => model,
+    );
+    await server.start();
+    try {
+      const recovered = await getTask(server, taskId);
+      expect(recovered.status).toBe("awaiting_user");
+      expect(recovered.agent_role).toBe("project");
+      expect(events).toContainEqual({
+        type: "assistant_message",
+        payload: { text: "[error] Project Agent turn was interrupted by Runtime restart" },
+      });
+      expect(events).toContainEqual({
+        type: "status",
+        payload: {
+          status: "awaiting_user",
+          reason: "Project Agent turn was interrupted by Runtime restart",
+        },
+      });
+      expect(await loadAgentState(taskId)).toMatchObject({ status: "awaiting_user" });
+
+      const followUp = await fetch(`${server.url}/tasks/${taskId}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "continue after restart" }),
+      });
+      expect(followUp.status).toBe(200);
+      expect((await waitForStatus(server, taskId, ["awaiting_user", "fail_closed"])).status)
+        .toBe("awaiting_user");
+      expect(model.calls).toHaveLength(1);
+    } finally {
+      await server.stop();
+      await deleteAgent(taskId).catch(() => {});
     }
   });
 
