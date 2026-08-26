@@ -75,6 +75,20 @@ describe("action validators", () => {
   test("makeXdcValidator(false) rejects XDC containing IOSTANDARD", () => {
     const v = makeXdcValidator(false);
     expect(() => v({ reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property IOSTANDARD LVCMOS33 [get_ports clk]\n" }] })).toThrow(/IOSTANDARD/);
+    expect(() => v({
+      reasoning: "dict assignment",
+      constraints: [{ path: "top.xdc", content: "set_property -dict {PACKAGE_PIN AH15 IOSTANDARD LVCMOS33} [get_ports clk]\n" }],
+    })).toThrow(/PACKAGE_PIN|IOSTANDARD/);
+  });
+  test("makeXdcValidator(false) allows comments documenting missing pin facts", () => {
+    const v = makeXdcValidator(false, ["clock"]);
+    expect(v({
+      reasoning: "fail closed",
+      constraints: [{
+        path: "top.xdc",
+        content: "# PACKAGE_PIN and IOSTANDARD are intentionally absent until board facts are verified.\ncreate_clock -period 10 [get_ports clock]\n",
+      }],
+    }).phase).toBe("generate_xdc");
   });
   test("makeXdcValidator(false) accepts a clock-only fail-closed XDC", () => {
     const v = makeXdcValidator(false);

@@ -1124,8 +1124,13 @@ export const XDC_SCHEMA = {
   required: ["reasoning", "constraints"],
 } as const;
 
-/** Regex detecting PACKAGE_PIN / IOSTANDARD pin assignments in XDC content. */
-const XDC_PIN_RE = /\b(?:set_property\s+(?:PACKAGE_PIN|IOSTANDARD)|PACKAGE_PIN|IOSTANDARD)\b/i;
+/** Detect actual PACKAGE_PIN / IOSTANDARD assignments, not explanatory comments. */
+function assignsUnverifiedPinFacts(content: string): boolean {
+  return content.split(/\r?\n/).some((rawLine) => {
+    const line = rawLine.split("#", 1)[0]!.trim();
+    return /\bset_property\b/i.test(line) && /\b(?:PACKAGE_PIN|IOSTANDARD)\b/i.test(line);
+  });
+}
 /** Missing board facts must never be bypassed by weakening Vivado DRC policy. */
 function overridesBlockingDrcSeverity(content: string): boolean {
   return content.split(/\r?\n/).some((line) =>
@@ -1163,7 +1168,7 @@ export function makeXdcValidator(
     const constraints = asFiles(o.constraints, "constraints", { kind: "constraint", extensions: XDC_EXTS });
     if (!allowPinAssignments) {
       for (const c of constraints) {
-        if (XDC_PIN_RE.test(c.content)) {
+        if (assignsUnverifiedPinFacts(c.content)) {
           err("constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target");
         }
         if (overridesBlockingDrcSeverity(c.content)) {
