@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps
 //============================================================================
 // 模块名称 : uart_rx
-// 功能描述 : UART 接收状态机。帧格式 8N1。对输入做两级寄存器同步；检测
-//            起始位下降沿后延时半位到达起始位中点确认，再每隔整位在数据
+// 功能描述 : UART 接收状态机。帧格式 8N1。对输入做两级寄存器同步并保留
+//            一拍历史值；检测起始位下降沿后延时半位到达起始位中点确认，再每隔整位在数据
 //            位中点采样，提高采样裕度（对波特率偏差的容差）。
 // 接口      : rxd       - 串行接收数据线
 //            rx_data   - 接收到的字节，rx_done 有效时有效
@@ -51,6 +51,7 @@ module uart_rx #(
     reg  [7:0]  data_reg;
     (* ASYNC_REG = "TRUE" *) reg rxd_meta;
     (* ASYNC_REG = "TRUE" *) reg rxd_sync;
+    reg rxd_sync_d;
 
     // 两级输入同步（复位置 1 = 线路空闲电平，避免误触发起始位）。
     // 只有第二级 rxd_sync 可被功能逻辑消费。
@@ -58,9 +59,11 @@ module uart_rx #(
         if (rst) begin
             rxd_meta <= 1'b1;
             rxd_sync <= 1'b1;
+            rxd_sync_d <= 1'b1;
         end else begin
             rxd_meta <= rxd;
             rxd_sync <= rxd_meta;
+            rxd_sync_d <= rxd_sync;
         end
     end
 
@@ -81,7 +84,9 @@ module uart_rx #(
                 IDLE: begin
                     clk_cnt <= {COUNTER_WIDTH{1'b0}};
                     bit_idx <= 3'd0;
-                    if (rxd_sync == 1'b0) begin   // 检测到起始位下降沿
+                    if ((rxd_sync_d == 1'b1) && (rxd_sync == 1'b0)) begin
+                        // 仅接受同步后的下降沿。坏停止位仍为低时回到 IDLE
+                        // 不会被误判成新帧，线路重新回高后才能检测下一起始沿。
                         state <= START;
                     end
                 end
@@ -120,9 +125,13 @@ module uart_rx #(
                     // 在停止位中点采样
                     if (clk_cnt == CLKS_PER_BIT - 1) begin
                         clk_cnt   <= {COUNTER_WIDTH{1'b0}};
-                        rx_data   <= data_reg;
-                        rx_done   <= 1'b1;
-                        frame_err <= ~rxd_sync;   // 停止位应为 1
+                        if (rxd_sync == 1'b1) begin
+                            rx_data <= data_reg;
+                            rx_done <= 1'b1;
+                        end else begin
+                            // 错误帧不更新数据，也不产生“有效字节完成”脉冲。
+                            frame_err <= 1'b1;
+                        end
                         state     <= IDLE;
                     end else begin
                         clk_cnt <= clk_cnt + {{(COUNTER_WIDTH-1){1'b0}}, 1'b1};

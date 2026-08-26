@@ -59,7 +59,7 @@ module uart_tb;
 
     always #(CLK_PERIOD_NS / 2) clk = ~clk;
 
-    // 全局脉冲契约：done/error 均只能维持一拍，且 frame_err 必须与 rx_done 同拍。
+    // 全局脉冲契约：done/error 均只能维持一拍；错误帧不得同时宣告有效字节。
     always @(posedge clk) begin
         if (!rst) begin
             if (tx_done && previous_tx_done)
@@ -68,8 +68,8 @@ module uart_tb;
                 $fatal(1, "RX_DONE_PULSE_WIDTH: rx_done exceeded one clock");
             if (frame_err && previous_frame_err)
                 $fatal(1, "FRAME_ERR_PULSE_WIDTH: frame_err exceeded one clock");
-            if (frame_err && !rx_done)
-                $fatal(1, "FRAME_ERR_ALIGNMENT: frame_err asserted without rx_done");
+            if (frame_err && rx_done)
+                $fatal(1, "FRAME_ERR_VALID_CONFLICT: frame_err and rx_done asserted together");
             if (tx_done)
                 tx_done_count = tx_done_count + 1;
             if (rx_done)
@@ -180,28 +180,36 @@ module uart_tb;
     );
         integer before_rx;
         integer before_err;
+        reg [7:0] before_data;
         begin
             before_rx = rx_done_count;
             before_err = frame_err_count;
+            before_data = rx_data;
             @(negedge clk);
             fork
                 drive_external_frame(data, bit_period_ns, stop_level);
                 begin
-                    @(posedge rx_done);
-                    #1;
-                    if (rx_data !== data)
-                        $fatal(1, "%s_DATA: expected 0x%02h got 0x%02h",
-                               label_text, data, rx_data);
-                    if (frame_err !== expected_error)
-                        $fatal(1, "%s_ERROR: expected frame_err=%0b got %0b",
-                               label_text, expected_error, frame_err);
+                    if (expected_error) begin
+                        @(posedge frame_err);
+                        #1;
+                        check(rx_done === 1'b0, {label_text, "_RX_DONE_SUPPRESSED"});
+                        check(rx_data === before_data, {label_text, "_RX_DATA_HELD"});
+                    end else begin
+                        @(posedge rx_done);
+                        #1;
+                        if (rx_data !== data)
+                            $fatal(1, "%s_DATA: expected 0x%02h got 0x%02h",
+                                   label_text, data, rx_data);
+                        check(frame_err === 1'b0, {label_text, "_FRAME_ERR"});
+                    end
                 end
             join
             @(posedge clk);
             #1;
             check(rx_done === 1'b0, {label_text, "_RX_DONE_WIDTH"});
             check(frame_err === 1'b0, {label_text, "_FRAME_ERR_WIDTH"});
-            check(rx_done_count == before_rx + 1, {label_text, "_RX_COUNT"});
+            check(rx_done_count == before_rx + (expected_error ? 0 : 1),
+                  {label_text, "_RX_COUNT"});
             check(frame_err_count == before_err + expected_error,
                   {label_text, "_ERROR_COUNT"});
         end
@@ -312,7 +320,7 @@ module uart_tb;
             $display("CASE 05: bad stop bit indication and subsequent recovery");
             loopback_en = 1'b0;
             drive_and_expect_rx(8'h96, DUT_BIT_NS, 1'b0, 1'b1, "BAD_STOP");
-            #(DUT_BIT_NS); // 允许坏停止位造成的第二个假起始检测自行退出
+            #(DUT_BIT_NS);
             drive_and_expect_rx(8'h69, DUT_BIT_NS, 1'b1, 1'b0, "ERROR_RECOVERY");
         end
     endtask
