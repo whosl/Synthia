@@ -50,7 +50,7 @@ export function assembleWorkspaceReadTool(): AgentTool {
       properties: {
         path: {
           type: "string",
-          description: "工作区相对路径，例如 doc/01-开发技术要求.md 或 rtl/uart_top.v。",
+          description: "工作区相对路径，例如 doc/01-可编程逻辑器件软件研制任务书.md 或 rtl/uart_top.v。",
         },
       },
       required: ["path"],

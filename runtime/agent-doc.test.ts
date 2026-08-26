@@ -24,17 +24,18 @@ beforeEach(() => {
 });
 
 describe("buildAgentDoc：手册 + 规则拼装", () => {
-  test("真实技能包：手册在前，8 份规则按编号顺序在后，无读取问题", async () => {
+  test("真实技能包：手册在前，9 份规则按编号顺序在后，无读取问题", async () => {
     const doc = await buildAgentDoc({ noCache: true });
 
     expect(doc.problems).toEqual([]);
     expect(doc.sources[0]).toBe(join(DEFAULT_SKILLS_ROOT, "AGENT.md"));
-    expect(doc.sources).toHaveLength(9); // 1 手册 + 8 规则
+    expect(doc.sources).toHaveLength(10); // 1 手册 + 9 规则
     // 文件名前缀就是阅读顺序，字符串序即编号序。
     expect(doc.sources.slice(1)).toEqual([...doc.sources.slice(1)].sort());
 
     expect(doc.text).toContain("Synthia FPGA 工程 Agent 操作手册");
     expect(doc.text).toContain("SYNTHIA-FPGA-RULE-00");
+    expect(doc.text).toContain("SYNTHIA-FPGA-RULE-15");
     expect(doc.text).toContain("SYNTHIA-FPGA-RULE-60");
     // 手册讲的是身份与边界，规则讲工程做法——两者都在，才算「完整文档」。
     expect(doc.text).toContain("core_check_gate");

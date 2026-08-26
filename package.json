@@ -5,7 +5,8 @@
   "scripts": {
     "test": "bun test core/tests connector runtime",
     "check:names": "bash scripts/check-undefined-names.sh",
-    "check": "bun run check:names && tsc --noEmit -p core/tsconfig.json"
+    "check:gjb-docs": "bun scripts/check-gjb9764-docs.ts",
+    "check": "bun run check:names && bun run check:gjb-docs && tsc --noEmit -p core/tsconfig.json"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
