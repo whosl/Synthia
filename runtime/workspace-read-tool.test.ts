@@ -71,7 +71,10 @@ describe("synthia_workspace_read", () => {
         isolatedReads++;
         return {
           path,
+          encoding: "utf8",
           content: "module side; endmodule\n",
+          contentBase64: null,
+          bytes: 23,
           contentHash: "a".repeat(64),
           commit: "b".repeat(40),
         };

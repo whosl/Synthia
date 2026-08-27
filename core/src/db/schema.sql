@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS artifact_revision (
     content_hash  text NOT NULL,
     content_location text NOT NULL,
     content       text,
+    content_encoding text NOT NULL DEFAULT 'utf8' CHECK (content_encoding IN ('utf8','base64')),
     schema_version text NOT NULL DEFAULT 'v1',
     source_ids    text[] NOT NULL DEFAULT '{}',
     data_classification data_classification NOT NULL DEFAULT 'D1',
@@ -843,8 +844,8 @@ CREATE TABLE IF NOT EXISTS task_conversation_event (
 CREATE INDEX IF NOT EXISTS task_conversation_event_task_created_idx
   ON task_conversation_event(task_id, created_at, sequence);
 
--- Immutable file versions produced inside an isolated task workspace.  Only
--- UTF-8 text up to one MiB is accepted in slice 1.  A->B->A remains three
+-- Immutable file versions produced inside an isolated task workspace. Text and
+-- governed binary artifacts are accepted up to one MiB. A->B->A remains three
 -- versions, so content hash is deliberately not unique per path.
 CREATE TABLE IF NOT EXISTS task_workspace_file (
     id                text PRIMARY KEY,
@@ -856,7 +857,10 @@ CREATE TABLE IF NOT EXISTS task_workspace_file (
     change_kind       text NOT NULL CHECK (change_kind IN ('added','modified')),
     base_content_hash text CHECK (base_content_hash IS NULL OR base_content_hash ~ '^[0-9a-f]{64}$'),
     content_hash      text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-    content_text      text NOT NULL,
+    content_encoding  text NOT NULL DEFAULT 'utf8' CHECK (content_encoding IN ('utf8','base64')),
+    content_text      text,
+    content_base64    text,
+    media_type        text NOT NULL DEFAULT 'text/plain',
     size_bytes        bigint NOT NULL CHECK (size_bytes >= 0 AND size_bytes <= 1048576),
     workspace_commit  text NOT NULL
                         CHECK (workspace_commit ~ '^[0-9a-f]{40}$' OR workspace_commit ~ '^[0-9a-f]{64}$'),
@@ -869,9 +873,19 @@ CREATE TABLE IF NOT EXISTS task_workspace_file (
       (change_kind = 'added' AND base_content_hash IS NULL)
       OR (change_kind = 'modified' AND base_content_hash IS NOT NULL)
     ),
-    CONSTRAINT task_workspace_file_content_size CHECK (size_bytes = octet_length(content_text)),
+    CONSTRAINT task_workspace_file_content_shape CHECK (
+      (content_encoding='utf8' AND content_text IS NOT NULL AND content_base64 IS NULL)
+      OR (content_encoding='base64' AND content_text IS NULL AND content_base64 IS NOT NULL)
+    ),
+    CONSTRAINT task_workspace_file_content_size CHECK (
+      size_bytes = CASE WHEN content_encoding='utf8'
+        THEN octet_length(content_text)
+        ELSE octet_length(decode(content_base64,'base64')) END
+    ),
     CONSTRAINT task_workspace_file_content_digest CHECK (
-      content_hash = encode(digest(convert_to(content_text, 'UTF8'), 'sha256'), 'hex')
+      content_hash = CASE WHEN content_encoding='utf8'
+        THEN encode(digest(convert_to(content_text, 'UTF8'), 'sha256'), 'hex')
+        ELSE encode(digest(decode(content_base64,'base64'), 'sha256'), 'hex') END
     ),
     FOREIGN KEY (task_id, workspace_id, project_id)
       REFERENCES agent_task(id, workspace_id, project_id)
@@ -3136,7 +3150,7 @@ INSERT INTO schema_migrations(version)
   VALUES ('0011_delivery_release')
   ON CONFLICT (version) DO NOTHING;
 
--- schema.sql is a complete fresh-install snapshot through 0012. Recording the
+-- schema.sql is a complete fresh-install snapshot through 0013. Recording the
 -- represented migration baseline prevents a later migrate() run from treating
 -- explicit free projects as pre-0006 legacy rows.
 INSERT INTO schema_migrations(version) VALUES
@@ -3152,5 +3166,6 @@ INSERT INTO schema_migrations(version) VALUES
   ('0009_task_workspaces'),
   ('0010_process_gate_checks'),
   ('0011_delivery_release'),
-  ('0012_project_agents')
+  ('0012_project_agents'),
+  ('0013_binary_workspace_documents')
 ON CONFLICT (version) DO NOTHING;

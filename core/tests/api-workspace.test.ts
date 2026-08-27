@@ -551,7 +551,7 @@ describe.skipIf(!DATABASE_URL)("工作区 API（真实 PostgreSQL + git）", () 
   describe("POST /workspace/files（agent 写候选）", () => {
     function writeFiles(
       projectId: string,
-      files: Array<{ path: string; content: string }>,
+      files: Array<{ path: string; content: string } | { path: string; content_base64: string }>,
       body: Record<string, unknown> = {},
       key = `k_wf_${randomUUID()}`,
     ) {
@@ -587,6 +587,51 @@ describe.skipIf(!DATABASE_URL)("工作区 API（真实 PostgreSQL + git）", () 
       );
       // 候选的正文只在 git 里——DB 不留副本，进基线时才冻结。
       expect((rows[0] as { content: string | null }).content).toBeNull();
+    });
+
+    test("DOCX 二进制按原始字节登记、读取并从修订端点回放", async () => {
+      const projectId = await newProject();
+      const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x80, 0x01]);
+      const contentBase64 = Buffer.from(bytes).toString("base64");
+      const res = await writeFiles(projectId, [{ path: "doc/spec.docx", content_base64: contentBase64 }]);
+      expect(res.status).toBe(200);
+      const data = envelopeData(res.json);
+      const registered = (data.registered as Array<{
+        artifact_id: string;
+        revision_id: string;
+        content_hash: string;
+      }>)[0]!;
+      expect(registered.content_hash).toBe(sha256Hex(bytes));
+      expect(await readFile(join(workspaceOf(projectId), "doc/spec.docx"))).toEqual(bytes);
+
+      const current = envelopeData((await getFile(projectId, "doc/spec.docx")).json);
+      expect(current.encoding).toBe("base64");
+      expect(current.content).toBeNull();
+      expect(current.content_base64).toBe(contentBase64);
+      expect(current.content_hash).toBe(sha256Hex(bytes));
+
+      const revision = envelopeData((await getContent(
+        projectId,
+        registered.artifact_id,
+        registered.revision_id,
+      )).json);
+      expect(revision.encoding).toBe("base64");
+      expect(revision.content_base64).toBe(contentBase64);
+      expect(revision.content_hash).toBe(sha256Hex(bytes));
+    });
+
+    test("二进制写入拒绝畸形 Base64 或同时提供两种内容字段", async () => {
+      const projectId = await newProject();
+      expect((await writeFiles(projectId, [
+        { path: "doc/bad.docx", content_base64: "not base64" },
+      ])).status).toBe(400);
+      const both = await apiCall(baseUrl, `/api/v1/projects/${projectId}/workspace/files`, {
+        method: "POST",
+        body: { files: [{ path: "doc/both.docx", content: "x", content_base64: "eA==" }] },
+        token: harness.ids.serviceToken,
+        headers: { "idempotency-key": `k_wf_${randomUUID()}` },
+      });
+      expect(both.status).toBe(400);
     });
 
     test("只登记点名的路径，人手边没写完的改动不被顺手署上 agent 的名字", async () => {

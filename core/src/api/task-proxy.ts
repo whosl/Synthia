@@ -793,10 +793,10 @@ function projectAgentTaskId(projectId: string): string {
   return `task-${digest.slice(0, 32)}`;
 }
 
-function baseManifestHash(files: readonly { path: string; contentHash: string; content: string }[]): string {
+function baseManifestHash(files: readonly { path: string; contentHash: string; sizeBytes: number }[]): string {
   const canonical = [...files]
     .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
-    .map((file) => `${file.path}\0${file.contentHash}\0${Buffer.byteLength(file.content, "utf8")}\n`)
+    .map((file) => `${file.path}\0${file.contentHash}\0${file.sizeBytes}\n`)
     .join("");
   return sha256Hex(canonical);
 }

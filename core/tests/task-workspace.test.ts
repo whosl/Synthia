@@ -12,6 +12,7 @@ import {
   writeTaskWorkspaceFiles,
 } from "../src/workspace/task-store.ts";
 import { ensureWorkspace, writeAndCommit } from "../src/workspace/store.ts";
+import { sha256Hex } from "../src/hashing.ts";
 
 describe("P3 isolated task workspace", () => {
   let root: string;
@@ -139,18 +140,22 @@ describe("P3 isolated task workspace", () => {
     )).rejects.toThrow("submodule");
   });
 
-  test("rejects binary and oversized base files before cloning", async () => {
+  test("allows governed binary base files but rejects oversized files before cloning", async () => {
     const binaryProject = "p3-binary";
     await seed(binaryProject);
     const binaryRoot = projectWorkspaceDir(binaryProject);
     await writeFile(join(binaryRoot, "rtl/binary.v"), new Uint8Array([0xff, 0xfe, 0xfd]));
     await git(binaryRoot, ["add", "--", "rtl/binary.v"]);
     await git(binaryRoot, ["commit", "--no-verify", "--quiet", "-m", "binary"]);
-    await expect(createIsolatedTaskWorkspace(
+    const binaryCreated = await createIsolatedTaskWorkspace(
       binaryProject,
       "ws-binary",
       (await headSha(binaryRoot))!,
-    )).rejects.toThrow("非 UTF-8");
+    );
+    expect(binaryCreated.baseCommit).toBe(await headSha(binaryRoot));
+    const binaryRead = await readTaskWorkspaceFile(binaryProject, "ws-binary", "rtl/binary.v");
+    expect(binaryRead.encoding).toBe("base64");
+    expect(binaryRead.contentBase64).toBe("//79");
 
     const largeProject = "p3-large";
     await seed(largeProject);
@@ -163,5 +168,35 @@ describe("P3 isolated task workspace", () => {
       "ws-large",
       (await headSha(largeRoot))!,
     )).rejects.toThrow("1 MiB");
+  });
+
+  test("writes and snapshots DOCX bytes in the isolated workspace", async () => {
+    const projectId = "p3-docx";
+    const baseCommit = await seed(projectId);
+    await createIsolatedTaskWorkspace(projectId, "ws-docx", baseCommit);
+    const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]);
+    const contentBase64 = Buffer.from(bytes).toString("base64");
+    const write = await writeTaskWorkspaceFiles(
+      projectId,
+      "ws-docx",
+      [{ path: "doc/spec.docx", contentBase64 }],
+      "add word document",
+      author,
+    );
+    expect(write.changed).toEqual(["doc/spec.docx"]);
+    const read = await readTaskWorkspaceFile(projectId, "ws-docx", "doc/spec.docx");
+    expect(read.encoding).toBe("base64");
+    expect(read.contentBase64).toBe(contentBase64);
+
+    const snapshot = await snapshotTaskWorkspace(projectId, "ws-docx", baseCommit, {
+      taskId: "task-docx",
+      workspaceId: "ws-docx",
+      summary: "word output",
+      tests: [],
+    });
+    const change = snapshot.changes.find((file) => file.path === "doc/spec.docx")!;
+    expect(change.content_encoding).toBe("base64");
+    expect(change.result_content_base64).toBe(contentBase64);
+    expect(change.result_hash).toBe(sha256Hex(bytes));
   });
 });

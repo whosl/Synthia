@@ -88,7 +88,13 @@ export function assembleWorkspaceReadTool(): AgentTool {
         const file = sideTask
           ? await ctx.workspace!.readFile(path)
           : await ctx.governance.readWorkspaceFile(path);
-        const bytes = Buffer.byteLength(file.content, "utf8");
+        if (file.encoding !== "utf8" || file.content === null) {
+          return {
+            content: `读取失败：${path} 是 ${file.encoding} 二进制文件。请使用 synthia_word_document 检查或编辑 DOCX。`,
+            isError: true,
+          };
+        }
+        const bytes = file.bytes;
         if (bytes > MAX_MODEL_FILE_BYTES) {
           return {
             content: `读取失败（fail-closed）：${path} 为 ${bytes} 字节，超过模型单文件读取上限 ${MAX_MODEL_FILE_BYTES}。`,

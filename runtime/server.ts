@@ -87,6 +87,7 @@ import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
+import { assembleWordDocumentTool } from "./word-document-tool.ts";
 import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
@@ -2592,6 +2593,7 @@ export class RuntimeServer {
       model,
       tools: [
         assembleWorkspaceReadTool(),
+        assembleWordDocumentTool(),
         ...await assembleSkillTools(),
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
         assembleVivadoTool(),

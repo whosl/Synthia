@@ -49,9 +49,29 @@ export interface WorkspaceEntry {
   readonly modifiedAt: string;
 }
 
-export interface WorkspaceFileInput {
-  readonly path: string;
-  readonly content: string;
+export type WorkspaceFileInput =
+  | {
+      readonly path: string;
+      readonly content: string;
+      readonly contentBase64?: never;
+    }
+  | {
+      readonly path: string;
+      readonly content?: never;
+      readonly contentBase64: string;
+    };
+
+export type WorkspaceContentEncoding = "utf8" | "base64";
+
+/** Convert a validated workspace payload to the exact bytes committed to Git. */
+export function workspaceFileBytes(file: WorkspaceFileInput): Uint8Array {
+  return "content" in file && typeof file.content === "string"
+    ? new TextEncoder().encode(file.content)
+    : Buffer.from(file.contentBase64, "base64");
+}
+
+export function workspaceFileEncoding(file: WorkspaceFileInput): WorkspaceContentEncoding {
+  return "content" in file && typeof file.content === "string" ? "utf8" : "base64";
 }
 
 export interface CommitOutcome {
@@ -126,9 +146,19 @@ async function writeIfAbsent(abs: string, content: string): Promise<void> {
 
 /** 读工作区当前内容（含尚未登记的人工改动）。文件不存在抛 `WORKSPACE_FILE_NOT_FOUND`。 */
 export async function readWorkingFile(projectId: string, path: string): Promise<string> {
+  const bytes = await readWorkingFileBytes(projectId, path);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new WorkspaceError("WORKSPACE_PATH_INVALID", `工作区文件不是 UTF-8 文本：${path}`, { path });
+  }
+}
+
+/** Read a workspace file without decoding or changing any byte. */
+export async function readWorkingFileBytes(projectId: string, path: string): Promise<Uint8Array> {
   const abs = absoluteWorkspacePath(projectId, path);
   try {
-    return await readFile(abs, "utf8");
+    return await readFile(abs);
   } catch {
     throw new WorkspaceError("WORKSPACE_FILE_NOT_FOUND", `工作区没有这个文件：${path}`, { path });
   }
@@ -140,11 +170,24 @@ export async function readWorkingFile(projectId: string, path: string): Promise<
  * （调用方可回落到 DB 里的归档副本）。
  */
 export async function readAtLocation(projectId: string, location: string): Promise<string | null> {
+  const bytes = await readAtLocationBytes(projectId, location);
+  if (bytes === null) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Read immutable Git content as exact bytes. */
+export async function readAtLocationBytes(
+  projectId: string,
+  location: string,
+): Promise<Uint8Array | null> {
   const parsed = parseGitLocation(location);
   if (!parsed) return null;
   const dir = projectWorkspaceDir(validateProjectId(projectId));
-  const bytes = await showAt(dir, parsed.commit, parsed.path);
-  return bytes === null ? null : new TextDecoder().decode(bytes);
+  return showAt(dir, parsed.commit, parsed.path);
 }
 
 /**
@@ -263,12 +306,21 @@ export async function pendingChanges(projectId: string): Promise<WorkspaceEntry[
  * 返回内容是否真的变了（没变时 UI 不必刷新树）。
  */
 export async function writeWorkingFile(projectId: string, path: string, content: string): Promise<boolean> {
+  return writeWorkingFileBytes(projectId, path, new TextEncoder().encode(content));
+}
+
+/** Editor write for exact binary bytes; like the text wrapper, this does not commit. */
+export async function writeWorkingFileBytes(
+  projectId: string,
+  path: string,
+  bytes: Uint8Array,
+): Promise<boolean> {
   const rel = validateWorkspacePath(path);
   const abs = absoluteWorkspacePath(projectId, rel);
   return withProjectLock(projectId, async () => {
-    if (await sameOnDisk(abs, content)) return false;
+    if (await sameBytesOnDisk(abs, bytes)) return false;
     await mkdir(dirname(abs), { recursive: true });
-    await writeFile(abs, content, "utf8");
+    await writeFile(abs, bytes);
     return true;
   });
 }
@@ -287,7 +339,11 @@ export async function writeAndCommit(
   author: CommitAuthor,
   options: WorkspaceWriteOptions = {},
 ): Promise<CommitOutcome> {
-  const normalized = files.map((f) => ({ path: validateWorkspacePath(f.path), content: f.content }));
+  const normalized = files.map((file): WorkspaceFileInput => (
+    "content" in file && typeof file.content === "string"
+      ? { path: validateWorkspacePath(file.path), content: file.content }
+      : { path: validateWorkspacePath(file.path), contentBase64: file.contentBase64 }
+  ));
   const guards = (options.guards ?? []).map((guard) => ({
     path: validateWorkspacePath(guard.path),
     expectedContentHash: guard.expectedContentHash,
@@ -322,7 +378,7 @@ export async function writeAndCommit(
     for (const file of normalized) {
       const state = status.get(file.path);
       if (state === undefined) continue; // 与 HEAD 一致，覆盖它没有风险
-      if (await sameOnDisk(join(dir, file.path), file.content)) continue; // 内容相同，不是冲突
+      if (await sameBytesOnDisk(join(dir, file.path), workspaceFileBytes(file))) continue; // 内容相同，不是冲突
       conflicts.push(file.path);
     }
     if (conflicts.length > 0) {
@@ -336,7 +392,7 @@ export async function writeAndCommit(
     const changedFiles: WorkspaceFileInput[] = [];
     for (const file of normalized) {
       const abs = join(dir, file.path);
-      const identical = await sameOnDisk(abs, file.content);
+      const identical = await sameBytesOnDisk(abs, workspaceFileBytes(file));
       // 盘上恰好已经是这份字节、但 git 里还不是（untracked，或上一次登记 DB 侧失败留下的
       // dirty）时仍要收进本次 commit。只看「内容有没有变」会让这种文件永远进不了树，
       // 也就永远登记不上——agent 重试同样的内容也救不回来。
@@ -346,7 +402,12 @@ export async function writeAndCommit(
       // 内容一字未变：不造空 commit，但要给出现 HEAD，让调用方仍能拼出 content_location。
       return { commit: await headSha(dir), changed: [] };
     }
-    const commit = await commitFilesAtomically(dir, changedFiles, message, author);
+    const commit = await commitFilesAtomically(
+      dir,
+      changedFiles.map((file) => ({ path: file.path, content: workspaceFileBytes(file) })),
+      message,
+      author,
+    );
     return {
       commit: commit ?? await headSha(dir),
       changed: changedFiles.map((file) => file.path),
@@ -389,8 +450,12 @@ function isMeaningfulPath(rel: string): boolean {
 }
 
 async function sameOnDisk(abs: string, content: string): Promise<boolean> {
+  return sameBytesOnDisk(abs, new TextEncoder().encode(content));
+}
+
+async function sameBytesOnDisk(abs: string, bytes: Uint8Array): Promise<boolean> {
   try {
-    return (await readFile(abs, "utf8")) === content;
+    return Buffer.from(await readFile(abs)).equals(Buffer.from(bytes));
   } catch {
     return false;
   }
@@ -398,9 +463,7 @@ async function sameOnDisk(abs: string, content: string): Promise<boolean> {
 
 async function contentHashOnDisk(abs: string, path: string): Promise<string | null> {
   try {
-    const bytes = await readFile(abs);
-    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return sha256Hex(content);
+    return sha256Hex(await readFile(abs));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new WorkspaceError(
@@ -415,15 +478,18 @@ async function contentHashOnDisk(abs: string, path: string): Promise<string | nu
 
 export interface TreeFile {
   readonly path: string;
-  readonly content: string;
-  /** sha256(content)；与 `getRevisionContent` 复核时用的是同一个函数、同一份字节。 */
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly encoding: WorkspaceContentEncoding;
+  readonly sizeBytes: number;
+  /** sha256(raw bytes)；与修订内容复核使用同一份字节。 */
   readonly contentHash: string;
 }
 
 export interface TreeSnapshot {
   readonly commit: string;
   readonly files: readonly TreeFile[];
-  /** 不是合法 UTF-8、无法作为文本修订登记的路径（例如误放进来的二进制文件）。 */
+  /** Kept for API compatibility. Binary files are now registered by raw-byte hash. */
   readonly skippedBinary: readonly string[];
 }
 
@@ -433,8 +499,7 @@ export interface TreeSnapshot {
  * 「登记」的依据取自 git 树而不是 `git status`，是为了让登记可重试：上一次 commit
  * 成功但 DB 写失败时，改动已经不在 status 里了，只有从树出发才找得回来。
  *
- * 非 UTF-8 的文件被剔除并单独报出——正文是按字符串存的，硬塞进去会让
- * `content_hash` 与实际字节对不上，那正是这套设计要保证不会发生的事。
+ * 文本保留 UTF-8 正文；二进制以规范 Base64 表示，但身份始终按 Git 原始字节计算。
  */
 export async function readTreeAt(projectId: string, commit: string): Promise<TreeSnapshot> {
   const dir = projectWorkspaceDir(validateProjectId(projectId));
@@ -446,14 +511,20 @@ export async function readTreeAt(projectId: string, commit: string): Promise<Tre
   for (const path of paths.sort()) {
     const bytes = await showAt(dir, commit, path);
     if (bytes === null) continue;
-    let content: string;
+    let content: string | null = null;
     try {
       content = decoder.decode(bytes);
     } catch {
-      skippedBinary.push(path);
-      continue;
+      // Binary artifacts such as DOCX are governed by their exact Git bytes.
     }
-    files.push({ path, content, contentHash: sha256Hex(content) });
+    files.push({
+      path,
+      content,
+      contentBase64: content === null ? Buffer.from(bytes).toString("base64") : null,
+      encoding: content === null ? "base64" : "utf8",
+      sizeBytes: bytes.byteLength,
+      contentHash: sha256Hex(bytes),
+    });
   }
   return { commit, files, skippedBinary };
 }

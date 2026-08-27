@@ -1,15 +1,15 @@
-# Synthia 任务工作区与正式采纳契约（v1）
+# Synthia 任务工作区与正式采纳契约（v1.1）
 
 - 编号：PB-003
-- 状态：P3 第一切片；已冻结
-- 日期：2026-08-21
+- 状态：P3 第一切片；二进制文档扩展已冻结
+- 日期：2026-08-27
 - 上位依据：[产品基线 v1](./product-baseline-v1.md)、[实施计划 v1](./implementation-plan-v1.md)
 
 ## 1. 目的与范围
 
 本文固定 P3 第一条可演示闭环：从项目当前不可变 Git 提交创建侧边任务的独立副本，侧边任务只在副本中探索，Core 密封结果并计算差异，最后由人选择文件采纳为项目主工作区的新候选修订。
 
-本切片只支持新增或修改符合工作区路径规则的 UTF-8 文本文件，单文件最多 1 MiB。不支持删除、二进制文件、符号链接、Git submodule、自动合并、自动采纳、侧边任务提门、侧边任务创建里程碑或侧边任务启动 `gate_check` / `formal` 运行。遇到这些情况必须 fail-closed，不得退化为直接修改项目主工作区。
+本切片支持新增或修改符合工作区路径规则的 UTF-8 文本，以及通过规范 Base64 承载的受治理二进制文档（当前 Runtime 编辑能力限定为 `.docx`），单文件最多 1 MiB。仍不支持删除、符号链接、Git submodule、自动合并、自动采纳、侧边任务提门、侧边任务创建里程碑或侧边任务启动 `gate_check` / `formal` 运行。遇到这些情况必须 fail-closed，不得退化为直接修改项目主工作区。
 
 功能由 `SYNTHIA_FEATURE_SIDE_TASKS` 控制，默认关闭。关闭时创建侧边任务、写侧边工作区、密封结果和采纳均返回 `503 capability_unavailable`；已经存在的任务、事件、结果、差异和采纳记录仍可只读。旧的个人主任务读取路径不因关闭开关而删除或改写。
 
@@ -55,7 +55,7 @@
 ### 3.3 事件、结果与采纳
 
 - `task_conversation_event` 是有序 append-only 事实。每任务的 `sequence` 单调递增，事件 ID 与 sequence 重放不得生成第二条记录。只持久化完整的用户消息、助手消息、工具调用/结果和状态事件，不持久化 SSE 文本 delta。
-- `task_workspace_file` 是结果密封时捕获的新增/修改文件，保存 UTF-8 正文、base/result 哈希和字节数。它不是可变的工作树索引。
+- `task_workspace_file` 是结果密封时捕获的新增/修改文件。文本保存 UTF-8 正文；二进制保存规范 Base64，并显式记录 `content_encoding` 与 `media_type`。哈希和字节数始终针对解码后的原始文件字节。它不是可变的工作树索引。
 - `task_result` 以 `(task_id, output_hash)` 保证重复密封幂等，绑定任务、工作区、base/result commit、结论、测试摘要、规范化 manifest 和 `output_hash`。第一切片的成功任务只暴露一条密封结果；表结构保留未来多次密封结果的前向空间。结果一经写入不可修改或删除。
 - side task 只有在 Runtime-only 控制工具 `synthia_complete_side_task` 成功调用后，随后的最终助手文本才可触发结果密封。普通助手文本只把任务推进到 `awaiting_user`；用户可通过同一 task 的消息接口补充信息，再进入 `running`。Web 必须展示 Core 中的用户/助手事件和补充入口，不能只显示一个不可操作的等待状态。
 - 结果中的测试摘要只由 Core 查询与该 `project_id + task_id + workspace_id` 精确绑定的 `tool_run` 事实生成。Runtime 请求体中的自报 `tests` 不作为证据，也不得进入 `output_hash`。
@@ -95,7 +95,7 @@ applying → applied | conflicted | failed
 
 ## 5. 哈希契约
 
-所有哈希都对 UTF-8 字节计算 SHA-256，并编码为 64 位小写十六进制。
+所有文件哈希都对原始文件字节计算 SHA-256，并编码为 64 位小写十六进制；文本的原始字节是其 UTF-8 编码，Base64 只是 API/数据库传输表示，不参与身份计算。
 
 `base_manifest_hash` 的输入为所有可登记文件按规范化 path 升序排列后的行：
 

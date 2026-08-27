@@ -9,6 +9,7 @@ const taskWorkspacesMigration = readFileSync(new URL("../src/db/migrations/0009_
 const processGateChecksMigration = readFileSync(new URL("../src/db/migrations/0010_process_gate_checks.sql", import.meta.url), "utf8");
 const deliveryReleaseMigration = readFileSync(new URL("../src/db/migrations/0011_delivery_release.sql", import.meta.url), "utf8");
 const projectAgentsMigration = readFileSync(new URL("../src/db/migrations/0012_project_agents.sql", import.meta.url), "utf8");
+const binaryWorkspaceMigration = readFileSync(new URL("../src/db/migrations/0013_binary_workspace_documents.sql", import.meta.url), "utf8");
 const freshSchema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
 describe("PostgreSQL D1 contracts", () => {
   test("initial numbered migration creates fresh core schema", () => {
@@ -38,8 +39,17 @@ describe("PostgreSQL D1 contracts", () => {
       "0010_process_gate_checks",
       "0011_delivery_release",
       "0012_project_agents",
+      "0013_binary_workspace_documents",
     ]) {
       expect(freshSchema).toContain(`('${version}')`);
+    }
+  });
+  test("binary workspace documents preserve raw-byte identity in migration and fresh schema", () => {
+    for (const sql of [binaryWorkspaceMigration, freshSchema]) {
+      expect(sql).toContain("content_encoding");
+      expect(sql).toContain("content_base64");
+      expect(sql).toContain("task_workspace_file_content_digest");
+      expect(sql).toContain("decode(content_base64");
     }
   });
   test("numbered migrations preserve fresh-schema ownership constraints and lookup indexes", () => {

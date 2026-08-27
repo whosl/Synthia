@@ -157,7 +157,8 @@ export async function commitPaths(
 
 export interface AtomicCommitFile {
   readonly path: string;
-  readonly content: string;
+  /** Exact blob bytes. Strings are encoded as UTF-8 for legacy text callers. */
+  readonly content: string | Uint8Array;
 }
 
 const WORKSPACE_PUBLISH_REF = "refs/synthia/workspace-publish";
@@ -441,7 +442,7 @@ function describeTreePathState(state: TreePathState | null): { mode: string; obj
  * writing its worktree before the commit is ready.
  *
  * A temporary index starts from `baseCommit`; only `files` are replaced with
- * freshly hashed UTF-8 bytes, so an operator's unrelated staged changes cannot
+ * freshly hashed bytes, so an operator's unrelated staged changes cannot
  * leak into the commit. Once the object is complete, HEAD is advanced with an
  * old-value compare-and-swap and only the selected paths are checked out. The
  * publish marker makes the short HEAD/worktree transition forward-recoverable
@@ -475,7 +476,11 @@ export async function commitFilesAtomically(
     for (let i = 0; i < uniqueFiles.length; i += 1) {
       const file = uniqueFiles[i]!;
       const contentPath = join(tempDir, `content-${i}`);
-      await writeFile(contentPath, file.content, "utf8");
+      if (typeof file.content === "string") {
+        await writeFile(contentPath, file.content, "utf8");
+      } else {
+        await writeFile(contentPath, file.content);
+      }
       const blob = (await git(dir, ["hash-object", "-w", "--no-filters", "--", contentPath])).trim();
       const mode = await regularFileModeAtCommit(dir, baseCommit, file.path);
       await gitWithOptions(

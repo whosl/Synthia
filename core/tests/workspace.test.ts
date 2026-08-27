@@ -36,8 +36,11 @@ import {
   listWorkspace,
   pendingChanges,
   readAtLocation,
+  readAtLocationBytes,
+  readTreeAt,
   readRegularFileAtLocation,
   readWorkingFile,
+  readWorkingFileBytes,
   writeAndCommit,
   writeWorkingFile,
 } from "../src/workspace/store.ts";
@@ -166,6 +169,49 @@ describe("建区与读写", () => {
     expect(readBack).toBe(content);
     // 可追溯性的全部意义在这一行：取回来的字节 hash 与登记时算的一致。
     expect(sha256Hex(readBack!)).toBe(sha256Hex(content));
+  });
+
+  test("二进制文件按原始字节提交、读取和登记身份，不经过 UTF-8 转码", async () => {
+    const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x80, 0x01]);
+    const contentBase64 = Buffer.from(bytes).toString("base64");
+    const out = await writeAndCommit(
+      "p-binary",
+      [{ path: "doc/spec.docx", contentBase64 }],
+      "binary docx",
+      AUTHOR,
+    );
+    expect(out.changed).toEqual(["doc/spec.docx"]);
+    expect(await readWorkingFileBytes("p-binary", "doc/spec.docx")).toEqual(bytes);
+    expect(await readAtLocationBytes(
+      "p-binary",
+      formatGitLocation(out.commit!, "doc/spec.docx"),
+    )).toEqual(bytes);
+    await expect(readWorkingFile("p-binary", "doc/spec.docx")).rejects.toThrow(/UTF-8/);
+
+    const tree = await readTreeAt("p-binary", out.commit!);
+    const file = tree.files.find((candidate) => candidate.path === "doc/spec.docx")!;
+    expect(file.encoding).toBe("base64");
+    expect(file.contentBase64).toBe(contentBase64);
+    expect(file.contentHash).toBe(sha256Hex(bytes));
+    expect(tree.skippedBinary).toEqual([]);
+  });
+
+  test("二进制目标带未登记人工改动时仍拒绝覆盖", async () => {
+    const initial = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+    await writeAndCommit(
+      "p-binary-dirty",
+      [{ path: "doc/spec.docx", contentBase64: initial.toString("base64") }],
+      "initial",
+      AUTHOR,
+    );
+    const dir = await ensureWorkspace("p-binary-dirty");
+    await writeFile(join(dir, "doc/spec.docx"), Buffer.from([0x50, 0x4b, 0x09]));
+    await expect(writeAndCommit(
+      "p-binary-dirty",
+      [{ path: "doc/spec.docx", contentBase64: Buffer.from([0x50, 0x4b, 0x03]).toString("base64") }],
+      "overwrite",
+      AUTHOR,
+    )).rejects.toThrow(/未登记|拒绝覆盖/);
   });
 
   test("历史版本按 sha 各读各的，后一版不会覆盖前一版的可读性", async () => {

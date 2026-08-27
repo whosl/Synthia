@@ -95,7 +95,8 @@ async function resolveSources(
   for (const ref of refs) {
     let file: {
       path: string;
-      content: string;
+      encoding: "utf8" | "base64";
+      content: string | null;
       contentHash: string;
       registered: boolean;
       revisionId: string | null;
@@ -118,6 +119,10 @@ async function resolveSources(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       failures.push({ path: ref.path, reason: msg });
+      continue;
+    }
+    if (file.encoding !== "utf8" || file.content === null) {
+      failures.push({ path: ref.path, reason: "Vivado 源文件必须是 UTF-8 文本，不能是二进制工作区文件。" });
       continue;
     }
     if (ref.inlineContent !== null && ref.inlineContent !== file.content) {

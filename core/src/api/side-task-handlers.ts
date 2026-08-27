@@ -22,7 +22,12 @@ import {
   writeTaskWorkspaceFiles,
   type TaskWorkspaceChange,
 } from "../workspace/task-store.ts";
-import { ensureWorkspace, readTreeAt, writeAndCommit } from "../workspace/store.ts";
+import {
+  ensureWorkspace,
+  readTreeAt,
+  writeAndCommit,
+  type WorkspaceFileInput,
+} from "../workspace/store.ts";
 import {
   capabilityUnavailableError,
   conflictApiError,
@@ -161,7 +166,10 @@ interface WorkspaceFileRow {
   readonly change_kind: "added" | "modified";
   readonly base_content_hash: string | null;
   readonly content_hash: string;
-  readonly content_text: string;
+  readonly content_encoding: "utf8" | "base64";
+  readonly content_text: string | null;
+  readonly content_base64: string | null;
+  readonly media_type: string;
   readonly size_bytes: number | string;
   readonly workspace_commit: string;
   readonly version: number;
@@ -472,8 +480,13 @@ export async function getSideTaskWorkspaceFileHandler(ctx: RequestContext): Prom
     status: 200,
     data: {
       path: file.path,
+      encoding: file.encoding,
       content: file.content,
+      content_base64: file.contentBase64,
       content_hash: file.contentHash,
+      bytes: file.encoding === "utf8"
+        ? Buffer.byteLength(file.content ?? "", "utf8")
+        : Buffer.from(file.contentBase64 ?? "", "base64").byteLength,
       commit: file.commit,
       workspace_id: task.workspace_id,
       isolated: true,
@@ -799,10 +812,11 @@ export async function finalizeSideTaskResultHandler(ctx: RequestContext): Promis
     const resultId = `result-${canonicalRequestHash({ taskId, outputHash: snapshot.output_hash }).slice(0, 32)}`;
     for (const change of snapshot.changes) {
       await tx.query(
-        `INSERT INTO task_workspace_file
+          `INSERT INTO task_workspace_file
            (id,task_id,project_id,workspace_id,path,artifact_type,change_kind,
-            base_content_hash,content_hash,content_text,size_bytes,workspace_commit,version,created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1,now())`,
+            base_content_hash,content_hash,content_encoding,content_text,content_base64,
+            media_type,size_bytes,workspace_commit,version,created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,1,now())`,
         [
           workspaceFileId(taskId, change),
           taskId,
@@ -813,7 +827,10 @@ export async function finalizeSideTaskResultHandler(ctx: RequestContext): Promis
           change.change_kind,
           change.base_hash,
           change.result_hash,
+          change.content_encoding,
           change.result_content,
+          change.result_content_base64,
+          change.media_type,
           change.size_bytes,
           snapshot.result_commit,
         ],
@@ -898,7 +915,11 @@ export async function getSideTaskDiffHandler(ctx: RequestContext): Promise<Handl
       base_hash: file.base_content_hash,
       result_hash: file.content_hash,
       current_target_hash: target.hash,
-      diff: unifiedDiff(file.path, target.content, file.content_text),
+      diff: file.content_encoding === "utf8" && target.encoding !== "base64"
+        ? unifiedDiff(file.path, target.content, file.content_text ?? "")
+        : null,
+      binary: file.content_encoding === "base64",
+      media_type: file.media_type,
       conflict_reason: risk === "none" ? null : risk,
       adopted: adopted.has(file.path),
     });
@@ -1031,7 +1052,7 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
             conflict: existing.details,
             terminal: existing.state,
             result,
-            files: [] as { path: string; content: string }[],
+            files: [] as WorkspaceFileInput[],
           };
         }
       }
@@ -1097,7 +1118,7 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
           conflict: detail,
           terminal: "conflicted",
           result,
-          files: [] as { path: string; content: string }[],
+          files: [] as WorkspaceFileInput[],
         };
       }
       const currentPreviewHash = canonicalRequestHash({
@@ -1115,7 +1136,7 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
       const completePreviewChanged = currentPreviewHash !== previewHash && !recoveryCommit;
 
       const conflicts: Record<string, unknown>[] = [];
-      const toApply: { path: string; content: string }[] = [];
+      const toApply: WorkspaceFileInput[] = [];
       for (const selection of selected) {
         const file = byPath.get(selection.path);
         if (!file) throw validationError(`path is not present in result: ${selection.path}`);
@@ -1148,7 +1169,13 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
           });
           continue;
         }
-        toApply.push({ path: selection.path, content: file.content_text });
+        if (file.content_encoding === "base64") {
+          if (file.content_base64 === null) throw internalError("SIDE_TASK_BINARY_CONTENT_MISSING");
+          toApply.push({ path: selection.path, contentBase64: file.content_base64 });
+        } else {
+          if (file.content_text === null) throw internalError("SIDE_TASK_TEXT_CONTENT_MISSING");
+          toApply.push({ path: selection.path, content: file.content_text });
+        }
       }
       if (conflicts.length > 0) {
         const detail = { code: "SIDE_TASK_ADOPTION_CONFLICT", conflicts };
@@ -1164,7 +1191,7 @@ export async function adoptSideTaskHandler(ctx: RequestContext): Promise<Handler
           conflict: detail,
           terminal: "conflicted",
           result,
-          files: [] as { path: string; content: string }[],
+          files: [] as WorkspaceFileInput[],
         };
       }
       return {
@@ -1733,7 +1760,7 @@ function parseExactPaths(raw: unknown, field: string): string[] {
   return normalized.sort(comparePaths);
 }
 
-function parseFiles(raw: unknown): { path: string; content: string }[] {
+function parseFiles(raw: unknown): WorkspaceFileInput[] {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_FILES_PER_WRITE) {
     throw validationError(`field 'files' must contain 1..${MAX_FILES_PER_WRITE} entries`);
   }
@@ -1743,14 +1770,35 @@ function parseFiles(raw: unknown): { path: string; content: string }[] {
     const path = validateWorkspacePath(value.path);
     if (seen.has(path)) throw validationError(`files contains duplicate path: ${path}`);
     seen.add(path);
-    if (typeof value.content !== "string") {
-      throw validationError(`files[${index}].content must be a string`);
+    const hasText = Object.prototype.hasOwnProperty.call(value, "content");
+    const hasBase64 = Object.prototype.hasOwnProperty.call(value, "content_base64");
+    if (hasText === hasBase64) {
+      throw validationError(`files[${index}] must contain exactly one of content or content_base64`);
     }
-    if (Buffer.byteLength(value.content, "utf8") > MAX_FILE_BYTES) {
+    if (hasText) {
+      if (typeof value.content !== "string") {
+        throw validationError(`files[${index}].content must be a string`);
+      }
+      if (Buffer.byteLength(value.content, "utf8") > MAX_FILE_BYTES) {
+        throw validationError(`files[${index}] exceeds 1 MiB`);
+      }
+      return { path, content: value.content };
+    }
+    if (typeof value.content_base64 !== "string" || !isCanonicalBase64(value.content_base64)) {
+      throw validationError(`files[${index}].content_base64 must be canonical padded Base64`);
+    }
+    if (Buffer.from(value.content_base64, "base64").byteLength > MAX_FILE_BYTES) {
       throw validationError(`files[${index}] exceeds 1 MiB`);
     }
-    return { path, content: value.content };
+    return { path, contentBase64: value.content_base64 };
   });
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (value === "") return true;
+  if (value.length % 4 !== 0) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  return Buffer.from(value, "base64").toString("base64") === value;
 }
 
 function parseTaskJobSources(raw: unknown, field: string, required: boolean): SourceInput[] {
@@ -2065,6 +2113,8 @@ async function resultPayload(
       base_hash: file.base_content_hash,
       result_hash: file.content_hash,
       size_bytes: Number(file.size_bytes),
+      content_encoding: file.content_encoding,
+      media_type: file.media_type,
     })),
     base_commit: result.base_commit,
     result_commit: result.result_commit,

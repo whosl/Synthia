@@ -20,6 +20,12 @@ import type {
   RuntimeTaskKind,
   TaskAuthorizationScope,
 } from "./task-workspace-client.ts";
+import {
+  encodeWorkspaceBytes,
+  workspaceInputBytes,
+  workspaceInputHash,
+  type RuntimeWorkspaceFileInput,
+} from "./workspace-content.ts";
 
 /** A generated source / constraint artifact (path + content + optional media type). */
 export interface ArtifactFile {
@@ -418,7 +424,10 @@ export interface ImportedMaterialSummary {
  *  plus whether those exact bytes are a registered revision. */
 export interface WorkspaceFileContent {
   readonly path: string;
-  readonly content: string;
+  readonly encoding: "utf8" | "base64";
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly bytes: number;
   readonly contentHash: string;
   /** True when these bytes equal the latest registered revision's content_hash. */
   readonly registered: boolean;
@@ -474,7 +483,7 @@ export interface GovernanceClient {
    * safe default. On that error the agent should read the file and reconcile.
    */
   writeWorkspaceFiles(input: {
-    files: readonly { path: string; content: string }[];
+    files: readonly RuntimeWorkspaceFileInput[];
     changeReason?: string;
     artifactType?: ArtifactType;
   }): Promise<WorkspaceWriteResult>;
@@ -535,7 +544,7 @@ export class NoGovernanceClient implements GovernanceClient {
   private readonly revisionHashes = new Map<string, string>();
   /** In-memory stand-in for the on-disk workspace, so `vivado_run` (which reads
    *  its sources back by path) still works with governance switched off. */
-  private readonly workspace = new Map<string, { content: string; commit: string; revisionId: string }>();
+  private readonly workspace = new Map<string, { bytes: Uint8Array; commit: string; revisionId: string }>();
   private nextId(prefix: string): string {
     return `${prefix}-nogov-${++this.counter}`;
   }
@@ -551,18 +560,19 @@ export class NoGovernanceClient implements GovernanceClient {
     };
   }
   async writeWorkspaceFiles(input: {
-    files: readonly { path: string; content: string }[];
+    files: readonly RuntimeWorkspaceFileInput[];
   }): Promise<WorkspaceWriteResult> {
     const commit = this.nextId("commit");
     const registered = input.files.map((f) => {
-      this.workspace.set(f.path, { content: f.content, commit, revisionId: this.nextId("rev") });
-      this.revisionHashes.set(this.workspace.get(f.path)!.revisionId, sha256Hex(f.content));
+      const bytes = workspaceInputBytes(f);
+      this.workspace.set(f.path, { bytes, commit, revisionId: this.nextId("rev") });
+      this.revisionHashes.set(this.workspace.get(f.path)!.revisionId, sha256Hex(bytes));
       return {
         path: f.path,
         artifactId: this.nextId("art"),
         revisionId: this.workspace.get(f.path)!.revisionId,
         version: 1,
-        contentHash: sha256Hex(f.content),
+        contentHash: workspaceInputHash(f),
       };
     });
     return { commit, registered, unchanged: [] };
@@ -570,10 +580,11 @@ export class NoGovernanceClient implements GovernanceClient {
   async readWorkspaceFile(path: string): Promise<WorkspaceFileContent> {
     const file = this.workspace.get(path);
     if (file === undefined) throw new Error(`WORKSPACE_FILE_NOT_FOUND: ${path}`);
+    const encoded = encodeWorkspaceBytes(file.bytes);
     return {
       path,
-      content: file.content,
-      contentHash: sha256Hex(file.content),
+      ...encoded,
+      contentHash: sha256Hex(file.bytes),
       registered: true,
       revisionId: file.revisionId,
       version: 1,

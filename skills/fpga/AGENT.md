@@ -37,7 +37,9 @@
 | 技能 | `fpga-intake` `fpga-hw-manual-extraction` `fpga-behavior-and-wave-plan` `fpga-architecture` `fpga-register-spec` `fpga-rtl-build` `fpga-tb-write` `fpga-xdc-gen` `fpga-compile-and-repair` `fpga-sim-run` | 生成并登记某一类候选产物 |
 | 门禁 | `core_create_snapshot` `core_submit_gate` `core_check_gate` | 冻结成员集、提交门禁、查询决策 |
 | 工具链 | `vivado_run` | 经 Connector 跑一次 Vivado 作业，取回 ToolRun 证据 |
-| 文档 | `read_skill_doc` | 按需读取技能手册 / 模板 / 参考（见下） |
+| 工作区 | `synthia_workspace_read` | 读取获授权的当前 UTF-8 文件和登记身份 |
+| Word | `synthia_word_document` | 创建、检查或精确替换真实 OOXML `.docx` 候选 |
+| 文档参考 | `read_skill_doc` | 按需读取技能手册 / 模板 / 参考（见下） |
 
 `vivado_run` 的 `operation` 参数虽然列了四个值，实际接通的只有 `validate_sources` 与 `simulate`；`synthesize` / `implement` 属 §2 的未启用能力，不要用它们去"验证"什么，也不要把它们的缺席说成失败。`top` 与 `testbench` 能自动推断，省着不填比填错强——填了且与推断不符会被拒绝并告诉你正确值。
 
@@ -54,7 +56,9 @@
 
 编写或修改工程文档前，先读 `references/standards/README.md`、`standards.json` 和 `document-catalog.md`，确认材料状态、文档适用性与 Golden 覆盖，再读 `GJB9764-2020.md` 中对应文档种类的第 5 章和附录。若该类型按 GJB 438B-2009 编制，或属于 OCD、SSS、IRS、SSDD、IDD，再读 `GJB438B-2009.md` 的对应附录。术语使用查 `GBT11457-2006.md`，开发过程和支撑活动查 `GJB2786A-2009.md`，配置标识/控制/记实查 `GJB5235-2004.md`，测试级别/过程/类型查 `GJB9433-2018.md`；需要核对原意时回看同目录 PDF 页面。
 
-GJB 9432-2018 与 GB/T 8566-2022 当前登记为 `missing`。涉及它们的开发完整性、配置管理适用性或正式符合性结论必须写成“阻塞/待受控文本复核”，不得用三页残件、相似国标、其他同名文件或模型记忆补齐。公开预览重建 PDF 不是发行机构原始电子文件，OCR/结构化转写也不是批准依据。
+正式 Word 文档使用 `synthia_word_document`，路径必须位于 Core 授权范围并以 `.docx` 结尾。`create_from_markdown` 生成真实 OOXML 包，`inspect_text` 检查正文，`replace_text` 做局部精确修改；写入仍只是 candidate，并受原始字节 SHA-256、未登记人工改动保护、Git 修订和 Side Agent 隔离边界约束。不要把 Markdown 文件改名为 `.docx`，也不要用 Word 工具生成签名、批准、发布或测试通过事实。
+
+GJB 9432-2018 已有受控 PDF 和检索转写；GB/T 8566-2022 当前仍登记为 `missing`。涉及 GB/T 8566-2022 的开发完整性或正式符合性结论必须写成“阻塞/待受控文本复核”，不得用相似国标、其他同名文件或模型记忆补齐。OCR/结构化转写是检索辅助，不是批准依据。
 
 ## 4. 门禁怎么走
 

@@ -194,9 +194,61 @@ describe("CoreTaskWorkspaceClient", () => {
 
     expect(await client.readFile("rtl/counter.v")).toEqual({
       path: "rtl/counter.v",
+      encoding: "utf8",
       content,
+      contentBase64: null,
+      bytes: Buffer.byteLength(content, "utf8"),
       contentHash: sha256Hex(content),
       commit: "b".repeat(40),
+    });
+  });
+
+  test("round-trips binary workspace files through Base64 with raw-byte hash", async () => {
+    const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0xff]);
+    const contentBase64 = Buffer.from(bytes).toString("base64");
+    const calls: RequestInit[] = [];
+    const client = new CoreTaskWorkspaceClient({
+      baseUrl: "http://core.local",
+      token: "svc-token",
+      projectId: "project-1",
+      taskId: "task-1",
+      workspaceId: "ws-task-1",
+      authorization: {
+        ...AUTHORIZATION,
+        read_paths: ["doc/**"],
+        write_paths: ["doc/**"],
+      },
+      fetchImpl: (async (input, init) => {
+        calls.push(init ?? {});
+        if (String(input).includes("workspace/file?")) {
+          return new Response(JSON.stringify({ data: {
+            path: "doc/spec.docx",
+            encoding: "base64",
+            content: null,
+            content_base64: contentBase64,
+            content_hash: sha256Hex(bytes),
+            commit: "c".repeat(40),
+          } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: {
+          commit: "c".repeat(40),
+          committed: ["doc/spec.docx"],
+          registered: [{ path: "doc/spec.docx", content_hash: sha256Hex(bytes) }],
+          unchanged: [],
+          isolated: true,
+        } }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.writeFiles({ files: [{ path: "doc/spec.docx", contentBase64 }] });
+    expect(JSON.parse(String(calls[0]!.body)).files).toEqual([
+      { path: "doc/spec.docx", content_base64: contentBase64 },
+    ]);
+    expect(await client.readFile("doc/spec.docx")).toMatchObject({
+      encoding: "base64",
+      content: null,
+      contentBase64,
+      contentHash: sha256Hex(bytes),
     });
   });
 

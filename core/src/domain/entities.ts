@@ -86,7 +86,8 @@ export interface ArtifactRevision {
   parentRevisionId: string | null;
   contentHash: string;           // SHA-256 of content (FLOW-002 §2)
   contentLocation: string;       // git ref, DB jsonb, or object storage URI
-  content: string | null;        // inline content when stored in DB; null when out-of-band
+  content: string | null;        // UTF-8 text or canonical Base64 when stored inline
+  contentEncoding?: "utf8" | "base64";
   schemaVersion: string;
   sourceIds: string[];           // source artifact/requirement/decision/run IDs
   dataClassification: DataClassification;

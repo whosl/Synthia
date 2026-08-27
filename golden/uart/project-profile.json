@@ -1,0 +1,82 @@
+{
+  "schema": "synthia-golden-project-profile.v1",
+  "project_id": "GOLDEN-UART",
+  "profile_version": "v2.3-candidate",
+  "decided_at": "2026-08-27",
+  "decision_authority": "project-owner",
+  "approval_state": "candidate_pending_human_review",
+  "hardware": {
+    "device_family": "AMD Xilinx Virtex-7",
+    "device": "XC7VX690T",
+    "selected_candidate_part": "xc7vx690tffg1761-2",
+    "part_verification": {
+      "state": "blocked",
+      "required_query": "get_parts -quiet xc7vx690t*",
+      "known_worker_result": "worker-66 Vivado 2021.1 does not contain xc7vx690tffg1761-2",
+      "rule": "Do not submit synthesis or implementation for the selected part until a Connector toolchain profile returns the exact part."
+    },
+    "board": {
+      "class": "Virtex-7 690T board",
+      "manufacturer": null,
+      "model": null,
+      "revision": null,
+      "state": "blocked_pending_authoritative_board_identity"
+    },
+    "topology": {
+      "core_top": "uart_top",
+      "board_wrapper": "uart_board_top",
+      "serial_path": "onboard_usb_uart",
+      "wrapper_state": "blocked_pending_board_schematic_and_master_xdc"
+    }
+  },
+  "clock_and_protocol": {
+    "core_clock_hz": 100000000,
+    "clock_source_state": "blocked_pending_board_oscillator_and_reset_evidence",
+    "baseline_uart": {
+      "baud": 9600,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1
+    },
+    "extended_regression_baud": [115200]
+  },
+  "electrical_and_pins": {
+    "policy": "derive_only_from_authoritative_board_materials",
+    "state": "blocked",
+    "required_inputs": [
+      "exact board manufacturer/model/revision",
+      "board schematic",
+      "official pinout or Master XDC",
+      "USB-UART bridge connection",
+      "oscillator and reset circuit",
+      "I/O bank VCCO and IOSTANDARD evidence"
+    ]
+  },
+  "assurance": {
+    "criticality_scheme": "project_defined",
+    "criticality": "non_safety_critical_low",
+    "rigor": "medium_assurance",
+    "mandatory_activities": [
+      "two_stage_rx_synchronizer_and_cdc_review",
+      "requirements_design_code_test_bidirectional_traceability",
+      "code_and_functional_coverage_with_approved_denominators",
+      "independent_verification",
+      "synthesis_implementation_drc_and_sta_on_the_verified_target_part",
+      "board_regression_after_authoritative_hardware_inputs_exist"
+    ]
+  },
+  "roles": [
+    { "role": "project_owner", "assignee": null, "state": "pending_nomination" },
+    { "role": "system_safety", "assignee": null, "state": "pending_nomination" },
+    { "role": "requirements", "assignee": null, "state": "pending_nomination" },
+    { "role": "plds_design", "assignee": null, "state": "pending_nomination" },
+    { "role": "verification", "assignee": null, "state": "pending_nomination" },
+    { "role": "independent_v_and_v", "assignee": null, "state": "pending_nomination" },
+    { "role": "quality_assurance", "assignee": null, "state": "pending_nomination" },
+    { "role": "configuration_management", "assignee": null, "state": "pending_nomination" },
+    { "role": "standards_document_control", "assignee": null, "state": "pending_nomination" },
+    { "role": "hardware_board_owner", "assignee": null, "state": "pending_nomination" },
+    { "role": "release_g4_approver", "assignee": null, "state": "pending_nomination" }
+  ],
+  "agent_boundary": "Synthia may prepare candidate artifacts and evidence indexes but cannot act as an authenticated human reviewer, approver, baseline authority, or release authority."
+}

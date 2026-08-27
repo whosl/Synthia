@@ -35,6 +35,7 @@ import {
   readTreeAt,
   type CommitAuthor,
   type WorkspaceFileInput,
+  workspaceFileBytes,
 } from "./store.ts";
 
 export type TaskWorkspaceChangeKind = "added" | "modified";
@@ -45,9 +46,12 @@ export interface TaskWorkspaceChange {
   readonly base_hash: string | null;
   readonly result_hash: string;
   readonly size_bytes: number;
-  readonly media_type: "text/plain";
+  readonly media_type: "text/plain" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/octet-stream";
+  readonly content_encoding: "utf8" | "base64";
   readonly base_content: string | null;
-  readonly result_content: string;
+  readonly base_content_base64: string | null;
+  readonly result_content: string | null;
+  readonly result_content_base64: string | null;
 }
 
 export interface TaskWorkspaceSnapshot {
@@ -69,6 +73,15 @@ export interface TaskWorkspaceTreeEntry {
   readonly path: string;
   readonly content_hash: string;
   readonly size_bytes: number;
+}
+
+export interface TaskWorkspaceFileContent {
+  readonly path: string;
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly encoding: "utf8" | "base64";
+  readonly contentHash: string;
+  readonly commit: string;
 }
 
 export interface IsolatedWorkspaceCreated {
@@ -143,13 +156,6 @@ export async function createIsolatedTaskWorkspace(
     );
   }
   const baseTree = await readTreeAt(project, baseCommit);
-  if (baseTree.skippedBinary.length > 0) {
-    throw new WorkspaceError(
-      "WORKSPACE_PATH_INVALID",
-      "主工作区包含非 UTF-8 文件，首版探索副本拒绝创建。",
-      { paths: baseTree.skippedBinary },
-    );
-  }
   const baseManifestHash = manifestHash(baseTree.files);
   const isolatedDir = taskWorkspaceDir(project, workspace);
   const parent = dirname(isolatedDir);
@@ -187,7 +193,7 @@ export async function readTaskWorkspaceFile(
   projectId: string,
   workspaceId: string,
   inputPath: string,
-): Promise<{ path: string; content: string; contentHash: string; commit: string }> {
+): Promise<TaskWorkspaceFileContent> {
   const path = validateWorkspacePath(inputPath);
   const dir = taskWorkspaceDir(projectId, workspaceId);
   await assertNoSymlinkPath(dir, path);
@@ -200,13 +206,20 @@ export async function readTaskWorkspaceFile(
   if (bytes.byteLength > MAX_TASK_FILE_BYTES) {
     throw new WorkspaceError("WORKSPACE_PATH_INVALID", `探索文件超过 1 MiB：${path}`, { path });
   }
-  const content = decodeUtf8(bytes, path);
+  const decoded = encodeWorkspaceBytes(bytes);
   const commit = await headSha(dir);
   if (!commit) throw new WorkspaceError("WORKSPACE_GIT_FAILED", "探索副本没有 HEAD");
-  return { path, content, contentHash: sha256Hex(content), commit };
+  return {
+    path,
+    content: decoded.content,
+    contentBase64: decoded.contentBase64,
+    encoding: decoded.encoding,
+    contentHash: sha256Hex(bytes),
+    commit,
+  };
 }
 
-/** List the complete current UTF-8 tree in the isolated clone. */
+/** List the complete current tree in the isolated clone, hashing exact bytes. */
 export async function readTaskWorkspaceTree(
   projectId: string,
   workspaceId: string,
@@ -227,10 +240,9 @@ export async function readTaskWorkspaceTree(
     }
     const bytes = await showAt(dir, commit, path);
     if (bytes === null) throw new WorkspaceError("WORKSPACE_GIT_FAILED", `无法读取探索文件：${path}`);
-    const content = decodeUtf8(bytes, path);
     files.push({
       path,
-      content_hash: sha256Hex(content),
+      content_hash: sha256Hex(bytes),
       size_bytes: bytes.byteLength,
     });
   }
@@ -248,7 +260,9 @@ export async function writeTaskWorkspaceFiles(
 ): Promise<{ commit: string; changed: readonly string[] }> {
   const normalized = files.map((file) => ({
     path: validateWorkspacePath(file.path),
-    content: file.content,
+    ...(typeof file.content === "string"
+      ? { content: file.content }
+      : { contentBase64: file.contentBase64 }),
   }));
   const seen = new Set<string>();
   for (const file of normalized) {
@@ -262,16 +276,11 @@ export async function writeTaskWorkspaceFiles(
       throw new WorkspaceError("WORKSPACE_PATH_INVALID", `重复路径：${file.path}`);
     }
     seen.add(file.path);
-    if (Buffer.byteLength(file.content, "utf8") > MAX_TASK_FILE_BYTES) {
+    const bytes = workspaceFileBytes(file as WorkspaceFileInput);
+    if (bytes.byteLength > MAX_TASK_FILE_BYTES) {
       throw new WorkspaceError(
         "WORKSPACE_PATH_INVALID",
         `探索结果文件超过 1 MiB：${file.path}`,
-      );
-    }
-    if (Buffer.from(file.content, "utf8").toString("utf8") !== file.content) {
-      throw new WorkspaceError(
-        "WORKSPACE_PATH_INVALID",
-        `探索结果必须是规范 UTF-8 文本：${file.path}`,
       );
     }
   }
@@ -288,7 +297,7 @@ export async function writeTaskWorkspaceFiles(
       await assertNoSymlinkPath(dir, file.path);
       const currentState = status.get(file.path);
       if (currentState === undefined) continue;
-      if (await sameFile(join(dir, file.path), file.content)) continue;
+      if (await sameFile(join(dir, file.path), workspaceFileBytes(file as WorkspaceFileInput))) continue;
       conflicts.push(file.path);
     }
     if (conflicts.length > 0) {
@@ -302,10 +311,11 @@ export async function writeTaskWorkspaceFiles(
     const changed: string[] = [];
     for (const file of normalized) {
       const abs = join(dir, file.path);
-      const identical = await sameFile(abs, file.content);
+      const bytes = workspaceFileBytes(file as WorkspaceFileInput);
+      const identical = await sameFile(abs, bytes);
       if (!identical) {
         await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, file.content, "utf8");
+        await writeFile(abs, bytes);
       }
       if (!identical || status.get(file.path) !== undefined) changed.push(file.path);
     }
@@ -420,24 +430,24 @@ export async function snapshotTaskWorkspace(
         `探索结果文件超过 1 MiB：${normalized}`,
       );
     }
-    const resultContent = decodeUtf8(resultBytes, normalized);
     const baseBytes = basePaths.has(normalized) ? await showAt(dir, baseCommit, normalized) : null;
-    let baseContent: string | null = null;
-    if (baseBytes !== null) {
-      baseContent = decodeUtf8(baseBytes, normalized);
-    }
-    const resultHash = sha256Hex(resultContent);
-    const baseHash = baseContent === null ? null : sha256Hex(baseContent);
+    const resultEncoded = encodeWorkspaceBytes(resultBytes);
+    const baseEncoded = baseBytes === null ? null : encodeWorkspaceBytes(baseBytes);
+    const resultHash = sha256Hex(resultBytes);
+    const baseHash = baseBytes === null ? null : sha256Hex(baseBytes);
     if (baseHash === resultHash) continue;
     changes.push({
       path: normalized,
-      change_kind: baseContent === null ? "added" : "modified",
+      change_kind: baseBytes === null ? "added" : "modified",
       base_hash: baseHash,
       result_hash: resultHash,
       size_bytes: resultBytes.byteLength,
-      media_type: "text/plain",
-      base_content: baseContent,
-      result_content: resultContent,
+      media_type: mediaTypeForPath(normalized, resultEncoded.encoding),
+      content_encoding: resultEncoded.encoding,
+      base_content: baseEncoded?.content ?? null,
+      base_content_base64: baseEncoded?.contentBase64 ?? null,
+      result_content: resultEncoded.content,
+      result_content_base64: resultEncoded.contentBase64,
     });
   }
 
@@ -503,27 +513,33 @@ async function changedResultPaths(
 export async function currentProjectFile(
   projectId: string,
   path: string,
-): Promise<{ content: string | null; hash: string | null }> {
+): Promise<{
+  content: string | null;
+  contentBase64: string | null;
+  encoding: "utf8" | "base64" | null;
+  hash: string | null;
+}> {
   const normalized = validateWorkspacePath(path);
   const root = projectWorkspaceDir(projectId);
   await assertNoSymlinkPath(root, normalized);
   const abs = join(root, normalized);
   try {
-    const content = decodeUtf8(await readFile(abs), normalized);
-    return { content, hash: sha256Hex(content) };
+    const bytes = await readFile(abs);
+    const encoded = encodeWorkspaceBytes(bytes);
+    return { ...encoded, hash: sha256Hex(bytes) };
   } catch (error) {
     if (error instanceof WorkspaceError) throw error;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new WorkspaceError("WORKSPACE_GIT_FAILED", `无法读取项目目标文件：${normalized}`);
     }
-    return { content: null, hash: null };
+    return { content: null, contentBase64: null, encoding: null, hash: null };
   }
 }
 
-function manifestHash(files: readonly { path: string; contentHash: string; content: string }[]): string {
+function manifestHash(files: readonly { path: string; contentHash: string; sizeBytes: number }[]): string {
   const canonical = [...files]
     .sort((a, b) => compareCodePoints(a.path, b.path))
-    .map((file) => `${file.path}\0${file.contentHash}\0${Buffer.byteLength(file.content, "utf8")}\n`)
+    .map((file) => `${file.path}\0${file.contentHash}\0${file.sizeBytes}\n`)
     .join("");
   return sha256Hex(canonical);
 }
@@ -552,6 +568,36 @@ function decodeUtf8(bytes: Uint8Array, path: string): string {
   } catch {
     throw new WorkspaceError("WORKSPACE_PATH_INVALID", `探索文件只支持 UTF-8 文本：${path}`, { path });
   }
+}
+
+function encodeWorkspaceBytes(bytes: Uint8Array): {
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly encoding: "utf8" | "base64";
+} {
+  try {
+    return {
+      content: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      contentBase64: null,
+      encoding: "utf8",
+    };
+  } catch {
+    return {
+      content: null,
+      contentBase64: Buffer.from(bytes).toString("base64"),
+      encoding: "base64",
+    };
+  }
+}
+
+function mediaTypeForPath(
+  path: string,
+  encoding: "utf8" | "base64",
+): TaskWorkspaceChange["media_type"] {
+  if (path.toLowerCase().endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  return encoding === "utf8" ? "text/plain" : "application/octet-stream";
 }
 
 async function assertSupportedGitTree(dir: string, commit: string) {
@@ -589,9 +635,9 @@ function isMeaningfulPath(path: string): boolean {
   return path !== ".gitignore" && path !== ".gitkeep" && !path.endsWith("/.gitkeep");
 }
 
-async function sameFile(abs: string, content: string): Promise<boolean> {
+async function sameFile(abs: string, bytes: Uint8Array): Promise<boolean> {
   try {
-    return (await readFile(abs, "utf8")) === content;
+    return Buffer.from(await readFile(abs)).equals(Buffer.from(bytes));
   } catch {
     return false;
   }

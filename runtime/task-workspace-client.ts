@@ -8,6 +8,10 @@
 
 import type { ArtifactType } from "../core/src/domain/enums.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import {
+  parseWorkspaceResponse,
+  type RuntimeWorkspaceFileInput,
+} from "./workspace-content.ts";
 
 export type RuntimeTaskKind = "main" | "side";
 
@@ -25,7 +29,10 @@ export interface TaskAuthorizationScope {
 
 export interface TaskWorkspaceFile {
   readonly path: string;
-  readonly content: string;
+  readonly encoding: "utf8" | "base64";
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly bytes: number;
   readonly contentHash: string;
   readonly commit: string | null;
 }
@@ -86,7 +93,7 @@ export interface TaskWorkspaceClient extends TaskConversationClient {
   listTree(): Promise<readonly TaskWorkspaceTreeEntry[]>;
   readFile(path: string): Promise<TaskWorkspaceFile>;
   writeFiles(input: {
-    readonly files: readonly { readonly path: string; readonly content: string }[];
+    readonly files: readonly RuntimeWorkspaceFileInput[];
     readonly changeReason?: string;
     readonly artifactType?: ArtifactType;
   }): Promise<TaskWorkspaceWriteResult>;
@@ -294,30 +301,35 @@ export class CoreTaskWorkspaceClient extends CoreTaskClientBase implements TaskW
       "GET",
       `workspace/file?path=${encodeURIComponent(path)}`,
     ));
-    if (
-      typeof data.path !== "string" ||
-      typeof data.content !== "string" ||
-      typeof data.content_hash !== "string"
-    ) {
+    if (typeof data.path !== "string" || typeof data.content_hash !== "string") {
       throw shapeError("workspace file response is invalid");
     }
     const returnedPath = normalizeWorkspacePath(data.path);
     if (returnedPath !== path) {
       throw shapeError(`Core returned ${returnedPath} while ${path} was requested`);
     }
-    if (sha256Hex(data.content) !== data.content_hash) {
+    let encoded;
+    try {
+      encoded = parseWorkspaceResponse(data, path);
+    } catch {
+      throw shapeError("workspace file response is invalid");
+    }
+    const bytes = encoded.encoding === "utf8"
+      ? new TextEncoder().encode(encoded.content ?? "")
+      : Buffer.from(encoded.contentBase64 ?? "", "base64");
+    if (sha256Hex(bytes) !== data.content_hash) {
       throw shapeError(`Core returned a content hash mismatch for ${path}`);
     }
     return {
       path,
-      content: data.content,
+      ...encoded,
       contentHash: data.content_hash,
       commit: typeof data.commit === "string" ? data.commit : null,
     };
   }
 
   async writeFiles(input: {
-    readonly files: readonly { readonly path: string; readonly content: string }[];
+    readonly files: readonly RuntimeWorkspaceFileInput[];
     readonly changeReason?: string;
     readonly artifactType?: ArtifactType;
   }): Promise<TaskWorkspaceWriteResult> {
@@ -332,7 +344,9 @@ export class CoreTaskWorkspaceClient extends CoreTaskClientBase implements TaskW
         throw new TaskWorkspaceClientError(`duplicate workspace path: ${path}`, "bad_request", 400, false);
       }
       seen.add(path);
-      return { path, content: file.content };
+      return typeof file.content === "string"
+        ? { path, content: file.content }
+        : { path, content_base64: file.contentBase64 };
     });
     const requestBody = {
       files,

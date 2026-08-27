@@ -56,7 +56,7 @@ import {
 } from "./connector-port.ts";
 import type { RuntimeClient } from "./task-proxy.ts";
 import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
-import { ensureWorkspace, readAtLocation } from "../workspace/store.ts";
+import { ensureWorkspace, readAtLocationBytes } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
 import type { CoreFeatureFlags } from "./feature-flags.ts";
 import { requireP4ProjectVisibility } from "./p4-project-access.ts";
@@ -1270,15 +1270,20 @@ export async function getRevisionContent(ctx: RequestContext): Promise<HandlerRe
   const artifactId = ctx.params.artifactId!;
   const revId = ctx.params.revId!;
   const { rows } = await ctx.pool.query(
-    `SELECT content, content_hash, content_location FROM artifact_revision
+    `SELECT content, content_hash, content_location,content_encoding FROM artifact_revision
       WHERE id = $1 AND project_id = $2 AND artifact_id = $3`,
     [revId, projectId, artifactId],
   );
   if (rows.length === 0) throw notFoundError(`revision not found: ${revId}`);
-  const row = rows[0] as { content: string | null; content_hash: string; content_location: string };
+  const row = rows[0] as {
+    content: string | null;
+    content_hash: string;
+    content_location: string;
+    content_encoding: "utf8" | "base64";
+  };
 
   if (parseGitLocation(row.content_location)) {
-    const fromGit = await readAtLocation(projectId, row.content_location);
+    const fromGit = await readAtLocationBytes(projectId, row.content_location);
     if (fromGit !== null) {
       const actual = sha256Hex(fromGit);
       if (actual !== row.content_hash) {
@@ -1289,7 +1294,7 @@ export async function getRevisionContent(ctx: RequestContext): Promise<HandlerRe
           contentLocation: row.content_location,
         });
       }
-      return { status: 200, data: { content: fromGit, content_hash: row.content_hash } };
+      return { status: 200, data: encodedRevisionContent(fromGit, row.content_hash) };
     }
     // git 里读不到：只有归档副本能救场，否则如实报缺内容。
     if (row.content === null) {
@@ -1300,7 +1305,53 @@ export async function getRevisionContent(ctx: RequestContext): Promise<HandlerRe
   }
 
   if (row.content === null) throw notFoundError(`revision has no inline content: ${revId}`);
-  return { status: 200, data: { content: row.content, content_hash: row.content_hash } };
+  if (row.content_encoding === "base64") {
+    const bytes = Buffer.from(row.content, "base64");
+    if (sha256Hex(bytes) !== row.content_hash) {
+      throw new ApiError("internal", 500, "CONTENT_HASH_MISMATCH", false, { revisionId: revId });
+    }
+    return {
+      status: 200,
+      data: {
+        encoding: "base64",
+        content: null,
+        content_base64: row.content,
+        content_hash: row.content_hash,
+        bytes: bytes.byteLength,
+      },
+    };
+  }
+  return {
+    status: 200,
+    data: {
+      encoding: "utf8",
+      content: row.content,
+      content_base64: null,
+      content_hash: row.content_hash,
+      bytes: Buffer.byteLength(row.content, "utf8"),
+    },
+  };
+}
+
+function encodedRevisionContent(bytes: Uint8Array, contentHash: string): Record<string, unknown> {
+  try {
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return {
+      encoding: "utf8",
+      content,
+      content_base64: null,
+      content_hash: contentHash,
+      bytes: bytes.byteLength,
+    };
+  } catch {
+    return {
+      encoding: "base64",
+      content: null,
+      content_base64: Buffer.from(bytes).toString("base64"),
+      content_hash: contentHash,
+      bytes: bytes.byteLength,
+    };
+  }
 }
 
 // ─── 3. Snapshot / Gate ──────────────────────────────────────────────────────

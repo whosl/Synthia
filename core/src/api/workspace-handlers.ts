@@ -46,11 +46,12 @@ import {
   ensureWorkspace,
   listWorkspace,
   readTreeAt,
-  readWorkingFile,
+  readWorkingFileBytes,
   writeAndCommit,
-  writeWorkingFile,
+  writeWorkingFileBytes,
   type CommitAuthor,
   type TreeSnapshot,
+  type WorkspaceFileInput,
 } from "../workspace/store.ts";
 import { headSha } from "../workspace/git.ts";
 import { notFoundError, validationError } from "./errors.ts";
@@ -237,8 +238,9 @@ export async function getWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
   await requireProjectExists(ctx.pool, projectId);
 
   const path = validateWorkspacePath(raw);
-  const content = await readWorkingFile(projectId, path);
-  const contentHash = sha256Hex(content);
+  const bytes = await readWorkingFileBytes(projectId, path);
+  const contentHash = sha256Hex(bytes);
+  const decoded = decodeWorkspaceBytes(bytes);
 
   const latest = await loadLatestRevisions((t, v) => ctx.pool.query(t, v), projectId);
   const match = resolveArtifact(latest, projectId, path);
@@ -248,8 +250,11 @@ export async function getWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
     status: 200,
     data: {
       path,
-      content,
+      encoding: decoded.encoding,
+      content: decoded.encoding === "utf8" ? decoded.content : null,
+      content_base64: decoded.encoding === "base64" ? decoded.content : null,
       content_hash: contentHash,
+      bytes: bytes.byteLength,
       registered,
       artifact_id: registered ? match!.artifact_id : null,
       revision_id: registered ? match!.id : null,
@@ -269,11 +274,8 @@ export async function putWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
   const projectId = ctx.params.projectId!;
   const body = asObject(ctx.body);
   const path = validateWorkspacePath(body.path);
-  // 空文件是合法的，所以不能用 requireString（它拒绝空串）。
-  if (typeof body.content !== "string") throw validationError("field 'content' must be a string");
-  if (Buffer.byteLength(body.content, "utf8") > MAX_CONTENT_BYTES) {
-    throw validationError(`field 'content' must be at most ${MAX_CONTENT_BYTES} bytes`);
-  }
+  const file = parseWorkspacePayload(body, "field");
+  const bytes = workspacePayloadBytes(file);
 
   // 项目必须先存在，否则会在盘上凭空建出一个没有对应项目的工作区。
   await requireProjectExists(ctx.pool, projectId);
@@ -284,15 +286,24 @@ export async function putWorkspaceFileHandler(ctx: RequestContext): Promise<Hand
         await requireP4ChangeWorkVersion(tx, projectId);
       });
       await ensureWorkspace(projectId);
-      return writeWorkingFile(projectId, path, body.content as string);
+      return writeWorkingFileBytes(projectId, path, bytes);
     })
     : await (async () => {
       await requireP4ChangeWorkVersion(ctx.pool, projectId);
       await ensureWorkspace(projectId);
-      return writeWorkingFile(projectId, path, body.content as string);
+      return writeWorkingFileBytes(projectId, path, bytes);
     })();
 
-  return { status: 200, data: { path, changed, content_hash: sha256Hex(body.content) } };
+  return {
+    status: 200,
+    data: {
+      path,
+      changed,
+      encoding: "content" in file ? "utf8" : "base64",
+      content_hash: sha256Hex(bytes),
+      bytes: bytes.byteLength,
+    },
+  };
 }
 
 // ─── 共用：让 DB 追上某个 commit 的树 ────────────────────────────────────────
@@ -358,7 +369,7 @@ export async function reconcileIntoRevisions(
       skipped.push({ path: file.path, reason: "invalid_path" });
       continue;
     }
-    if (Buffer.byteLength(file.content, "utf8") > MAX_CONTENT_BYTES) {
+    if (file.sizeBytes > MAX_CONTENT_BYTES) {
       skipped.push({ path: file.path, reason: "too_large" });
       continue;
     }
@@ -404,6 +415,7 @@ export async function reconcileIntoRevisions(
       // 正文只在 git 里。进基线时 `freezeBaselineContent` 会把它冻回 content 列。
       contentLocation: formatGitLocation(snapshot.commit, file.path),
       content: null,
+      contentEncoding: file.encoding,
       schemaVersion: "v1",
       sourceIds: [],
       dataClassification: ctx.classification as DataClassification,
@@ -610,7 +622,7 @@ export async function writeWorkspaceFilesHandler(ctx: RequestContext): Promise<H
 const MAX_FILES_PER_WRITE = 32;
 
 /** 校验 `files` 入参，顺带把路径规范化成 RULE-25 相对路径。 */
-function parseFileInputs(raw: unknown): { path: string; content: string }[] {
+function parseFileInputs(raw: unknown): WorkspaceFileInput[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw validationError("field 'files' must be a non-empty array");
   }
@@ -624,11 +636,7 @@ function parseFileInputs(raw: unknown): { path: string; content: string }[] {
     }
     const item = entry as Record<string, unknown>;
     const path = validateWorkspacePath(item.path);
-    // 空文件合法，所以不能用 requireString。
-    if (typeof item.content !== "string") throw validationError(`files[${i}].content must be a string`);
-    if (Buffer.byteLength(item.content, "utf8") > MAX_CONTENT_BYTES) {
-      throw validationError(`files[${i}].content must be at most ${MAX_CONTENT_BYTES} bytes`);
-    }
+    const payload = parseWorkspacePayload(item, `files[${i}]`);
     if (!isRegisterablePath(path)) {
       // `sim/` 被 .gitignore 排除，`git add` 会直接失败；而且仿真产物按
       // EvidenceManifest 登记，本来就不该走产物这条路（RULE-25 §1）。
@@ -636,8 +644,58 @@ function parseFileInputs(raw: unknown): { path: string; content: string }[] {
     }
     if (seen.has(path)) throw validationError(`files 里有重复路径：${path}`);
     seen.add(path);
-    return { path, content: item.content };
+    return "content" in payload
+      ? { path, content: payload.content! }
+      : { path, contentBase64: payload.contentBase64 };
   });
+}
+
+type WorkspacePayload =
+  | { readonly content: string; readonly contentBase64?: never }
+  | { readonly content?: never; readonly contentBase64: string };
+
+function parseWorkspacePayload(value: Record<string, unknown>, label: string): WorkspacePayload {
+  const hasText = Object.prototype.hasOwnProperty.call(value, "content");
+  const hasBase64 = Object.prototype.hasOwnProperty.call(value, "content_base64");
+  if (hasText === hasBase64) {
+    throw validationError(`${label} must contain exactly one of 'content' or 'content_base64'`);
+  }
+  if (hasText) {
+    if (typeof value.content !== "string") throw validationError(`${label}.content must be a string`);
+    if (Buffer.byteLength(value.content, "utf8") > MAX_CONTENT_BYTES) {
+      throw validationError(`${label}.content must be at most ${MAX_CONTENT_BYTES} bytes`);
+    }
+    return { content: value.content };
+  }
+  if (typeof value.content_base64 !== "string" || !isCanonicalBase64(value.content_base64)) {
+    throw validationError(`${label}.content_base64 must be canonical padded Base64`);
+  }
+  const bytes = Buffer.from(value.content_base64, "base64");
+  if (bytes.byteLength > MAX_CONTENT_BYTES) {
+    throw validationError(`${label}.content_base64 must decode to at most ${MAX_CONTENT_BYTES} bytes`);
+  }
+  return { contentBase64: value.content_base64 };
+}
+
+function workspacePayloadBytes(payload: WorkspacePayload): Uint8Array {
+  return "content" in payload && typeof payload.content === "string"
+    ? new TextEncoder().encode(payload.content)
+    : Buffer.from(payload.contentBase64, "base64");
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (value === "") return true;
+  if (value.length % 4 !== 0) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  return Buffer.from(value, "base64").toString("base64") === value;
+}
+
+function decodeWorkspaceBytes(bytes: Uint8Array): { encoding: "utf8" | "base64"; content: string } {
+  try {
+    return { encoding: "utf8", content: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { encoding: "base64", content: Buffer.from(bytes).toString("base64") };
+  }
 }
 
 

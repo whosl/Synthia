@@ -51,6 +51,13 @@ import type {
 import { parseProcessProfile, ProcessProfileValidationError } from "./process-profile.ts";
 import type { ProcessProfileV1 } from "./process-profile.ts";
 import {
+  encodeWorkspaceBytes,
+  parseWorkspaceResponse,
+  workspaceInputBytes,
+  workspaceInputHash,
+  type RuntimeWorkspaceFileInput,
+} from "./workspace-content.ts";
+import {
   parseEvaluatedGateSubmission,
   parseBitstreamResult,
   parseDeliveryRelease,
@@ -509,18 +516,20 @@ export class CoreGovernanceClient implements GovernanceClient {
   // ----- workspace (real disk + git; Core is the only writer) -----
 
   async writeWorkspaceFiles(input: {
-    files: readonly { path: string; content: string }[];
+    files: readonly RuntimeWorkspaceFileInput[];
     changeReason?: string;
     artifactType?: ArtifactType;
   }): Promise<WorkspaceWriteResult> {
     const body = {
-      files: input.files.map((f) => ({ path: f.path, content: f.content })),
+      files: input.files.map((file) => typeof file.content === "string"
+        ? { path: file.path, content: file.content }
+        : { path: file.path, content_base64: file.contentBase64 }),
       ...(input.changeReason ? { change_reason: input.changeReason } : {}),
       ...(input.artifactType ? { artifact_type: input.artifactType } : {}),
     };
     // 幂等键由「路径 + 内容」决定：同一批字节重发是同一次写入，内容一变就是新的一次。
     const fingerprint = sha256Hex(
-      input.files.map((f) => `${f.path}\0${sha256Hex(f.content)}`).sort().join("\n"),
+      input.files.map((file) => `${file.path}\0${workspaceInputHash(file)}`).sort().join("\n"),
     );
     const data = await this.request(
       "POST",
@@ -543,23 +552,25 @@ export class CoreGovernanceClient implements GovernanceClient {
     const data = await this.request(
       "GET",
       `/api/v1/projects/${this.projectId}/workspace/file?path=${encodeURIComponent(path)}`,
-    ) as {
-      path: string;
-      content: string;
-      content_hash: string;
-      registered?: boolean;
-      revision_id?: string | null;
-      version?: number | null;
-      commit?: string | null;
-    };
+    ) as Record<string, unknown>;
+    if (typeof data.path !== "string" || typeof data.content_hash !== "string") {
+      throw new GovernanceError("workspace file response is invalid", "response_shape", 502, false);
+    }
+    const encoded = parseWorkspaceResponse(data, path);
+    const bytes = encoded.encoding === "utf8"
+      ? new TextEncoder().encode(encoded.content ?? "")
+      : Buffer.from(encoded.contentBase64 ?? "", "base64");
+    if (sha256Hex(bytes) !== data.content_hash) {
+      throw new GovernanceError("workspace file content hash mismatch", "CONTENT_HASH_MISMATCH", 502, false);
+    }
     return {
       path: data.path,
-      content: data.content,
+      ...encoded,
       contentHash: data.content_hash,
       registered: data.registered === true,
-      revisionId: data.revision_id ?? null,
-      version: data.version ?? null,
-      commit: data.commit ?? null,
+      revisionId: typeof data.revision_id === "string" ? data.revision_id : null,
+      version: typeof data.version === "number" ? data.version : null,
+      commit: typeof data.commit === "string" ? data.commit : null,
     };
   }
 
@@ -1233,14 +1244,14 @@ export class MockGovernanceClient implements GovernanceClient {
    *  `registeredHash === null` means "on disk but never registered" (untracked). */
   private readonly workspace = new Map<
     string,
-    { content: string; registeredHash: string | null; revisionId: string | null; commit: string | null }
+    { bytes: Uint8Array; registeredHash: string | null; revisionId: string | null; commit: string | null }
   >();
 
   /** Seed a file as if a human had edited it: present on disk, not registered. */
   seedWorkspaceFile(path: string, content: string): void {
     const prev = this.workspace.get(path);
     this.workspace.set(path, {
-      content,
+      bytes: new TextEncoder().encode(content),
       registeredHash: prev?.registeredHash ?? null,
       revisionId: prev?.revisionId ?? null,
       commit: prev?.commit ?? null,
@@ -1249,11 +1260,18 @@ export class MockGovernanceClient implements GovernanceClient {
 
   /** Current workspace contents, for assertions. */
   workspaceSnapshot(): Map<string, string> {
-    return new Map([...this.workspace].map(([path, f]) => [path, f.content]));
+    return new Map([...this.workspace].map(([path, file]) => [
+      path,
+      new TextDecoder().decode(file.bytes),
+    ]));
+  }
+
+  workspaceBytesSnapshot(): Map<string, Uint8Array> {
+    return new Map([...this.workspace].map(([path, file]) => [path, file.bytes.slice()]));
   }
 
   async writeWorkspaceFiles(input: {
-    files: readonly { path: string; content: string }[];
+    files: readonly RuntimeWorkspaceFileInput[];
     changeReason?: string;
     artifactType?: ArtifactType;
   }): Promise<WorkspaceWriteResult> {
@@ -1261,8 +1279,9 @@ export class MockGovernanceClient implements GovernanceClient {
     const conflicts = input.files
       .filter((f) => {
         const cur = this.workspace.get(f.path);
-        if (!cur || cur.content === f.content) return false;
-        return cur.registeredHash !== sha256Hex(cur.content);
+        const nextBytes = workspaceInputBytes(f);
+        if (!cur || Buffer.from(cur.bytes).equals(Buffer.from(nextBytes))) return false;
+        return cur.registeredHash !== sha256Hex(cur.bytes);
       })
       .map((f) => f.path);
     if (conflicts.length > 0) {
@@ -1274,18 +1293,19 @@ export class MockGovernanceClient implements GovernanceClient {
 
     // 不消耗 `counter`：revisionId 的编号是测试断言的对象，不该被这里的取值扰动。
     const commit = sha256Hex(
-      input.files.map((f) => `${f.path} ${sha256Hex(f.content)}`).sort().join("\n"),
+      input.files.map((file) => `${file.path} ${workspaceInputHash(file)}`).sort().join("\n"),
     ).slice(0, 40);
 
     const registered: WorkspaceRegisteredFile[] = [];
     const unchanged: WorkspaceRegisteredFile[] = [];
     for (const file of input.files) {
-      const contentHash = sha256Hex(file.content);
+      const bytes = workspaceInputBytes(file);
+      const contentHash = sha256Hex(bytes);
       const artifactId = `ws-${file.path}`.replace(/[^A-Za-z0-9._-]/g, "-");
       const prev = this.workspace.get(file.path);
       if (prev?.registeredHash === contentHash) {
         const prior = [...this.registeredArtifacts].reverse().find((a) => a.artifactId === artifactId);
-        this.workspace.set(file.path, { ...prev, content: file.content });
+        this.workspace.set(file.path, { ...prev, bytes });
         unchanged.push({
           path: file.path,
           artifactId,
@@ -1298,7 +1318,7 @@ export class MockGovernanceClient implements GovernanceClient {
       const version = (this.artifactVersions.get(artifactId) ?? 0) + 1;
       this.artifactVersions.set(artifactId, version);
       const revisionId = this.nextId("rev");
-      this.workspace.set(file.path, { content: file.content, registeredHash: contentHash, revisionId, commit });
+      this.workspace.set(file.path, { bytes, registeredHash: contentHash, revisionId, commit });
       this.registeredArtifacts.push({
         artifactId,
         artifactType: input.artifactType ?? ("DETAILED_DESIGN" as ArtifactType),
@@ -1318,7 +1338,7 @@ export class MockGovernanceClient implements GovernanceClient {
     if (!file) {
       throw new GovernanceError(`工作区没有这个文件：${path}`, "WORKSPACE_FILE_NOT_FOUND", 404, false);
     }
-    const contentHash = sha256Hex(file.content);
+    const contentHash = sha256Hex(file.bytes);
     const registered = file.registeredHash === contentHash;
     const artifactId = `ws-${path}`.replace(/[^A-Za-z0-9._-]/g, "-");
     const prior = registered
@@ -1326,7 +1346,7 @@ export class MockGovernanceClient implements GovernanceClient {
       : undefined;
     return {
       path,
-      content: file.content,
+      ...encodeWorkspaceBytes(file.bytes),
       contentHash,
       registered,
       revisionId: registered ? file.revisionId : null,

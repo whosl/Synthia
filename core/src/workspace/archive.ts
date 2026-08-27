@@ -14,12 +14,13 @@
 import type { Pool } from "pg";
 import { sha256Hex } from "../hashing.ts";
 import { parseGitLocation } from "./paths.ts";
-import { readAtLocation } from "./store.ts";
+import { readAtLocationBytes } from "./store.ts";
 
 interface RevisionRow {
   readonly id: string;
   readonly content_location: string;
   readonly content_hash: string;
+  readonly content_encoding: "utf8" | "base64";
 }
 
 export interface FreezeOutcome {
@@ -46,7 +47,7 @@ export async function freezeBaselineContent(pool: Pool, baselineId: string): Pro
   if (!row || row.member_revision_ids.length === 0) return { frozen: [], notInGit: [], failed: [] };
 
   const pending = await pool.query(
-    `SELECT id, content_location, content_hash FROM artifact_revision
+    `SELECT id, content_location, content_hash,content_encoding FROM artifact_revision
       WHERE id = ANY($1::text[]) AND project_id = $2 AND content IS NULL`,
     [row.member_revision_ids, row.project_id],
   );
@@ -59,14 +60,27 @@ export async function freezeBaselineContent(pool: Pool, baselineId: string): Pro
       notInGit.push(rev.id);
       continue;
     }
-    const content = await readAtLocation(row.project_id, rev.content_location);
-    if (content === null || sha256Hex(content) !== rev.content_hash) {
+    const bytes = await readAtLocationBytes(row.project_id, rev.content_location);
+    if (bytes === null || sha256Hex(bytes) !== rev.content_hash) {
+      failed.push(rev.id);
+      continue;
+    }
+    let content: string;
+    let encoding: "utf8" | "base64";
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      encoding = "utf8";
+    } catch {
+      content = Buffer.from(bytes).toString("base64");
+      encoding = "base64";
+    }
+    if (encoding !== rev.content_encoding) {
       failed.push(rev.id);
       continue;
     }
     await pool.query(
-      "UPDATE artifact_revision SET content = $1 WHERE id = $2 AND content IS NULL",
-      [content, rev.id],
+      "UPDATE artifact_revision SET content = $1,content_encoding=$2 WHERE id = $3 AND content IS NULL",
+      [content, encoding, rev.id],
     );
     frozen.push(rev.id);
   }

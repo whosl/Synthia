@@ -468,12 +468,13 @@ async function loadSourceManifest(
       // output and oversized trees before `readTreeAt` materializes blobs.
       preflightProjectTree(await listTreeEntries(dir, sourceCommit));
       const tree = await readTreeAt(sourceProjectId, sourceCommit);
-      if (tree.skippedBinary.length > 0) {
-        throw validationError("source project commit contains unsupported binary files", { paths: tree.skippedBinary });
+      const unsupportedBinary = tree.files.filter((file) => file.encoding === "base64").map((file) => file.path);
+      if (unsupportedBinary.length > 0) {
+        throw validationError("source project commit contains unsupported binary reference files", { paths: unsupportedBinary });
       }
       const generated = tree.files.map((file) => ({
         path: file.path,
-        content: file.content,
+        content: file.content!,
       }));
       const workspaceFiles = normalizeProvidedFiles(generated, snapshotId);
       if (suppliedFiles !== undefined && suppliedFiles !== null) {
