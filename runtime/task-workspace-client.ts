@@ -103,7 +103,7 @@ export interface TaskWorkspaceClient extends TaskConversationClient {
   }): Promise<TaskFinalizedResult>;
 }
 
-export interface CoreTaskConversationClientOptions {
+export interface CoreTaskClientOptions {
   readonly baseUrl: string;
   readonly token: string;
   readonly projectId: string;
@@ -113,7 +113,7 @@ export interface CoreTaskConversationClientOptions {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-export interface CoreTaskWorkspaceClientOptions extends CoreTaskConversationClientOptions {
+export interface CoreTaskWorkspaceClientOptions extends CoreTaskClientOptions {
   readonly workspaceId: string;
   readonly authorization: TaskAuthorizationScope;
 }
@@ -139,7 +139,7 @@ interface EnvelopeError {
 }
 
 /** Shared Core API transport pinned to one Core-issued task identity. */
-class CoreTaskClientBase implements TaskConversationClient {
+export class CoreTaskClientBase implements TaskConversationClient {
   readonly projectId: string;
   readonly taskId: string;
 
@@ -150,7 +150,7 @@ class CoreTaskClientBase implements TaskConversationClient {
   private readonly sleeper: (ms: number) => Promise<void>;
   private readonly workspaceHeader?: string;
 
-  constructor(options: CoreTaskConversationClientOptions, workspaceHeader?: string) {
+  constructor(options: CoreTaskClientOptions, workspaceHeader?: string) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token;
     this.projectId = requireIdentifier("projectId", options.projectId);
@@ -253,13 +253,6 @@ class CoreTaskClientBase implements TaskConversationClient {
       }
     }
     throw new TaskWorkspaceClientError("request failed", "request_failed", 0, true);
-  }
-}
-
-/** Event-only callback client used by a Core-owned main task. */
-export class CoreTaskConversationClient extends CoreTaskClientBase {
-  constructor(options: CoreTaskConversationClientOptions) {
-    super(options);
   }
 }
 

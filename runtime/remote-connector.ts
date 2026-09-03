@@ -22,6 +22,7 @@ import { RemoteConnectorError, type RemoteConnectorClient } from "../connector/r
 import { sha256Hex, stableId } from "../core/src/hashing.ts";
 import { FailClosedError, VIVADO_CAPABILITY_VERSION, submissionSha } from "./loop.ts";
 import type { ConnectorCapability, EvidenceContent, EvidenceManifest, LoopConnector, VivadoResult, VivadoSubmission } from "./types.ts";
+import { TERMINAL_STATES, jobStateToResultStatus } from "./utils.ts";
 
 export interface ConnectorLifecycleEvent {
   readonly action: string;
@@ -43,9 +44,6 @@ export interface RemoteVivadoOptions {
 
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_MAX_POLL_MS = 30 * 60 * 1000;
-const TERMINAL_STATES: ReadonlySet<string> = new Set([
-  "succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect",
-]);
 
 export class RemoteVivadoConnector implements LoopConnector {
   readonly id: string;
@@ -228,22 +226,6 @@ function isLeaseExpired(e: unknown): e is RemoteConnectorError {
   return e instanceof RemoteConnectorError && e.code === "LEASE_EXPIRED";
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-}
-
-function jobStateToResultStatus(state: string): VivadoResult["status"] {
-  switch (state) {
-    case "succeeded": return "succeeded";
-    case "timeout": return "timeout";
-    case "lost": return "lost";
-    case "unknown_effect": return "unknown_effect";
-    default: return "failed";
-  }
-}
-
 function buildParameters(submission: VivadoSubmission, jobId: string, projectId: string): Record<string, unknown> {
   const base: Record<string, unknown> = {
     jobId, projectId, runClass: "exploratory",
@@ -259,8 +241,4 @@ function buildParameters(submission: VivadoSubmission, jobId: string, projectId:
 
 function toSourceInput(f: { path: string; content: string; mediaType?: string }) {
   return { path: f.path, content: f.content, ...(f.mediaType ? { mediaType: f.mediaType } : {}) };
-}
-
-export function manifestDigest(submission: VivadoSubmission): string {
-  return sha256Hex(JSON.stringify(buildParameters(submission, "manifest", submission.projectId)));
 }

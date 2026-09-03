@@ -33,6 +33,7 @@
 import { randomUUID } from "node:crypto";
 import { RemoteConnectorError } from "../connector/remote.ts";
 import { submissionSha, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
+import { TERMINAL_STATES, jobStateToResultStatus } from "./utils.ts";
 import {
   WHITELISTED_OPERATIONS,
   type ConnectorCapability,
@@ -65,9 +66,6 @@ const DEFAULT_MAX_POLL_MS = 30 * 60 * 1000;
 const DEFAULT_RETRY_DELAY_MS = 500;
 
 /** Core job states that mark a job terminal (mirrors connector/index.ts). */
-const TERMINAL_STATES: ReadonlySet<string> = new Set([
-  "succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect",
-]);
 
 // ---------------------------------------------------------------------------
 // Options + env resolution
@@ -335,15 +333,6 @@ function requireTaskBindingIdentifier(field: string, value: string): string {
   return value;
 }
 
-function jobStateToResultStatus(state: string): VivadoResult["status"] {
-  switch (state) {
-    case "succeeded": return "succeeded";
-    case "timeout": return "timeout";
-    case "lost": return "lost";
-    case "unknown_effect": return "unknown_effect";
-    default: return "failed"; // failed | cancelled → failed
-  }
-}
 
 /** Map a Core HTTP response into a RemoteConnectorError (or null when OK). */
 function classifyResponse(status: number, json: unknown): RemoteConnectorError | null {

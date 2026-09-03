@@ -1,25 +1,13 @@
 import type { AgentTool, AgentToolResult, ToolExecContext } from "./agent-types.ts";
 import { normalizeWorkspacePath } from "./task-workspace-client.ts";
 import { createDocxFromMarkdown, inspectDocx, replaceDocxText } from "./ooxml-docx.ts";
+import { isRecord, matchesPath } from "./utils.ts";
 
 const DEFAULT_PROJECT_READ_PATHS = ["doc/**"] as const;
 const DEFAULT_PROJECT_WRITE_PATHS = ["doc/**"] as const;
 const MAX_MARKDOWN_CHARS = 512 * 1024;
 const MAX_REPLACEMENT_CHARS = 128 * 1024;
 const MAX_INSPECTION_CHARS = 40_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function matchesPath(pattern: string, path: string): boolean {
-  const normalizedPattern = pattern.startsWith("./") ? pattern.slice(2) : pattern;
-  if (normalizedPattern.endsWith("/**")) {
-    const prefix = normalizedPattern.slice(0, -2);
-    return path.startsWith(prefix) && path.length > prefix.length;
-  }
-  return normalizedPattern === path;
-}
 
 function authorized(patterns: readonly string[], path: string): boolean {
   return patterns.some((pattern) => matchesPath(pattern, path));

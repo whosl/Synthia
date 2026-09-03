@@ -27,6 +27,7 @@ import { readFileSync } from "node:fs";
 import type { ArtifactType } from "../core/src/domain/enums.ts";
 import type { AgentTool, AgentToolResult, ToolExecContext } from "./agent-types.ts";
 import { NoGovernanceClient } from "./types.ts";
+import { isRecord as isPlainObject } from "./utils.ts";
 
 /** Default pack path, relative to the repo root (the runtime's CWD). */
 const DEFAULT_PACK_PATH = "skills/fpga/skill-pack.json";
@@ -154,9 +155,6 @@ function afterPath(desc: string): string {
 }
 
 /** Plain-object type guard: narrows `unknown` to a string-indexed record. */
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
 
 function buildConfig(skill: SkillEntry): SkillToolConfig {
   const runsVivado = skill.required_capabilities.some((c) => c.startsWith("vivado-"));
@@ -508,11 +506,6 @@ function buildTool(config: SkillToolConfig): AgentTool {
 // Public API — Slice B fixed signature.
 // ---------------------------------------------------------------------------
 
-export interface AssembleSkillToolsOptions {
-  /** Path to the skill pack JSON (default: skills/fpga/skill-pack.json). */
-  readonly packPath?: string;
-}
-
 /**
  * Load the FPGA skill pack and assemble every skill as a model-selectable
  * {@link AgentTool}. Returns one tool per skill (10 for the current pack),
@@ -520,16 +513,15 @@ export interface AssembleSkillToolsOptions {
  *
  * @throws if the pack cannot be read or contains no skills.
  */
-export function assembleSkillTools(opts: AssembleSkillToolsOptions = {}): AgentTool[] {
-  const packPath = opts.packPath ?? DEFAULT_PACK_PATH;
-  const parsed: unknown = JSON.parse(readFileSync(packPath, "utf8"));
+export function assembleSkillTools(): AgentTool[] {
+  const parsed: unknown = JSON.parse(readFileSync(DEFAULT_PACK_PATH, "utf8"));
   if (!isPlainObject(parsed) || !Array.isArray(parsed.skills)) {
-    throw new Error(`skill pack at ${packPath} is malformed: expected { skills: [...] }`);
+    throw new Error(`skill pack at ${DEFAULT_PACK_PATH} is malformed: expected { skills: [...] }`);
   }
   // Frozen, committed pack; structure validated above, fields read via SkillEntry.
   const pack = parsed as SkillPackFile;
   if (pack.skills.length === 0) {
-    throw new Error(`skill pack at ${packPath} contains no skills`);
+    throw new Error(`skill pack at ${DEFAULT_PACK_PATH} contains no skills`);
   }
 
   return pack.skills.map((skill) => buildTool(buildConfig(skill)));

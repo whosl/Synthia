@@ -74,19 +74,12 @@ const AGENT_OPERATION_SET: Record<AgentPriority, ReadonlySet<Permission>> = {
   P3: new Set<Permission>(["read", "candidate_write", "tool_submit"]),
 };
 
-export function canAgentPriority(
-  priority: AgentPriority,
-  required: AgentPriority,
-): boolean {
-  return rank[priority] >= rank[required];
-}
-
 /**
  * Clamp an agent's declared priority to the P3 ceiling. A priority outside the
  * legal range is never trusted to mean "more privileged"; it is reduced to the
  * ceiling (least autonomy at-or-below P3).
  */
-export function clampAgentPriority(priority: AgentPriority): AgentPriority {
+function clampAgentPriority(priority: AgentPriority): AgentPriority {
   return rank[priority] >= rank[AGENT_PRIORITY_CEILING]
     ? AGENT_PRIORITY_CEILING
     : priority;
@@ -281,45 +274,4 @@ function denied(
     operation: ctx.operation,
     actorType: ctx.actorType,
   };
-}
-
-/**
- * Throwing variant of {@link authorize}. Throws an `AUTHORIZATION_DENIED`
- * tagged error on denial; returns void on success. Use at command boundaries
- * where a denial must abort the request.
- */
-export function requireAuthorization(
-  policy: PolicyDefinition,
-  ctx: AuthorizationContext,
-): void {
-  const decision = authorize(policy, ctx);
-  if (!decision.authorized) {
-    throw new Error(
-      `AUTHORIZATION_DENIED:${decision.reason}:${ctx.operation}:${ctx.actorType}`,
-    );
-  }
-}
-
-// ── Back-compat: structural priority assertions ─────────────────────────────
-//
-// Preserved for call sites that only need the priority relationship (e.g. tool
-// run class gating). Full operation authorization MUST go through
-// authorize/requireAuthorization.
-
-/**
- * @deprecated Use {@link authorize} / {@link requireAuthorization} for any
- * operation check. This helper only reasons about agent autonomy priority.
- */
-export function assertPermission(
-  actor: { type: ActorType; priority?: AgentPriority },
-  operation: Permission,
-): void {
-  if (actor.type !== "agent") return;
-  if (AGENT_FORBIDDEN_OPERATIONS.has(operation)) {
-    throw new Error(`AUTHORIZATION_DENIED:agent_forbidden_operation:${operation}`);
-  }
-  const priority = clampAgentPriority(actor.priority ?? "P0");
-  if (!AGENT_OPERATION_SET[priority].has(operation)) {
-    throw new Error(`AUTHORIZATION_DENIED:agent_priority_exceeded:${operation}`);
-  }
 }

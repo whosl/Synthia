@@ -68,7 +68,7 @@ import {
   CounterScriptedModel,
   buildCoreApiConnector,
   buildCoreGovernanceClient,
-  buildCoreTaskConversationClient,
+  buildCoreTaskClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
 import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
@@ -3188,7 +3188,7 @@ export function createEnvDepsFactory(
       ? buildCoreTaskWorkspaceClient(projectId, taskId, workspaceId, authorization, env)
       : undefined;
     const taskEvents = taskId
-      ? taskWorkspace ?? buildCoreTaskConversationClient(projectId, taskId, env)
+      ? taskWorkspace ?? buildCoreTaskClient(projectId, taskId, env)
       : undefined;
 
     return {

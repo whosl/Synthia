@@ -2,9 +2,14 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAgentDoc, clearAgentDocCache, composeSystemPrompt, DEFAULT_SKILLS_ROOT } from "./agent-doc.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import type { ToolExecContext } from "./agent-types.ts";
+import {
+  buildAgentDoc,
+  composeSystemPrompt,
+  clearAgentDocCache,
+  DEFAULT_SKILLS_ROOT,
+} from "./agent-doc.ts";
 
 /** The doc tool never touches the exec context; a cast keeps the call sites readable. */
 const NO_CTX = {} as ToolExecContext;

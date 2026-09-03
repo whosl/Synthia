@@ -252,34 +252,3 @@ export async function deleteAgent(agentId: string): Promise<void> {
 }
 
 // ----- Functional updates for the loop -----
-
-export function withStage(state: AgentState, stage: StageId): AgentState {
-  return { ...state, currentStage: stage, status: "running" };
-}
-
-export function withAwaitingApproval(state: AgentState, gate: GateId): AgentState {
-  return { ...state, status: "awaiting_approval", awaitingGate: gate };
-}
-
-export function withTerminal(state: AgentState, status: "succeeded" | "failed" | "fail_closed", reason?: string): AgentState {
-  return { ...state, status, endedReason: reason, awaitingGate: undefined };
-}
-
-export function withDocArtifact(state: AgentState, stage: StageId, rev: RegisteredRevision): AgentState {
-  const docs = { ...(state.docs ?? {}), [stage]: rev };
-  return { ...state, docs };
-}
-
-export function withRtlRevision(state: AgentState, rev: RegisteredRevision): AgentState {
-  return { ...state, rtlRevision: rev };
-}
-
-export function withGateSubmission(state: AgentState, gate: GateId, submissionId: string): AgentState {
-  const gateSubmissions = { ...(state.gateSubmissions ?? {}), [gate]: submissionId };
-  return { ...state, gateSubmissions };
-}
-
-export function withGateDecision(state: AgentState, gate: GateId, decision: "approved" | "rejected" | "withdrawn"): AgentState {
-  const gateDecisions = { ...(state.gateDecisions ?? {}), [gate]: decision };
-  return { ...state, gateDecisions };
-}

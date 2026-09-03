@@ -33,7 +33,7 @@ import {
 } from "../db/repository.ts";
 import { canonicalRequestHash, computeManifestHash, sha256Hex } from "../hashing.ts";
 import { approveGateSubmission, type ApproveGateSubmissionInput } from "../services/approval.ts";
-import { ConflictError, InvariantError } from "../memory-repository.ts";
+import { ConflictError, InvariantError } from "../errors.ts";
 import { gateSubmissionMachine } from "../domain/state-machines.ts";
 import type { DataClassification, GateId, GateSubmissionState, RunClass, TraceRelationState } from "../domain/enums.ts";
 import type { AuthenticatedIdentity } from "./auth.ts";

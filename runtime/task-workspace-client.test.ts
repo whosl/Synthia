@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { sha256Hex } from "../core/src/hashing.ts";
 import {
-  CoreTaskConversationClient,
+  CoreTaskClientBase,
   CoreTaskWorkspaceClient,
   TaskWorkspaceClientError,
   type TaskAuthorizationScope,
@@ -20,7 +20,7 @@ const AUTHORIZATION: TaskAuthorizationScope = {
 
 describe("CoreTaskWorkspaceClient", () => {
   test("main-task event client sends no isolated-workspace header", async () => {
-    const client = new CoreTaskConversationClient({
+    const client = new CoreTaskClientBase({
       baseUrl: "http://core.local",
       token: "svc-token",
       projectId: "project-1",

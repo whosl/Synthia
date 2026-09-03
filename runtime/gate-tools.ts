@@ -28,6 +28,7 @@ import type { GateId, GateSubmissionState, GjbGate } from "./types.ts";
 import { GJB_GATES } from "./types.ts";
 import { checkGateConformity, collectKeywordSources, type ConformityArtifact } from "./conformity.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import { isRecord as isPlainObject } from "./utils.ts";
 
 /** Stable marker for snapshots created by the free-agent (always exploratory). */
 const FREE_AGENT_TOOL_MODEL_POLICY_HASH = sha256Hex("synthia:free-agent:exploratory:v1");
@@ -35,9 +36,6 @@ const FREE_AGENT_TOOL_MODEL_POLICY_HASH = sha256Hex("synthia:free-agent:explorat
 /** Tools exempt from conformity (intake-side / non-design gates). */
 const CONFORMITY_GATES: Readonly<Record<string, true>> = { G3: true, G4: true };
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
 
 function asGjbGate(gate: unknown): GjbGate | null {
   return typeof gate === "string" && (GJB_GATES as readonly string[]).includes(gate)

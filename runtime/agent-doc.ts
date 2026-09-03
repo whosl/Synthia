@@ -67,9 +67,6 @@ export const FREE_AGENT_GUIDANCE = `# Synthia 自由编码助手
 const cache = new Map<string, Promise<AgentDocResult>>();
 
 /** Clear the cache — for tests that mutate fixtures between assertions. */
-export function clearAgentDocCache(): void {
-  cache.clear();
-}
 
 async function readIfPossible(path: string, problems: string[]): Promise<string | null> {
   try {
@@ -127,6 +124,11 @@ async function assemble(skillsRoot: string): Promise<AgentDocResult> {
   // of the previous document.
   const text = blocks.length > 0 ? `${blocks.join("\n\n---\n\n")}\n` : "";
   return { text, sources, problems };
+}
+
+/** Test hook: drop the module-level doc cache so each test sees fresh disk. */
+export function clearAgentDocCache(): void {
+  cache.clear();
 }
 
 /**

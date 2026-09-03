@@ -22,7 +22,7 @@ import {
 import { CoreGovernanceClient } from "./governance-client.ts";
 import { RemoteVivadoConnector } from "./remote-connector.ts";
 import {
-  CoreTaskConversationClient,
+  CoreTaskClientBase,
   CoreTaskWorkspaceClient,
   type TaskAuthorizationScope,
 } from "./task-workspace-client.ts";
@@ -173,13 +173,13 @@ export function buildCoreGovernanceClient(
 }
 
 /** Build the event-only callback used by a Core-owned main task. */
-export function buildCoreTaskConversationClient(
+export function buildCoreTaskClient(
   projectId: string,
   taskId: string,
   env: Record<string, string | undefined> = process.env,
-): CoreTaskConversationClient {
+): CoreTaskClientBase {
   const cfg = resolveTaskRuntimeApiConfig(env);
-  return new CoreTaskConversationClient({
+  return new CoreTaskClientBase({
     baseUrl: cfg.baseUrl,
     token: cfg.token,
     projectId,
