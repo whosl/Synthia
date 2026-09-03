@@ -158,6 +158,8 @@ export interface VivadoSubmission {
   readonly testbench?: string;
   /** XDC constraints (implement only). */
   readonly constraints?: readonly ArtifactFile[];
+  /** Complete route/reports/checkpoints but never invoke write_bitstream (implement only). */
+  readonly stopBeforeBitstream?: boolean;
   readonly timeoutMs?: number;
 }
 

@@ -189,6 +189,7 @@ function buildRemoteParameters(params: SubmitJobParams): Record<string, unknown>
   if (p.part !== undefined) base.part = p.part;
   if (p.testbench !== undefined) base.testbench = p.testbench;
   if (p.constraints.length > 0) base.constraints = p.constraints;
+  if (p.stopBeforeBitstream !== undefined) base.stopBeforeBitstream = p.stopBeforeBitstream;
   if (p.timeoutMs !== undefined) base.timeoutMs = p.timeoutMs;
   return base;
 }
@@ -434,10 +435,6 @@ export interface ConnectorEnvOptions {
  */
 export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Promise<ConnectorPort | undefined> {
   const env = opts.env ?? process.env;
-  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
-  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
-  if (!cfId || !cfSecret) return undefined;
-
   const configPath = opts.configPath ?? env.SYNTHIA_CONNECTOR_CONFIG ?? "connector/worker-66.config.json";
   const endpointUrl = opts.endpointUrl ?? PRODUCTION_ENDPOINT_URL;
 
@@ -453,6 +450,25 @@ export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Pr
   } catch {
     return undefined;
   }
+
+  // Direct mTLS deployments (for example Core on a workstation reaching the
+  // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
+  // on-disk endpoint origin and let the factory load the client/server
+  // certificate material from the config paths.
+  if (config.transport_mode === "direct_https" && config.auth_mode === "mtls") {
+    const httpModule = (await import("../../../connector/http.ts")) as unknown as {
+      createMtlsDirectRemoteConnector: RemoteFactory;
+    };
+    const directEndpoint = String(config.endpoint_url ?? "");
+    if (!directEndpoint) return undefined;
+    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+  }
+
+  // Cloudflare-tunnel deployments require the Access service-token credentials.
+  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
+  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
+  if (!cfId || !cfSecret) return undefined;
+
   // Override the endpoint origin to the public tunnel; allowlist must include it.
   // The tunnel terminates TLS at Cloudflare Access, so the mTLS material in the
   // on-disk (LAN) config does not apply: point the TLS refs at the Cloudflare

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { createCloudflareAccessTokenProvider, createCloudflareRemoteConnector, createCloudflareRemoteTransport, createEnvironmentSecretResolver } from "./http.ts";
+import { createCloudflareAccessTokenProvider, createCloudflareRemoteConnector, createCloudflareRemoteTransport, createEnvironmentSecretResolver,
+  createMtlsDirectRemoteConnector,
+} from "./http.ts";
 import { RemoteConnectorError, type RemoteEnvelope } from "./remote.ts";
 
 const envelope: RemoteEnvelope<Record<string, never>> = {
@@ -106,5 +108,33 @@ describe("Cloudflare Access remote transport", () => {
     });
     await expect(transport.request("/discover", { method: "POST", body: envelope }))
       .rejects.toMatchObject({ code: "REMOTE_UNAVAILABLE", retryable: true });
+  });
+});
+
+// ─── direct mTLS connector factory ───────────────────────────────────────────
+
+describe("mTLS direct connector factory", () => {
+  const base = {
+    allowlist: ["100.96.223.49"],
+    actor: { actor_type: "service" as const, actor_id: "core-test" },
+    classification: "internal" as const,
+    projectId: "p1",
+  };
+
+  test("rejects config without endpoint_url", () => {
+    expect(() => createMtlsDirectRemoteConnector({ ...base, endpoint: {} })).toThrow("endpoint_url");
+  });
+
+  test("rejects config without cert paths", () => {
+    expect(() => createMtlsDirectRemoteConnector({ ...base, endpoint: { endpoint_url: "https://100.96.223.49:8444" } })).toThrow("client_cert_path");
+  });
+
+  test("rejects unreadable mTLS material", () => {
+    expect(() =>
+      createMtlsDirectRemoteConnector({
+        ...base,
+        endpoint: { endpoint_url: "https://100.96.223.49:8444", client_cert_path: "/nonexistent/a.pem", client_key_path: "/nonexistent/b.pem", server_ca_path: "/nonexistent/c.pem" },
+      }),
+    ).toThrow("unreadable");
   });
 });

@@ -119,6 +119,8 @@ All user specified timing constraints are met.
   const writeImplementationOutputs = async (cwd: string, overrides: { drc?: string | null; sta?: string | null } = {}): Promise<void> => {
     await writeFile(join(cwd, "output", "synth.dcp"), "synth dcp\n");
     await writeFile(join(cwd, "output", "resources.rpt"), "resources\n");
+    await writeFile(join(cwd, "output", "methodology.rpt"), "methodology\n");
+    await writeFile(join(cwd, "output", "cdc.rpt"), "cdc\n");
     await writeFile(join(cwd, "output", "routed.dcp"), "routed dcp\n");
     await writeFile(join(cwd, "output", "synthia.bit"), "bitstream\n");
     const drc = overrides.drc === undefined ? passingDrc : overrides.drc;
@@ -134,15 +136,17 @@ All user specified timing constraints are met.
       const result = await adapter.execute(implementRequest());
       expect(result.status).toBe("succeeded");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
-      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "get_drc_violations", "SYNTHIA_DRC_FAILED", "get_clocks -quiet", "SYNTHIA_TIMING_UNCONSTRAINED", "get_timing_paths", "SYNTHIA_TIMING_FAILED", "write_bitstream -force"];
+      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_methodology -file", "report_cdc -details -file", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "get_drc_violations", "SYNTHIA_DRC_FAILED", "get_clocks -quiet", "SYNTHIA_TIMING_UNCONSTRAINED", "get_timing_paths", "SYNTHIA_TIMING_FAILED", "write_bitstream -force"];
       let cursor = -1;
       for (const step of order) { const index = tcl.indexOf(step); expect(index).toBeGreaterThan(cursor); cursor = index; }
       expect(tcl).toContain("synthia.bit");
       expect(tcl).not.toContain("launch_simulation");
       expect([...result.evidence.entries.map(entry => entry.name)].sort()).toEqual([
+        "cdc.rpt",
         "drc.rpt",
         "implementation-result.json",
         "input-manifest.json",
+        "methodology.rpt",
         "resources.rpt",
         "routed.dcp",
         "run.tcl",
@@ -158,6 +162,42 @@ All user specified timing constraints are met.
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  test("stopBeforeBitstream completes routed evidence without invoking or emitting bitstream", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd);
+        await rm(join(cwd, "output", "synthia.bit"));
+        return { exitCode: 0, stdout: "BITSTREAM_GENERATION_SKIPPED\nIMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ stopBeforeBitstream: true }));
+      expect(result.status).toBe("succeeded");
+      const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
+      expect(tcl).toContain("route_design");
+      expect(tcl).toContain("BITSTREAM_GENERATION_SKIPPED");
+      expect(tcl).not.toContain("write_bitstream");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      const structured = JSON.parse(await readFile(join(result.workspace, "output", "implementation-result.json"), "utf8"));
+      expect(structured.stopBeforeBitstream).toBe(true);
+      expect(structured.bitstreamGenerated).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("stopBeforeBitstream rejects and removes an unexpected bitstream", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd);
+        return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ stopBeforeBitstream: true }));
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_UNEXPECTED_BITSTREAM");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      await expect(readFile(join(result.workspace, "output", "synthia.bit"))).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test("writes the fail-closed XDC into the workspace and reads it before synthesis", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
@@ -170,7 +210,7 @@ All user specified timing constraints are met.
       expect(tcl).toContain("pins.xdc");
       const xdc = await readFile(join(result.workspace, "input", "xdc", "pins.xdc"), "utf8");
       expect(xdc).toContain("create_clock");
-      expect(xdc).toContain("本文件故意不降低 NSTD-1/UCIO-1 严重度");
+      expect(xdc).toContain("XC7VX690T-2FFG1761C");
       expect(xdc).not.toContain("set_property SEVERITY WARNING");
     } finally { await rm(root, { recursive: true, force: true }); }
   });

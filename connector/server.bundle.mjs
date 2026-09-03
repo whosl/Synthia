@@ -482,7 +482,7 @@ var XDC_COMMANDS = new Set([
   "set_output_delay",
   "set_property"
 ]);
-var XDC_QUERY_COMMANDS = new Set(["get_cells", "get_clocks", "get_drc_checks", "get_nets", "get_pins", "get_ports"]);
+var XDC_QUERY_COMMANDS = new Set(["current_design", "get_cells", "get_clocks", "get_drc_checks", "get_nets", "get_pins", "get_ports"]);
 function assertXdcLine(line) {
   if (/\\[ \t]*$/.test(line))
     reject("XDC_LINE_CONTINUATION");
@@ -584,6 +584,10 @@ function validateVivadoRequest(request) {
     if (typeof request.top !== "string")
       reject("INVALID_TOP");
     safeToken(request.top, "top");
+  }
+  if ("stopBeforeBitstream" in request && request.stopBeforeBitstream !== undefined) {
+    if (request.operation !== "implement" || typeof request.stopBeforeBitstream !== "boolean")
+      reject("INVALID_STOP_BEFORE_BITSTREAM");
   }
   if (request.operation === "simulate") {
     const tb = request.testbench;
@@ -687,7 +691,8 @@ puts SOURCE_VALIDATION_OK`;
     const simPaths = [];
     for (const source of request.sources) {
       const target = tclQuote(join2(inputDir, source.path));
-      (declaredModules(source).includes(request.testbench) ? simPaths : designPaths).push(target);
+      const testSource = declaredModules(source).includes(request.testbench) || /(^|\/)(?:tb|test|tests|testbench)(?:\/|$)/i.test(source.path);
+      (testSource ? simPaths : designPaths).push(target);
     }
     const designFiles = designPaths.join(" ");
     const simFiles = simPaths.join(" ");
@@ -735,7 +740,7 @@ report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
     const constraints = (request.constraints ?? []).map((c) => `read_xdc ${tclQuote(join2(inputDir, c.path))}`).join(`
 `);
     const out = (name) => tclQuote(join2(outputDir, name));
-    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set timingClocks [get_clocks -quiet]", 'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
+    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_methodology -file ${out("methodology.rpt")}`, `report_cdc -details -file ${out("cdc.rpt")}`, `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set timingClocks [get_clocks -quiet]", 'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, request.stopBeforeBitstream ? "puts BITSTREAM_GENERATION_SKIPPED" : `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
 `);
   }
   const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join2(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join2(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
@@ -764,6 +769,7 @@ function evidenceInputManifest(request) {
     top: "top" in request ? request.top : null,
     testbench: request.operation === "simulate" ? request.testbench : null,
     part: "part" in request ? request.part : request.toolchain?.part ?? null,
+    stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
     sources: "sources" in request ? request.sources.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : [],
     constraints: "constraints" in request && request.constraints ? request.constraints.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : []
   };
@@ -851,7 +857,7 @@ function judgeSimulation(simulatorStdout, phaseExitCode, exitCode) {
     return { status: "succeeded" };
   return { status: "failed", errorCode: "VIVADO_SIMULATION_INCONCLUSIVE" };
 }
-var IMPLEMENTATION_OUTPUTS = ["synth.dcp", "drc.rpt", "sta.rpt", "resources.rpt", "routed.dcp", "synthia.bit"];
+var PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS = ["synth.dcp", "methodology.rpt", "cdc.rpt", "drc.rpt", "sta.rpt", "resources.rpt", "routed.dcp"];
 var FAILED_IMPLEMENTATION_OMISSIONS = new Set(["synthia.bit"]);
 function judgeDrcReport(report) {
   const finished = report.match(/DRC finished with\s+(\d+)\s+Errors?/i);
@@ -897,7 +903,7 @@ function judgeStaReport(report) {
     return "inconclusive";
   return "passed";
 }
-async function implementationVerdict(outputDir, exitCode, text) {
+async function implementationVerdict(outputDir, exitCode, text, stopBeforeBitstream) {
   let drc;
   let sta;
   try {
@@ -916,7 +922,7 @@ async function implementationVerdict(outputDir, exitCode, text) {
     return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_FAILED" };
   if (drc === undefined || sta === undefined || judgeDrcReport(drc) !== "passed" || judgeStaReport(sta) !== "passed")
     return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
-  for (const name of IMPLEMENTATION_OUTPUTS) {
+  for (const name of [...PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS, ...stopBeforeBitstream ? [] : ["synthia.bit"]]) {
     try {
       const details = await stat2(join2(outputDir, name));
       if (!details.isFile() || details.size === 0)
@@ -924,6 +930,12 @@ async function implementationVerdict(outputDir, exitCode, text) {
     } catch {
       return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
     }
+  }
+  if (stopBeforeBitstream) {
+    try {
+      await access(join2(outputDir, "synthia.bit"));
+      return { status: "failed", errorCode: "VIVADO_UNEXPECTED_BITSTREAM" };
+    } catch {}
   }
   return { status: "succeeded" };
 }
@@ -972,6 +984,11 @@ class VivadoBatchAdapter {
     const outputDir = join2(workspace, "output");
     await mkdir2(inputDir, { recursive: true });
     await mkdir2(outputDir, { recursive: true });
+    if (request.operation === "implement" && request.stopBeforeBitstream === true) {
+      try {
+        await unlink(join2(outputDir, "synthia.bit"));
+      } catch {}
+    }
     if ("sources" in request)
       for (const source of request.sources) {
         safePath(source.path);
@@ -1042,7 +1059,8 @@ ${result.stderr}`;
       return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode };
     }
     if (request.operation === "implement") {
-      const verdict = await implementationVerdict(outputDir, result.exitCode, text);
+      const stopBeforeBitstream = request.stopBeforeBitstream === true;
+      const verdict = await implementationVerdict(outputDir, result.exitCode, text, stopBeforeBitstream);
       let drcVerdict = "inconclusive";
       let timingVerdict = "inconclusive";
       try {
@@ -1054,6 +1072,8 @@ ${result.stderr}`;
       await writeExecutionEvidence(outputDir, request, result, verdict.status, {
         drcVerdict,
         timingVerdict,
+        bitstreamGenerated: stopBeforeBitstream ? false : verdict.status === "succeeded",
+        stopBeforeBitstream,
         errorCode: verdict.errorCode ?? null
       });
       const ev2 = verdict.status === "succeeded" ? await evidence(workspace, request.jobId) : await failedImplementationEvidence(workspace, request.jobId);

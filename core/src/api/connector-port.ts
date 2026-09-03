@@ -33,6 +33,7 @@ export interface JobParameters {
   readonly testbench?: string;
   readonly part?: string;
   readonly constraints: readonly SourceInput[];
+  readonly stopBeforeBitstream?: boolean;
   readonly timeoutMs?: number;
 }
 

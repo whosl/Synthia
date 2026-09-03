@@ -244,9 +244,10 @@ describe("CoreApiConnector.submit happy path", () => {
       return { status: 200, body: { data: { jobId: "job-imp", state: "succeeded" } } };
     });
     const conn = makeConnector({ fetchImpl });
-    await conn.submit(implementSubmission());
+    await conn.submit({ ...implementSubmission(), stopBeforeBitstream: true });
     const body = calls[0]!.body as Record<string, unknown>;
     expect(body["constraints"]).toEqual([{ path: "synthia.xdc", content: "create_clock -period 10 [get_ports clk]\n" }]);
+    expect(body["stop_before_bitstream"]).toBe(true);
   });
 
   test("follows server-returned jobId for status + evidence (not the idempotency key)", async () => {

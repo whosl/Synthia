@@ -325,7 +325,7 @@ export function assembleVivadoTool(): AgentTool {
       "sources=**工作区文件路径**数组（{path}，如 rtl/pwm.v；不要贴正文，正文由系统从工作区读取；simulate 时把 TB 文件一并列出以便推断 testbench）。" +
       "文件必须先存在于工作区（由技能工具写入），否则本工具拒绝执行并列出缺失路径。" +
       "top=顶层模块名，可省略：系统从 sources 自动推断（顶层=未被其他文件例化且声明于非 tb 路径文件的模块）；显式填写时与推断校验，不一致将被拒绝并给出正确值。" +
-      "simulate 需 testbench（同样可省略自动推断：例化了 top 的未例化模块，优先取 tb 路径文件中的）；implement 需 constraints。轮询到终态后返回 state/errorCode 与 evidence 清单，" +
+      "simulate 需 testbench（同样可省略自动推断：例化了 top 的未例化模块，优先取 tb 路径文件中的）；implement 需 constraints；stopBeforeBitstream=true 会完成布局布线和报告但绝不调用 write_bitstream。轮询到终态后返回 state/errorCode 与 evidence 清单，" +
       "并回报每个源文件的 sha256 与它对应的登记修订（证据指向确定的字节）。" +
       "能力漂移/租约/能力不可用等按 fail-closed 返回错误（不静默）；仿真/编译失败返回可得诊断（errorCode/stderr/evidence 清单）。",
     parameters: {
@@ -355,6 +355,7 @@ export function assembleVivadoTool(): AgentTool {
           },
           description: "XDC 约束文件的工作区路径（仅 implement）。只给路径，不要贴正文。",
         },
+        stopBeforeBitstream: { type: "boolean", description: "仅 implement；为 true 时停在生成码流前，仍生成 DCP/DRC/STA/资源报告。" },
         timeoutMs: { type: "number", description: "可选超时（毫秒）。" },
       },
       required: ["operation", "sources"],
@@ -403,6 +404,7 @@ export function assembleVivadoTool(): AgentTool {
       const rawConstraints = Array.isArray(argObj.constraints) ? argObj.constraints : [];
       const constraintRefs = rawConstraints.map(narrowSourceRef).filter((s): s is SourceRef => s !== null);
       const timeoutMs = typeof argObj.timeoutMs === "number" && argObj.timeoutMs > 0 ? argObj.timeoutMs : undefined;
+      const stopBeforeBitstream = typeof argObj.stopBeforeBitstream === "boolean" ? argObj.stopBeforeBitstream : undefined;
 
       // --- 从工作区取正文（模型只给了路径）---
       // 放在 permission gate 之前：路径写错是模型自己能修的错，不该先占用连接器的
@@ -542,6 +544,7 @@ export function assembleVivadoTool(): AgentTool {
         part: ctx.part,
         ...(testbench ? { testbench } : {}),
         ...(constraints.length > 0 ? { constraints } : {}),
+        ...(operation === "implement" && stopBeforeBitstream !== undefined ? { stopBeforeBitstream } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
       };
 

@@ -45,8 +45,23 @@ export interface ApprovalContext { baselineId?:string; approvedGateResultId?:str
 function capabilitySupports(d:DiscoverySnapshot|undefined,operation:string,runClass:string,version:string):boolean { const cap=d?.capabilities.find(x=>x.operation===operation); return !!cap&&cap.version===version&&cap.runClasses.includes(runClass); }
 export interface EvidenceContent { content: string; bytes: Uint8Array; sha256: string; truncated: boolean; mediaType: string; }
 interface EvidenceContentEnvelope { name: string; sha256: string; sizeBytes: number; mediaType: string; content_base64: string; truncated: boolean; }
+function isBase64Char(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 43 || code === 47;
+}
 function decodeBase64(b64: string): Uint8Array {
-  if (b64.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(b64)) throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+  if (b64.length % 4 !== 0) throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+  // Strict per-character validation via charCode scan. The equivalent anchored
+  // regex returns false negatives on multi-megabyte payloads under
+  // JavaScriptCore/YARR (verified with valid ~38 MB bitstream base64), which
+  // froze formal bitstream evidence as EVIDENCE_CORRUPT.
+  const firstPad = b64.indexOf("=");
+  const dataEnd = firstPad === -1 ? b64.length : firstPad;
+  const pads = b64.length - dataEnd;
+  if (pads > 2) throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+  if (pads > 0 && (dataEnd + pads !== b64.length || b64.slice(dataEnd) !== "=".repeat(pads))) throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+  for (let i = 0; i < dataEnd; i++) {
+    if (!isBase64Char(b64.charCodeAt(i))) throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+  }
   let bin: string;
   try { bin = atob(b64); } catch { throw new RemoteConnectorError("EVIDENCE_CORRUPT"); }
   const bytes = new Uint8Array(bin.length);

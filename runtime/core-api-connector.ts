@@ -377,6 +377,9 @@ function buildSubmitBody(submission: VivadoSubmission): Record<string, unknown> 
   if (submission.operation === "implement" && submission.constraints?.length) {
     body.constraints = submission.constraints.map(toSourceInput);
   }
+  if (submission.operation === "implement" && submission.stopBeforeBitstream !== undefined) {
+    body.stop_before_bitstream = submission.stopBeforeBitstream;
+  }
   if (submission.timeoutMs !== undefined) body.timeout_ms = submission.timeoutMs;
   return body;
 }
