@@ -1,0 +1,35 @@
+{
+  "observedAtUtc": "2026-08-28T03:16:33Z",
+  "source": {
+    "hostName": "MacBook Pro",
+    "dnsName": "macbook-pro.ruffe-cat.ts.net.",
+    "tailscaleIps": [
+      "100.123.31.75",
+      "fd7a:115c:a1e0::1c38:1f4c"
+    ],
+    "online": true
+  },
+  "target": {
+    "hostName": "DESKTOP-DVFFB09",
+    "dnsName": "desktop-dvffb09.ruffe-cat.ts.net.",
+    "tailscaleIps": [
+      "100.96.223.49",
+      "fd7a:115c:a1e0::3d30:df32"
+    ],
+    "online": true,
+    "active": true,
+    "relay": "tok",
+    "currentDirectAddress": null
+  },
+  "ping": {
+    "count": 3,
+    "path": "DERP(tok)",
+    "latencyMs": [169, 198, 157],
+    "peerToPeerUdpEstablished": false
+  },
+  "sshTransport": {
+    "destination": "100.96.223.49:22",
+    "jumpHost": null,
+    "policy": "Mac -> 66"
+  }
+}

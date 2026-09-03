@@ -1,0 +1,16 @@
+user admin
+hostname 100.96.223.49
+port 22
+batchmode yes
+checkhostip yes
+clearallforwardings yes
+identitiesonly yes
+kbdinteractiveauthentication no
+passwordauthentication no
+requesttty false
+stricthostkeychecking true
+identityagent none
+preferredauthentications publickey
+identityfile /Users/wenzhuolin/.ssh/agent/synthia_m4f_direct_20260828
+userknownhostsfile /Users/wenzhuolin/.ssh/agent/synthia_m4f_direct_20260828.known_hosts
+forwardagent no

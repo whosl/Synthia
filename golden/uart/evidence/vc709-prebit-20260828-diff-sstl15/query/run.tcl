@@ -1,0 +1,1 @@
+puts [join [get_parts {xc7vx690tffg1761-2}] "\n"]

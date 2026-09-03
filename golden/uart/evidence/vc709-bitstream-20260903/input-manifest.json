@@ -1,0 +1,53 @@
+{
+  "schema": "vivado-input-manifest.v1",
+  "jobId": "vc709-implement-bit-formal-20260828",
+  "projectId": "p1",
+  "operation": "implement",
+  "runClass": "exploratory",
+  "inputHash": null,
+  "toolchainHash": "dffba16f6b8ba5b71a7fe7c732690231b1e58e78a3b2a4824a2512aa6fc788bc",
+  "top": "uart_board_top",
+  "testbench": null,
+  "part": "xc7vx690tffg1761-2",
+  "stopBeforeBitstream": false,
+  "sources": [
+    {
+      "path": "rtl/baud_gen.v",
+      "sha256": "d6382fd9cd8b87b38a284c0fa64dc092d59568b30d536f6873a0a9436a027d68",
+      "sizeBytes": 2437,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_board_top.v",
+      "sha256": "1500d877155b0ddc4cfb58679244e9432f0ef87ebc5c80c08ee3414467984b66",
+      "sizeBytes": 2593,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_rx.v",
+      "sha256": "355a368ebc720c038719fb2f13e7cbe4f49b006641a942c604e1e8ed33f78bf3",
+      "sizeBytes": 6150,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_top.v",
+      "sha256": "63b16be8f494f10111fc91c5c64426d7584d8dc3c37fe98db7faa31de9405892",
+      "sizeBytes": 1518,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_tx.v",
+      "sha256": "1b6c21c39c2f27875c7ecfcb451731127c1fc6a60019f8e4da325a50d5537b1d",
+      "sizeBytes": 4056,
+      "mediaType": "application/octet-stream"
+    }
+  ],
+  "constraints": [
+    {
+      "path": "xdc/uart.xdc",
+      "sha256": "69ff446877b535cf1301db74e1a699dc1fca6d71e3603776b5fe141ea3dd051e",
+      "sizeBytes": 972,
+      "mediaType": "application/octet-stream"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "jobId": "vc709-query-direct-diff-sstl15-20260828",
+  "operation": "query_parts",
+  "status": "succeeded",
+  "command": [
+    "D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat",
+    "-mode",
+    "batch",
+    "-nolog",
+    "-nojournal",
+    "-notrace",
+    "-source",
+    "D:\\synthia-worker-vc709\\workspaces\\vc709-query-direct-diff-sstl15-20260828\\run.tcl"
+  ],
+  "inputSha256": "e882f30c342908e34faa1c8ba2da662159331ad5cfe191244d79b74bbe4c1209",
+  "workspace": "D:\\synthia-worker-vc709\\workspaces\\vc709-query-direct-diff-sstl15-20260828",
+  "toolchain": {
+    "binary": "D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat",
+    "licenseStatus": "unknown",
+    "part": "xc7vx690tffg1761-2",
+    "profileHash": "dffba16f6b8ba5b71a7fe7c732690231b1e58e78a3b2a4824a2512aa6fc788bc"
+  },
+  "exitCode": 0,
+  "stdout": "\r\n****** Vivado v2021.1 (64-bit)\r\n  **** SW Build 3247384 on Thu Jun 10 19:36:33 MDT 2021\r\n  **** IP Build 3246043 on Fri Jun 11 00:30:35 MDT 2021\r\n    ** Copyright 1986-2021 Xilinx, Inc. All Rights Reserved.\r\n\r\nsource {D:\\synthia-worker-vc709\\workspaces\\vc709-query-direct-diff-sstl15-20260828\\run.tcl} -notrace\r\nxc7vx690tffg1761-2\r\nINFO: [Common 17-206] Exiting Vivado at Fri Aug 28 11:27:26 2026...\r\n",
+  "stderr": "",
+  "timeoutMs": 1800000,
+  "output": {
+    "stdout": "\r\n****** Vivado v2021.1 (64-bit)\r\n  **** SW Build 3247384 on Thu Jun 10 19:36:33 MDT 2021\r\n  **** IP Build 3246043 on Fri Jun 11 00:30:35 MDT 2021\r\n    ** Copyright 1986-2021 Xilinx, Inc. All Rights Reserved.\r\n\r\nsource {D:\\synthia-worker-vc709\\workspaces\\vc709-query-direct-diff-sstl15-20260828\\run.tcl} -notrace\r\nxc7vx690tffg1761-2\r\nINFO: [Common 17-206] Exiting Vivado at Fri Aug 28 11:27:26 2026...\r\n",
+    "stderr": ""
+  }
+}
