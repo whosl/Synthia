@@ -452,7 +452,9 @@ export function parseTimingReport(text: string): TimingVerdictV1 {
   }
   const coveredClocks = [...new Set([
     ...[...text.matchAll(/^\s*(?:Clock|Path Group)\s*:\s*([^\s].*?)\s*$/gim)].map((match) => match[1]!.trim()),
-    ...[...text.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_./:-]*)\s+\{[^}]*\}\s+[\d.]+\s*$/gm)].map((match) => match[1]!),
+    // Clock Summary table rows carry TWO trailing numbers (period + frequency),
+    // so the row must not be anchored to a single trailing value.
+    ...[...text.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_./:-]*)\s+\{[^}]*\}\s+[\d.]+/gm)].map((match) => match[1]!),
   ])].sort();
   const explicitlyMet = /All user specified timing constraints are met\./i.test(text);
   const explicitlyFailed = /timing constraints are not met/i.test(text) || /Slack\s*\(VIOLATED\)/i.test(text);
@@ -569,7 +571,7 @@ export function evidenceVerdicts(
   const stdout = textEntry(entries, (entry) => entry.role === "stdout_log") ?? "";
   if (operation === "validate_sources") {
     const result = resultEvidence(entries, "validation_result", "validate_sources-result.v1");
-    const marker = /(?:^|\n)SOURCE_VALIDATION_OK(?:\n|$)/.test(stdout);
+    const marker = /(?:^|\r?\n)SOURCE_VALIDATION_OK(?:\r?\n|$)/.test(stdout);
     const validation = {
       determined: result.determined && marker,
       passed: result.passed && marker,

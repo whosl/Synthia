@@ -3575,6 +3575,7 @@ function expectedConnectorInputManifest(run: Record<string, unknown>): Record<st
       : null,
     part: (run.operation === "synthesize" || run.operation === "implement")
       && typeof parameters.part === "string" ? parameters.part : null,
+    stopBeforeBitstream: run.operation === "implement" ? parameters.stopBeforeBitstream === true : null,
     sources: sources.sort(byPath),
     constraints: constraints.sort(byPath),
   };

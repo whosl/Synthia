@@ -2017,6 +2017,10 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
   const top = nullableString(body, "top");
   const testbench = nullableString(body, "testbench");
   const part = nullableString(body, "part");
+  const stopBeforeBitstream = body.stop_before_bitstream === undefined ? undefined : body.stop_before_bitstream;
+  if (stopBeforeBitstream !== undefined && (operation !== "implement" || typeof stopBeforeBitstream !== "boolean")) {
+    throw validationError("field 'stop_before_bitstream' must be a boolean and is only valid for implement");
+  }
   const timeoutMs = optionalPositiveNumber(body, "timeout_ms");
   const connector = requireConnector(ctx);
 
@@ -2025,7 +2029,7 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
     const runClass = await adjudicateRunClass(tx, projectId, body);
     const jobId = `job-${randomUUID()}`;
     const inputManifestHash = canonicalRequestHash(ctx.body);
-    const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part, constraints, timeoutMs };
+    const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part, constraints, stopBeforeBitstream, timeoutMs };
     const authorizationContext = buildAuthorizationContext(body);
     const projectFactsResult = await tx.query(
       "SELECT project_type, process_version_id, process_profile_id FROM project WHERE id = $1",
@@ -2086,7 +2090,7 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
         inputHash: inputManifestHash,
         toolchainProfileHash: exploratoryToolchainHash ?? undefined,
         actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
-        parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, timeoutMs },
+        parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, stopBeforeBitstream, timeoutMs },
         approval: Object.keys(authorizationContext).length > 0 ? authorizationContext : undefined,
       });
     } catch (err) {

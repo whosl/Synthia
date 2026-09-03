@@ -549,6 +549,10 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
   const top = optionalJobString(body.top, "top");
   const testbench = optionalJobString(body.testbench, "testbench");
   const part = optionalJobString(body.part, "part");
+  const stopBeforeBitstream = body.stop_before_bitstream === undefined ? undefined : body.stop_before_bitstream;
+  if (stopBeforeBitstream !== undefined && (operation !== "implement" || typeof stopBeforeBitstream !== "boolean")) {
+    throw validationError("field 'stop_before_bitstream' must be a boolean and is only valid for implement");
+  }
   const timeoutMs = optionalJobTimeout(body.timeout_ms);
   const connector = requireConnector(ctx);
   const dispatch = stableSideTaskJobDispatch(ctx, projectId, taskId);
@@ -589,6 +593,7 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       top,
       testbench,
       part,
+      stopBeforeBitstream,
       timeoutMs,
       runClass,
     });
@@ -605,6 +610,7 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       top,
       testbench,
       part,
+      stopBeforeBitstream,
       timeoutMs,
     };
     await tx.query(
@@ -647,6 +653,7 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
           ...(top ? { top } : {}),
           ...(testbench ? { testbench } : {}),
           ...(part ? { part } : {}),
+          ...(stopBeforeBitstream !== undefined ? { stopBeforeBitstream } : {}),
           ...(timeoutMs ? { timeoutMs } : {}),
         },
       });
