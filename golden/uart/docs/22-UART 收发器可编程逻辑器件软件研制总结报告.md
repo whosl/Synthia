@@ -4,9 +4,9 @@
 
 | 属性 | 内容 |
 |---|---|
-| 文档标识及版本 | UART-DOC-022 / v2.3 candidate |
+| 文档标识及版本 | UART-DOC-022 / v2.5 candidate |
 | 数据分类 | 待项目责任人确定；当前按非公开工程资料处理 |
-| 编制/修订日期 | 2026-08-27 |
+| 编制/修订日期 | 2026-08-28 |
 | 文档名称 | UART 收发器可编程逻辑器件软件研制总结报告 |
 | 编制单位 | Synthia Golden 候选项目（待授权单位确认） |
 | 编写 | Agent 辅助拟制，待授权角色署名 |
@@ -17,7 +17,7 @@
 
 | 版本 | 日期 | 修改内容 | 修改人 |
 |---|---|---|---|
-| v2.3 candidate | 2026-08-27 | 按适用标准补齐 PLDSDSR Word 候选，并纳入 690T/保证/角色决策 | Agent 辅助拟制，待授权角色确认 |
+| v2.5 candidate | 2026-08-28 | 按适用标准补齐 PLDSDSR Word 候选，并纳入 690T/保证/角色决策 | Agent 辅助拟制，待授权角色确认 |
 
 ## 目录
 
@@ -40,29 +40,29 @@
 
 ## 2 任务来源与可编程逻辑器件软件研制依据
 
-本文档适用于 GOLDEN-UART 候选项目。用户已选定 AMD Xilinx Virtex-7 XC7VX690T、`uart_top` 通用核 + `uart_board_top` 板级包装、板载 USB-UART、100 MHz 核时钟、9600 bit/s 8N1 基线与 115200 bit/s 扩展回归。候选 Vivado part 为 `xc7vx690tffg1761-2`，但已知 worker-66/Vivado 2021.1 不包含它，新 Connector 尚未用 `get_parts -quiet xc7vx690t*` 确认。
+本文档适用于 GOLDEN-UART 候选项目。目标平台已固定为 AMD/Xilinx VC709 Rev 1.0 候选板、`xc7vx690tffg1761-2`、`uart_top` 通用核 + `uart_board_top` 板级包装、200 MHz 差分板钟经 MMCM生成 100 MHz 核时钟，以及板载 CP2103 USB-UART。真实 Connector/Vivado 2021.1 已返回精确 part，9600 与 115200 两组 XSim、综合和停在码流前的实现均已通过 Mac→66 直连形成修订后 `DIFF_SSTL15` exploratory/candidate 证据。
 
 任务来源是 Synthia Golden 参考项目建设；真实装备合同和系统任务书未提供。
 
 
 ## 3 可编程逻辑器件软件概述
 
-通用 UART 核、参数化分频、TX/RX FSM、两级 RX 同步和自检 TB。
+通用 UART 核、参数化分频、TX/RX FSM、两级 RX 同步、VC709 时钟/复位/CP2103 包装和自检 TB。
 
 
 ## 4 可编程逻辑器件软件研制过程
 
-已完成候选需求/设计、RTL/TB 修正、历史 K70T exploratory 仿真/综合/STA 和文档整改；690T 器件级实证和板级确认未完成。
+已完成候选需求/设计、RTL/TB/XDC 修正，并在真实 Connector/Vivado 2021.1 上经 Mac→66 直连完成精确 part 查询、源码校验、9600/115200 XSim、综合和停在码流前的布局布线及报告。
 
 
 ## 5 满足任务指标情况
 
-核级 9600 功能有历史 exploratory 证据；115200 扩展回归、覆盖、精确 690T part 实现、完整 XDC 和板测未闭合。
+9600 与 115200 均为 10/10 PASS；修订后 `DIFF_SSTL15` 的 690T 预码流实现 DRC 0 违规、WNS/WHS 为正、资源满足候选限值；XTP213/Master XDC 已入库交叉核对。覆盖、独立验证、批准和板测未闭合。
 
 
 ## 6 可编程逻辑器件软件测试
 
-行为仿真报告见 UART-DOC-006，实物确认为 0 执行/blocked。
+行为仿真与工具报告见 UART-DOC-006 及 `evidence/vc709-prebit-20260828-diff-sstl15`；2026-08-27 包仅保留为修订前历史，实物确认为 0 执行/blocked。
 
 
 ## 7 质量保证情况
@@ -82,12 +82,12 @@
 
 ## 10 测量与分析
 
-历史 exploratory 结果：10+9 个动态用例成功、约 63 LUT/70 FF、K70T 内部 100 MHz STA 有正余量。这些数据不是 690T 或板级结论。
+VC709/690T exploratory（修订后 direct）结果：9600 10/10、115200 10/10；55 LUT、62 FF、0 BRAM/DSP；methodology 0 违规；CDC 仅两级 ASYNC_REG 同步器的 CDC-3 Info ×1；DRC 0 违规；WNS 7.630 ns、WHS 0.093 ns、TNS/THS 0；未生成 bitstream。
 
 
 ## 11 结论
 
-当前只能结论“候选设计可继续实证”，不能结论“符合、验收、可交付或可使用”。
+当前可以结论“VC709/690T 候选已走通至码流生成前，具备继续人工评审和板级准备的技术基础”，但不能结论“符合、验收、可交付或可使用”。
 
 ## 候选与批准声明
 

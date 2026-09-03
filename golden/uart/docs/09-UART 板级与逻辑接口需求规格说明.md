@@ -4,9 +4,9 @@
 
 | 属性 | 内容 |
 |---|---|
-| 文档标识及版本 | UART-DOC-009 / v2.3 candidate |
+| 文档标识及版本 | UART-DOC-009 / v2.5 candidate |
 | 数据分类 | 待项目责任人确定；当前按非公开工程资料处理 |
-| 编制/修订日期 | 2026-08-27 |
+| 编制/修订日期 | 2026-08-28 |
 | 文档名称 | UART 板级与逻辑接口需求规格说明 |
 | 编制单位 | Synthia Golden 候选项目（待授权单位确认） |
 | 编写 | Agent 辅助拟制，待授权角色署名 |
@@ -17,7 +17,7 @@
 
 | 版本 | 日期 | 修改内容 | 修改人 |
 |---|---|---|---|
-| v2.3 candidate | 2026-08-27 | 按适用标准补齐 IRS Word 候选，并纳入 690T/保证/角色决策 | Agent 辅助拟制，待授权角色确认 |
+| v2.5 candidate | 2026-08-28 | 按适用标准补齐 IRS Word 候选，并纳入 690T/保证/角色决策 | Agent 辅助拟制，待授权角色确认 |
 
 ## 目录
 
@@ -30,7 +30,7 @@
 
 ## 1 范围
 
-本文档适用于 GOLDEN-UART 候选项目。用户已选定 AMD Xilinx Virtex-7 XC7VX690T、`uart_top` 通用核 + `uart_board_top` 板级包装、板载 USB-UART、100 MHz 核时钟、9600 bit/s 8N1 基线与 115200 bit/s 扩展回归。候选 Vivado part 为 `xc7vx690tffg1761-2`，但已知 worker-66/Vivado 2021.1 不包含它，新 Connector 尚未用 `get_parts -quiet xc7vx690t*` 确认。
+本文档适用于 GOLDEN-UART 候选项目。目标平台已固定为 AMD/Xilinx VC709 Rev 1.0 候选板、`xc7vx690tffg1761-2`、`uart_top` 通用核 + `uart_board_top` 板级包装、200 MHz 差分板钟经 MMCM生成 100 MHz 核时钟，以及板载 CP2103 USB-UART。真实 Connector/Vivado 2021.1 已返回精确 part，9600 与 115200 两组 XSim、综合和停在码流前的实现均已通过 Mac→66 直连形成修订后 `DIFF_SSTL15` exploratory/candidate 证据。
 
 本文档单独控制通用 UART 核、板级包装、板载 USB-UART 和时钟/复位之间的候选接口需求。
 
@@ -39,29 +39,33 @@
 
 | 文档标识 | 标题 | 状态 |
 |---|---|---|
+| GB/T 11457-2006 | 软件工程术语 | 国家标准全文公开系统原始 PDF；受控性待审核 |
+| GJB 2786A-2009 | 军用软件开发通用要求 | 仓库完整重建件及用户副本交叉核对；受控性待审核 |
+| GJB 5235-2004 | 军用软件配置管理 | 仓库完整重建件及用户副本交叉核对；受控性待审核 |
 | GJB 9432-2018 | 军用可编程逻辑器件软件开发通用要求 | 用户提供的 11 页完整副本；受控性待审核 |
 | GJB 9433-2018 | 军用可编程逻辑器件软件测试要求 | 仓库参考副本；受控性待审核 |
 | GJB 9764-2020 | 军用可编程逻辑器件软件文档编制规范 | 仓库完整扫描与校读转写 |
 | GJB 438B-2009 | 军用软件开发文档通用要求 | 仓库完整扫描与校读转写 |
-| UART-DOC-000 | 项目保证与裁剪说明 | v2.3 candidate |
+| GB/T 8566-2022 | 系统与软件工程 软件生存周期过程 | 用户已定位原文；仓库尚未同步、哈希和版本复核 |
+| UART-DOC-000 | 项目保证与裁剪说明 | v2.5 candidate |
 
 
 ## 3 接口需求
 
 | 标识 | 接口 | 需求 | 状态 |
 |---|---|---|---|
-| UART-IRS-001 | 核时钟/复位 | `clk` 100 MHz 上升沿，`rst` 同步高有效；板级来源和极性由包装适配 | 核语义已定；板级阻塞 |
+| UART-IRS-001 | 核时钟/复位 | `clk` 100 MHz 上升沿，`rst` 同步高有效；VC709 200 MHz SYSCLK 经 MMCM 适配 | candidate implemented |
 | UART-IRS-002 | 发送并行口 | `tx_data[7:0]`/`tx_start` 输入，`tx_busy`/`tx_done` 输出；忙时不接受新请求 | candidate |
 | UART-IRS-003 | 接收并行口 | `rx_data[7:0]`/`rx_done`/`frame_err` 输出；完成/错误指示为单拍 | candidate |
 | UART-IRS-004 | 串行线 | `txd` 输出、`rxd` 输入；9600 8N1 基线，115200 8N1 扩展回归 | candidate |
-| UART-IRS-005 | USB-UART/管脚 | 包装只能按权威原理图和 Master XDC 映射 TX/RX、IOSTANDARD 和 Bank | blocked |
+| UART-IRS-005 | USB-UART/管脚 | 按 UG887 v1.6 与已入库 XTP213/Master XDC 交叉确认 CP2103 TX/RX、SYSCLK、CPU_RESET 和 IOSTANDARD | candidate implemented |
 
 
 ## 4 质量与合格性
 
 项目暂定义为非安全关键/低关键性，但采用中等保证严谨度。必须执行 RX 两级同步与 CDC 评审、双向追踪、覆盖模型和分母审定、独立验证、已确认目标 part 上的综合/实现/DRC/STA，以及硬件事实完整后的板级回归。该定义待系统/安全角色依危害分析复核。
 
-精确板卡制造商/型号/修订、原理图、官方管脚表或 Master XDC、USB-UART 连接、晶振/复位电路、Bank VCCO/IOSTANDARD 和测试仪器未提供。因此物理管脚、电气约束、码流和实物确认测试均为阻塞，不得由 Agent 填入典型值代替。
+AMD UG887 v1.6 与已入库的 Xilinx XTP213 Rev 1.0 原理图/官方 Master XDC 已交叉确认 VC709、XC7VX690T-2FFG1761C、200 MHz SYSCLK、CP2103 UART、CPU_RESET、管脚和 I/O 标准候选事实。本轮未生成 bitstream，也没有实物板卡修订确认、仪器或批准的确认规程，因此板测、批准、发布和交付仍为阻塞。
 
 
 ## 5 需求可追踪性

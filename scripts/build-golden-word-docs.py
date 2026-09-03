@@ -22,28 +22,34 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = ROOT / "golden" / "uart" / "docs"
 WORD_DIR = DOCS_DIR / "word"
-VERSION = "v2.3 candidate"
-DATE = "2026-08-27"
+VERSION = "v2.5 candidate"
+DATE = "2026-08-28"
 
 COMMON_REFS = """| 文档标识 | 标题 | 状态 |
 |---|---|---|
+| GB/T 11457-2006 | 软件工程术语 | 国家标准全文公开系统原始 PDF；受控性待审核 |
+| GJB 2786A-2009 | 军用软件开发通用要求 | 仓库完整重建件及用户副本交叉核对；受控性待审核 |
+| GJB 5235-2004 | 军用软件配置管理 | 仓库完整重建件及用户副本交叉核对；受控性待审核 |
 | GJB 9432-2018 | 军用可编程逻辑器件软件开发通用要求 | 用户提供的 11 页完整副本；受控性待审核 |
 | GJB 9433-2018 | 军用可编程逻辑器件软件测试要求 | 仓库参考副本；受控性待审核 |
 | GJB 9764-2020 | 军用可编程逻辑器件软件文档编制规范 | 仓库完整扫描与校读转写 |
 | GJB 438B-2009 | 军用软件开发文档通用要求 | 仓库完整扫描与校读转写 |
-| UART-DOC-000 | 项目保证与裁剪说明 | v2.3 candidate |"""
+| GB/T 8566-2022 | 系统与软件工程 软件生存周期过程 | 用户已定位原文；仓库尚未同步、哈希和版本复核 |
+| UART-DOC-000 | 项目保证与裁剪说明 | v2.5 candidate |"""
 
 PROJECT_FACTS = (
-    "本文档适用于 GOLDEN-UART 候选项目。用户已选定 AMD Xilinx Virtex-7 XC7VX690T、"
-    "`uart_top` 通用核 + `uart_board_top` 板级包装、板载 USB-UART、100 MHz 核时钟、"
-    "9600 bit/s 8N1 基线与 115200 bit/s 扩展回归。候选 Vivado part 为 `xc7vx690tffg1761-2`，"
-    "但已知 worker-66/Vivado 2021.1 不包含它，新 Connector 尚未用 `get_parts -quiet xc7vx690t*` 确认。"
+    "本文档适用于 GOLDEN-UART 候选项目。目标平台已固定为 AMD/Xilinx VC709 Rev 1.0 候选板、"
+    "`xc7vx690tffg1761-2`、`uart_top` 通用核 + `uart_board_top` 板级包装、200 MHz 差分板钟经 MMCM"
+    "生成 100 MHz 核时钟，以及板载 CP2103 USB-UART。真实 Connector/Vivado 2021.1 已返回精确 part，"
+    "9600 与 115200 两组 XSim、综合和停在码流前的实现均已通过 Mac→66 直连形成"
+    "修订后 `DIFF_SSTL15` exploratory/candidate 证据。"
 )
 
 BLOCKED_HW = (
-    "精确板卡制造商/型号/修订、原理图、官方管脚表或 Master XDC、USB-UART 连接、"
-    "晶振/复位电路、Bank VCCO/IOSTANDARD 和测试仪器未提供。因此物理管脚、电气约束、"
-    "码流和实物确认测试均为阻塞，不得由 Agent 填入典型值代替。"
+    "AMD UG887 v1.6 与已入库的 Xilinx XTP213 Rev 1.0 原理图/官方 Master XDC 已交叉确认 "
+    "VC709、XC7VX690T-2FFG1761C、200 MHz SYSCLK、CP2103 UART、CPU_RESET、管脚和 I/O 标准候选事实。"
+    "本轮未生成 bitstream，也没有实物板卡修订确认、仪器或批准的"
+    "确认规程，因此板测、批准、发布和交付仍为阻塞。"
 )
 
 ASSURANCE = (
@@ -78,11 +84,11 @@ DOCS: list[dict[str, object]] = [
             sec("1 范围", PROJECT_FACTS, "本文档单独控制通用 UART 核、板级包装、板载 USB-UART 和时钟/复位之间的候选接口需求。"),
             sec("2 引用文档", COMMON_REFS),
             sec("3 接口需求", table(["标识", "接口", "需求", "状态"], [
-                ["UART-IRS-001", "核时钟/复位", "`clk` 100 MHz 上升沿，`rst` 同步高有效；板级来源和极性由包装适配", "核语义已定；板级阻塞"],
+                ["UART-IRS-001", "核时钟/复位", "`clk` 100 MHz 上升沿，`rst` 同步高有效；VC709 200 MHz SYSCLK 经 MMCM 适配", "candidate implemented"],
                 ["UART-IRS-002", "发送并行口", "`tx_data[7:0]`/`tx_start` 输入，`tx_busy`/`tx_done` 输出；忙时不接受新请求", "candidate"],
                 ["UART-IRS-003", "接收并行口", "`rx_data[7:0]`/`rx_done`/`frame_err` 输出；完成/错误指示为单拍", "candidate"],
                 ["UART-IRS-004", "串行线", "`txd` 输出、`rxd` 输入；9600 8N1 基线，115200 8N1 扩展回归", "candidate"],
-                ["UART-IRS-005", "USB-UART/管脚", "包装只能按权威原理图和 Master XDC 映射 TX/RX、IOSTANDARD 和 Bank", "blocked"],
+                ["UART-IRS-005", "USB-UART/管脚", "按 UG887 v1.6 与已入库 XTP213/Master XDC 交叉确认 CP2103 TX/RX、SYSCLK、CPU_RESET 和 IOSTANDARD", "candidate implemented"],
             ])),
             sec("4 质量与合格性", ASSURANCE, BLOCKED_HW),
             sec("5 需求可追踪性", "UART-IRS-001～005 应追踪到 PLDSDTD/PLDSRS、PLDSDD 接口设计、RTL 端口、XDC 约束来源和确认测试用例。"),
@@ -96,24 +102,24 @@ DOCS: list[dict[str, object]] = [
             sec("2 引用文档", COMMON_REFS),
             sec("3 接口设计决策", table(["决策", "设计", "理由/边界"], [
                 ["UART-IDD-001", "`uart_top` 仅保留参数化数字接口", "便于 9600/115200 回归和跨板复用"],
-                ["UART-IDD-002", "`uart_board_top` 负责晶振/复位适配与 USB-UART 映射", "实现在板级材料提供前阻塞"],
+                ["UART-IDD-002", "`uart_board_top` 负责差分时钟/MMCM、复位同步和 CP2103 UART 回显", "UG887/XTP213/Master XDC 交叉核对已完成，实物复核待办"],
                 ["UART-IDD-003", "`rxd` 经两级 `ASYNC_REG` 同步后进入功能逻辑", "中等保证必做 CDC 评审"],
                 ["UART-IDD-004", "波特 tick 作同步时钟使能，不产生派生时钟", "简化 STA 和 CDC 边界"],
             ])),
-            sec("4 接口详细设计", "标准数字接口的方向、位宽、复位值和时序语义见 UART-DOC-002；板级管脚、IOSTANDARD 和 I/O delay 必须逐条引用权威板级材料。", BLOCKED_HW),
-            sec("5 需求可追踪性", table(["IRS", "IDD", "实现/验证"], [["UART-IRS-001～004", "UART-IDD-001/003/004", "`uart_top.v`、TB、CDC/STA"], ["UART-IRS-005", "UART-IDD-002", "板级包装、XDC、实物测试（blocked）"]])),
-            sec("6 注释", "本文档不包含未经证实的管脚和电气值。"),
+            sec("4 接口详细设计", "标准数字接口语义见 UART-DOC-002。VC709 候选约束为 SYSCLK H19/G18 DIFF_SSTL15、CPU_RESET AV40 LVCMOS18、UART TX/RX AU36/AU33 LVCMOS18、CFGBVS=GND、CONFIG_VOLTAGE=1.8；异步 UART 只约束同步器边界，不编造同步 I/O delay。", BLOCKED_HW),
+            sec("5 需求可追踪性", table(["IRS", "IDD", "实现/验证"], [["UART-IRS-001～004", "UART-IDD-001/003/004", "`uart_top.v`、9600/115200 XSim、CDC/STA"], ["UART-IRS-005", "UART-IDD-002", "`uart_board_top.v`、`uart.xdc`、预码流实现；实物测试 blocked"]])),
+            sec("6 注释", "板级候选值已由 UG887 v1.6、已入库 XTP213 原理图和官方 Master XDC 交叉核对；实物板卡修订和板测仍待人工确认。"),
         ],
     },
     {
         "number": 11, "id": "UART-DOC-011", "acronym": "PLDSFARAR", "name": "UART 收发器可编程逻辑器件软件可行性和风险分析报告",
         "sections": [
             sec("1 范围", PROJECT_FACTS), sec("2 引用文档", COMMON_REFS),
-            sec("3 需求分析", "已知功能只需小规模 UART RTL，逻辑资源可行性风险低；器件安装、供货、功耗、温压、辐照和板级电气事实仍未闭合。"),
-            sec("4 可行性分析", table(["项目", "当前证据", "结论"], [["功能/结构", "四个 RTL 模块与自检 TB", "核级可行"], ["资源", "历史 K70T 综合约 63 LUT/70 FF", "仅支持规模量级，690T 须重跑"], ["工具/part", "候选 part 在 worker-66 不存在", "阻塞；需新 Connector profile"], ["板级", "无原理图/Master XDC", "阻塞"], ["功耗/温压/辐照", "无系统级指标", "阻塞/待裁剪审定"]])),
+            sec("3 需求分析", "UART 只需小规模 RTL。VC709 候选板级输入、精确 part、仿真、综合、布局布线、CDC、DRC 和 STA 已形成探索性证据；供货、功耗、温压、辐照和实物确认仍未闭合。"),
+            sec("4 可行性分析", table(["项目", "当前证据", "结论"], [["功能/结构", "五个 RTL 模块与两种波特率自检 TB", "核级候选可行"], ["资源", "690T 实现 55 LUT/62 FF、0 BRAM/DSP", "资源候选可行"], ["工具/part", "Connector/Vivado 2021.1 精确返回并实现 `xc7vx690tffg1761-2`", "工具链候选可行"], ["板级", "UG887 v1.6 + 已入库 XTP213/Master XDC", "约束候选已交叉核对；实物复核待办"], ["功耗/温压/辐照", "无系统级指标", "阻塞/待裁剪审定"]])),
             sec("5 必要性分析", "通用 UART 核适合作为 Synthia 的最小闭环参考：包含异步输入、状态机、参数化时序、异常恢复和板级约束边界。"),
             sec("6 继承性分析", "现有 RTL/TB 可继承为核级候选；历史 K70T 综合/STA 不能继承为 690T 器件级证据，旧 XDC 不能继承为新板级约束。"),
-            sec("7 风险分析", table(["风险", "可能性/影响", "预防措施", "意外计划"], [["690T part 未安装", "高/高", "运行 `get_parts` 并冻结 profile", "安装支持该 part 的 Vivado 版本/器件库"], ["板卡资料不明", "高/高", "由硬件责任人提供权威材料", "保持 XDC/bitstream/板测阻塞"], ["115200 参数边界", "中/中", "重算分频误差并全量回归", "改用分数分频/过采样设计"], ["Agent 冒充批准", "中/高", "全部文档标记 candidate，批准走不可变记录", "拒绝基线/发布"]])),
+            sec("7 风险分析", table(["风险", "可能性/影响", "预防措施", "意外计划"], [["工具 profile 漂移", "低/高", "冻结精确 part/profile/输入哈希", "重新 query/validate/implement"], ["实物板卡修订与入库 Rev 1.0 不一致", "中/高", "硬件责任人核对 PCB 标识和受控资料", "保持 bitstream/板测阻塞并对应修订重做约束复核"], ["115200 参数边界", "低/中", "参数化判据与全量回归", "改用分数分频/过采样设计"], ["Agent 冒充批准", "中/高", "全部文档标记 candidate，批准走不可变记录", "拒绝基线/发布"]])),
         ],
     },
     {
@@ -123,8 +129,8 @@ DOCS: list[dict[str, object]] = [
             sec("2 引用文档", COMMON_REFS),
             sec("3 软件开发概述", "生存周期采用需求—设计—实现/单元验证—集成/确认—交付的阶段化模型，各门只冻结受控快照。"),
             sec("4 组织和责职", ROLES),
-            sec("5 软件开发活动", table(["活动", "主要产出", "入口/出口"], [["需求分析", "PLDSDTD/IRS/PLDSRS", "板级未知项显式阻塞"], ["设计", "IDD/PLDSDD", "接口、CDC、时序与验证设计受审"], ["实现/单元验证", "RTL/TB/PLDSSTP/STD/STR", "9600 + 115200；覆盖与独立验证"], ["工具链实证", "综合/实现/DRC/STA 证据", "精确 690T part 必须先确认"], ["板级确认", "PLDSVTP/VTD/VTR", "权威板级材料与仪器完整后才进入"]])),
-            sec("6 进度和控制节点", table(["节点", "候选出口", "状态"], [["G1", "任务/风险/需求输入已审", "pending"], ["G2", "需求/接口基线候选", "pending"], ["G3", "设计/RTL/TB 及追踪已审", "pending"], ["G4", "验证、工具证据和发布输入已闭合", "blocked by part/board"]])),
+            sec("5 软件开发活动", table(["活动", "主要产出", "入口/出口"], [["需求分析", "PLDSDTD/IRS/PLDSRS", "板级未知项显式阻塞"], ["设计", "IDD/PLDSDD", "接口、CDC、时序与验证设计受审"], ["实现/单元验证", "RTL/TB/PLDSSTP/STD/STR", "9600 + 115200 已形成候选实证；覆盖与独立验证待办"], ["工具链实证", "综合/实现/DRC/STA 证据", "精确 690T part/profile 已完成 exploratory 验证，正式复现仍需受控快照"], ["板级确认", "PLDSVTP/VTD/VTR", "XTP213/Master XDC 交叉核对已完成，实物修订与仪器完整后进入"]])),
+            sec("6 进度和控制节点", table(["节点", "候选出口", "状态"], [["G1", "任务/风险/需求输入已审", "pending"], ["G2", "需求/接口基线候选", "pending"], ["G3", "设计/RTL/TB 及追踪已审", "pending"], ["G4", "验证、工具证据和发布输入已闭合", "blocked by coverage/independent review/board/approval"]])),
             sec("7 资源、风险和测量", "人员工时、设备和合同日期尚无批准数据。度量至少包含需求/追踪覆盖、用例执行、代码/功能覆盖、问题关闭、资源和时序余量。"),
             sec("8 配置、质量、保密和分承制方", "SCMP 和 SQAP 独立编制。当前无已识别分承制方；数据分类和保密方案待项目负责人/保密角色确定。"),
             sec("9 注释", "本 SDP 未合并 SCMP/SQAP，避免在未批准时隐藏专业责任。"),
@@ -163,7 +169,7 @@ DOCS: list[dict[str, object]] = [
             sec("4 推荐规程", "受方先验证哈希/签名，再在支持精确 690T part 的 Vivado profile 上重建，复核 DRC/STA/资源，最后按 PLDSVTP/VTD 执行板级回归。"),
             sec("5 培训", "至少覆盖文档状态语义、工作区/基线、Connector 证据、回归和板级固化/恢复。课程、人数和日期待移交双方确定。"),
             sec("6 预期更改区域", "主要可变区域为板级包装/XDC、目标 part/profile、UART 参数、复位适配和实物测试脚本；通用核变更必须执行完整回归和影响分析。"),
-            sec("7 移交计划", table(["活动", "责任方", "出口", "状态"], [["基线审核", "配置+质量+发布", "获批发布快照", "pending"], ["交付校验", "双方", "哈希与清单一致", "pending"], ["环境重建", "受方", "可复现综合/实现", "blocked by part"], ["板级验收", "硬件+验证+需方", "PLDSVTR", "blocked by board"]])),
+            sec("7 移交计划", table(["活动", "责任方", "出口", "状态"], [["基线审核", "配置+质量+发布", "获批发布快照", "pending"], ["交付校验", "双方", "哈希与清单一致", "pending"], ["环境重建", "受方", "精确 690T profile 可复现综合/预码流实现", "candidate demonstrated; formal transfer pending"], ["板级验收", "硬件+验证+需方", "PLDSVTR", "blocked by schematic archive/physical board/approval"]])),
             sec("8 注释", "本计划未给出虚构受方、地点、日期或签名。"),
         ],
     },
@@ -174,7 +180,7 @@ def add_remaining_docs() -> None:
     DOCS.extend([
         {
             "number": 16, "id": "UART-DOC-016", "acronym": "PLDSVTP", "name": "UART 收发器可编程逻辑器件软件确认测试计划",
-            "sections": [sec("1 范围", PROJECT_FACTS, "本计划定义实物确认测试的结构；因硬件输入不全，当前为 blocked candidate。"), sec("2 引用文档", COMMON_REFS), sec("3 测试要求与测试策略", ASSURANCE, "拟采用实物串口分析仪/对端、回环、异常帧、长稳和复位/掉电恢复，并对 9600 与 115200 分别执行。"), sec("4 确认测试环境", BLOCKED_HW, "还需记录精确板卡、FPGA part、bitstream 哈希、Vivado/Connector profile、供电、线缆、对端和仪器校准信息。"), sec("5 测试内容", table(["测试项", "内容", "状态"], [["VTI-001", "9600 8N1 双向基线", "blocked"], ["VTI-002", "115200 8N1 扩展回归", "blocked"], ["VTI-003", "错帧/持续低/恢复", "blocked"], ["VTI-004", "复位、掉电、重配置", "blocked"], ["VTI-005", "长稳、吞吐、丢帧和时序余量", "blocked"]])), sec("6 测试进度", "入口是板级材料、完整 XDC、精确 part/profile、已路由实现和获批测试说明；当前无法给出执行日期。"), sec("7 可追踪性", "VTI-001～005 须追踪 PLDSRS/IRS 需求、PLDSDD/IDD 设计和 PLDSVTD 用例。")],
+            "sections": [sec("1 范围", PROJECT_FACTS, "本计划定义实物确认测试的结构；XTP213/Master XDC 交叉核对已完成，但无实物板卡修订确认/仪器/批准输入，当前仍为 blocked candidate。"), sec("2 引用文档", COMMON_REFS), sec("3 测试要求与测试策略", ASSURANCE, "拟采用实物串口分析仪/对端、回环、异常帧、长稳和复位/掉电恢复，并对 9600 与 115200 分别执行。"), sec("4 确认测试环境", BLOCKED_HW, "还需记录实物板卡修订、已批 bitstream 哈希、受控 Vivado/Connector profile、供电、线缆、对端和仪器校准信息。"), sec("5 测试内容", table(["测试项", "内容", "状态"], [["VTI-001", "9600 8N1 双向基线", "blocked"], ["VTI-002", "115200 8N1 扩展回归", "blocked"], ["VTI-003", "错帧/持续低/恢复", "blocked"], ["VTI-004", "复位、掉电、重配置", "blocked"], ["VTI-005", "长稳、吞吐、丢帧和时序余量", "blocked"]])), sec("6 测试进度", "预码流候选入口已满足：精确 part/profile、候选 XDC 与已路由实现均有证据，XTP213/Master XDC 已交叉核对；实物确认仍须取得板卡修订确认/仪器/已批 bitstream 并批准测试说明。"), sec("7 可追踪性", "VTI-001～005 须追踪 PLDSRS/IRS 需求、PLDSDD/IDD 设计和 PLDSVTD 用例。")],
         },
         {
             "number": 17, "id": "UART-DOC-017", "acronym": "PLDSVTD", "name": "UART 收发器可编程逻辑器件软件确认测试说明",
@@ -182,31 +188,31 @@ def add_remaining_docs() -> None:
         },
         {
             "number": 18, "id": "UART-DOC-018", "acronym": "PLDSVTR", "name": "UART 收发器可编程逻辑器件软件确认测试报告",
-            "sections": [sec("1 范围", "本报告为未执行/blocked 状态记录，不宣称任何确认测试通过。"), sec("2 引用文档", COMMON_REFS), sec("3 测试概述", "未执行。原因：" + BLOCKED_HW), sec("4 详细测试结果", table(["项目", "计划", "已执行", "通过", "失败", "阻塞"], [["实物确认用例", "4", "0", "0", "0", "4"]]), "没有测试环境、原始数据、仪器记录、问题单或回归结果可报告。"), sec("5 评估和建议", "不具备全面评估、板级可用性、确认通过或交付的证据。建议先关闭 part/profile 与板级输入，再批准 PLDSVTP/VTD 并执行。"), sec("附录 A 测试执行结果记录表", "本附录无执行记录，原因是确认测试尚未开始。"), sec("附录 B 问题报告单", "本附录无实物测试问题单；阻塞输入记录于 UART-DOC-000。")],
+            "sections": [sec("1 范围", "本报告为未执行/blocked 状态记录，不宣称任何确认测试通过。"), sec("2 引用文档", COMMON_REFS), sec("3 测试概述", "未执行。原因：" + BLOCKED_HW), sec("4 详细测试结果", table(["项目", "计划", "已执行", "通过", "失败", "阻塞"], [["实物确认用例", "4", "0", "0", "0", "4"]]), "没有实物测试环境、原始板测数据、仪器记录、问题单或回归结果可报告。"), sec("5 评估和建议", "不具备全面评估、板级可用性、确认通过或交付的证据。精确 part/profile、预码流实现和 XTP213/Master XDC 交叉核对已完成候选验证；下一步应取得实物板卡修订确认、仪器和已批 bitstream，再批准 PLDSVTP/VTD 并执行。"), sec("附录 A 测试执行结果记录表", "本附录无执行记录，原因是确认测试尚未开始。"), sec("附录 B 问题报告单", "本附录无实物测试问题单；阻塞输入记录于 UART-DOC-000。")],
         },
         {
             "number": 19, "id": "UART-DOC-019", "acronym": "SPS", "name": "UART 收发器软件产品规格说明",
-            "sections": [sec("1 范围", "本 SPS 描述当前候选产品结构；无获批产品基线或可交付 bitstream。"), sec("2 引用文档", COMMON_REFS), sec("3 需求", table(["类别", "候选内容", "状态"], [["源文件", "`rtl/*.v`、`tb/*.sv`、受控 XDC", "candidate"], ["文档", "22 类适用文档 + 3 份支撑文档", "candidate"], ["配置文件", "精确 Vivado/Connector profile 和已确认 part", "blocked"], ["可执行/配置数据", "bitstream 及编程/验证记录", "blocked"]])), sec("4 合格性规定", "逐项比对清单、文件长度和 SHA-256；在精确 part/profile 上可复现综合/实现/DRC/STA；依获批 PLDSVTP/VTD 完成板级确认。"), sec("5 软件支持信息", "“已建成”设计为通用 `uart_top`、TX/RX FSM 和分频使能。建立规程须指定精确输入哈希、top、part、约束和工具 profile；修改规程必须执行影响分析和全量回归。"), sec("6 需求可追踪性", "产品文件应追踪到设计单元、源文件、工具证据、资源测量和需求限值。"), sec("7 注释", "当前不得将候选清单称为产品基线。")],
+            "sections": [sec("1 范围", "本 SPS 描述当前候选产品结构；无获批产品基线或可交付 bitstream。"), sec("2 引用文档", COMMON_REFS), sec("3 需求", table(["类别", "候选内容", "状态"], [["源文件", "`rtl/*.v`、`tb/*.sv`、候选 VC709 XDC", "candidate"], ["文档", "22 类适用文档 + 3 份支撑文档", "candidate"], ["配置文件", "精确 Vivado/Connector profile 和已确认 part", "verified exploratory candidate"], ["可执行/配置数据", "bitstream 及编程/验证记录", "blocked"]])), sec("4 合格性规定", "逐项比对清单、文件长度和 SHA-256；在精确 part/profile 上可复现综合/预码流实现/DRC/STA；依获批 PLDSVTP/VTD 完成板级确认。"), sec("5 软件支持信息", "已实现 `uart_top` 通用核、`uart_board_top` 板级包装、TX/RX FSM、分频使能、MMCM 和复位同步。建立规程须指定精确输入哈希、top、part、约束和工具 profile；修改规程必须执行影响分析和全量回归。"), sec("6 需求可追踪性", "产品文件应追踪到设计单元、源文件、工具证据、资源测量和需求限值。"), sec("7 注释", "当前不得将候选清单称为产品基线。")],
         },
         {
             "number": 20, "id": "UART-DOC-020", "acronym": "SVD", "name": "UART 收发器软件版本说明",
-            "sections": [sec("1 范围", "本文档是候选版本说明，不是已发布 SVD。"), sec("2 引用文档", COMMON_REFS), sec("3 版本说明", table(["属性", "候选值"], [["版本", "v2.3 candidate"], ["预期接收者", "待项目负责人确定"], ["内容", "RTL/TB/XDC/文档/证据索引"], ["相对上版变更", "目标转为 XC7VX690T；增加 115200 回归、全角色和中等保证策略；补齐 Word 文档结构"], ["已知问题", "690T part 未在 Connector 验证；板级材料缺失；无产品基线/bitstream/板测"], ["安装", "不可安装/固化，待批准发布文档" ]]), "发布材料清单、校验和安装判据须由配置/发布角色在获批基线后重新生成。"), sec("4 注释", "本文档没有伪造发布号、签名、交付日期或安装成功结论。")],
+            "sections": [sec("1 范围", "本文档是候选版本说明，不是已发布 SVD。"), sec("2 引用文档", COMMON_REFS), sec("3 版本说明", table(["属性", "候选值"], [["版本", VERSION], ["预期接收者", "待项目负责人确定"], ["内容", "RTL/TB/XDC/文档/VC709 预码流证据索引"], ["相对上版变更", "固定 VC709/`xc7vx690tffg1761-2`；增加板级包装、115200 XSim、综合和预码流实现证据；补齐 Word 文档"], ["已知问题", "无实物板卡修订确认/覆盖/独立验证/产品基线/bitstream/板测；XTP213/Master XDC 已入库交叉核对"], ["安装", "不可安装/固化，待批准发布文档" ]]), "发布材料清单、校验和安装判据须由配置/发布角色在获批基线后重新生成。"), sec("4 注释", "本文档没有伪造发布号、签名、交付日期或安装成功结论。")],
         },
         {
             "number": 21, "id": "UART-DOC-021", "acronym": "PLDSUD", "name": "UART 收发器可编程逻辑器件软件使用说明",
-            "sections": [sec("1 范围", PROJECT_FACTS, "当前仅支持核级仿真/审查使用，不支持板级固化或装备运行。"), sec("2 引用文档", COMMON_REFS), sec("3 功能概述", "全双工 8N1 UART，TX 将并行字节转换为 LSB-first 串行帧，RX 对异步输入同步后中点采样并报告错停止位。"), sec("4 主要技术指标", table(["指标", "值/状态"], [["时钟", "100 MHz 核级需求；板级来源待确认"], ["波特率", "9600 基线；115200 扩展回归"], ["帧", "8 数据位、无校验、1 停止位"], ["目标器件", "XC7VX690T；精确 part 未验证"], ["功耗/温压/辐照", "未提供/阻塞"]])), sec("5 物理特性", BLOCKED_HW), sec("6 使用说明", "核级使用：在 `tx_busy=0` 时以单拍 `tx_start` 提交 `tx_data`；捕获 `tx_done`、`rx_done`、`frame_err` 单拍。仿真时以参数选择 9600/115200，全量回归后才接受。"), sec("7 固化", "本章无可执行固化步骤，因目标 part、板卡、配置方式、已批 bitstream 和验收规程缺失。固化前须补充操作、校验、回退和恢复规程。")],
+            "sections": [sec("1 范围", PROJECT_FACTS, "当前支持核级仿真、候选板级包装审查和预码流实现复现，不支持板级固化或装备运行。"), sec("2 引用文档", COMMON_REFS), sec("3 功能概述", "全双工 8N1 UART，TX 将并行字节转换为 LSB-first 串行帧，RX 对异步输入同步后中点采样并报告错停止位；VC709 包装以 115200 bit/s 对 CP2103 进行字节回显。"), sec("4 主要技术指标", table(["指标", "值/状态"], [["时钟", "VC709 200 MHz 差分 SYSCLK 经 MMCM 生成 100 MHz 核时钟"], ["波特率", "9600 与 115200 均完成 XSim 10/10 候选回归"], ["帧", "8 数据位、无校验、1 停止位"], ["目标器件", "`xc7vx690tffg1761-2`；Vivado 2021.1 精确查询并完成预码流实现"], ["功耗/温压/辐照", "未提供/阻塞"]])), sec("5 物理特性", BLOCKED_HW), sec("6 使用说明", "核级使用：在 `tx_busy=0` 时以单拍 `tx_start` 提交 `tx_data`；捕获 `tx_done`、`rx_done`、`frame_err` 单拍。仿真可参数化选择 9600/115200。板级候选包装将 CP2103 接收字节以 115200 bit/s 回显。"), sec("7 固化", "本章无可执行固化步骤，因为尚无实物板卡修订确认、已批 bitstream 和验收规程；XTP213/Master XDC 已入库交叉核对。本轮明确停在码流生成前；固化前须补充操作、校验、回退和恢复规程。")],
         },
         {
             "number": 22, "id": "UART-DOC-022", "acronym": "PLDSDSR", "name": "UART 收发器可编程逻辑器件软件研制总结报告",
-            "sections": [sec("1 范围", "本文档为阶段性候选总结，项目未收尾，不得作为正式交付结论。"), sec("2 任务来源与可编程逻辑器件软件研制依据", PROJECT_FACTS, "任务来源是 Synthia Golden 参考项目建设；真实装备合同和系统任务书未提供。"), sec("3 可编程逻辑器件软件概述", "通用 UART 核、参数化分频、TX/RX FSM、两级 RX 同步和自检 TB。"), sec("4 可编程逻辑器件软件研制过程", "已完成候选需求/设计、RTL/TB 修正、历史 K70T exploratory 仿真/综合/STA 和文档整改；690T 器件级实证和板级确认未完成。"), sec("5 满足任务指标情况", "核级 9600 功能有历史 exploratory 证据；115200 扩展回归、覆盖、精确 690T part 实现、完整 XDC 和板测未闭合。"), sec("6 可编程逻辑器件软件测试", "行为仿真报告见 UART-DOC-006，实物确认为 0 执行/blocked。"), sec("7 质量保证情况", "已补齐候选 SQAP 和文档结构；独立质量审核和人类批准未执行。"), sec("8 配置管理情况", "使用 Git/SHA-256/manifest 保留候选身份；无获批产品基线。"), sec("9 可靠性、安全性分析", ASSURANCE), sec("10 测量与分析", "历史 exploratory 结果：10+9 个动态用例成功、约 63 LUT/70 FF、K70T 内部 100 MHz STA 有正余量。这些数据不是 690T 或板级结论。"), sec("11 结论", "当前只能结论“候选设计可继续实证”，不能结论“符合、验收、可交付或可使用”。")],
+            "sections": [sec("1 范围", "本文档为阶段性候选总结，项目未收尾，不得作为正式交付结论。"), sec("2 任务来源与可编程逻辑器件软件研制依据", PROJECT_FACTS, "任务来源是 Synthia Golden 参考项目建设；真实装备合同和系统任务书未提供。"), sec("3 可编程逻辑器件软件概述", "通用 UART 核、参数化分频、TX/RX FSM、两级 RX 同步、VC709 时钟/复位/CP2103 包装和自检 TB。"), sec("4 可编程逻辑器件软件研制过程", "已完成候选需求/设计、RTL/TB/XDC 修正，并在真实 Connector/Vivado 2021.1 上经 Mac→66 直连完成精确 part 查询、源码校验、9600/115200 XSim、综合和停在码流前的布局布线及报告。"), sec("5 满足任务指标情况", "9600 与 115200 均为 10/10 PASS；修订后 `DIFF_SSTL15` 的 690T 预码流实现 DRC 0 违规、WNS/WHS 为正、资源满足候选限值；XTP213/Master XDC 已入库交叉核对。覆盖、独立验证、批准和板测未闭合。"), sec("6 可编程逻辑器件软件测试", "行为仿真与工具报告见 UART-DOC-006 及 `evidence/vc709-prebit-20260828-diff-sstl15`；2026-08-27 包仅保留为修订前历史，实物确认为 0 执行/blocked。"), sec("7 质量保证情况", "已补齐候选 SQAP 和文档结构；独立质量审核和人类批准未执行。"), sec("8 配置管理情况", "使用 Git/SHA-256/manifest 保留候选身份；无获批产品基线。"), sec("9 可靠性、安全性分析", ASSURANCE), sec("10 测量与分析", "VC709/690T exploratory（修订后 direct）结果：9600 10/10、115200 10/10；55 LUT、62 FF、0 BRAM/DSP；methodology 0 违规；CDC 仅两级 ASYNC_REG 同步器的 CDC-3 Info ×1；DRC 0 违规；WNS 7.630 ns、WHS 0.093 ns、TNS/THS 0；未生成 bitstream。"), sec("11 结论", "当前可以结论“VC709/690T 候选已走通至码流生成前，具备继续人工评审和板级准备的技术基础”，但不能结论“符合、验收、可交付或可使用”。")],
         },
         {
             "number": 23, "id": "UART-DOC-023", "acronym": "SCMR", "name": "UART 收发器软件配置管理报告",
-            "sections": [sec("1 范围", "本报告记录当前候选配置状态，不冒充已批基线或发布报告。"), sec("2 引用文档", COMMON_REFS), sec("3 配置管理情况综述", "已使用 Git 和 SHA-256 管理仓库候选，当前无获批产品基线、发布或交付。"), sec("4 基本信息", table(["属性", "值"], [["项目", "GOLDEN-UART"], ["候选版本", "v2.3 candidate"], ["目标", "XC7VX690T；part 未验证"], ["配置库", "Git + manifest.sha256"]])), sec("5 专业组和权限", ROLES), sec("6 配置项记录", "候选配置项包含 RTL/TB/XDC/文档/标准参考集和 project-profile.json；精确列表以 manifest 和 Git tree 为准。"), sec("7 变更记录", "本版主要变更为 690T 目标、115200 回归、关键性/保证和全角色决策，以及 Word 文档补全。"), sec("8 基线记录", "本章无内容，因为当前没有获授权人类批准的 B0/B1/B2 或产品基线。"), sec("9 入库记录", "仓库提交和标准参考集已记录；正式配置库入库权限/单据待确定。"), sec("10 出库记录", "本章无内容，因未发生正式出库或交付。"), sec("11 审核记录", "有 Agent 自检记录，无独立配置审核和问题关闭批准。"), sec("12 备份记录", "仓库备份、保存期限和恢复演练尚未提供受控记录。"), sec("13 测量", "报告应统计配置项/基线/变更/审核/备份和问题关闭；当前仅报告候选文件和哈希完整性。"), sec("14 注释", "本报告不代替 Core 中的结构化配置事实。")],
+            "sections": [sec("1 范围", "本报告记录当前候选配置状态，不冒充已批基线或发布报告。"), sec("2 引用文档", COMMON_REFS), sec("3 配置管理情况综述", "已使用 Git 和 SHA-256 管理仓库候选，当前无获批产品基线、发布或交付。"), sec("4 基本信息", table(["属性", "值"], [["项目", "GOLDEN-UART"], ["候选版本", VERSION], ["目标", "VC709 / `xc7vx690tffg1761-2`；精确 part/profile 已完成 exploratory 验证"], ["配置库", "Git + manifest.sha256"]])), sec("5 专业组和权限", ROLES), sec("6 配置项记录", "候选配置项包含 RTL/TB/XDC/文档/标准参考集、project-profile.json 和 VC709 预码流证据；精确列表以 manifest 和 Git tree 为准。"), sec("7 变更记录", "本版主要变更为固定 VC709/690T、加入板级包装与 115200 回归、完成预码流实现证据，并同步关键性/保证、全角色和 Word 文档。"), sec("8 基线记录", "本章无内容，因为当前没有获授权人类批准的 B0/B1/B2 或产品基线。"), sec("9 入库记录", "仓库提交和标准参考集已记录；正式配置库入库权限/单据待确定。"), sec("10 出库记录", "本章无内容，因未发生正式出库或交付。"), sec("11 审核记录", "有 Agent 自检记录，无独立配置审核和问题关闭批准。"), sec("12 备份记录", "仓库备份、保存期限和恢复演练尚未提供受控记录。"), sec("13 测量", "报告应统计配置项/基线/变更/审核/备份和问题关闭；当前仅报告候选文件、哈希和 exploratory ToolRun 完整性。"), sec("14 注释", "本报告不代替 Core 中的结构化配置事实。")],
         },
         {
             "number": 24, "id": "UART-DOC-024", "acronym": "SQAR", "name": "UART 收发器软件质量保证报告",
-            "sections": [sec("1 范围", "本报告是阶段性候选质量状态记录，无独立质量角色签署。"), sec("2 引用文档", COMMON_REFS), sec("3 软件研制概述", PROJECT_FACTS), sec("4 软件质量保证情况", table(["活动", "当前情况", "结论边界"], [["文档审查", "已按 GJB 9764/438B 补齐 22 类 Word 候选及 3 份支撑文档", "待标准/质量独立审核"], ["代码/设计审查", "已有 Agent 自检和历史缺陷整改", "不替代独立评审"], ["仿真测试", "历史 exploratory 10+9 用例", "不是 formal/批准运行"], ["覆盖", "未采集批准代码/功能覆盖", "未闭合"], ["690T 工具证据", "part/profile 未验证", "blocked"], ["实物确认", "0 执行", "blocked"]])), sec("5 软件配置管理情况", "候选文件使用 Git/SHA-256/manifest；无获批基线、发布或交付。"), sec("6 第三方评测情况", "本章无内容，因未发生第三方评测；不得用 Agent 或外部模型自检冒充第三方结论。"), sec("7 注释", ASSURANCE, "当前质量结论为 review_required，不是通过。")],
+            "sections": [sec("1 范围", "本报告是阶段性候选质量状态记录，无独立质量角色签署。"), sec("2 引用文档", COMMON_REFS), sec("3 软件研制概述", PROJECT_FACTS), sec("4 软件质量保证情况", table(["活动", "当前情况", "结论边界"], [["文档审查", "已按 GJB 9764/438B 补齐 22 类 Word 候选及 3 份支撑文档", "待标准/质量独立审核"], ["代码/设计审查", "已有 Agent 自检和历史缺陷整改", "不替代独立评审"], ["仿真测试", "VC709/690T exploratory：9600 10/10、115200 10/10", "不是 formal/批准运行"], ["覆盖", "未采集批准代码/功能覆盖", "未闭合"], ["690T 工具证据", "精确 part/profile、综合、预码流实现、methodology/CDC/DRC/STA 已验证", "exploratory candidate；待独立复核/批准"], ["实物确认", "0 执行", "blocked"]])), sec("5 软件配置管理情况", "候选文件使用 Git/SHA-256/manifest；无获批基线、发布或交付。"), sec("6 第三方评测情况", "本章无内容，因未发生第三方评测；不得用 Agent 或外部模型自检冒充第三方结论。"), sec("7 注释", ASSURANCE, "当前质量结论为 review_required，不是通过。")],
         },
     ])
 
@@ -263,18 +269,18 @@ def add_inline_runs(paragraph, text: str, *, size: float = 11, force_bold: bool 
     for match in re.finditer(r"(`[^`]+`|\*\*[^*]+\*\*)", text):
         if match.start() > cursor:
             run = paragraph.add_run(text[cursor:match.start()])
-            set_run_font(run, "FangSong_GB2312", size, bold=force_bold)
+            set_run_font(run, "Songti SC", size, bold=force_bold)
         token = match.group(0)
         if token.startswith("`"):
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, "Courier New", max(size - 0.5, 8), bold=force_bold, color="1F3A5F")
         else:
             run = paragraph.add_run(token[2:-2])
-            set_run_font(run, "FangSong_GB2312", size, bold=True)
+            set_run_font(run, "Songti SC", size, bold=True)
         cursor = match.end()
     if cursor < len(text):
         run = paragraph.add_run(text[cursor:])
-        set_run_font(run, "FangSong_GB2312", size, bold=force_bold)
+        set_run_font(run, "Songti SC", size, bold=force_bold)
 
 
 def add_numbering_definition(doc: Document, *, abstract_id: int, num_id: int, ordered: bool) -> None:
@@ -409,9 +415,9 @@ def style_document(doc: Document) -> None:
     section.footer_distance = Cm(1.25)
 
     normal = doc.styles["Normal"]
-    normal.font.name = "FangSong_GB2312"
+    normal.font.name = "Songti SC"
     for font_key in ("eastAsia", "ascii", "hAnsi", "cs"):
-        normal._element.rPr.rFonts.set(qn(f"w:{font_key}"), "FangSong_GB2312")
+        normal._element.rPr.rFonts.set(qn(f"w:{font_key}"), "Songti SC")
     normal.font.size = Pt(11)
     normal.paragraph_format.space_before = Pt(0)
     normal.paragraph_format.space_after = Pt(6)
@@ -424,9 +430,9 @@ def style_document(doc: Document) -> None:
         ("Heading 3", 12, "1F4D78", 10, 5),
     ):
         style = doc.styles[name]
-        style.font.name = "FangSong_GB2312"
+        style.font.name = "Songti SC"
         for font_key in ("eastAsia", "ascii", "hAnsi", "cs"):
-            style._element.rPr.rFonts.set(qn(f"w:{font_key}"), "FangSong_GB2312")
+            style._element.rPr.rFonts.set(qn(f"w:{font_key}"), "Songti SC")
         style.font.size = Pt(size)
         style.font.color.rgb = RGBColor.from_string(color)
         style.font.bold = name != "Title"
@@ -437,18 +443,18 @@ def style_document(doc: Document) -> None:
 
     for style_name in ("List Bullet", "List Number"):
         style = doc.styles[style_name]
-        style.font.name = "FangSong_GB2312"
+        style.font.name = "Songti SC"
         for font_key in ("eastAsia", "ascii", "hAnsi", "cs"):
-            style._element.rPr.rFonts.set(qn(f"w:{font_key}"), "FangSong_GB2312")
+            style._element.rPr.rFonts.set(qn(f"w:{font_key}"), "Songti SC")
         style.font.size = Pt(11)
         style.paragraph_format.left_indent = Inches(0.375)
         style.paragraph_format.first_line_indent = Inches(-0.188)
         style.paragraph_format.space_after = Pt(4)
         style.paragraph_format.line_spacing = 1.25
 
-    # compact_reference_guide with named A4/FangSong-GB2312 overrides:
+    # compact_reference_guide with named A4/Songti SC overrides:
     # A4 210 x 297 mm, 25.4 mm margins, 9025 DXA usable width;
-    # FangSong_GB2312 is used for all scripts to match formal Chinese engineering-document practice.
+    # Songti SC is used for all scripts because it renders CJK reliably in Word/LibreOffice on macOS.
     add_numbering_definition(doc, abstract_id=90, num_id=90, ordered=False)
     add_numbering_definition(doc, abstract_id=91, num_id=91, ordered=True)
 
@@ -456,7 +462,7 @@ def style_document(doc: Document) -> None:
 def add_page_number(paragraph) -> None:
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run = paragraph.add_run("第 ")
-    set_run_font(run, "FangSong_GB2312", 9, color="666666")
+    set_run_font(run, "Songti SC", 9, color="666666")
     fld_char = OxmlElement("w:fldChar")
     fld_char.set(qn("w:fldCharType"), "begin")
     instr = OxmlElement("w:instrText")
@@ -468,7 +474,7 @@ def add_page_number(paragraph) -> None:
     run._r.append(instr)
     run._r.append(end)
     suffix = paragraph.add_run(" 页")
-    set_run_font(suffix, "FangSong_GB2312", 9, color="666666")
+    set_run_font(suffix, "Songti SC", 9, color="666666")
 
 
 def add_table(doc: Document, rows: list[list[str]]) -> None:
@@ -530,7 +536,7 @@ def markdown_to_docx(markdown: str, output: Path) -> None:
     header.text = "Synthia Golden | 受控候选文档"
     header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     for run in header.runs:
-        set_run_font(run, "FangSong_GB2312", 8.5, color="666666")
+        set_run_font(run, "Songti SC", 8.5, color="666666")
     add_page_number(doc.sections[0].footer.paragraphs[0])
 
     index = 0
@@ -547,7 +553,7 @@ def markdown_to_docx(markdown: str, output: Path) -> None:
                 p.paragraph_format.left_indent = Cm(0.5)
                 p.paragraph_format.space_after = Pt(6)
                 run = p.add_run("\n".join(code_lines))
-                set_run_font(run, "FangSong_GB2312", 8.5, color="1F3A5F")
+                set_run_font(run, "Songti SC", 8.5, color="1F3A5F")
                 code_lines = []
                 in_code = False
             else:
@@ -604,7 +610,7 @@ def markdown_to_docx(markdown: str, output: Path) -> None:
             p.paragraph_format.left_indent = Cm(0.6)
             p.paragraph_format.right_indent = Cm(0.3)
             run = p.add_run(stripped[2:])
-            set_run_font(run, "FangSong_GB2312", 9.5, color="555555")
+            set_run_font(run, "Songti SC", 9.5, color="555555")
         else:
             p = doc.add_paragraph()
             p.paragraph_format.first_line_indent = Cm(0.74)
@@ -618,7 +624,7 @@ def markdown_to_docx(markdown: str, output: Path) -> None:
     core_props.keywords = "candidate; GJB 9432; GJB 9764; UART; XC7VX690T"
     core_props.comments = (
         "Generated from controlled Markdown source; compact_reference_guide preset with named A4 and "
-        "FangSong_GB2312 font override; memo_masthead-style title plus metadata cover; human review and approval pending."
+        "Songti SC font override; memo_masthead-style title plus metadata cover; human review and approval pending."
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output)
