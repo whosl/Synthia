@@ -8,16 +8,20 @@
 //   * 每项检查失败均以 $fatal 终止，全部通过才打印最终 PASS；
 //   * 这是行为级候选证据，不替代门级仿真、板级测试或人工批准。
 //============================================================================
-module uart_tb;
+module uart_tb #(
+    parameter integer BAUD_RATE = 9600
+);
 
     localparam integer CLK_FREQ       = 100_000_000;
-    localparam integer BAUD_RATE      = 9600;
     localparam integer CLKS_PER_BIT   = CLK_FREQ / BAUD_RATE; // 10416
     localparam integer CLK_PERIOD_NS  = 10;
     localparam integer DUT_BIT_NS     = CLKS_PER_BIT * CLK_PERIOD_NS;
-    localparam integer EXT_FAST_NS    = 102_083; // 9600 bit/s 的 +2% 端点
-    localparam integer EXT_SLOW_NS    = 106_250; // 9600 bit/s 的 -2% 端点
-    localparam integer MAX_INTERVAL_NS = 1_000_000_000 / 960; // >= 960 byte/s
+    localparam time EXT_FAST_NS       = (64'd1_000_000_000 * 98) / (BAUD_RATE * 100);
+    localparam time EXT_SLOW_NS       = (64'd1_000_000_000 * 102) / (BAUD_RATE * 100);
+    // One system-clock handoff is required between tx_done and the next accepted
+    // tx_start. Bound the interval to the 10-bit frame plus two clocks rather
+    // than truncating the ideal real-number byte interval below that boundary.
+    localparam time MAX_INTERVAL_NS   = (CLKS_PER_BIT * 10 + 2) * CLK_PERIOD_NS;
 
     reg        clk         = 1'b0;
     reg        rst         = 1'b1;
@@ -415,7 +419,7 @@ module uart_tb;
             if (interval_ns > MAX_INTERVAL_NS)
                 $fatal(1, "TX_THROUGHPUT: interval %0d ns exceeds %0d ns",
                        interval_ns, MAX_INTERVAL_NS);
-            $display("  observed start interval=%0d ns, throughput >= 960 byte/s", interval_ns);
+            $display("  observed start interval=%0d ns (limit=%0d ns)", interval_ns, MAX_INTERVAL_NS);
             @(posedge tx_done);
         end
     endtask

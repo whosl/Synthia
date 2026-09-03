@@ -1,13 +1,16 @@
-# =============================================================================
-# 文件名称 : uart_exploratory.xdc
-# 用途说明 : 非交付、非门禁的 exploratory Vivado 试跑专用约束。
-#            该文件允许在缺少板级事实时收集资源/STA/DRC 诊断，不得进入
-#            B2～B4、正式码流、板测或交付清单。
-# =============================================================================
-
-create_clock -name sys_clk -period 10.000 [get_ports clk]
-
-# 仅为 exploratory 证据收集降低严重度。报告中必须保留全部违规，不得将
-# write_bitstream 成功表述为设计满足板级约束或具备发布条件。
-set_property SEVERITY WARNING [get_drc_checks NSTD-1]
-set_property SEVERITY WARNING [get_drc_checks UCIO-1]
+# Exploratory runs use the same complete VC709 facts; no DRC is downgraded.
+set_property PACKAGE_PIN H19 [get_ports sysclk_p]
+set_property PACKAGE_PIN G18 [get_ports sysclk_n]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_p]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_n]
+create_clock -name sysclk_200 -period 5.000 [get_ports sysclk_p]
+set_property PACKAGE_PIN AV40 [get_ports cpu_reset]
+set_property IOSTANDARD LVCMOS18 [get_ports cpu_reset]
+set_property PACKAGE_PIN AU36 [get_ports uart_txd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_txd]
+set_property PACKAGE_PIN AU33 [get_ports uart_rxd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_rxd]
+set_false_path -from [get_ports uart_rxd] -to [get_pins u_uart/u_uart_rx/rxd_meta_reg/D]
+set_false_path -from [get_ports cpu_reset]
+set_property CFGBVS GND [current_design]
+set_property CONFIG_VOLTAGE 1.8 [current_design]

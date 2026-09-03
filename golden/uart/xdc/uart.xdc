@@ -1,25 +1,17 @@
-# =============================================================================
-# 文件名称 : uart.xdc
-# 目标器件 : xc7k70tfbv676-1
-# 用途说明 : 正式约束候选。当前只定义主时钟；板级引脚、电平标准、输入/
-#            输出延迟及配置电压均未获得权威板卡资料，因此保持 fail-closed。
-# =============================================================================
-
-# ---- 主时钟约束 ----
-# 顶层 clk 端口，100 MHz，周期 10.000 ns
-create_clock -name sys_clk -period 10.000 [get_ports clk]
-
-# 注意：内部时序逻辑位于唯一 clk 域，不代表顶层输入/输出时序已经闭合。
-# set_input_delay / set_output_delay 需由对端接口预算和板级时序事实导出；
-# 在这些事实缺失时不得编造时序例外或 I/O 延迟。
-
-# =============================================================================
-# 未决板级事实（阻断正式实现/码流）
-# -----------------------------------------------------------------------------
-# NSTD-1 : 设计中存在未绑定物理引脚的顶层端口（本工程仅做功能仿真与综合
-#          冒烟，顶层端口经环回直接连接，不映射到封装引脚）。
-# UCIO-1 : 顶层端口缺少 I/O 标准（IOSTANDARD）约束，原因同上。
-# 处置   : 本文件故意不降低 NSTD-1/UCIO-1 严重度。正式实现必须在权威板卡
-#          原理图、器件 Bank 电压和接口时序预算齐备后补全 PACKAGE_PIN、
-#          IOSTANDARD、配置电压和 I/O delay，并重新评审/回归。
-# =============================================================================
+# VC709 Rev 1.0 / XC7VX690T-2FFG1761C. Pin/electrical facts: AMD UG887 v1.6.
+set_property PACKAGE_PIN H19 [get_ports sysclk_p]
+set_property PACKAGE_PIN G18 [get_ports sysclk_n]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_p]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_n]
+create_clock -name sysclk_200 -period 5.000 [get_ports sysclk_p]
+set_property PACKAGE_PIN AV40 [get_ports cpu_reset]
+set_property IOSTANDARD LVCMOS18 [get_ports cpu_reset]
+set_property PACKAGE_PIN AU36 [get_ports uart_txd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_txd]
+set_property PACKAGE_PIN AU33 [get_ports uart_rxd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_rxd]
+# UART and pushbutton are asynchronous; no fictitious synchronous I/O delay.
+set_false_path -from [get_ports uart_rxd] -to [get_pins u_uart/u_uart_rx/rxd_meta_reg/D]
+set_false_path -from [get_ports cpu_reset]
+set_property CFGBVS GND [current_design]
+set_property CONFIG_VOLTAGE 1.8 [current_design]
