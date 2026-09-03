@@ -37,7 +37,10 @@
         "sha256": "c43dfa87ff36b96d105cd263518d216ae99969f5f372fb1aa10f9c58e0b7c86f",
         "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
       },
-      "directlyReferences": ["GBT11457-2006", "GJB438B-2009"]
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB438B-2009"
+      ]
     },
     {
       "id": "GJB438B-2009",
@@ -53,7 +56,10 @@
         "url": null,
         "locator": "complete local scan supplied by the user"
       },
-      "directlyReferences": ["GBT11457-2006", "GJB2786A-2009"]
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB2786A-2009"
+      ]
     },
     {
       "id": "GJB5235-2004",
@@ -75,7 +81,10 @@
         "sha256": "7ee5d13d5dea89e603efa3c349178cc9961c6e3939cd5efc0070ca79ad61a273",
         "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
       },
-      "directlyReferences": ["GBT8566-2022", "GBT11457-2006"]
+      "directlyReferences": [
+        "GBT8566-2022",
+        "GBT11457-2006"
+      ]
     },
     {
       "id": "GJB9432-2018",
@@ -91,7 +100,11 @@
         "url": null,
         "locator": "11-page complete local copy supplied by the user; cover, foreword, clauses, normative Annex A and back cover visually verified"
       },
-      "directlyReferences": ["GBT11457-2006", "GJB5235-2004", "GJB9433-2018"]
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB5235-2004",
+        "GJB9433-2018"
+      ]
     },
     {
       "id": "GJB9433-2018",
@@ -113,7 +126,10 @@
         "sha256": "60dd9265b95adda950cd8d6160aa837284fcbebe53f55e3a8bd156cbca79996f",
         "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
       },
-      "directlyReferences": ["GBT11457-2006", "GJB9432-2018"]
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB9432-2018"
+      ]
     },
     {
       "id": "GJB9764-2020",
@@ -129,20 +145,24 @@
         "url": null,
         "locator": "complete local scan supplied by the user"
       },
-      "directlyReferences": ["GBT11457-2006", "GJB438B-2009", "GJB9432-2018"]
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB438B-2009",
+        "GJB9432-2018"
+      ]
     },
     {
       "id": "GBT8566-2022",
       "designation": "GB/T 8566-2022",
       "title": "系统与软件工程 软件生存周期过程",
-      "status": "missing",
-      "source": {
-        "kind": "user-located-not-synchronized",
-        "url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=1196DB510493E4E57EC6796598E75CDA",
-        "purchaseUrl": "https://www.spc.org.cn/online/9f7d2faeb2dd3e15091b9cce22bdc5d4.html",
-        "locator": "user located a copy at Windows host 140 path E:\\dev\\GBT8566-2022\\GBT8566-2022.pdf; file has not yet been synchronized to this repository, hashed, or visually verified; applicability still requires review"
-      },
-      "directlyReferences": []
+      "status": "available",
+      "source": "scribd_screenshot_reconstruction",
+      "directlyReferences": [],
+      "pageCount": 115,
+      "sha256": "0e5be2cb26ca190279e1cc69fec1a396c5ab4d8d2310b1d8d3d10e4edcbced59",
+      "markdownFile": "GBT8566-2022.md",
+      "pdfFile": "GBT8566-2022.pdf",
+      "notes": "Scribd 在线页逐页截图合成 PDF + tesseract OCR 转写；正式结论以官方版为准"
     }
   ]
 }

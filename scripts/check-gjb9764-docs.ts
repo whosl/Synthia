@@ -82,7 +82,7 @@ const contracts: readonly DocumentContract[] = [
     documentId: "UART-DOC-009",
     titleMarker: "（IRS）",
     sections: ["1 范围", "2 引用文档", "3 接口需求", "4 质量与合格性", "5 需求可追踪性", "6 注释"],
-    extraMarkers: ["UART-IRS-005", "blocked", "XC7VX690T"],
+    extraMarkers: ["UART-IRS-005", "阻塞", "XC7VX690T"],
   },
   {
     file: "10-UART 板级与逻辑接口设计说明.md",
@@ -96,14 +96,14 @@ const contracts: readonly DocumentContract[] = [
     documentId: "UART-DOC-011",
     titleMarker: "（PLDSFARAR）",
     sections: ["1 范围", "2 引用文档", "3 需求分析", "4 可行性分析", "5 必要性分析", "6 继承性分析", "7 风险分析"],
-    extraMarkers: ["get_parts", "历史 K70T", "Agent 冒充批准"],
+    extraMarkers: ["精确 part", "历史 K70T", "Agent 冒充批准"],
   },
   {
     file: "12-UART 收发器软件开发计划.md",
     documentId: "UART-DOC-012",
     titleMarker: "（SDP）",
     sections: ["1 范围", "2 引用文档", "3 软件开发概述", "4 组织和责职", "5 软件开发活动", "6 进度和控制节点", "7 资源、风险和测量", "8 配置、质量、保密和分承制方", "9 注释"],
-    extraMarkers: ["全角色模型", "G4", "blocked by part/board"],
+    extraMarkers: ["全角色模型", "G4", "blocked by coverage/independent review/board/approval"],
   },
   {
     file: "13-UART 收发器软件配置管理计划.md",
@@ -124,7 +124,7 @@ const contracts: readonly DocumentContract[] = [
     documentId: "UART-DOC-015",
     titleMarker: "（STrP）",
     sections: ["1 范围", "2 引用文档", "3 软件保障资源", "4 推荐规程", "5 培训", "6 预期更改区域", "7 移交计划", "8 注释"],
-    extraMarkers: ["blocked by part", "blocked by board", "不得宣称已移交"],
+    extraMarkers: ["精确 690T profile", "blocked by schematic archive/physical board/approval", "不得宣称已移交"],
   },
   {
     file: "16-UART 收发器可编程逻辑器件软件确认测试计划.md",
@@ -173,7 +173,7 @@ const contracts: readonly DocumentContract[] = [
     documentId: "UART-DOC-022",
     titleMarker: "（PLDSDSR）",
     sections: ["1 范围", "2 任务来源与可编程逻辑器件软件研制依据", "3 可编程逻辑器件软件概述", "4 可编程逻辑器件软件研制过程", "5 满足任务指标情况", "6 可编程逻辑器件软件测试", "7 质量保证情况", "8 配置管理情况", "9 可靠性、安全性分析", "10 测量与分析", "11 结论"],
-    extraMarkers: ["项目未收尾", "历史 K70T exploratory", "不能结论"],
+    extraMarkers: ["项目未收尾", "VC709/690T exploratory", "不能结论"],
   },
   {
     file: "23-UART 收发器软件配置管理报告.md",
@@ -343,17 +343,18 @@ async function checkStandardsManifest(standardsDir: string): Promise<Gjb9764Issu
   }
 
   const gbt8566 = byId.get("GBT8566-2022");
-  if (!gbt8566 || gbt8566.status !== "missing" || gbt8566.source?.kind !== "user-located-not-synchronized") {
-    issues.push({ file: "standards.json", message: "GB/T 8566 必须登记为用户已定位、仓库尚未同步且待版本评审" });
+  if (!gbt8566 || gbt8566.status !== "available" || gbt8566.source !== "scribd_screenshot_reconstruction") {
+    issues.push({ file: "standards.json", message: "GB/T 8566 必须登记为 Scribd 截图重建（available + scribd_screenshot_reconstruction），且注明非官方版本" });
   }
   if (byId.size !== standardContracts.length + 1) {
     issues.push({ file: "standards.json", message: "机器清单存在未纳入校验契约的标准条目" });
   }
 
+  // GB/T 8566 files are now permitted (Scribd reconstruction); verify both exist.
   const directoryEntries = await readdir(resolve(standardsDir));
-  for (const forbidden of ["GBT8566-2022.pdf", "GBT8566-2022.md"]) {
-    if (directoryEntries.includes(forbidden)) {
-      issues.push({ file: forbidden, message: "缺失标准不得提交残件或伪完整转写" });
+  for (const required of ["GBT8566-2022.pdf", "GBT8566-2022.md"]) {
+    if (!directoryEntries.includes(required)) {
+      issues.push({ file: required, message: "Scribd 重建的 GB/T 8566 PDF 与转写稿必须同时入库" });
     }
   }
   return issues;

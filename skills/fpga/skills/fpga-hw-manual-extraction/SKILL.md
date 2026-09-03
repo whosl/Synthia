@@ -43,7 +43,7 @@
 
 范围判定优先级：用户当前消息显式请求 → 用户显式提供的硬件文件/路径 → 既有 `doc/intake/summary.md` → 既有 `extracted_facts.json`（同范围保留已确认事实）→ 其他明确缩小硬件目标的项目上下文。无关硬件范围之间歧义时以 needs_input 停止。
 
-输入优先级：用户提供的硬件参考（手册/数据手册 PDF、原理图、管脚表 CSV/Excel/Markdown、参考约束文件）→ `doc/hw/` 下既有资料 → intake 摘要 → 既有 `extracted_facts.json` → `doc/hw/config.json`（仅背景，不作输出目标）。来源优先级与字段归一化细节见 `references.md`。
+输入优先级：用户提供的硬件参考（手册/数据手册 PDF、原理图、管脚表 CSV/Excel/Markdown、参考约束文件）→ 与目标硬件匹配的 `skills/fpga/references/hardware/hardware-documents.json` 入库资料 → `doc/hw/` 下既有资料 → intake 摘要 → 既有 `extracted_facts.json` → `doc/hw/config.json`（仅背景，不作输出目标）。入库资料必须通过目录中的哈希和标识字段匹配，不得仅因文件名相似就用于目标板卡或器件。来源优先级与字段归一化细节见 `references.md`。
 
 ## 5. 工作流程
 

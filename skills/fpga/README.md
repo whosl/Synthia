@@ -39,6 +39,7 @@
 skills/fpga/
 ├── skill-pack.json            # 技能包清单（synthia.skill-pack.v1）
 ├── references/standards/      # 标准 PDF、检索转写、来源/哈希/缺口机器清单
+├── references/hardware/       # 板卡/器件/接口资料、来源与哈希机器清单
 ├── rules/                     # 包级规则（路由、门禁、文档、布局、工具链/Tcl 边界、交接、失败路由、产物状态）
 └── skills/<skill-id>/
     ├── SKILL.md               # 技能说明（用途/边界/输入/流程/产物/证据/失败处理/交接）
