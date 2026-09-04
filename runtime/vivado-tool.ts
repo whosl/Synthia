@@ -679,9 +679,9 @@ export function assembleVivadoTool(): AgentTool {
 }
 
 /** Line classification mirroring the worker's log digest (connector/log-digest.ts). */
-const DIAGNOSTIC_FAILURE_RE = /^\s*(?:ERROR\b|Fatal:|\*\s*Error|FAIL\b)/;
+const DIAGNOSTIC_FAILURE_RE = /^\s*(?:ERROR\b|FATAL:|\*\s*Error|FAIL\b)/i;
 const DIAGNOSTIC_WARNING_RE = /^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/;
-const DIAGNOSTIC_SIM_FAILURE_RE = /(?:\$fatal|\bFatal:)/;
+const DIAGNOSTIC_SIM_FAILURE_RE = /(?:\$fatal|\bFatal:)/i;
 const DIAGNOSTIC_PASS_RE = /\bPASS/;
 const DIAGNOSTIC_PHASE_RE = /^(?:PHASE=\S+|PHASE_EXIT_CODE=\d+|SOURCE_VALIDATION_OK|SIMULATION_OK|SYNTHIA_DRC_FAILED|SYNTHIA_TIMING_FAILED|SYNTHIA_TIMING_UNCONSTRAINED)$/;
 

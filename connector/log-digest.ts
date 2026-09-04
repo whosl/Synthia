@@ -63,10 +63,14 @@ export const LINE_CHAR_CAP = 400;
 export const CONTEXT_LINE_CHAR_CAP = 200;
 export const CONTEXT_LINES = 2;
 
-/** Vivado batch ("ERROR: [Vivado 12-…] …"), TB ("ERROR [B2B] …"), xsim ("Fatal: …"). */
-const FAILURE_LINE_RE = /^\s*(?:ERROR\b|Fatal:|\*\s*Error|FAIL\b)/;
+/** Vivado batch ("ERROR: [Vivado 12-…] …"), TB ("ERROR [B2B] …"), xsim ("Fatal: …").
+ *  Case-insensitive fatal prefix: TBs commonly print "FATAL:" — p9's first
+ *  failure shape ("$finish reached but digest empty", state=failed) was
+ *  exactly an uppercase FATAL: line being missed (only "Fatal:" matched),
+ *  forcing the TB to re-prefix failures as "ERROR: TB FAIL". */
+const FAILURE_LINE_RE = /^\s*(?:ERROR\b|FATAL:|\*\s*Error|FAIL\b)/i;
 /** Applied only inside the simulator region / dedicated simulator stream. */
-const SIMULATOR_FAILURE_RE = /(?:\$fatal|\bFatal:)/;
+const SIMULATOR_FAILURE_RE = /(?:\$fatal|\bFatal:)/i;
 const WARNING_LINE_RE = /^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/;
 /** Applied only to simulator output, matching judgeSimulation's PASS semantics
  *  ("PASS", "ALL TESTS PASSED", …). */

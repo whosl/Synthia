@@ -112,4 +112,14 @@ describe("buildLogDigest", () => {
     const digest = buildLogDigest("simulate", { stdout: vivadoSimulateStdout(simRegion), simulator: simRegion });
     expect(digest.counts.failure).toBe(1);
   });
+
+  test("uppercase FATAL: lines classify as failures (H4 regression anchor)", () => {
+    // p9's TB printed "FATAL: scenario failed" — xsim $fatal path — and the
+    // digest missed it because only "Fatal:" matched. The state was failed
+    // with zero failure lines, forcing a TB prefix rewrite as workaround.
+    const simRegion = "INFO [S1] begin\nFATAL: scenario failed at t=110000\n$finish";
+    const digest = buildLogDigest("simulate", { stdout: vivadoSimulateStdout(simRegion), simulator: simRegion });
+    expect(digest.counts.failure).toBe(1);
+    expect(digest.failureLines[0]!.line).toContain("FATAL: scenario failed");
+  });
 });
