@@ -3242,6 +3242,16 @@ async function main(): Promise<void> {
   const server = new RuntimeServer(config, factory);
   await server.start();
 
+  // H1: journal whatever escapes the loop instead of dying silently (Core and
+  // Runtime both vanished without a log line during the C-series runs).
+  process.on("uncaughtException", (err) => {
+    process.stderr.write(`[runtime-server] uncaught exception: ${err}\n`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(`[runtime-server] unhandled rejection: ${reason}\n`);
+  });
+
   // Graceful shutdown.
   process.on("SIGINT", async () => { await server.stop(); process.exit(0); });
   process.on("SIGTERM", async () => { await server.stop(); process.exit(0); });

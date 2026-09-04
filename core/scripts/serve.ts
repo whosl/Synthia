@@ -23,6 +23,17 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
+// H1: a silent death with an empty log is the worst failure shape — both Core
+// and Runtime exited without a trace during the C-series runs. Anything that
+// escapes the server loop lands here and is journaled before the exit.
+process.on("uncaughtException", (err) => {
+  console.error("[core] uncaught exception:", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[core] unhandled rejection:", reason);
+});
+
 const features = resolveCoreFeatureFlags({ env: process.env });
 const pool = new Pool({ connectionString: DATABASE_URL });
 const connector = await createConnectorFromEnv();
