@@ -643,36 +643,26 @@ export function assembleVivadoTool(): AgentTool {
             }
           : {}),
         ...(errorCode ? { errorCode } : {}),
-        ...(result.stderr ? { stderr: capDiagnostic(result.stderr) } : {}),
-        ...(result.stdout ? { stdout: capDiagnostic(result.stdout) } : {}),
+        ...(result.stderr ? { stderr: diagnosticExcerpt(result.stderr) } : {}),
+        ...(result.stdout ? { stdout: diagnosticExcerpt(result.stdout) } : {}),
         evidence: evidenceEntries.map((e) => ({ name: e.name, uri: e.uri, mediaType: e.mediaType, sizeBytes: e.sizeBytes })),
       };
 
-      // On a normal simulation/compile failure (not fail-closed), pull the
-      // structured worker-result.json so the model gets exitCode/phase + stdout/
-      // stderr tails rather than blind repair. Degrades to the manifest-only
-      // summary above on any fetch/parse error (existing behavior).
-      if (result.status === "failed" && !failClosed) {
-        const hasResult = evidenceEntries.some((e) => e.name === WORKER_RESULT_NAME);
-        let diagnosticsFetched = false;
-        if (hasResult) {
-          try {
-            const c = await connector.fetchEvidenceContent(result.jobId, WORKER_RESULT_NAME);
-            const parsed = JSON.parse(c.content) as { exitCode?: number; phase?: string; stdout?: string; stderr?: string };
-            const headerParts: string[] = [];
-            if (parsed.phase) headerParts.push(`phase=${parsed.phase}`);
-            if (parsed.exitCode !== undefined) headerParts.push(`exitCode=${parsed.exitCode}`);
-            summary.failureDiagnostics = {
-              ...(headerParts.length > 0 ? { summary: headerParts.join(", ") } : {}),
-              stdout: capDiagnostic(parsed.stdout ?? ""),
-              stderr: capDiagnostic(parsed.stderr ?? ""),
-            };
-            diagnosticsFetched = true;
-          } catch {
-            diagnosticsFetched = false;
-          }
+      // Diagnostics for the model: prefer the worker's structured log digest
+      // (synthia-log-digest.v1, a small dedicated evidence file), then the
+      // logDigest embedded in worker-result.json, then degrade to smart
+      // excerpts of worker-result's simulator/stdout streams. On success we
+      // still surface the compact digest (pass markers / phase trail) so the
+      // model can cite what actually passed, not just the state field.
+      const wantsDiagnostics = (result.status === "failed" || result.status === "succeeded") && !failClosed;
+      if (wantsDiagnostics) {
+        const diagnostics = await fetchDiagnostics(connector, result.jobId, evidenceEntries);
+        if (result.status === "failed" && diagnostics) {
+          summary.failureDiagnostics = diagnostics.diagnostics;
+          summary.diagnosticsSource = diagnostics.source;
+        } else if (result.status === "succeeded" && diagnostics?.digest) {
+          summary.logDigest = compactDigest(diagnostics.digest);
         }
-        summary.diagnosticsFetched = diagnosticsFetched;
       }
 
       if (failClosed) {
@@ -688,7 +678,148 @@ export function assembleVivadoTool(): AgentTool {
   };
 }
 
-/** Bound a diagnostic string to 2000 chars, marking the elided tail. */
-function capDiagnostic(s: string): string {
-  return s.length <= 2000 ? s : s.slice(0, 2000) + `\n…(truncated, ${s.length - 2000} more chars)`;
+/** Line classification mirroring the worker's log digest (connector/log-digest.ts). */
+const DIAGNOSTIC_FAILURE_RE = /^\s*(?:ERROR\b|Fatal:|\*\s*Error|FAIL\b)/;
+const DIAGNOSTIC_WARNING_RE = /^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/;
+const DIAGNOSTIC_SIM_FAILURE_RE = /(?:\$fatal|\bFatal:)/;
+const DIAGNOSTIC_PASS_RE = /\bPASS/;
+const DIAGNOSTIC_PHASE_RE = /^(?:PHASE=\S+|PHASE_EXIT_CODE=\d+|SOURCE_VALIDATION_OK|SIMULATION_OK|SYNTHIA_DRC_FAILED|SYNTHIA_TIMING_FAILED|SYNTHIA_TIMING_UNCONSTRAINED)$/;
+
+export interface DiagnosticExcerptPart { readonly kind: "head" | "failure" | "pass" | "warning" | "phase" | "tail"; readonly text: string }
+
+/**
+ * Content-aware log excerpt. Position windows (head or tail slices) are wrong
+ * for Vivado logs: batch runs put project-generation noise up front and TB
+ * assertions at the end, but multi-scenario TBs interleave errors anywhere.
+ * This keeps the head banner, every classified line with 2 lines of context
+ * (capped), phase markers, and the tail verdict — with elision counts so the
+ * reader knows what was dropped. Returns the whole string when it fits.
+ */
+export function diagnosticExcerptParts(s: string, cap = 2000): DiagnosticExcerptPart[] {
+  if (s.length <= cap) return [{ kind: "head", text: s }];
+  const lines = s.split(/\r?\n/);
+  const parts: DiagnosticExcerptPart[] = [];
+  const budget = () => cap - parts.reduce((n, p) => n + p.text.length + 1, 0);
+  const emit = (kind: DiagnosticExcerptPart["kind"], text: string, maxLines = 1): boolean => {
+    let block = "";
+    const chosen: string[] = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (chosen.length >= maxLines) break;
+      const candidate = line.length > 400 ? `${line.slice(0, 400)}…` : line;
+      if (block.length + candidate.length + 2 > budget()) break;
+      chosen.push(candidate);
+      block = chosen.join("\n");
+    }
+    if (chosen.length === 0) return false;
+    parts.push({ kind, text: block });
+    return true;
+  };
+
+  emit("head", lines.slice(0, 3).join("\n"));
+  let failureKept = 0;
+  let elided = 0;
+  for (let i = 0; i < lines.length && failureKept < 10; i++) {
+    const line = lines[i]!;
+    const isFailure = DIAGNOSTIC_FAILURE_RE.test(line) || DIAGNOSTIC_SIM_FAILURE_RE.test(line);
+    const isPass = DIAGNOSTIC_PASS_RE.test(line) && !isFailure;
+    const isWarning = DIAGNOSTIC_WARNING_RE.test(line);
+    const isPhase = DIAGNOSTIC_PHASE_RE.test(line);
+    if (!isFailure && !isPass && !isWarning && !isPhase) continue;
+    const context: string[] = [];
+    if (isFailure) {
+      for (let j = i - 1; j >= 0 && context.length < 2; j--) {
+        const prev = lines[j]!;
+        if (prev.trim().length > 0) context.unshift(prev.length > 200 ? `${prev.slice(0, 200)}…` : prev);
+      }
+    }
+    const block = [...context, line.length > 400 ? `${line.slice(0, 400)}…` : line].join("\n");
+    const kind: DiagnosticExcerptPart["kind"] = isFailure ? "failure" : isPhase ? "phase" : isPass ? "pass" : "warning";
+    if (budget() - 40 <= 0) { elided++; continue; }
+    parts.push({ kind, text: block });
+    if (isFailure) failureKept++;
+  }
+  emit("tail", lines.slice(-5).join("\n"), 5);
+  return parts;
+}
+
+export function diagnosticExcerpt(s: string, cap = 2000): string {
+  const parts = diagnosticExcerptParts(s, cap);
+  return parts.length === 1 ? parts[0]!.text
+    : parts.map((p, i) => (i === 0 ? p.text : `«${p.kind}»\n${p.text}`)).join("\n…(elided)…\n");
+}
+
+/** Wire shape of connector/log-digest.ts's synthia-log-digest.v1. */
+export interface WireLogDigest {
+  readonly schema?: string;
+  readonly counts?: { failure?: number; warning?: number; pass?: number };
+  readonly failureLines?: readonly { source?: string; index?: number; line?: string; contextBefore?: readonly string[] }[];
+  readonly warningLines?: readonly { line?: string }[];
+  readonly passLines?: readonly { line?: string }[];
+  readonly phaseMarkers?: readonly string[];
+  readonly scanned?: { stdout?: number; stderr?: number; simulator?: number };
+  readonly truncated?: boolean;
+}
+
+function isLogDigest(v: unknown): v is WireLogDigest {
+  return isPlainObject(v) && (v as WireLogDigest).schema === "synthia-log-digest.v1";
+}
+
+function compactDigest(digest: WireLogDigest): WireLogDigest {
+  return {
+    schema: digest.schema,
+    counts: digest.counts,
+    passLines: digest.passLines,
+    phaseMarkers: digest.phaseMarkers,
+    ...(digest.truncated !== undefined ? { truncated: digest.truncated } : {}),
+  };
+}
+
+interface FetchedDiagnostics {
+  readonly source: "log-digest.json" | "worker-result.json";
+  readonly digest?: WireLogDigest;
+  readonly diagnostics?: Record<string, unknown>;
+}
+
+export async function fetchDiagnostics(
+  connector: { fetchEvidenceContent(jobId: string, name: string): Promise<{ content: string }> },
+  jobId: string,
+  evidenceEntries: readonly { name: string }[],
+): Promise<FetchedDiagnostics | undefined> {
+  // 1) Dedicated digest file (a few KB; produced by workers ≥ this change).
+  if (evidenceEntries.some((e) => e.name === "log-digest.json")) {
+    try {
+      const c = await connector.fetchEvidenceContent(jobId, "log-digest.json");
+      const parsed = JSON.parse(c.content) as unknown;
+      if (isLogDigest(parsed)) {
+        return {
+          source: "log-digest.json",
+          digest: parsed,
+          diagnostics: { logDigest: parsed },
+        };
+      }
+    } catch { /* fall through */ }
+  }
+  // 2) worker-result.json: embedded digest, else smart stream excerpts. The
+  // old head-slice here is what blinded repair loops to TB assertions.
+  if (!evidenceEntries.some((e) => e.name === WORKER_RESULT_NAME)) return undefined;
+  try {
+    const c = await connector.fetchEvidenceContent(jobId, WORKER_RESULT_NAME);
+    const parsed = JSON.parse(c.content) as {
+      exitCode?: number; phase?: string; stdout?: string; stderr?: string; simulatorStdout?: string; logDigest?: unknown;
+    };
+    const headerParts: string[] = [];
+    if (parsed.phase) headerParts.push(`phase=${parsed.phase}`);
+    if (parsed.exitCode !== undefined) headerParts.push(`exitCode=${parsed.exitCode}`);
+    const diagnostics: Record<string, unknown> = {
+      ...(headerParts.length > 0 ? { summary: headerParts.join(", ") } : {}),
+      ...(parsed.simulatorStdout !== undefined ? { simulatorStdout: diagnosticExcerpt(parsed.simulatorStdout) } : {}),
+      ...(parsed.stdout !== undefined ? { stdout: diagnosticExcerpt(parsed.stdout) } : {}),
+      ...(parsed.stderr ? { stderr: diagnosticExcerpt(parsed.stderr) } : {}),
+    };
+    const digest = isLogDigest(parsed.logDigest) ? parsed.logDigest : undefined;
+    if (digest) diagnostics.logDigest = digest;
+    return { source: "worker-result.json", ...(digest ? { digest } : {}), diagnostics };
+  } catch {
+    return undefined;
+  }
 }
