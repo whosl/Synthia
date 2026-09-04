@@ -253,6 +253,9 @@ export async function routeApi(
     identity = await authenticate(pool, request.headers.get("authorization"));
   } catch (err) {
     if (err instanceof ApiError) return jsonBody(err.httpStatus, errorEnvelope(err, correlationId));
+    // Auth-layer crashes are the worst kind of 500 (every request fails, no
+    // handler-level logging fires) — always leave a server-side trace.
+    console.error("[synthia-api] authentication internal error:", err);
     return jsonBody(500, errorEnvelope(INTERNAL_ERROR, correlationId));
   }
 
