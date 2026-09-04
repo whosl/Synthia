@@ -146,6 +146,7 @@ All user specified timing constraints are met.
         "drc.rpt",
         "implementation-result.json",
         "input-manifest.json",
+        "log-digest.json",
         "methodology.rpt",
         "resources.rpt",
         "routed.dcp",

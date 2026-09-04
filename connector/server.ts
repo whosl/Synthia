@@ -111,6 +111,7 @@ function execution(config: WorkerConfig): WorkerExecution {
       if (result.phase !== undefined) meta.phase = result.phase;
       if (result.phaseExitCode !== undefined) meta.phaseExitCode = result.phaseExitCode;
       if (result.simulatorStdout !== undefined) meta.simulatorStdout = result.simulatorStdout;
+      if (result.logDigest !== undefined) meta.logDigest = result.logDigest;
       if (result.stdout !== undefined) meta.stdout = result.stdout;
       if (result.stderr !== undefined) meta.stderr = result.stderr;
       if (result.errorCode !== undefined) meta.errorCode = result.errorCode;

@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promi
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { ConnectorCapability, EvidenceManifest } from "./index.ts";
+import { buildLogDigest, LOG_DIGEST_FILE_NAME, type LogDigest } from "./log-digest.ts";
 
 export const VIVADO_CAPABILITY_VERSION = "vivado-batch-1" as const;
 export type VivadoOperation = "discover_toolchain" | "query_parts" | "validate_sources" | "simulate" | "synthesize" | "implement" | "report_drc" | "report_sta" | "report_resources";
@@ -26,7 +27,7 @@ export const VIVADO_CAPABILITIES: readonly CapabilityDefinition[] = [
 ].map(([operation, inputKind, outputKind]) => ({ operation, version: VIVADO_CAPABILITY_VERSION, runClasses: ["exploratory", "gate_check", "formal"], inputKind, outputKind, execution: "vivado_batch" })) as readonly CapabilityDefinition[];
 export interface EvidenceReference { readonly name: string; readonly uri: string; readonly sha256: string; readonly sizeBytes: number; readonly mediaType: string }
 export interface ToolchainMetadata { readonly binary: string; readonly vivadoVersion?: string; readonly licenseStatus: "available" | "unavailable" | "unknown"; readonly part?: string; readonly profileHash?: string }
-export interface VivadoExecutionResult { readonly status: VivadoResultStatus; readonly jobId: string; readonly operation: VivadoOperation; readonly command: readonly string[]; readonly inputSha256: string; readonly workspace: string; readonly toolchain: ToolchainMetadata; readonly exitCode?: number; readonly phase?: string; readonly phaseExitCode?: number; readonly simulatorStdout?: string; readonly stdout?: string; readonly stderr?: string; readonly output?: unknown; readonly errorCode?: string; readonly error?: Record<string, unknown>; readonly evidence: EvidenceManifest; readonly unsupportedReason?: "BINARY_UNAVAILABLE" | "LICENSE_UNAVAILABLE" | "PART_UNAVAILABLE"; readonly timeoutMs?: number; readonly timedOut?: boolean; readonly signal?: string | null }
+export interface VivadoExecutionResult { readonly status: VivadoResultStatus; readonly jobId: string; readonly operation: VivadoOperation; readonly command: readonly string[]; readonly inputSha256: string; readonly workspace: string; readonly toolchain: ToolchainMetadata; readonly exitCode?: number; readonly phase?: string; readonly phaseExitCode?: number; readonly simulatorStdout?: string; readonly stdout?: string; readonly stderr?: string; readonly output?: unknown; readonly errorCode?: string; readonly error?: Record<string, unknown>; readonly evidence: EvidenceManifest; readonly unsupportedReason?: "BINARY_UNAVAILABLE" | "LICENSE_UNAVAILABLE" | "PART_UNAVAILABLE"; readonly timeoutMs?: number; readonly timedOut?: boolean; readonly signal?: string | null; readonly logDigest?: LogDigest }
 export interface CommandResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly signal?: string | null }
 export type CommandRunner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<CommandResult>;
 export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner }
@@ -499,6 +500,12 @@ export class VivadoBatchAdapter {
     }
     if (result.timedOut) { const ev = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId); return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev }; }
     const text = `${result.stdout}\n${result.stderr}`;
+    // Structured log digest: written before any verdict branch so every
+    // downstream path (license failure, part failure, simulate, implement,
+    // default) carries it — both as an evidence file (cheap for consumers to
+    // fetch) and on the result object (embedded into worker-result.json).
+    const baseDigest = buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr });
+    await writeFile(join(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(baseDigest, null, 2), "utf8");
     const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
     const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
     if (licenseFailure) { const ev = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId); return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev }; }
@@ -512,8 +519,15 @@ export class VivadoBatchAdapter {
         phaseExitCode: sim.phaseExitCode ?? null,
         simulatorVerdict: verdict.errorCode ?? "passed",
       });
+      // Re-emit the digest with the simulator stream included: TB assertions
+      // are attributed to the simulator source and deduplicated against the
+      // stdout simulator region.
+      const digest = sim.simulatorStdout !== undefined
+        ? buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr, simulator: sim.simulatorStdout })
+        : baseDigest;
+      await writeFile(join(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(digest, null, 2), "utf8");
       const ev = await evidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode };
+      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode, logDigest: digest };
     }
     if (request.operation === "implement") {
       const stopBeforeBitstream = request.stopBeforeBitstream === true;
@@ -530,11 +544,11 @@ export class VivadoBatchAdapter {
         errorCode: verdict.errorCode ?? null,
       });
       const ev = verdict.status === "succeeded" ? await evidence(workspace, request.jobId) : await failedImplementationEvidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode };
+      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode, logDigest: baseDigest };
     }
     const status = result.exitCode === 0 ? "succeeded" : "failed";
     await writeExecutionEvidence(outputDir, request, result, status);
     const ev = await evidence(workspace, request.jobId);
-    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
+    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, logDigest: baseDigest };
   }
 }
