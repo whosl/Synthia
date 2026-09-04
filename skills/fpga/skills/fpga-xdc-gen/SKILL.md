@@ -25,6 +25,7 @@
   - **引脚/电气轴**：每个需要物理映射的顶层端口的 `PACKAGE_PIN` 与 `IOSTANDARD` 均有 `explicit`/`derived` 证据 → 引脚约束内容可进入主约束；任一端口缺口 → 引脚内容**整体不进入**主约束；
 - 两轴均齐备 → 产出完整主约束候选（`XDC_CANDIDATE`）；
 - 仅时钟轴齐备（引脚轴 `partial`/`needs_input`）→ 产出 **clock-only 主约束候选**（同路径 `prj/constr/top.xdc` 等，类型 `XDC_CANDIDATE`）：文件头必须显式声明 `timing-only / exploratory`、不含任何引脚映射、引脚未决按 NSTD-1/UCIO-1 豁免预期（对齐需求侧"XDC 至少包含时钟约束 + 引脚豁免显式声明"的处置，如 UART-DRQ-ENV-003 形态）；同时照旧产出 `pin_summary.md`（缺口）、`missing_info.md`、`handoff_packet.md`；
+- **豁免的实现形态是注释声明**（文件头/注释中列出预期未决的 DRC 检查项），**禁止**用 `set_property SEVERITY [get_drc_checks NSTD-1/UCIO-1]` 之类的严重度改写命令——worker 对该类命令 fail-closed 拒收（`UNSAFE_XDC_DRC_SEVERITY_OVERRIDE`，vivado.ts assertXdcLine）；需求文本中的"豁免方式显式声明"一律按注释形态理解；
 - 时钟轴亦缺（无 `explicit`/`derived` 时钟事实）→ 不产出任何主约束文件；`needs_input` 只写 `prj/constr/missing_info.md` 后停止，`partial` 只写 `pin_summary.md` + `missing_info.md` + `handoff_packet.md` 后停止；
 - `fallback` 证据**不进入主约束**（两轴同规则），只记入缺口文档；
 - 全部约束相关产物写 `prj/constr/`；

@@ -499,7 +499,7 @@
       ],
       "required_capabilities": [],
       "evidence": [
-        "主约束中引脚类内容每条端口-管脚-电气映射必须回指 source_ref（evidence_kind=explicit/derived）；时钟类内容（create_clock 等）须回指 clock_facts 的 explicit/derived 事实；fallback/缺失事实只记入缺口文档，不进入主约束",
+        "主约束中引脚类内容每条端口-管脚-电气映射必须回指 source_ref（evidence_kind=explicit/derived）；时钟类内容（create_clock 等）须回指 clock_facts 的 explicit/derived 事实；fallback/缺失事实只记入缺口文档，不进入主约束；NSTD-1/UCIO-1 豁免一律为注释声明（worker 拒收 SEVERITY 改写命令：UNSAFE_XDC_DRC_SEVERITY_OVERRIDE）",
         "模板命中时记录命中的模板与理由；生成文件须对目标厂商工具链语法有效（语法验证属 post-mvp 能力）"
       ],
       "failure_policy": "fail_closed"
