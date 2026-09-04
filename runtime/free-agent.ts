@@ -240,6 +240,8 @@ function truncateForStream(s: string): string {
 
 /** 单次 prompt() 内完成声明被拦截后的最大重试次数（共 3 次文本尝试）。 */
 const MAX_CLAIM_RETRIES = 2;
+/** Empty text turns per prompt() that get one corrective nudge + retry. */
+const MAX_EMPTY_REPLY_RETRIES = 1;
 
 /**
  * 完成性声明模式（中英文）。宁漏勿滥：只拦高置信的「仿真已通过」类表述，
@@ -468,6 +470,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private async runLoop(opts: PromptStreamOptions = {}): Promise<string> {
     // 防呆 2：本 prompt() 内完成声明被拦截的次数（重试上限 MAX_CLAIM_RETRIES）。
     let claimRetries = 0;
+    let emptyReplyRetries = 0;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       this.checkAbort();
 
@@ -517,6 +520,21 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       // again before accepting any returned text or tool calls so the request
       // cannot be reported as a successful turn after Core has cancelled it.
       this.checkAbort();
+
+      // Empty-reply guard: reasoning-heavy models can burn the entire output
+      // budget on thinking and return an empty text turn (observed with
+      // GLM-4.6: multi-minute thinking rounds at 16k/32k budgets produced
+      // content:"" with stop at the cap). Treating that as a finished reply
+      // silently idles the agent mid-task with no error, no retry, and no
+      // trace — so nudge once and let the round re-run.
+      if (turn.kind === "text" && turn.content.trim().length === 0 && emptyReplyRetries < MAX_EMPTY_REPLY_RETRIES) {
+        emptyReplyRetries++;
+        this.messages.push({
+          role: "user",
+          content: "（系统提示）你的上一轮回复内容为空（输出预算疑似被思考耗尽）。请继续执行当前任务：给出下一步工具调用，或输出实质性的阶段产出/最终汇总文本。",
+        });
+        continue;
+      }
 
       if (turn.kind === "text") {
         // 防呆 2：声称-记录一致性核查。绝不把「模型声称仿真通过 + 无 succeeded
