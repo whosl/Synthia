@@ -73,8 +73,11 @@ describe("Responses model configuration", () => {
   test("defaults to Chat Completions and accepts explicit Responses mode", () => {
     expect(modelApiModeFromEnv({})).toBe("chat-completions");
     expect(modelApiModeFromEnv({ SYNTHIA_MODEL_API: "responses" })).toBe("responses");
-    expect(() => modelApiModeFromEnv({ SYNTHIA_MODEL_API: "messages" })).toThrow(
-      /chat-completions or responses/,
+    expect(modelApiModeFromEnv({ SYNTHIA_MODEL_API: "anthropic" })).toBe("anthropic-messages");
+    expect(modelApiModeFromEnv({ SYNTHIA_MODEL_API: "anthropic-messages" })).toBe("anthropic-messages");
+    expect(modelApiModeFromEnv({ SYNTHIA_MODEL_API: "messages" })).toBe("anthropic-messages");
+    expect(() => modelApiModeFromEnv({ SYNTHIA_MODEL_API: "bogus" })).toThrow(
+      /chat-completions, responses, or anthropic-messages/,
     );
   });
 

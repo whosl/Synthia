@@ -1,10 +1,9 @@
 /**
- * OpenAI Responses transport for Synthia, backed by @mariozechner/pi-ai.
+ * Anthropic Messages transport for Synthia, backed by @mariozechner/pi-ai.
  *
- * pi-ai owns only provider-specific wire conversion and streaming. Synthia
- * continues to own the agent loop, tool execution, governance hooks, audit,
- * and persistence. In particular, this module deliberately does not use
- * pi-agent-core.
+ * Connects to any Anthropic-compatible Messages API endpoint (Anthropic,
+ * Zhipu GLM via /api/anthropic, etc.). pi-ai owns only wire conversion;
+ * Synthia owns the agent loop, tool execution, governance, and audit.
  */
 
 import {
@@ -17,12 +16,10 @@ import {
   type ProviderStreamOptions,
   type TSchema,
   type Tool,
-  type ToolCall,
 } from "@mariozechner/pi-ai";
 
 import {
   ModelClient,
-  modelConfigFromEnv,
   type ChatCompletionResponse,
   type ChatPoster,
   type ModelClientConfig,
@@ -32,7 +29,6 @@ import type {
   AgentTool,
   AgentToolCall,
   ChatTurn,
-  ConversationalModel,
 } from "./agent-types.ts";
 import type {
   ArtifactFile,
@@ -44,60 +40,24 @@ import type {
   UpstreamArtifacts,
   XdcGeneration,
 } from "./types.ts";
+import type { RuntimeModel } from "./pi-responses-model.ts";
 
-export type ModelApiMode = "chat-completions" | "responses" | "anthropic-messages";
-export type RuntimeModel = LoopModel & ConversationalModel;
-
-type PiResponsesModel = Model<"openai-responses">;
-type PiComplete = (
-  model: PiResponsesModel,
+type PiAnthropicModel = Model<"anthropic-messages">;
+type PiAnthropicComplete = (
+  model: PiAnthropicModel,
   context: Context,
   options?: ProviderStreamOptions,
 ) => Promise<AssistantMessage>;
-type PiStream = (
-  model: PiResponsesModel,
+type PiAnthropicStream = (
+  model: PiAnthropicModel,
   context: Context,
   options?: ProviderStreamOptions,
 ) => AssistantMessageEventStream;
 
-export interface PiResponsesDeps {
-  readonly complete?: PiComplete;
-  readonly stream?: PiStream;
+export interface PiAnthropicDeps {
+  readonly complete?: PiAnthropicComplete;
+  readonly stream?: PiAnthropicStream;
   readonly now?: () => number;
-}
-
-interface ChatWireToolCall {
-  readonly id?: string;
-  readonly function?: {
-    readonly name?: string;
-    readonly arguments?: unknown;
-  };
-}
-
-interface ChatWireMessage {
-  readonly role?: string;
-  readonly content?: unknown;
-  readonly tool_calls?: readonly ChatWireToolCall[];
-  readonly tool_call_id?: string;
-  readonly name?: string;
-}
-
-interface ChatWireTool {
-  readonly type?: string;
-  readonly function?: {
-    readonly name?: string;
-    readonly description?: string;
-    readonly parameters?: unknown;
-  };
-}
-
-interface ChatWireRequest {
-  readonly messages?: readonly ChatWireMessage[];
-  readonly tools?: readonly ChatWireTool[];
-  readonly tool_choice?: unknown;
-  readonly response_format?: unknown;
-  readonly max_tokens?: unknown;
-  readonly max_completion_tokens?: unknown;
 }
 
 const EMPTY_USAGE: AssistantMessage["usage"] = {
@@ -106,20 +66,11 @@ const EMPTY_USAGE: AssistantMessage["usage"] = {
   cacheRead: 0,
   cacheWrite: 0,
   totalTokens: 0,
-  cost: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    total: 0,
-  },
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
 function cloneEmptyUsage(): AssistantMessage["usage"] {
-  return {
-    ...EMPTY_USAGE,
-    cost: { ...EMPTY_USAGE.cost },
-  };
+  return { ...EMPTY_USAGE, cost: { ...EMPTY_USAGE.cost } };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -132,27 +83,14 @@ function parseArguments(value: unknown): Record<string, unknown> {
     try {
       const parsed = JSON.parse(value) as unknown;
       if (isRecord(parsed)) return parsed;
-    } catch {
-      // The tool loop will receive an empty argument object and the tool result
-      // will carry the validation error back to the model.
-    }
+    } catch { /* tool loop carries the validation error back */ }
   }
   return {};
 }
 
-/**
- * pi-ai represents Responses calls as `call_id|output_item_id`. Synthia only
- * persists the stable call_id. Omitting the provider-owned item id also means
- * a resumed Synthia conversation never claims to possess encrypted reasoning
- * items that its audit-safe message contract intentionally does not persist.
- */
-export function stableToolCallId(id: string): string {
-  return id.split("|", 1)[0] || id;
-}
-
 function assistantMessage(
   content: AssistantMessage["content"],
-  model: PiResponsesModel,
+  model: PiAnthropicModel,
   now: number,
 ): AssistantMessage {
   return {
@@ -170,7 +108,7 @@ function assistantMessage(
 function agentMessagesToContext(
   messages: readonly AgentMessage[],
   tools: readonly AgentTool[],
-  model: PiResponsesModel,
+  model: PiAnthropicModel,
   now: () => number,
 ): Context {
   const systemParts: string[] = [];
@@ -188,7 +126,7 @@ function agentMessagesToContext(
     if (message.role === "tool") {
       converted.push({
         role: "toolResult",
-        toolCallId: stableToolCallId(message.toolCallId),
+        toolCallId: message.toolCallId,
         toolName: message.name,
         content: [{ type: "text", text: message.content }],
         isError: message.isError === true,
@@ -203,7 +141,7 @@ function agentMessagesToContext(
     for (const call of message.toolCalls ?? []) {
       content.push({
         type: "toolCall",
-        id: stableToolCallId(call.toolCallId),
+        id: call.toolCallId,
         name: call.name,
         arguments: parseArguments(call.args),
       });
@@ -223,9 +161,33 @@ function agentMessagesToContext(
   };
 }
 
+interface ChatWireToolCall {
+  readonly id?: string;
+  readonly function?: { readonly name?: string; readonly arguments?: unknown };
+}
+interface ChatWireMessage {
+  readonly role?: string;
+  readonly content?: unknown;
+  readonly tool_calls?: readonly ChatWireToolCall[];
+  readonly tool_call_id?: string;
+  readonly name?: string;
+}
+interface ChatWireTool {
+  readonly type?: string;
+  readonly function?: { readonly name?: string; readonly description?: string; readonly parameters?: unknown };
+}
+interface ChatWireRequest {
+  readonly messages?: readonly ChatWireMessage[];
+  readonly tools?: readonly ChatWireTool[];
+  readonly tool_choice?: unknown;
+  readonly response_format?: unknown;
+  readonly max_tokens?: unknown;
+  readonly max_completion_tokens?: unknown;
+}
+
 function wireRequestToContext(
   request: ChatWireRequest,
-  model: PiResponsesModel,
+  model: PiAnthropicModel,
   now: () => number,
 ): Context {
   const messages: AgentMessage[] = [];
@@ -237,7 +199,7 @@ function wireRequestToContext(
     }
     if (message.role === "assistant") {
       const toolCalls: AgentToolCall[] = (message.tool_calls ?? []).map((call, index) => ({
-        toolCallId: stableToolCallId(call.id ?? `call_${index}`),
+        toolCallId: call.id ?? `call_${index}`,
         name: call.function?.name ?? "",
         args: parseArguments(call.function?.arguments),
       }));
@@ -251,7 +213,7 @@ function wireRequestToContext(
     if (message.role === "tool") {
       messages.push({
         role: "tool",
-        toolCallId: stableToolCallId(message.tool_call_id ?? "call_unknown"),
+        toolCallId: message.tool_call_id ?? "call_unknown",
         name: message.name ?? "tool",
         content,
       });
@@ -265,9 +227,7 @@ function wireRequestToContext(
       name: fn.name,
       description: fn.description ?? "",
       parameters: fn.parameters,
-      async execute() {
-        throw new Error("pi-responses transport tools are descriptions only");
-      },
+      async execute() { throw new Error("pi-anthropic transport tools are descriptions only"); },
     }];
   });
   return agentMessagesToContext(messages, tools, model, now);
@@ -280,13 +240,9 @@ function textFromAssistant(message: AssistantMessage): string {
     .join("");
 }
 
-export function assistantToChatTurn(message: AssistantMessage): ChatTurn {
+function assistantToChatTurn(message: AssistantMessage): ChatTurn {
   const calls: AgentToolCall[] = message.content.flatMap((block) => block.type === "toolCall"
-    ? [{
-        toolCallId: stableToolCallId(block.id),
-        name: block.name,
-        args: block.arguments,
-      }]
+    ? [{ toolCallId: block.id, name: block.name, args: block.arguments }]
     : []);
   const text = textFromAssistant(message);
   return calls.length > 0
@@ -332,40 +288,14 @@ function positiveInteger(value: unknown, fallback: number): number {
     : fallback;
 }
 
-function forcedToolName(toolChoice: unknown): string | undefined {
-  if (!isRecord(toolChoice) || toolChoice.type !== "function") return undefined;
-  if (typeof toolChoice.name === "string") return toolChoice.name;
-  const fn = toolChoice.function;
-  return isRecord(fn) && typeof fn.name === "string" ? fn.name : undefined;
-}
-
-function responsePayloadOverride(request: ChatWireRequest): ProviderStreamOptions["onPayload"] {
-  return (payload) => {
-    if (!isRecord(payload)) return payload;
-    const next: Record<string, unknown> = { ...payload };
-    const forcedName = forcedToolName(request.tool_choice);
-    if (forcedName) next.tool_choice = { type: "function", name: forcedName };
-    if (isRecord(request.response_format) && request.response_format.type === "json_object") {
-      next.text = { format: { type: "json_object" } };
-    }
-    return next;
-  };
-}
-
-function reasoningEffort(value: string | undefined): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
-  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
-    ? value
-    : undefined;
-}
-
-export class PiResponsesRuntimeModel implements RuntimeModel {
-  private readonly piModel: PiResponsesModel;
-  private readonly completeFn: PiComplete;
-  private readonly streamFn: PiStream;
+export class PiAnthropicRuntimeModel implements RuntimeModel {
+  private readonly piModel: PiAnthropicModel;
+  private readonly completeFn: PiAnthropicComplete;
+  private readonly streamFn: PiAnthropicStream;
   private readonly now: () => number;
   private readonly actionClient: ModelClient;
 
-  constructor(private readonly config: ModelClientConfig, deps: PiResponsesDeps = {}) {
+  constructor(private readonly config: ModelClientConfig, deps: PiAnthropicDeps = {}) {
     this.completeFn = deps.complete ?? piComplete;
     this.streamFn = deps.stream ?? piStream;
     this.now = deps.now ?? Date.now;
@@ -377,41 +307,41 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
     this.piModel = {
       id: config.model,
       name: config.model,
-      api: "openai-responses",
-      // A custom provider makes pi-ai omit provider-owned output-item ids on
-      // replay. Synthia persists stable call_ids but intentionally not opaque
-      // reasoning signatures or provider item ids.
-      provider: "synthia-openai-responses",
+      api: "anthropic-messages",
+      provider: "anthropic",
       baseUrl: config.baseUrl,
-      reasoning: reasoningEffort(config.reasoningEffort) !== undefined,
+      reasoning: true,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 200_000,
       maxTokens,
+      // pi-ai merges model.headers over the SDK defaults on every request
+      // (chat, stream, and pipeline action calls alike), identifying traffic
+      // as originating from the Synthia pi agent loop.
+      headers: {
+        "User-Agent": "pi-agent/1.0",
+        "X-Request-Source": "pi-agent",
+      },
       compat: {
-        sendSessionIdHeader: false,
+        supportsEagerToolInputStreaming: false,
         supportsLongCacheRetention: false,
       },
     };
     const poster: ChatPoster = (input) => this.postChatCompletion(input.body, input.timeoutMs);
     this.actionClient = new ModelClient({
       ...config,
-      // pi-ai/OpenAI SDK owns wire-level retries. Keep ModelClient's parse
-      // retries, but do not multiply network retry budgets.
       networkRetries: 0,
       post: poster,
     });
   }
 
   private options(maxTokens: number, extra: ProviderStreamOptions = {}): ProviderStreamOptions {
-    const effort = reasoningEffort(this.config.reasoningEffort);
     return {
       apiKey: this.config.apiKey,
       maxTokens,
       cacheRetention: "none",
       timeoutMs: this.config.timeoutMs ?? 120_000,
       maxRetries: Math.max(0, this.config.networkRetries ?? 2),
-      ...(effort ? { reasoningEffort: effort, reasoningSummary: "auto" } : {}),
       ...extra,
     };
   }
@@ -419,7 +349,7 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
   private async requireSuccess(promise: Promise<AssistantMessage>): Promise<AssistantMessage> {
     const message = await promise;
     if (message.stopReason === "error" || message.stopReason === "aborted") {
-      throw new Error(message.errorMessage ?? `pi-responses stopped: ${message.stopReason}`);
+      throw new Error(message.errorMessage ?? `pi-anthropic stopped: ${message.stopReason}`);
     }
     return message;
   }
@@ -440,10 +370,7 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
       const message = await this.requireSuccess(this.completeFn(
         this.piModel,
         context,
-        this.options(maxTokens, {
-          timeoutMs,
-          onPayload: responsePayloadOverride(request),
-        }),
+        this.options(maxTokens, { timeoutMs }),
       ));
       return assistantToChatCompletion(message);
     } catch (error) {
@@ -485,7 +412,7 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
       if (idleTimer) clearTimeout(idleTimer);
       if (idleMs > 0) {
         idleTimer = setTimeout(
-          () => controller.abort(new Error(`pi-responses: no upstream events for ${idleMs}ms`)),
+          () => controller.abort(new Error(`pi-anthropic: no upstream events for ${idleMs}ms`)),
           idleMs,
         );
       }
@@ -499,19 +426,10 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
       );
       for await (const event of eventStream) {
         bump();
-        if (event.type === "text_start") {
-          emitted = true;
-          opts.onTextStart?.();
-        } else if (event.type === "text_delta") {
-          emitted = true;
-          opts.onDelta?.(event.delta);
-        } else if (event.type === "thinking_start") {
-          emitted = true;
-          opts.onReasoningStart?.();
-        } else if (event.type === "thinking_delta") {
-          emitted = true;
-          opts.onReasoning?.(event.delta);
-        }
+        if (event.type === "text_start") { emitted = true; opts.onTextStart?.(); }
+        else if (event.type === "text_delta") { emitted = true; opts.onDelta?.(event.delta); }
+        else if (event.type === "thinking_start") { emitted = true; opts.onReasoningStart?.(); }
+        else if (event.type === "thinking_delta") { emitted = true; opts.onReasoning?.(event.delta); }
       }
       return assistantToChatTurn(await this.requireSuccess(eventStream.result()));
     } catch (error) {
@@ -527,78 +445,30 @@ export class PiResponsesRuntimeModel implements RuntimeModel {
   generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration> {
     return this.actionClient.generateRtl(task, systemPrompt, upstream);
   }
-
   generateTestbench(
-    rtl: readonly ArtifactFile[],
-    topModule: string,
-    systemPrompt: string,
-    upstream?: UpstreamArtifacts,
+    rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string, upstream?: UpstreamArtifacts,
   ): Promise<TbGeneration> {
     return this.actionClient.generateTestbench(rtl, topModule, systemPrompt, upstream);
   }
-
   generateXdc(
-    topModule: string,
-    part: string,
-    systemPrompt: string,
-    allowPinAssignments: boolean,
-    upstream?: UpstreamArtifacts,
-    topPorts?: readonly string[],
+    topModule: string, part: string, systemPrompt: string,
+    allowPinAssignments: boolean, upstream?: UpstreamArtifacts, topPorts?: readonly string[],
   ): Promise<XdcGeneration> {
-    return this.actionClient.generateXdc(
-      topModule,
-      part,
-      systemPrompt,
-      allowPinAssignments,
-      upstream,
-      topPorts,
-    );
+    return this.actionClient.generateXdc(topModule, part, systemPrompt, allowPinAssignments, upstream, topPorts);
   }
-
   repair(input: Parameters<LoopModel["repair"]>[0]): Promise<RepairGeneration> {
     return this.actionClient.repair(input);
   }
-
   generateIntake(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     return this.actionClient.generateIntake(task, systemPrompt, upstream);
   }
-
   generateBehaviorWave(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     return this.actionClient.generateBehaviorWave(systemPrompt, upstream);
   }
-
   generateArchitecture(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     return this.actionClient.generateArchitecture(systemPrompt, upstream);
   }
-
   generateRegisterSpec(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
     return this.actionClient.generateRegisterSpec(systemPrompt, upstream);
   }
-}
-
-export function modelApiModeFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): ModelApiMode {
-  const raw = env.SYNTHIA_MODEL_API?.trim().toLowerCase();
-  if (!raw || raw === "chat-completions" || raw === "chat_completions" || raw === "chat") {
-    return "chat-completions";
-  }
-  if (raw === "responses" || raw === "response") return "responses";
-  if (raw === "anthropic-messages" || raw === "anthropic" || raw === "messages") return "anthropic-messages";
-  throw new Error(
-    "SYNTHIA_MODEL_API must be one of chat-completions, responses, or anthropic-messages",
-  );
-}
-
-import { PiAnthropicRuntimeModel } from "./pi-anthropic-model.ts";
-
-export function createRuntimeModelFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): RuntimeModel {
-  const config = modelConfigFromEnv(env);
-  const mode = modelApiModeFromEnv(env);
-  if (mode === "anthropic-messages") return new PiAnthropicRuntimeModel(config);
-  return mode === "responses"
-    ? new PiResponsesRuntimeModel(config)
-    : new ModelClient(config);
 }
