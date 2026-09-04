@@ -77,6 +77,7 @@ import type { SkillPrompts } from "./skill-loader.ts";
 
 // ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
 import {
+  appendSystemNoteToConversation,
   createFreeAgentSession,
   loadFreeAgentConversation,
   SIDE_TASK_COMPLETION_TOOL,
@@ -3058,6 +3059,29 @@ export class RuntimeServer {
               "task execution interrupted by Runtime restart",
               "execution_error",
             );
+          } else if (executionMode === "free") {
+            // H7: a free agent's full conversation persists (sidecar), so an
+            // interrupted turn is continuable, not terminal. Recover as idle
+            // and leave an in-band system note so the next model call knows a
+            // restart cut the previous turn short (previously this branch
+            // marked the agent failed, which misreported state and made
+            // operators treat continuable sessions as dead).
+            const updated: AgentState = {
+              ...state,
+              status: "awaiting_user",
+              endedReason: undefined,
+              terminalCause: undefined,
+              updatedAt: new Date().toISOString(),
+            };
+            await saveAgentState(updated);
+            handle.currentState = updated;
+            delete handle.endedReason;
+            delete handle.terminalCause;
+            await appendSystemNoteToConversation(
+              agentId,
+              "运行时进程重启打断了上一轮执行；已恢复为待命状态。已完成的工具调用与产物有效，请从中断处继续任务。",
+              `restart-${state.updatedAt}`,
+            ).catch(() => undefined);
           } else {
             const updated: AgentState = {
               ...state,

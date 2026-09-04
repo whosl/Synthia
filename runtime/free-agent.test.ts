@@ -30,6 +30,10 @@ import {
   unsupportedBehavior,
 } from "./loop.ts";
 import { loadAgentState } from "./agent-state.ts";
+import {
+  appendSystemNoteToConversation,
+  loadFreeAgentConversation,
+} from "./free-agent.ts";
 import type {
   AgentMessage,
   ChatTurn,
@@ -1104,5 +1108,46 @@ describe("free-agent: 声称-记录一致性拦截（防呆 2）", () => {
     expect(modelB.calls.length).toBe(1);
     const convoB = await loadFreeAgentConversation(agentIdB);
     expect(convoB!.claimChecks).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H7: restart-interruption system notes on the conversation sidecar
+// ---------------------------------------------------------------------------
+
+describe("appendSystemNoteToConversation (H7)", () => {
+  test("appends an idempotent system note to a persisted sidecar", async () => {
+    const model = new ScriptedModel([txt("ack")]);
+    const { session, agentId } = makeSession({ model });
+    await session.prompt("start something");
+
+    const appended = await appendSystemNoteToConversation(
+      agentId,
+      "运行时进程重启打断了上一轮执行。",
+      "restart-t1",
+    );
+    expect(appended).toBeTrue();
+
+    const convo = await loadFreeAgentConversation(agentId);
+    const notes = convo!.messages.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("〔noteId=restart-t1〕"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.content).toContain("运行时进程重启");
+
+    // Same noteId again → no duplication.
+    const again = await appendSystemNoteToConversation(agentId, "dup", "restart-t1");
+    expect(again).toBeFalse();
+    const convo2 = await loadFreeAgentConversation(agentId);
+    const notes2 = convo2!.messages.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("〔noteId=restart-t1〕"));
+    expect(notes2).toHaveLength(1);
+
+    // A different noteId appends a second, distinct note.
+    await appendSystemNoteToConversation(agentId, "second event", "restart-t2");
+    const convo3 = await loadFreeAgentConversation(agentId);
+    expect(convo3!.messages.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("〔noteId=restart-t2〕"))).toHaveLength(1);
+  });
+
+  test("returns false when no sidecar exists (nothing to annotate)", async () => {
+    const ok = await appendSystemNoteToConversation("agent-never-existed", "note", "n1");
+    expect(ok).toBeFalse();
   });
 });

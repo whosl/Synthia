@@ -936,3 +936,36 @@ export interface LoadedFreeAgentConversation {
   /** claim-check 审计记录（无命中时缺失；向后兼容旧 sidecar）。 */
   readonly claimChecks?: readonly ClaimCheckRecord[];
 }
+
+/**
+ * Append an in-band system note to a persisted conversation sidecar (H7).
+ *
+ * When a Runtime restart interrupts an in-flight free-agent turn, the
+ * conversation itself is intact and continuable — the next model call should
+ * SEE that a restart happened, not silently continue as if nothing broke.
+ * The note is a plain user-role message (the Anthropic/OpenAI wire contracts
+ * have no first-class system-mid-conversation slot) and is idempotent per
+ * `noteId` so a double recovery cannot duplicate it.
+ */
+export async function appendSystemNoteToConversation(
+  agentId: string,
+  note: string,
+  noteId: string,
+  agentsDir?: string,
+): Promise<boolean> {
+  const dir = agentsDir ?? dirname(agentStatePath(agentId));
+  const path = join(dir, `${agentId}.conversation.json`);
+  let sidecar: LoadedFreeAgentConversation;
+  try {
+    sidecar = JSON.parse(await readFile(path, "utf8")) as LoadedFreeAgentConversation;
+  } catch {
+    return false;
+  }
+  const marker = `noteId=${noteId}`;
+  if (sidecar.messages.some(m => m.role === "user" && typeof m.content === "string" && m.content.includes(`〔${marker}〕`))) {
+    return false;
+  }
+  const messages: AgentMessage[] = [...sidecar.messages, { role: "user", content: `（系统提示〔${marker}〕）${note}` }];
+  await writeFile(path, JSON.stringify({ agentId, status: sidecar.status, messages, ...(sidecar.claimChecks ? { claimChecks: sidecar.claimChecks } : {}) }, null, 2) + "\n", "utf8");
+  return true;
+}
