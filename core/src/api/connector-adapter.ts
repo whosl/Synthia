@@ -158,6 +158,23 @@ function isLeaseExpiredError(err: unknown): boolean {
 }
 
 /**
+ * Client-lifecycle errors that mean the cached client is stale against the
+ * worker's CURRENT state — most commonly the worker process restarted and lost
+ * its in-memory registration/lease (worker state is not durable). Without this
+ * check a NOT_REGISTERED heartbeat error would propagate forever because the
+ * cached client never gets evicted. Re-priming (register → heartbeat →
+ * discover) is the recovery for all of these.
+ */
+function isStaleClientError(err: unknown): boolean {
+  if (isLeaseExpiredError(err)) return true;
+  if (err instanceof Error && "code" in err) {
+    const code = String((err as { code: unknown }).code);
+    return code === "NOT_REGISTERED" || code === "ENDPOINT_NOT_APPROVED" || code === "ENDPOINT_REVOKED";
+  }
+  return false;
+}
+
+/**
  * Build the `parameters` object the Worker's vivado.execute() consumes. The
  * inner object MUST repeat operation/jobId/projectId/runClass (worker server.ts
  * spreads `candidate` to build the VivadoRequest) alongside the source payload.
@@ -310,7 +327,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     try {
       await client.heartbeat();
     } catch (err) {
-      if (isLeaseExpiredError(err)) {
+      if (isStaleClientError(err)) {
         this.clients.delete(projectId);
         this.primed.delete(projectId);
         return this.ensureReady(projectId);
@@ -333,8 +350,8 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     try {
       return await action(client);
     } catch (err) {
-      if (!isLeaseExpiredError(err)) throw toConnectorError(err);
-      // Lease expired mid-call — rebuild and retry once.
+      if (!isStaleClientError(err)) throw toConnectorError(err);
+      // Stale client (lease/registration lost, e.g. worker restart) — rebuild and retry once.
       const rebuilt = this.buildClient(projectId);
       this.clients.set(projectId, rebuilt);
       try {
