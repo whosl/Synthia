@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sha256 } from "../core/src/hashing.ts";
@@ -258,6 +258,77 @@ describe("worker evidence content endpoint", () => {
       const p = res.payload as ContentReply;
       expect(p.truncated).toBe(false);
       expect(Buffer.from(p.content_base64, "base64").toString("utf8")).toBe(content);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H8: job registry survives worker restarts
+// ---------------------------------------------------------------------------
+
+describe("worker job registry persistence (H8)", () => {
+  test("evidence and status APIs answer across a restart from the snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      const rt1 = runtime(root, async (_req, workspace) => {
+        await mkdir(join(workspace, "output"), { recursive: true });
+        await writeFile(join(workspace, "output", "rpt.txt"), "hello", "utf8");
+        return { outcome: "success", output: JSON.stringify({ status: "ok" }) };
+      });
+      await prime(rt1);
+      await submitJob(rt1, "job-h8-1");
+
+      // New runtime over the same workspace root — the old world lost all
+      // jobs in memory here (evidence APIs 404 until this fix).
+      // Wait until the durable registry carries the terminal state — the
+      // in-memory evidence API can seal a moment before the snapshot write
+      // lands, and a restart in that window is exactly what this test guards.
+      let registrySealed = false;
+      for (let i = 0; i < 1000 && !registrySealed; i++) {
+        await tick();
+        const snapRaw = await readFile(join(root, "jobs-registry.json"), "utf8").catch(() => "");
+        registrySealed = snapRaw.includes('"state":"succeeded"');
+      }
+      expect(registrySealed).toBeTrue();
+      const rt2 = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt2);
+      const status = await post(rt2, "/jobs/status", { job_id: "job-h8-1" });
+      expect(status.status).toBe(200);
+      const payload = status.payload as { state?: string };
+      expect(payload.state).toBe("succeeded");
+      const evidence = await post(rt2, "/jobs/evidence", { job_id: "job-h8-1" });
+      expect(evidence.status).toBe(200);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("a non-terminal job at snapshot time reloads as lost, not as its stale running state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      // Craft a snapshot with a mid-flight job directly (simulating a crash
+      // between the submit and run snapshots).
+      const { writeFile: wf } = await import("node:fs/promises");
+      await wf(join(root, "jobs-registry.json"), JSON.stringify({
+        schema: "synthia-worker-jobs-registry.v1",
+        jobs: [{ id: "job-crash", request: { jobId: "job-crash", idempotencyKey: "k", projectId: "p1", operation: "vivado_synthesize", runClass: "exploratory", input: "x", correlationId: "c" }, state: "running", inputSha256: "x" }],
+        bindings: [["job-crash", { projectId: "p1", classification: "internal" }]],
+      }), "utf8");
+      const rt = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt);
+      const status = await post(rt, "/jobs/status", { job_id: "job-crash" });
+      expect(status.status).toBe(200);
+      expect((status.payload as { state?: string }).state).toBe("lost");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("corrupt snapshot → fresh registry, worker still serves", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      const { writeFile: wf } = await import("node:fs/promises");
+      await wf(join(root, "jobs-registry.json"), "{not json", "utf8");
+      const rt = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt);
+      const status = await post(rt, "/jobs/status", { job_id: "anything" });
+      expect(status.status).toBe(404);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

@@ -32,11 +32,38 @@ export class WorkerRuntime {
   private readonly endpoint: ConnectorEndpoint; private readonly root: string; private readonly execution: WorkerExecution; private readonly clock: () => Date;
   private registration?: ConnectorRegistration; private discovery?: DiscoverySnapshot; private active = 0; private leaseExpiresAt?: number;
   private readonly jobs = new Map<string, Job>(); private readonly jobBindings = new Map<string, { projectId: string; classification: DataClassification }>(); private readonly keys = new Map<string, { fingerprint: string; status: number; body: RemoteEnvelope<unknown> }>(); private readonly pending: string[] = [];
-  constructor(o: WorkerRuntimeOptions) { this.endpoint = copy(o.endpoint); this.root = o.workspaceRoot; this.execution = o.execution ?? unavailableExecution; this.clock = o.now ?? (() => new Date()); if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1) throw new Error("CONFIG_INVALID"); }
+  /** H8: registry snapshot reload — resolves once the on-disk job registry
+   *  (if any) has been merged; every request awaits it so post-restart
+   *  queries cannot race the restore. */
+  private readonly restorePromise: Promise<void>;
+  constructor(o: WorkerRuntimeOptions) { this.endpoint = copy(o.endpoint); this.root = o.workspaceRoot; this.execution = o.execution ?? unavailableExecution; this.clock = o.now ?? (() => new Date()); if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1) throw new Error("CONFIG_INVALID"); this.restorePromise = this.restoreRegistry(); }
+  private registryPath(): string { return join(this.root, "jobs-registry.json"); }
+  /** Persist the in-memory job registry so a worker restart does not orphan
+   *  every historical job's evidence API (files stay on disk; the manifest
+   *  only lived in memory). Non-terminal jobs at snapshot time are reloaded
+   *  as "lost" — the process died mid-run, so their state is unknowable.
+   *  Idempotency keys are deliberately NOT persisted: replay-after-restart
+   *  is a stronger contract than the snapshot's recency. */
+  /** Serialized last-writer-wins: concurrent snapshots (submit + terminal)
+   *  must not let an older state overwrite a newer one on disk. */
+  private snapshotChain: Promise<void> = Promise.resolve();
+  private snapshotRegistry(): Promise<void> {
+    this.snapshotChain = this.snapshotChain.then(() => this.writeSnapshot());
+    return this.snapshotChain;
+  }
+  private async writeSnapshot(): Promise<void> {
+    try {
+      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: [...this.jobs.values()], bindings: [...this.jobBindings.entries()] };
+      await mkdir(this.root, { recursive: true });
+      await writeFile(this.registryPath(), JSON.stringify(snapshot), "utf8");
+    } catch { /* best-effort persistence */ }
+  }
+  private async restoreRegistry(): Promise<void> { try { const raw = await readFile(this.registryPath(), "utf8"); const parsed = JSON.parse(raw) as { jobs?: unknown; bindings?: unknown }; if (!Array.isArray(parsed.jobs) || !Array.isArray(parsed.bindings)) return; for (const job of parsed.jobs) { if (!job || typeof job !== "object" || typeof (job as Job).id !== "string") continue; const restored = copy(job as Job); if (!terminal.has(restored.state)) restored.state = "lost"; this.jobs.set(restored.id, restored); } for (const [id, binding] of parsed.bindings) { if (typeof id === "string" && binding && typeof binding === "object" && typeof binding.projectId === "string") this.jobBindings.set(id, binding as { projectId: string; classification: DataClassification }); } } catch { /* missing/corrupt snapshot → fresh registry */ } }
   private discoveryReady(): boolean { return this.discovery?.license_status === "available" && this.discovery.capabilities.length > 0 && this.discovery.unsupported?.length === undefined; }
   private hasDrift(discovery: DiscoverySnapshot): boolean { return discovery.connector_protocol_version !== this.endpoint.protocol_version || discovery.toolchain_profile_hash !== this.endpoint.toolchain_profile_hash || (this.endpoint.expected_capability_map_version !== undefined && discovery.capability_map_version !== this.endpoint.expected_capability_map_version) || (this.endpoint.expected_part_catalog_hash !== undefined && discovery.part_catalog_hash !== this.endpoint.expected_part_catalog_hash) || (this.endpoint.expected_sdk_worker_build_hash !== undefined && discovery.sdk_worker_build_hash !== this.endpoint.expected_sdk_worker_build_hash) || discovery.license_status !== "available"; }
 
   async handle(request: Request): Promise<Response> {
+    await this.restorePromise;
     if (request.method !== "POST") return responseError("METHOD_NOT_ALLOWED", "POST required", 405);
     const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (contentType !== "application/json") return responseError("UNSUPPORTED_MEDIA_TYPE", "application/json required", 415);
@@ -58,12 +85,12 @@ export class WorkerRuntime {
     if (path === "/jobs/submit") { if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) { this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration; throw new Error("LEASE_EXPIRED"); } return this.submit(e, p.request as JobRequest, p.approval as Record<string, unknown> | undefined); }
     const jobId = p.job_id; if (!good(jobId)) throw new Error("INVALID_JOB_ID"); const job = this.jobs.get(jobId); const binding = this.jobBindings.get(jobId); if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND");
     if (path === "/jobs/status") return { status: 200, body: this.envelope(e, copy(job)) };
-    if (path === "/jobs/cancel") { if (!terminal.has(job.state)) job.state = "cancelled"; return { status: 200, body: this.envelope(e, copy(job)) }; }
+    if (path === "/jobs/cancel") { if (!terminal.has(job.state)) { job.state = "cancelled"; void this.snapshotRegistry(); } return { status: 200, body: this.envelope(e, copy(job)) }; }
     if (path === "/jobs/evidence") { if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE"); this.assertEvidenceLimits(job.evidence); return { status: 200, body: this.envelope(e, copy(job.evidence)) }; }
     if (path === "/jobs/evidence/content") { const name = p.name; if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE"); return this.evidenceContent(e, job, name, p.complete === true); }
     throw new Error("NOT_FOUND");
   }
-  private submit(e: RemoteEnvelope<unknown>, request: JobRequest, approval?: Record<string, unknown>): { status: number; body: RemoteEnvelope<unknown> } { const capability = this.discovery?.capabilities.find(c => c.operation === request?.operation); if (!this.registration || this.registration.registration_state !== "ready" || this.registration.capability_drift === true) throw new Error("ENDPOINT_NOT_APPROVED"); if (!request || request.projectId !== e.project_id || !good(request.idempotencyKey) || !good(request.operation) || !good(request.input) || !good(request.correlationId)) throw new Error("INVALID_JOB_REQUEST"); if (!this.endpoint.allowed_capability_ids.includes(request.operation) || !capability || capability.version !== e.capability_version || !capability.runClasses.includes(request.runClass)) throw new Error("CAPABILITY_UNAVAILABLE"); if (request.runClass === "gate_check" && !good(approval?.gateSubmissionId)) throw new Error("GATE_SUBMISSION_REQUIRED"); if (request.runClass === "formal" && (approval?.inputApproved !== true || (!good(approval?.baselineId) && !good(approval?.approvedGateResultId)))) throw new Error("FORMAL_GATE_REQUIRED"); if (request.runClass === "formal" && request.input.startsWith("candidate:")) throw new Error("CANDIDATE_FORMAL_REJECTED"); const jobId = request.jobId ?? `job-${crypto.randomUUID()}`; if (!idRe.test(jobId)) throw new Error("INVALID_JOB_ID"); const fingerprint = sha256(JSON.stringify(request)); const old = this.jobs.get(jobId); if (old) { const binding = this.jobBindings.get(jobId); if (!binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND"); if (sha256(JSON.stringify(old.request)) !== fingerprint) throw new Error("IDEMPOTENCY_CONFLICT"); return { status: 200, body: this.envelope(e, copy(old)) }; } const job: Job = { id: jobId, request: { ...request, jobId }, state: "submitted", inputSha256: sha256(request.input) }; this.jobs.set(jobId, job); this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification }); this.pending.push(jobId); void this.pump(); return { status: 202, body: this.envelope(e, copy(job)) }; }
+  private submit(e: RemoteEnvelope<unknown>, request: JobRequest, approval?: Record<string, unknown>): { status: number; body: RemoteEnvelope<unknown> } { const capability = this.discovery?.capabilities.find(c => c.operation === request?.operation); if (!this.registration || this.registration.registration_state !== "ready" || this.registration.capability_drift === true) throw new Error("ENDPOINT_NOT_APPROVED"); if (!request || request.projectId !== e.project_id || !good(request.idempotencyKey) || !good(request.operation) || !good(request.input) || !good(request.correlationId)) throw new Error("INVALID_JOB_REQUEST"); if (!this.endpoint.allowed_capability_ids.includes(request.operation) || !capability || capability.version !== e.capability_version || !capability.runClasses.includes(request.runClass)) throw new Error("CAPABILITY_UNAVAILABLE"); if (request.runClass === "gate_check" && !good(approval?.gateSubmissionId)) throw new Error("GATE_SUBMISSION_REQUIRED"); if (request.runClass === "formal" && (approval?.inputApproved !== true || (!good(approval?.baselineId) && !good(approval?.approvedGateResultId)))) throw new Error("FORMAL_GATE_REQUIRED"); if (request.runClass === "formal" && request.input.startsWith("candidate:")) throw new Error("CANDIDATE_FORMAL_REJECTED"); const jobId = request.jobId ?? `job-${crypto.randomUUID()}`; if (!idRe.test(jobId)) throw new Error("INVALID_JOB_ID"); const fingerprint = sha256(JSON.stringify(request)); const old = this.jobs.get(jobId); if (old) { const binding = this.jobBindings.get(jobId); if (!binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND"); if (sha256(JSON.stringify(old.request)) !== fingerprint) throw new Error("IDEMPOTENCY_CONFLICT"); return { status: 200, body: this.envelope(e, copy(old)) }; } const job: Job = { id: jobId, request: { ...request, jobId }, state: "submitted", inputSha256: sha256(request.input) }; this.jobs.set(jobId, job); this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification }); this.pending.push(jobId); void this.snapshotRegistry(); void this.pump(); return { status: 202, body: this.envelope(e, copy(job)) }; }
   private async pump(): Promise<void> { while (this.active < this.endpoint.max_concurrency && this.pending.length) { const jobId = this.pending.shift()!; const job = this.jobs.get(jobId); if (!job || terminal.has(job.state)) continue; this.active++; void this.run(job).finally(() => { this.active--; void this.pump(); }); } }
   private async run(job: Job): Promise<void> {
     const workspace = join(this.root, job.id);
@@ -84,6 +111,9 @@ export class WorkerRuntime {
         const outputEntry = { name: "worker-result.json", uri: `workspace://${job.id}/output/worker-result.json`, sha256: job.outputSha256, sizeBytes: new TextEncoder().encode(result.output).byteLength, mediaType: "application/json" };
         job.evidence = { jobId: job.id, entries: [...(result.evidence?.entries ?? []), outputEntry] };
       } else if (result.evidence) job.evidence = result.evidence;
+      // Terminal transitions persist before run() settles — a crash right
+      // after completion must not reload the job as non-terminal/lost.
+      await this.snapshotRegistry();
     } catch {
       if (this.jobs.get(job.id)?.state === "cancelled") return;
       job.state = "failed";
