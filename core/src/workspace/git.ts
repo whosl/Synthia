@@ -550,7 +550,10 @@ async function regularFileModeAtCommit(dir: string, commit: string, path: string
 export async function showAt(dir: string, commit: string, path: string): Promise<Uint8Array | null> {
   const res = await gitRaw(dir, ["show", `${commit}:${path}`]);
   if (res.exitCode !== 0) return null;
-  return res.stdout;
+  // Bun's Response.bytes() returns a bare ArrayBuffer (not Uint8Array) for
+  // larger outputs — observed above ~64 KiB with git show on a 116 KiB blob.
+  // Wrap unconditionally so every consumer gets a TypedArray view.
+  return res.stdout instanceof Uint8Array ? res.stdout : new Uint8Array(res.stdout);
 }
 
 /** 某个 commit 的树里有哪些文件（`git ls-tree -r --name-only`）。 */

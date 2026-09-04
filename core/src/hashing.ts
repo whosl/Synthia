@@ -4,12 +4,16 @@
 
 import { createHash, randomUUID } from "node:crypto";
 
-export function sha256Hex(data: string | Uint8Array): string {
+export function sha256Hex(data: string | Uint8Array | ArrayBuffer): string {
   const h = createHash("sha256");
   if (typeof data === "string") {
     h.update(data, "utf8");
+  } else if (data instanceof ArrayBuffer) {
+    // Defense in depth: Bun's Response.bytes() yields a bare ArrayBuffer for
+    // large outputs; node:crypto only accepts TypedArray views.
+    h.update(new Uint8Array(data));
   } else {
-    h.update(data as Buffer);
+    h.update(data);
   }
   return h.digest("hex");
 }
