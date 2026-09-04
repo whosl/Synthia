@@ -98,7 +98,7 @@ const UPSTREAM_GUIDANCE: Readonly<Record<string, string>> = {
   "fpga-hw-manual-extraction":
     "偏入口；可参照 fpga-intake 的 doc/intake/summary.md 限定硬件范围。",
   "fpga-xdc-gen":
-    "fpga-hw-manual-extraction（extracted_facts.json 须 status=complete 且每条映射带 source_ref/evidence_kind）+ fpga-rtl-build（板级顶层端口）。",
+    "fpga-hw-manual-extraction（extracted_facts.json 逐条带 source_ref/evidence_kind）+ fpga-rtl-build（板级顶层端口）。主约束两轴判定：时钟轴（clock_facts 有 explicit/derived 主时钟事实）齐备即可产出 clock-only 约束（timing-only/exploratory 声明，不含引脚映射）；完整约束须引脚/电气轴亦齐备（每端口 PACKAGE_PIN/IOSTANDARD 非 fallback）。",
 };
 
 /** A hard upstream artifact dependency a skill's preconditions make absolute. */
