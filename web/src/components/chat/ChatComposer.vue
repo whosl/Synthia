@@ -5,7 +5,7 @@
  * 按钮、发送/打断进行中的禁用态。是否可发消息（`hasAgent`/`agentStatus` 推导）由
  * ProjectView 通过 `composerMode`/`canAbort` 下发，本组件不重复判定 run 状态。
  *
- * v-model（modelValue）由 ChatFeed 持有：这样点击「空态示例任务」时 ChatFeed
+ * v-model（modelValue）最终由 ProjectView 按对话持有：点击「空态示例任务」时 ChatFeed
  * 能直接把文案填进输入框（`EXAMPLE_TASKS` 注释「可一键填入」——是填入，不是
  * 直接发送），composer 自身不需要关心草稿从哪来。
  */
@@ -51,7 +51,7 @@ function onInput(ev: Event): void {
 function submit(): void {
   if (!sendEnabled.value) return;
   emit("send", props.modelValue.trim());
-  emit("update:modelValue", ""); // 发送后清空输入（乐观清空，不等待请求结果）
+  // The workspace clears its draft only after a successful response.
 }
 
 function onKeydown(ev: KeyboardEvent): void {
@@ -72,6 +72,7 @@ function onKeydown(ev: KeyboardEvent): void {
         class="chat-composer-input"
         :value="modelValue"
         :placeholder="placeholder"
+        aria-label="发送给 Agent 的消息"
         :disabled="sending"
         rows="1"
         @input="onInput"

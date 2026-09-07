@@ -15,6 +15,9 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
 import type { GatePartState } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
+import Icon from "../ui/Icon.vue";
+import { TASK_STATUS_TEXT } from "../../domain/tasks.ts";
+import Button from "../ui/Button.vue";
 import Badge from "../ui/Badge.vue";
 import AgentToolItem from "./AgentToolItem.vue";
 import ApprovalCard from "./ApprovalCard.vue";
@@ -55,8 +58,12 @@ function onOpenApprovalDoc(artifactId: string, revisionId: string): void {
   emit("open-doc", artifactId, revisionId);
 }
 
-// ─── 输入草稿：ChatFeed 持有，示例任务「一键填入」需要能写回输入框 ────────
-const draft = ref("");
+// ─── 输入草稿：项目按对话持有，组件独立使用时保留本地回退 ───────────────
+const localDraft = ref("");
+const draft = computed({
+  get: () => props.draft ?? localDraft.value,
+  set: (value: string) => { localDraft.value = value; emit("update:draft", value); },
+});
 let pendingSendText: string | null = null;
 
 function fillExample(task: string): void {
@@ -112,6 +119,7 @@ onMounted(() => void nextTick(scrollToBottom));
 
 <template>
   <div class="chat-feed">
+    <div class="chat-feed-heading"><span><Icon name="spark" :size="16" />主 Agent</span><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><Icon name="close" :size="16" /></Button></div>
     <div v-if="streamPhase === 'degraded'" class="chat-feed-banner tone-warn">实时连接中断，已切换定时刷新</div>
     <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="chat-feed-banner tone-muted">正在连接实时更新…</div>
 
@@ -452,4 +460,7 @@ onMounted(() => void nextTick(scrollToBottom));
   font-size: var(--font-size-sm);
   background: color-mix(in srgb, var(--state-danger) 10%, transparent);
 }
+.chat-feed-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); }
+.chat-feed-heading > span { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 550; }
+.chat-feed-heading svg { color: var(--accent); }
 </style>

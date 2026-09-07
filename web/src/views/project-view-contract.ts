@@ -336,6 +336,7 @@ export interface CodeEditorProps {
 }
 
 export interface CodeEditorEmits {
+  "dirty-change": [dirty: boolean];
   /** 版本下拉选择另一版本查看（revisionId 必须是 file.revisions 中的一个 id）。 */
   "select-revision": [revisionId: string];
   /** 版本对比：选两版进 diff editor；ProjectView 补齐 baseContent 后回填 diffAgainst。 */
@@ -411,6 +412,8 @@ export interface ApprovalCardEmits {
 }
 
 export interface ChatFeedProps {
+  readonly draft?: string;
+  readonly closable?: boolean;
   /**
    * 合成后的对话流：audit 事件物化（`domain/parts.ts:auditToParts`）与 SSE 流式
    * 增量（`domain/task-stream.ts:applyStreamEvent`）已由 ProjectView 按 turn 顺序
@@ -440,6 +443,8 @@ export interface ChatFeedProps {
 }
 
 export interface ChatFeedEmits {
+  close: [];
+  "update:draft": [draft: string];
   /**
    * 发送消息。ChatFeed 不需要关心具体调哪个后端端点——composerMode="new-task"
    * 时 ProjectView 会调用 createTask 建首个任务；其余情况调用 sendMessage（服务端

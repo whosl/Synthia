@@ -28,7 +28,7 @@
   --border-strong: #4a4a45;
   --text-primary: #f5f4ef;
   --text-secondary: #a8a49b;
-  --text-muted: #78746b;
+  --text-muted: #a19b91;
   --accent: #d97757;
   --accent-hover: #e08a6e;
   --accent-subtle: rgba(217, 119, 87, 0.12);
@@ -49,7 +49,7 @@
   --border-strong: #d4d0c7;
   --text-primary: #1f1e1d;
   --text-secondary: #6b6862;
-  --text-muted: #97938b;
+  --text-muted: #777169;
   --accent: #c15f3c;
   --accent-hover: #a94e2e;
   --accent-subtle: rgba(193, 95, 60, 0.09);
@@ -98,7 +98,7 @@
   --duration-slow: 180ms;
 
   /* 三栏骨架尺寸（可被 Splitter 持久化的拖拽宽度覆盖，见 components/ui/Splitter.vue） */
-  --topbar-height: 44px;
+  --topbar-height: 52px;
   --tree-width: 240px;
   --chat-width: 380px;
 
@@ -119,7 +119,7 @@
   --border-strong: #4a4a45;
   --text-primary: #f5f4ef;
   --text-secondary: #a8a49b;
-  --text-muted: #78746b;
+  --text-muted: #a19b91;
   --accent: #d97757;
   --accent-hover: #e08a6e;
   --accent-subtle: rgba(217, 119, 87, 0.12);
@@ -236,3 +236,11 @@ kbd {
   white-space: nowrap;
   border: 0;
 }
+
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+@media (max-width: 700px) { :root { --topbar-height: 82px; } }

@@ -39,13 +39,14 @@ const fileTitle = computed(() => {
 });
 
 /** markdown 且非对比态 → 走 DocPreview，不加载 Monaco。 */
-const showDocPreview = computed(() => !props.diffAgainst && isDocPreviewLanguage(props.language));
+const markdownEditing = ref(false);
+const showDocPreview = computed(() => !props.diffAgainst && isDocPreviewLanguage(props.language) && !markdownEditing.value);
 
 /** 是否需要挂载 Monaco：有文件、不是 DocPreview、内容已加载完成。 */
-const needsMonaco = computed(() => !!props.file && !showDocPreview.value && !props.loading);
+const needsMonaco = computed(() => !!props.file && props.content !== null && !showDocPreview.value && !props.loading);
 
 /** 可编辑当且仅当没有只读原因，且不在对比态（diff 编辑器两侧都只读）。 */
-const editable = computed(() => props.readonlyReason === null && !props.diffAgainst);
+const editable = computed(() => props.readonlyReason === null && !props.diffAgainst && props.content !== null && !props.loading);
 
 /**
  * 顶部状态条：「v3 · 未登记改动 · 已批准 · 只读」这样一路拼下来。
@@ -98,8 +99,11 @@ function loadMonaco(): Promise<Monaco> {
 
 const editorHost = ref<HTMLDivElement | null>(null);
 const monacoLoading = ref(false);
+const monacoError = ref<string | null>(null);
 /** 编辑器里的字节与 props.content 已经不同——决定「保存」按钮亮不亮。 */
 const dirty = ref(false);
+watch(dirty, (value) => emit("dirty-change", value), { flush: "sync" });
+watch(() => props.file?.artifactId, () => { markdownEditing.value = false; });
 
 let monacoRef: Monaco | null = null;
 let editorInstance: MonacoNamespace.editor.IStandaloneCodeEditor | null = null;
@@ -117,6 +121,7 @@ function disposeDiffModels(): void {
 
 /** 拆卸全部 Monaco 实例与 model（组件卸载、或切到无需 Monaco 的状态时调用）。 */
 function disposeEditors(): void {
+  dirty.value = false;
   editorInstance?.dispose();
   editorInstance = null;
   diffEditorInstance?.dispose();
@@ -178,7 +183,7 @@ function renderContent(): void {
 
   if (!editorInstance) {
     editorInstance = monaco.editor.create(host, {
-      readOnly: !editable.value,
+      readOnly: !editable.value || props.saving,
       automaticLayout: true,
       theme: monacoThemeFor(props.theme),
       fontFamily: "var(--font-mono)",
@@ -202,8 +207,13 @@ async function ensureMonacoMounted(): Promise<void> {
   await nextTick(); // 等 editorHost 的 v-else 分支先渲染出 DOM 节点
   if (!editorHost.value) return;
   monacoLoading.value = true;
+  monacoError.value = null;
   try {
     monacoRef = await loadMonaco();
+  } catch {
+    monacoLoadPromise = null;
+    monacoError.value = "编辑器加载失败，请重试。";
+    return;
   } finally {
     monacoLoading.value = false;
   }
@@ -225,7 +235,7 @@ watch(
 );
 
 watch(
-  () => [props.content, props.language, props.diffAgainst] as const,
+  () => [props.content, props.language, props.diffAgainst, props.file?.artifactId] as const,
   () => {
     if (needsMonaco.value && monacoRef) renderContent();
   },
@@ -240,8 +250,8 @@ watch(
 
 // 只读态可能在文件不变的情况下翻转（agent 跑起来了、这一版刚被批准），所以更新
 // 已挂载实例的选项，而不是等下一次 renderContent。
-watch(editable, (canEdit) => {
-  editorInstance?.updateOptions({ readOnly: !canEdit });
+watch(() => [editable.value, props.saving] as const, ([canEdit, saving]) => {
+  editorInstance?.updateOptions({ readOnly: !canEdit || saving });
 });
 
 onBeforeUnmount(() => {
@@ -288,6 +298,8 @@ function submitSave(): void {
           </span>
           <template v-else>
             <Badge v-if="statusText" size="sm" :tone="statusTone">{{ statusText }}</Badge>
+            <Button v-if="isDocPreviewLanguage(language) && !loading && content !== null && (editable || markdownEditing)" size="sm" :disabled="dirty || saving" @click="markdownEditing = !markdownEditing">{{ markdownEditing ? '预览文档' : '编辑文档' }}</Button>
+            <span v-if="dirty" class="dirty-label">未保存</span>
             <Button v-if="editable" size="sm" variant="ghost" :disabled="!dirty || saving" @click="submitSave">
               {{ saving ? "保存中…" : "保存" }}
             </Button>
@@ -295,13 +307,15 @@ function submitSave(): void {
         </div>
       </div>
 
-      <p v-if="saveError" class="code-editor-save-error">{{ saveError }}</p>
+      <p v-if="saveError" class="code-editor-save-error" role="alert">{{ saveError }}</p>
 
       <div class="code-editor-body">
         <div v-if="loading" class="code-editor-loading">加载中…</div>
+        <div v-else-if="content === null" class="code-editor-loading">无法显示文件内容，请从文件树重新打开以重试。</div>
         <DocPreview v-else-if="showDocPreview" :content="content ?? ''" />
         <div v-else class="code-editor-monaco-wrap">
-          <div v-if="monacoLoading" class="code-editor-loading">正在加载编辑器…</div>
+          <div v-if="monacoError" class="code-editor-loading" role="alert">{{ monacoError }}<Button @click="ensureMonacoMounted">重试</Button></div>
+          <div v-else-if="monacoLoading" class="code-editor-loading">正在加载编辑器…</div>
           <div ref="editorHost" class="code-editor-monaco-host" />
         </div>
       </div>
@@ -346,8 +360,12 @@ function submitSave(): void {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  height: 32px;
-  padding: 0 var(--space-3);
+  min-height: 40px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
   background: var(--surface-panel);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -380,7 +398,7 @@ function submitSave(): void {
   padding: var(--space-1) var(--space-3);
   background: var(--surface-panel);
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--danger);
+  color: var(--state-danger);
   font-size: var(--font-size-sm);
   line-height: var(--line-height-list);
 }
@@ -427,4 +445,6 @@ function submitSave(): void {
   min-height: 0;
   min-width: 0;
 }
+.dirty-label { color: var(--state-warn); font-size: 11px; }
+.code-editor-monaco-wrap .code-editor-loading { z-index: 1; gap: 12px; }
 </style>
