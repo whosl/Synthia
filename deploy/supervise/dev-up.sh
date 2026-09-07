@@ -24,7 +24,19 @@ TASK_RUNTIME_TOKEN=$(grep '^TASK_RUNTIME_TOKEN=' /tmp/synthia-tokens.txt | cut -
 
 pkill -f "core/scripts/serve.ts" 2>/dev/null || true
 pkill -f "runtime/server.ts" 2>/dev/null || true
+# Our own vite instances (this repo only — other projects' vite are left alone).
+pkill -f "synthia-golden/web" 2>/dev/null || true
+pkill -f "supervise.sh web" 2>/dev/null || true
 sleep 1
+# Port 5180 may be squatted by a stale vite from another worktree (a mock
+# instance there once shadowed this stack for two days) — refuse to start
+# silently on a bumped port; surface the squatter instead.
+if lsof -nP -iTCP:5180 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port 5180 is held by another process:" >&2
+  lsof -nP -iTCP:5180 -sTCP:LISTEN >&2
+  echo "kill it (or edit web/vite.config.ts port) and re-run." >&2
+  exit 1
+fi
 
 # ── Core (8787 → web vite proxy expects 5130; we run Core ON 5130) ──────────
 DATABASE_URL="postgres://synthia_core:syn_core_9f4k2m7q_zj81@127.0.0.1:55432/synthia_real_ui" \
