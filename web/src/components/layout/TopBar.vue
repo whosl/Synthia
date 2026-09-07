@@ -7,6 +7,7 @@
  */
 import { useRouter } from "vue-router";
 import type { TopBarEmits, TopBarProps } from "../../views/project-view-contract.ts";
+import Icon from "../ui/Icon.vue";
 import StageRail from "./StageRail.vue";
 import TaskSwitcher from "./TaskSwitcher.vue";
 import Button from "../ui/Button.vue";
@@ -50,6 +51,7 @@ function onBack(): void {
     </div>
 
     <div class="topbar-right">
+      <router-link class="topbar-inbox" to="/approvals" aria-label="审批中心" title="审批中心"><Icon name="inbox" :size="17" /></router-link>
       <TaskSwitcher
         :agents="props.agents"
         :current-agent="props.currentAgent"
@@ -65,17 +67,17 @@ function onBack(): void {
         :aria-pressed="props.chatOverlayOpen"
         @click="emit('toggle-chat-overlay')"
       >
-        💬
+        <Icon name="spark" :size="17" />
       </button>
 
       <Tooltip placement="left" :text="props.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'">
         <Button variant="ghost" size="sm" aria-label="切换主题" @click="emit('toggle-theme')">
-          {{ props.theme === "dark" ? "☾" : "☀" }}
+          <Icon :name="props.theme === 'dark' ? 'sun' : 'moon'" :size="17" />
         </Button>
       </Tooltip>
 
       <Tooltip text="退出登录" placement="left">
-        <Button variant="ghost" size="sm" aria-label="退出登录" @click="emit('logout')">⎋</Button>
+        <Button variant="ghost" size="sm" aria-label="退出登录" @click="emit('logout')"><Icon name="logout" :size="17" /></Button>
       </Tooltip>
     </div>
   </div>
@@ -127,8 +129,8 @@ function onBack(): void {
   display: none;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -155,5 +157,15 @@ function onBack(): void {
   .topbar-chat-toggle {
     display: inline-flex;
   }
+}
+.topbar-inbox { display: grid; place-items: center; width: 30px; height: 30px; color: var(--text-secondary); border-radius: 6px; }
+.topbar-inbox:hover { background: var(--surface-hover); color: var(--accent); }
+@media (max-width: 700px) {
+  .topbar { gap: 4px; padding: 6px 8px; flex-wrap: wrap; align-content: center; }
+  .topbar-left { flex: 1; gap: 3px; }
+  .topbar-project-name { max-width: 110px; font-size: 12px; }
+  .topbar-right { gap: 2px; }
+  .topbar-center { order: 3; flex: 1 1 100%; height: 24px; padding-left: 8px; }
+  .topbar-right :deep(.task-switcher-trigger) { max-width: 85px; }
 }
 </style>

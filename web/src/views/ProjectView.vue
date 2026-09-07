@@ -1,18 +1,12 @@
 <script setup lang="ts">
-/**
- * 三栏项目页（v4 架构基线批次）：顶栏 + 文件树 / 编辑器 / 对话三栏，可拖拽调宽。
- *
- * 本文件是四个栏位组件（TopBar / FileTree / CodeEditor / ChatFeed）唯一的数据
- * 编排者：项目详情、run 列表与详情、artifacts/revisions/内容、SSE 订阅全部在
- * 这里持有，四个栏位组件一律受控（见 views/project-view-contract.ts）。
- *
- * 第一批范围（spec §8 步骤 1-5）：不调 gate-submissions / jobs 端点，不做就地
- * 审批与证据面板；四个栏位组件本身是占位实现，真实交互由后续批次接入，本文件
- * 的编排数据已按契约就绪。
- */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import { api } from "../main.ts";
+/** Project workspace: main conversation, files, approvals, and governed delivery. */
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
+import { createRefreshQueue } from "../domain/refresh-queue.ts";
+import { useEditorContent } from "../composables/use-editor-content.ts";
+import Button from "../components/ui/Button.vue";
+import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
+import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
   abortAgent,
@@ -39,13 +33,11 @@ import {
   getProcessProfile,
   getProcessState,
   getProjectWorkVersion,
-  getRevisionContent,
   getSideTask,
   getSideTaskDiff,
   getSideTaskEvents,
   getSideTaskResult,
   getTask,
-  getWorkspaceFile,
   getWorkspaceTree,
   listArtifacts,
   listBitstreams,
@@ -58,7 +50,6 @@ import {
   listProjectReadiness,
   listSideTasks,
   listTasks,
-  putWorkspaceFile,
   previewFormalInput,
   registerWorkspace,
   rejectGateSubmission,
@@ -205,9 +196,10 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 const projectId = String(route.params.id);
+const isMock = import.meta.env.VITE_MOCK === "1";
 
 // ─────────────────────────────────────────────────────────────────────
-// 基础数据 + 轮询（3s；无活动 run 时停）
+// 基础数据 + 轮询（3s；无活动 run 时跳过请求，保留恢复能力）
 // ─────────────────────────────────────────────────────────────────────
 
 const project = ref<ProjectDetail | null>(null);
@@ -345,10 +337,12 @@ let changeRequestAttempt: WriteAttempt<CreateChangeRequestV1> | null = null;
 let withdrawChangeRequestAttempt: WriteAttempt<{ readonly changeRequestId: string; readonly reason: string }> | null = null;
 
 const loading = ref(true);
+const taskListReady = ref(false);
 const loadErrorText = ref<string | null>(null);
 
 let poller: Poller | null = null;
-let refreshing = false;
+const refresh = createRefreshQueue(refreshOnce);
+let disposed = false;
 
 async function loadArtifactsAndRevisions(): Promise<void> {
   const list = await listArtifacts(api, projectId);
@@ -375,11 +369,12 @@ async function loadWorkspace(): Promise<boolean> {
 }
 
 /** 每轮刷新：run 列表 + 当前 run 详情 + 产物/版本（agent 运行期间会不断产出新候选版本）+ 工作区。 */
-async function refresh(): Promise<void> {
-  if (refreshing) return;
-  refreshing = true;
+async function refreshOnce(): Promise<void> {
+  if (disposed) return;
   try {
     const [taskList] = await Promise.all([listTasks(api, projectId), loadArtifactsAndRevisions(), loadWorkspace()]);
+    if (disposed) return;
+    taskListReady.value = true;
     agents.value = [...taskList.agents]
       .filter((task) => task.kind !== "side")
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -393,7 +388,11 @@ async function refresh(): Promise<void> {
       else delete query.run;
       void router.replace({ query });
     }
-    detail.value = currentAgentId.value ? await getTask(api, projectId, currentAgentId.value) : null;
+    const selectedId = currentAgentId.value;
+    const selectedDetail = selectedId ? await getTask(api, projectId, selectedId) : null;
+    if (disposed) return;
+    if (selectedId !== currentAgentId.value) { void refresh(); return; }
+    detail.value = selectedDetail;
     loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
     void syncApproval();
@@ -401,8 +400,6 @@ async function refresh(): Promise<void> {
     if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
   } catch (err) {
     loadErrorText.value = humanizeLoadError(err);
-  } finally {
-    refreshing = false;
   }
 }
 
@@ -1360,26 +1357,35 @@ async function onWithdrawChangeRequest(changeRequestId: string, reason: string):
   }
 }
 
-onMounted(async () => {
+async function initializeProject(): Promise<void> {
+  loading.value = true;
+  loadErrorText.value = null;
   try {
-    project.value = await getProject(api, projectId);
+    const value = await getProject(api, projectId);
+    if (disposed) return;
+    project.value = value;
+    await refresh();
+    if (disposed) return;
+    const subId = route.query.sub;
+    if (typeof subId === "string" && subId.length > 0) await openSubmissionDeepLink(subId);
+    if (disposed) return;
+    poller?.stop();
+    poller = createPoller(() => {
+      if (document.visibilityState === "hidden") return;
+      // A later task or a degraded stream must still be able to recover.
+      if (loadErrorText.value || agents.value.some((task) => task.status === "running" || task.status === "awaiting_approval")) void refresh();
+    }, 3000);
   } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
+    if (!disposed) loadErrorText.value = humanizeLoadError(err);
+  } finally {
+    if (!disposed) loading.value = false;
   }
-  await refresh();
-  // 深链要在 refresh 之后：它需要 agents 已就绪才能找到在等这道门的那个 agent。
-  const subId = route.query.sub;
-  if (typeof subId === "string" && subId.length > 0) await openSubmissionDeepLink(subId);
-  loading.value = false;
-  poller = createPoller(() => {
-    void refresh();
-    const active = agents.value.some((r) => r.status === "running" || r.status === "awaiting_approval");
-    // 有其它后台 run 在跑，或当前 run 未知/未到终态 → 继续轮询；否则停。
-    return active || detail.value === null || !isTerminalStatus(detail.value.status);
-  }, 3000);
-});
+}
+
+onMounted(() => { void initializeProject(); });
 
 onBeforeUnmount(() => {
+  disposed = true;
   poller?.stop();
   poller = null;
   streamHandle?.close();
@@ -1561,13 +1567,34 @@ const hasAgent = computed(() => agents.value.length > 0);
 
 const openArtifactId = ref<string | null>(null);
 const openRevisionId = ref<string | null>(null);
-const fileContent = ref<string | null>(null);
-const fileContentLoading = ref(false);
-/** 编辑器里这份正文是从哪儿取的，见契约 CodeEditorProps.contentSource。 */
-const contentSource = ref<"workspace" | "revision">("revision");
-const saving = ref(false);
-const saveError = ref<string | null>(null);
-const diffAgainst = ref<CodeEditorProps["diffAgainst"]>(null);
+const {
+  fileContent, fileContentLoading, contentSource, saving, saveError, diffAgainst,
+  resetContent, loadRevisionContent, loadWorkspaceContent, loadComparison, saveWorkspaceContent,
+} = useEditorContent(api, projectId);
+const editorDirty = ref(false);
+
+function canLeaveEditor(): boolean {
+  if (saving.value) return false;
+  if (!editorDirty.value) return true;
+  if (!window.confirm("当前文件有未保存的修改。放弃修改并继续？")) return false;
+  editorDirty.value = false;
+  return true;
+}
+
+onBeforeRouteLeave(() => canLeaveEditor());
+onBeforeRouteUpdate((to, from) => {
+  if (to.path === from.path && (to.query.run ?? null) === currentAgentId.value && to.query.sub === from.query.sub) return true;
+  const changesContext = to.path !== from.path || to.query.run !== from.query.run || to.query.sub !== from.query.sub;
+  if (changesContext && sending.value) return false;
+  return !changesContext || canLeaveEditor();
+});
+function warnBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!editorDirty.value && !saving.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+onMounted(() => window.addEventListener("beforeunload", warnBeforeUnload));
+onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnload));
 
 const openFileEntry = computed<FileTreeEntry | null>(
   () => (openArtifactId.value ? fileTreeEntries.value.find((e) => e.artifactId === openArtifactId.value) ?? null : null),
@@ -1592,7 +1619,7 @@ const readonlyReason = computed<EditorReadonlyReason>(() => {
   return deriveReadonlyReason(
     {
       revisionState: activeRevision.value?.state ?? null,
-      agentStatus: detail.value?.status ?? null,
+      agentStatus: agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null,
       inWorkspace: entry.status !== null,
       contentSource: contentSource.value,
     },
@@ -1618,35 +1645,6 @@ function inferLanguage(entry: FileTreeEntry | null): string {
   return "markdown";
 }
 
-async function loadRevisionContent(artifactId: string, revisionId: string): Promise<void> {
-  fileContentLoading.value = true;
-  try {
-    const res = await getRevisionContent(api, projectId, artifactId, revisionId);
-    fileContent.value = res.content;
-    contentSource.value = "revision";
-  } catch (err) {
-    fileContent.value = null;
-    loadErrorText.value = humanizeLoadError(err);
-  } finally {
-    fileContentLoading.value = false;
-  }
-}
-
-/** 读工作区**当前**字节（含还没登记的改动）——文件树点开一个盘上文件走这条路。 */
-async function loadWorkspaceContent(path: string): Promise<void> {
-  fileContentLoading.value = true;
-  try {
-    const res = await getWorkspaceFile(api, projectId, path);
-    fileContent.value = res.content;
-    contentSource.value = "workspace";
-  } catch (err) {
-    fileContent.value = null;
-    loadErrorText.value = humanizeLoadError(err);
-  } finally {
-    fileContentLoading.value = false;
-  }
-}
-
 /**
  * 打开文件。默认打开的是**盘上那份**，不是最新那版修订——文件树上标着「已改动」的
  * 行点进来却看见登记在册的旧内容，是在骗人。只有盘上没有这个文件（流水线产出的
@@ -1658,7 +1656,8 @@ async function loadWorkspaceContent(path: string): Promise<void> {
  */
 function openFile(artifactId: string, revisionId?: string): void {
   const entry = fileTreeEntries.value.find((e) => e.artifactId === artifactId);
-  if (!entry) return;
+  if (!entry || !canLeaveEditor()) return;
+  resetContent();
   const target = pickRevision(entry, revisionId);
   openArtifactId.value = artifactId;
   openRevisionId.value = target?.id ?? null;
@@ -1680,7 +1679,7 @@ function openFile(artifactId: string, revisionId?: string): void {
 }
 
 function onSelectRevision(revisionId: string): void {
-  if (!openArtifactId.value) return;
+  if (!openArtifactId.value || !canLeaveEditor()) return;
   openRevisionId.value = revisionId;
   diffAgainst.value = null;
   saveError.value = null;
@@ -1694,23 +1693,10 @@ function onSelectRevision(revisionId: string): void {
 async function compareRevisions(entry: FileTreeEntry, baseRevisionId: string, headRevisionId: string): Promise<void> {
   const base = entry.revisions.find((r) => r.id === baseRevisionId);
   const head = entry.revisions.find((r) => r.id === headRevisionId);
-  if (!base || !head) return;
+  if (!base || !head || !canLeaveEditor()) return;
   openArtifactId.value = entry.artifactId;
   openRevisionId.value = head.id;
-  fileContentLoading.value = true;
-  try {
-    const [baseRes, headRes] = await Promise.all([
-      getRevisionContent(api, projectId, entry.artifactId, base.id),
-      getRevisionContent(api, projectId, entry.artifactId, head.id),
-    ]);
-    fileContent.value = headRes.content;
-    contentSource.value = "revision";
-    diffAgainst.value = { base, baseContent: baseRes.content, head };
-  } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
-  } finally {
-    fileContentLoading.value = false;
-  }
+  await loadComparison(entry.artifactId, base, head);
 }
 
 async function onCompareRevisions(baseRevisionId: string, headRevisionId: string): Promise<void> {
@@ -1736,19 +1722,8 @@ function onExitDiff(): void {
  */
 async function onSave(content: string): Promise<void> {
   const entry = openFileEntry.value;
-  if (!entry?.path || saving.value) return;
-  saving.value = true;
-  saveError.value = null;
-  try {
-    await putWorkspaceFile(api, projectId, entry.path, content);
-    fileContent.value = content;
-    contentSource.value = "workspace";
-    await loadWorkspace();
-  } catch (err) {
-    saveError.value = humanizeLoadError(err);
-  } finally {
-    saving.value = false;
-  }
+  if (!entry?.path || readonlyReason.value || diffAgainst.value) return;
+  if (await saveWorkspaceContent(entry.path, content)) await loadWorkspace();
 }
 
 const registering = ref(false);
@@ -1829,7 +1804,11 @@ const focusStageId = ref<string | null>(null);
 
 function onSelectAgent(agentId: string): void {
   if (agentId === currentAgentId.value) return;
+  if (sending.value || !canLeaveEditor()) return;
   if (resolveMainTaskId(agentId, agents.value) !== agentId) return;
+  forceNewTask.value = false;
+  deepLinkSerial += 1;
+  resetContent();
   currentAgentId.value = agentId;
   detail.value = null;
   openArtifactId.value = null;
@@ -1840,6 +1819,7 @@ function onSelectAgent(agentId: string): void {
   formalApproval.value = null;
   formalApprovalId.value = null;
   clearApproval(); // 审批卡是「当前 agent 的当前门」，切 agent 必须整块作废
+  void router.replace({ query: { ...route.query, run: agentId, sub: undefined } });
   void refresh();
 }
 
@@ -1849,10 +1829,14 @@ function onSelectAgent(agentId: string): void {
  * 不受影响，仍留在切换器里可选回去，不是丢弃或撤销它们。
  */
 function onNewAgent(): void {
+  if (sending.value) return;
   if (projectType(project.value ?? {}) === "engineering" && agents.value.length > 0) {
     sendError.value = "工程项目只有一个主 Agent；需要并行试验时，请使用顶部的“探索任务”入口。";
     return;
   }
+  if (!canLeaveEditor()) return;
+  deepLinkSerial += 1;
+  resetContent();
   currentAgentId.value = null;
   detail.value = null;
   openArtifactId.value = null;
@@ -1864,7 +1848,17 @@ function onNewAgent(): void {
   formalApprovalId.value = null;
   clearApproval();
   forceNewTask.value = true;
+  void router.replace({ query: { ...route.query, run: undefined, sub: undefined } });
 }
+
+watch(() => route.query.run, (run) => {
+  if (loading.value || (forceNewTask.value && !run)) return;
+  const selected = resolveMainTaskId(typeof run === "string" ? run : null, agents.value);
+  if (selected && selected !== currentAgentId.value) onSelectAgent(selected);
+});
+watch(() => route.query.sub, (sub) => {
+  if (!loading.value && typeof sub === "string" && sub) void openSubmissionDeepLink(sub);
+});
 
 function onSelectStage(stageId: string): void {
   viewMode.value = "stage";
@@ -1872,6 +1866,7 @@ function onSelectStage(stageId: string): void {
 }
 
 function onLogout(): void {
+  if (!canLeaveEditor()) return;
   auth.logout();
   void router.push({ name: "login" });
 }
@@ -1901,6 +1896,10 @@ const leftCollapsed = computed(() => viewportWidth.value < 1024);
 const rightCollapsed = computed(() => viewportWidth.value < 1280);
 const treeDrawerOpen = ref(false);
 const chatOverlayOpen = ref(false);
+function focusConversation(): void {
+  chatOverlayOpen.value = true;
+  void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // 右栏：发言模式 / 发送 / 打断
@@ -1912,6 +1911,12 @@ const composerMode = computed<ChatComposerMode>(() => {
   return "prompt";
 });
 const canAbort = computed(() => detail.value?.status === "running");
+const chatDrafts = ref<Record<string, string>>({});
+const chatDraftKey = computed(() => forceNewTask.value ? "new" : currentAgentId.value ?? "new");
+const chatDraft = computed({
+  get: () => chatDrafts.value[chatDraftKey.value] ?? "",
+  set: (value: string) => { chatDrafts.value[chatDraftKey.value] = value; },
+});
 const sending = ref(false);
 const sendError = ref<string | null>(null);
 let createMainTaskAttempt: { readonly text: string; readonly key: string } | null = null;
@@ -1925,7 +1930,10 @@ watch(currentAgentId, (agentId) => {
 });
 
 async function onSend(text: string): Promise<void> {
-  if (sending.value) return;
+  if (sending.value || loading.value || !project.value) return;
+  if (!taskListReady.value) { sendError.value = "任务列表尚未加载完成，请先重试加载项目。"; return; }
+  if (composerMode.value !== "new-task" && !detail.value) { sendError.value = "对话尚未加载完成，请稍后重试。"; return; }
+  const draftKey = chatDraftKey.value;
   sending.value = true;
   sendError.value = null;
   try {
@@ -1951,9 +1959,13 @@ async function onSend(text: string): Promise<void> {
       await sendMessage(api, projectId, attempt.taskId, attempt.text, attempt.key);
       mainTaskMessageAttempt = null;
     }
+    if (chatDrafts.value[draftKey]?.trim() === text) chatDrafts.value[draftKey] = "";
+    if (currentAgentId.value) void router.replace({ query: { ...route.query, run: currentAgentId.value } });
     await refresh();
   } catch (err) {
-    sendError.value = humanizeDecisionError(err, "发送").text;
+    sendError.value = err instanceof ApiError && err.code === "mock_unsupported"
+      ? "当前离线演示不支持在新项目中启动 Agent。请返回预置项目体验对话。"
+      : humanizeDecisionError(err, "发送").text;
   } finally {
     sending.value = false;
   }
@@ -2084,6 +2096,7 @@ async function syncApproval(): Promise<void> {
     const found = findApprovalSubmission(subs, run!.awaiting_gate!);
     if (!found || submission.value?.id === found.id) return;
     const full = await getGateSubmission(api, projectId, found.id);
+    if (disposed || detail.value?.agent_id !== run?.agent_id || route.query.sub) return;
     clearApproval(); // 换了一条提交 → 上一条的幂等尝试与错误提示全部作废
     submission.value = full;
     void loadApprovalMembers(full);
@@ -2099,15 +2112,22 @@ async function syncApproval(): Promise<void> {
  * 进来会停在默认（最新）agent 上，要批的那张卡根本不在当前上下文里。找不到对应
  * agent（会话已结束/丢失）时标记为孤儿，由 `approvalCardProps` 退化成按提交状态渲染。
  *
- * 只在挂载时跑一次：之后的可见性交给 `syncApproval` + `deriveApprovalCard`。
+ * 挂载及审批深链变化时加载；过期请求不得覆盖当前所选上下文。
  */
+let deepLinkSerial = 0;
 async function openSubmissionDeepLink(subId: string): Promise<void> {
+  const serial = ++deepLinkSerial;
+  chatOverlayOpen.value = true;
   try {
     const full = await getGateSubmission(api, projectId, subId);
+    if (disposed || serial !== deepLinkSerial) return;
     const owner = agents.value.find((a) => a.status === "awaiting_approval" && a.awaiting_gate === full.gate);
     if (owner && owner.agent_id !== currentAgentId.value) {
       currentAgentId.value = owner.agent_id;
-      detail.value = await getTask(api, projectId, owner.agent_id);
+      forceNewTask.value = false;
+      const ownerDetail = await getTask(api, projectId, owner.agent_id);
+      if (disposed || serial !== deepLinkSerial || currentAgentId.value !== owner.agent_id) return;
+      detail.value = ownerDetail;
     }
     clearApproval();
     submission.value = full;
@@ -2295,6 +2315,8 @@ const codeEditorProps = computed<CodeEditorProps>(() => ({
 }));
 
 const chatFeedProps = computed<ChatFeedProps>(() => ({
+  draft: chatDraft.value,
+  closable: rightCollapsed.value,
   parts: parts.value,
   agentStatus: detail.value?.status ?? null,
   streamPhase: streamPhase.value,
@@ -2386,6 +2408,7 @@ function onToggleChatOverlay(): void {
       />
     </header>
     <div v-if="project" class="project-view-meta" aria-label="项目类型与流程版本">
+      <span v-if="isMock" class="project-demo-tag">演示数据</span>
       <span>{{ projectTypeLabel }}</span>
       <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
       <span v-if="project.target_part">器件：{{ project.target_part }}</span>
@@ -2423,9 +2446,11 @@ function onToggleChatOverlay(): void {
       </div>
     </div>
 
-    <div v-if="loadErrorText" class="project-view-error">{{ loadErrorText }}</div>
+    <div v-if="loadErrorText" class="project-view-error" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
+    <div v-if="loading" class="project-loading" role="status">正在准备项目工作区…</div>
 
     <Splitter
+      v-else-if="project"
       class="project-view-body"
       storage-key="synthia.splitter"
       :left-collapsed="leftCollapsed"
@@ -2441,17 +2466,29 @@ function onToggleChatOverlay(): void {
         />
       </template>
       <template #center>
-        <CodeEditor
+        <WorkspaceWelcome
+          v-if="!openArtifactId"
+          :project-name="project.name"
+          :engineering="projectType(project) === 'engineering'"
+          :has-agent="hasAgent"
+          :show-browse="leftCollapsed"
+          @start="focusConversation"
+          @browse="treeDrawerOpen = true"
+        />
+        <CodeEditor v-else
           v-bind="codeEditorProps"
           @select-revision="onSelectRevision"
           @compare-revisions="onCompareRevisions"
           @exit-diff="onExitDiff"
           @save="onSave"
+          @dirty-change="editorDirty = $event"
         />
       </template>
       <template #right>
         <ChatFeed
           v-bind="chatFeedProps"
+          @update:draft="chatDraft = $event"
+          @close="chatOverlayOpen = false"
           @send="onSend"
           @abort="onAbort"
           @open-doc="onOpenDoc"
@@ -2484,6 +2521,8 @@ function onToggleChatOverlay(): void {
         <div class="project-view-overlay">
           <ChatFeed
             v-bind="chatFeedProps"
+            @update:draft="chatDraft = $event"
+            @close="chatOverlayOpen = false"
             @send="onSend"
             @abort="onAbort"
             @open-doc="onOpenDoc"
@@ -2603,7 +2642,7 @@ function onToggleChatOverlay(): void {
 .project-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   background: var(--surface-base);
   color: var(--text-primary);
@@ -2621,8 +2660,8 @@ function onToggleChatOverlay(): void {
   flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
-  min-height: 28px;
-  padding: 0 var(--space-4);
+  min-height: 38px;
+  padding: 5px var(--space-4);
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
   border-bottom: 1px solid var(--border-subtle);
@@ -2662,6 +2701,10 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   flex: none;
   padding: var(--space-2) var(--space-4);
   background: color-mix(in srgb, var(--state-danger) 12%, transparent);
@@ -2700,6 +2743,8 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-overlay {
+  display: flex;
+  flex-direction: column;
   width: min(380px, 92vw);
 }
 
@@ -2711,5 +2756,14 @@ function onToggleChatOverlay(): void {
 .project-view-veil-fade-enter-from,
 .project-view-veil-fade-leave-to {
   opacity: 0;
+}
+</style>
+
+<style scoped>
+.project-loading { flex: 1; display: grid; place-items: center; color: var(--text-secondary); }
+.project-view-overlay > :deep(.chat-feed) { flex: 1; min-height: 0; }
+@media (max-width: 600px) {
+  .project-view-meta { gap: 6px 12px; }
+  .project-view-meta-actions { width: 100%; flex-wrap: wrap; margin-left: 0; padding-bottom: 4px; }
 }
 </style>

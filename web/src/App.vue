@@ -10,6 +10,7 @@
  */
 import { onMounted } from "vue";
 import { useRoute } from "vue-router";
+import { viewKey } from "./domain/navigation.ts";
 import { initTheme } from "./domain/theme.ts";
 
 const route = useRoute();
@@ -20,5 +21,5 @@ onMounted(() => {
 </script>
 
 <template>
-  <router-view :key="route.fullPath" />
+  <router-view :key="viewKey(route)" />
 </template>
