@@ -37,18 +37,29 @@ if lsof -nP -iTCP:5180 -sTCP:LISTEN >/dev/null 2>&1; then
   echo "kill it (or edit web/vite.config.ts port) and re-run." >&2
   exit 1
 fi
+# Same preflight for the backend ports — an m4f E2E service squatting 8790
+# once sent this stack's runtime into a 745-attempt crash loop while Core
+# silently pointed task traffic at the wrong process.
+for PORT in 5130 8791; do
+  if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "port $PORT is held by another process:" >&2
+    lsof -nP -iTCP:$PORT -sTCP:LISTEN >&2
+    echo "free it (or change the port in this script) and re-run." >&2
+    exit 1
+  fi
+done
 
 # ── Core (8787 → web vite proxy expects 5130; we run Core ON 5130) ──────────
 DATABASE_URL="postgres://synthia_core:syn_core_9f4k2m7q_zj81@127.0.0.1:55432/synthia_real_ui" \
 PORT=5130 \
 SYNTHIA_CONNECTOR_CONFIG="$HOME/.synthia/certs/worker-66/worker-66.client.json" \
-SYNTHIA_RUNTIME_URL="http://127.0.0.1:8790" \
+SYNTHIA_RUNTIME_URL="http://127.0.0.1:8791" \
   nohup sh "$SUP" core "$LOGDIR/synthia-core.log" \
   bun run core/scripts/serve.ts > /dev/null 2>&1 &
 
 # ── Runtime (GLM via Zhipu Anthropic-compatible endpoint) ───────────────────
 SYNTHIA_RUNTIME_MODE=core \
-SYNTHIA_RUNTIME_PORT=8790 \
+SYNTHIA_RUNTIME_PORT=8791 \
 SYNTHIA_CORE_URL="http://127.0.0.1:5130" \
 SYNTHIA_CORE_TOKEN="$SERVICE_TOKEN" \
 SYNTHIA_TASK_RUNTIME_TOKEN="$TASK_RUNTIME_TOKEN" \
@@ -76,5 +87,5 @@ cd "$ROOT"
 
 sleep 6
 echo "core:    $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5130/api/v1/projects -H "Authorization: Bearer $(grep '^ADMIN_TOKEN=' /tmp/synthia-tokens.txt | cut -d= -f2-)") (200=ok)"
-echo "runtime: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/tasks)"
+echo "runtime: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/tasks)"
 echo "web:     http://127.0.0.1:5180  (login token = ADMIN_TOKEN in /tmp/synthia-tokens.txt)"
