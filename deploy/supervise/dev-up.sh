@@ -64,6 +64,11 @@ SYNTHIA_MODEL_DOC_MAX_TOKENS=49152 \
 
 # ── Web (vite on 5180, /api proxied to 5130) ─────────────────────────────────
 cd web
+# Compile-time feature flags — the same set dev:mock enables. Missing flags
+# compile whole UI sections out (historical materials, side tasks), which
+# makes the real-mode app look like an older, plainer build than the mock.
+VITE_FEATURE_HISTORICAL_MATERIALS=1 \
+VITE_FEATURE_SIDE_TASKS=1 \
 VITE_FEATURE_FORMAL_DELIVERY=1 \
   nohup sh "$ROOT/deploy/supervise/supervise.sh" web "$LOGDIR/synthia-web.log" \
   bun run dev > /dev/null 2>&1 &
