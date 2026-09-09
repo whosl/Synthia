@@ -26,6 +26,7 @@ import {
   CoreTaskWorkspaceClient,
   type TaskAuthorizationScope,
 } from "./task-workspace-client.ts";
+import { CoreTaskEvolutionClient } from "./evolution-client.ts";
 import type { ArtifactFile, DocGeneration, LoopModel, RtlGeneration, TbGeneration, XdcGeneration, RepairGeneration } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -180,6 +181,21 @@ export function buildCoreTaskConversationClient(
 ): CoreTaskConversationClient {
   const cfg = resolveTaskRuntimeApiConfig(env);
   return new CoreTaskConversationClient({
+    baseUrl: cfg.baseUrl,
+    token: cfg.token,
+    projectId,
+    taskId,
+  });
+}
+
+/** Build the task-bound Learned Skill client using the same singleton token. */
+export function buildCoreTaskEvolutionClient(
+  projectId: string,
+  taskId: string,
+  env: Record<string, string | undefined> = process.env,
+): CoreTaskEvolutionClient {
+  const cfg = resolveTaskRuntimeApiConfig(env);
+  return new CoreTaskEvolutionClient({
     baseUrl: cfg.baseUrl,
     token: cfg.token,
     projectId,

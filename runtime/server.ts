@@ -31,6 +31,7 @@
  *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
  *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
  *   SYNTHIA_FEATURE_HISTORICAL_MATERIALS 1|true 显式开启历史资料上下文 (default off)
+ *   SYNTHIA_FEATURE_SELF_EVOLUTION 1|true 显式开启 Learned Skill 闭环 (default off)
  *   SYNTHIA_CORE_TOKEN / URL        (ordinary Core governance/main connector)
  *   SYNTHIA_TASK_RUNTIME_TOKEN      (singleton-scope task callbacks/side capability)
  *
@@ -68,6 +69,7 @@ import {
   buildCoreApiConnector,
   buildCoreGovernanceClient,
   buildCoreTaskConversationClient,
+  buildCoreTaskEvolutionClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
 import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
@@ -77,6 +79,7 @@ import type { SkillPrompts } from "./skill-loader.ts";
 // ── free-agent mode (spec 001-agent-freedom) ────────────────────────────────
 import {
   createFreeAgentSession,
+  loadFreeAgentConversation,
   SIDE_TASK_COMPLETION_TOOL,
   type FreeAgentDeps,
 } from "./free-agent.ts";
@@ -84,6 +87,8 @@ import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
+import { assembleLearnedSkillTools } from "./learned-skill-tools.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
@@ -103,6 +108,7 @@ import {
   type RuntimeTaskKind,
   type TaskAuthorizationScope,
   type TaskConversationClient,
+  type TaskConversationEventResult,
   type TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
 
@@ -119,6 +125,8 @@ export interface AgentHandle {
   readonly agentId: string;
   readonly taskId?: string;
   readonly taskKind?: RuntimeTaskKind;
+  /** Project agents are durable conversations; runs and sides are bounded. */
+  readonly agentRole: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization?: TaskAuthorizationScope;
@@ -154,6 +162,7 @@ export interface AgentHandle {
   /** Append-only Core callback for every Core-owned main or side task. */
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
   readonly skillPrompts: SkillPrompts;
   readonly toolModelPolicyHash: string;
   // latest persisted state (mirrors disk; updated via onStateChange)
@@ -166,6 +175,7 @@ export interface AgentDeps {
   readonly governance: GovernanceClient;
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
 }
 
 export type DepsFactory = (opts: {
@@ -190,6 +200,8 @@ export interface ServerConfig {
   readonly port: number;
   /** Default-off rollout gate. Only literal true enables historical context. */
   readonly historicalMaterialsEnabled?: boolean;
+  /** Default-off Learned Skill rollout gate. */
+  readonly selfEvolutionEnabled?: boolean;
 }
 
 export type ConversationalModelFactory = () => ConversationalModel;
@@ -320,6 +332,7 @@ class RuntimeProjectConfigError extends Error {
 interface CoreIssuedTaskDescriptor {
   readonly taskId: string;
   readonly kind: RuntimeTaskKind;
+  readonly agentRole: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization: TaskAuthorizationScope;
@@ -340,6 +353,31 @@ function parseCoreIssuedTaskDescriptor(
     throw new RuntimeProjectConfigError(400, "task_descriptor_invalid", "task_kind must be main or side");
   }
   const kind = rawKind;
+  const executionIntent = body.execution_intent;
+  if (
+    executionIntent !== undefined
+    && executionIntent !== "project_agent"
+    && executionIntent !== "run"
+    && executionIntent !== "side_agent"
+  ) {
+    throw new RuntimeProjectConfigError(
+      400,
+      "task_descriptor_invalid",
+      "execution_intent must be project_agent, run, or side_agent",
+    );
+  }
+  const agentRole: "project" | "run" | "side" = kind === "side"
+    ? "side"
+    : executionIntent === "project_agent"
+      ? "project"
+      : "run";
+  if (kind === "side" && executionIntent !== undefined && executionIntent !== "side_agent") {
+    throw new RuntimeProjectConfigError(
+      400,
+      "task_descriptor_invalid",
+      "side task execution_intent must be side_agent",
+    );
+  }
   const parentTaskId = body.parent_task_id === undefined || body.parent_task_id === null
     ? undefined
     : requireTaskIdentifier("parent_task_id", body.parent_task_id);
@@ -369,6 +407,8 @@ function parseCoreIssuedTaskDescriptor(
     taskId,
     projectId,
     kind,
+    agentRole,
+    executionIntent: executionIntent ?? null,
     parentTaskId: parentTaskId ?? null,
     workspaceId: workspaceId ?? null,
     task,
@@ -385,6 +425,7 @@ function parseCoreIssuedTaskDescriptor(
   return {
     taskId,
     kind,
+    agentRole,
     ...(parentTaskId ? { parentTaskId } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     authorization,
@@ -908,7 +949,7 @@ export class RuntimeServer {
   private readonly taskEventChains = new Map<string, Promise<void>>();
   /** Any missing event makes the current Core-owned task ineligible to succeed. */
   private readonly taskEventFailures = new Map<string, unknown>();
-  private server?: Server;
+  private server?: Server<undefined>;
   private monitorTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -1043,7 +1084,7 @@ export class RuntimeServer {
 
     handle.executionStarted = true;
 
-    if (handle.executionMode === "free") {
+    if (handle.agentRole === "project" || handle.executionMode === "free") {
       const registeredState = handle.currentState;
       if (registeredState) {
         const startedState: AgentState = {
@@ -1245,9 +1286,9 @@ export class RuntimeServer {
         defaultPart: this.config.defaultPart,
       });
       // A side task is always an isolated free-agent conversation. Project
-      // engineering facts still stay frozen on the handle, but can never turn
-      // this task into the formal pipeline.
-      runtime = descriptor?.kind === "side"
+      // Agents keep the project's real execution mode and engineering tools;
+      // their durable conversational lifecycle is selected by agentRole.
+      runtime = descriptor?.agentRole === "side"
         ? { ...resolved, executionMode: "free" }
         : resolved;
     } catch (e) {
@@ -1289,6 +1330,7 @@ export class RuntimeServer {
       ...(descriptor ? {
         taskId: descriptor.taskId,
         taskKind: descriptor.kind,
+        agentRole: descriptor.agentRole,
         ...(descriptor.parentTaskId ? { parentTaskId: descriptor.parentTaskId } : {}),
         ...(descriptor.workspaceId ? { workspaceId: descriptor.workspaceId } : {}),
         authorization: descriptor.authorization,
@@ -1318,6 +1360,7 @@ export class RuntimeServer {
         inputHash: descriptor.inputHash,
         taskDescriptorHash: descriptor.descriptorHash,
       } : {}),
+      agentRole: descriptor?.agentRole ?? "run",
       executionStarted: !deferCoreTaskStart,
       projectId, processInstanceId: runtime.processInstanceId, task, part: runtime.part,
       ...(runtime.projectType ? { projectType: runtime.projectType } : {}),
@@ -1340,6 +1383,7 @@ export class RuntimeServer {
         taskEvents: deps.taskEvents ?? deps.taskWorkspace,
       } : {}),
       ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+      ...(deps.evolution ? { evolution: deps.evolution } : {}),
       skillPrompts: this.config.skillPrompts,
       toolModelPolicyHash: this.config.toolModelPolicyHash,
       currentState: agentState,
@@ -1376,10 +1420,15 @@ export class RuntimeServer {
       task_id: h.taskId ?? h.agentId,
       project_id: h.projectId,
       kind: h.taskKind ?? "main",
+      agent_role: h.agentRole,
       parent_task_id: h.parentTaskId ?? null,
       workspace_id: h.workspaceId ?? null,
       input_hash: h.inputHash ?? null,
       status: h.status,
+      // A conversational turn may still expose its preceding durable status
+      // (for example awaiting_user) while prompt/tool execution is in flight.
+      // The evolution scheduler needs this live fact to prove continuous idle.
+      busy: h.busy || this.activeMessageTurns.has(h.agentId),
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
       formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
@@ -1407,6 +1456,7 @@ export class RuntimeServer {
       task_id: h.taskId ?? h.agentId,
       project_id: h.projectId,
       kind: h.taskKind ?? "main",
+      agent_role: h.agentRole,
       parent_task_id: h.parentTaskId ?? null,
       workspace_id: h.workspaceId ?? null,
       authorization_scope: h.authorization ?? null,
@@ -1452,7 +1502,7 @@ export class RuntimeServer {
       h.status === "failed" ||
       h.status === "fail_closed";
 
-    if (!h.busy && resumable) {
+    if (!h.busy && resumable && h.agentRole === "run") {
       this.executeAgent(agentId, "resume").catch((e) => {
         process.stderr.write(`[runtime-server] resume executeAgent error for ${agentId}: ${e}\n`);
       });
@@ -1734,6 +1784,10 @@ export class RuntimeServer {
       );
     }
 
+    const owner = this.registry.get(agentId);
+    if (owner?.busy || (owner?.executionMode === "engineering" && owner.agentRole === "run")) {
+      return errorResponse(409, "pipeline_message_not_supported", "Engineering pipelines cannot accept conversational messages; abort or resume the pipeline through its control endpoint");
+    }
     const session = await this.getOrCreateSession(agentId);
     if (!session) {
       return errorResponse(503, "capability_unavailable", "failed to assemble free-agent session (model/governance/snapshot)");
@@ -1742,7 +1796,7 @@ export class RuntimeServer {
     if (session.status() === "running") {
       // 运行中：注入纠偏上下文（下一工具结束后生效），不开新 prompt。
       this.recordConversationAudit(agentId, "user_message", text);
-      session.steer(text);
+      await session.steer(text);
       this.recordConversationAudit(agentId, "free_agent_steer");
       return json({ steered: true, status: session.status() });
     }
@@ -1762,12 +1816,20 @@ export class RuntimeServer {
     // 一个 prompt（session.prompt 自身对 running 抛错，这里是双保险）。
     const hub = StreamHub.for(agentId);
     hub.emit({ type: "status", status: "running", ts: new Date().toISOString() });
+    const startingHandle = this.registry.get(agentId);
+    if (startingHandle?.agentRole === "project") {
+      // Project Agent turns are independent. A callback failure from an older
+      // turn must not poison a later turn after its fresh running event can be
+      // written successfully. Bounded Run/Side tasks retain sticky failure
+      // tracking so result sealing remains fail-closed.
+      this.taskEventFailures.delete(agentId);
+    }
     try {
       await this.appendCoreTaskEvent(
         agentId,
         `te-${sha256Hex(`${agentId}\0${turnId}\0status-running`).slice(0, 40)}`,
         "status",
-        { status: "running" },
+        { turn_id: turnId, status: "running" },
       );
     } catch (error) {
       const reason = `Core task event sync failed before model execution: ${error instanceof Error ? error.message : String(error)}`;
@@ -1786,11 +1848,14 @@ export class RuntimeServer {
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0assistant`).slice(0, 40)}`,
           "assistant_message",
-          { text: reply },
+          { turn_id: turnId, text: reply },
         );
 
         const handle = this.registry.get(agentId);
-        let status: string = session.status();
+        let status: string = handle?.agentRole === "project"
+          ? handle.status
+          : session.status();
+        let settlingEvent: TaskConversationEventResult | undefined;
         if (handle?.taskKind === "side" && handle.taskWorkspace) {
           try {
             // Tool callbacks and the assistant message are awaited individually;
@@ -1812,11 +1877,11 @@ export class RuntimeServer {
                 handle.currentState = terminal;
               }
             } else {
-              await this.appendCoreTaskEvent(
+              settlingEvent = await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user`).slice(0, 40)}`,
                 "status",
-                { status: "awaiting_user" },
+                { turn_id: turnId, status: "awaiting_user" },
               );
               await this.flushCoreTaskEvents(agentId);
               handle.status = "awaiting_user";
@@ -1837,13 +1902,24 @@ export class RuntimeServer {
             await this.failClosedCoreTask(agentId, `result finalization failed: ${reason}`);
           }
         } else {
-          await this.appendCoreTaskEvent(
+          settlingEvent = await this.appendCoreTaskEvent(
             agentId,
             `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
             "status",
-            { status },
+            { turn_id: turnId, status },
           );
           await this.flushCoreTaskEvents(agentId);
+        }
+        if (handle?.agentRole === "project" && settlingEvent) {
+          await this.sealProjectLearningEpisode(
+            handle,
+            turnId,
+            text,
+            reply,
+            status,
+            settlingEvent.sequence,
+            opts.toolEventRange(),
+          );
         }
         hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -1856,16 +1932,77 @@ export class RuntimeServer {
         const handle = this.registry.get(agentId);
         const cancelled = session.status() === "cancelled";
         const coreOwnsCancellation = cancelled && this.coreOwnedAbortIntents.delete(agentId);
-        const mustFailClosed = !cancelled && !!(handle?.taskEvents ?? handle?.taskWorkspace);
-        const status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
-        if (mustFailClosed) {
+        const recoverableProjectTurn = !cancelled && handle?.agentRole === "project";
+        const mustFailClosed = !cancelled && !recoverableProjectTurn
+          && !!(handle?.taskEvents ?? handle?.taskWorkspace);
+        let status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
+        let projectSettlingEvent: TaskConversationEventResult | undefined;
+        if (recoverableProjectTurn) {
+          // A Project Agent is a durable conversation, not a bounded Run. A
+          // model/network failure ends only this turn: persist the visible error
+          // and return the same agent to awaiting_user. If that recovery cannot
+          // be written durably, fall back to fail-closed just like other Core
+          // callback failures.
+          try {
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0assistant-error`).slice(0, 40)}`,
+              "assistant_message",
+              { turn_id: turnId, text: `[error] ${reason}` },
+            );
+            projectSettlingEvent = await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user-error`).slice(0, 40)}`,
+              "status",
+              { turn_id: turnId, status: "awaiting_user", reason },
+            );
+            await this.flushCoreTaskEvents(agentId);
+            if (handle) {
+              handle.status = "awaiting_user";
+              delete handle.endedReason;
+              delete handle.terminalCause;
+              if (handle.currentState) {
+                const {
+                  endedReason: _endedReason,
+                  terminalCause: _terminalCause,
+                  ...recoverableState
+                } = handle.currentState;
+                const awaiting: AgentState = {
+                  ...recoverableState,
+                  status: "awaiting_user",
+                  updatedAt: new Date().toISOString(),
+                };
+                await saveAgentState(awaiting);
+                handle.currentState = awaiting;
+              }
+            }
+            status = "awaiting_user";
+            if (handle && projectSettlingEvent) {
+              await this.sealProjectLearningEpisode(
+                handle,
+                turnId,
+                text,
+                `[error] ${reason}`,
+                status,
+                projectSettlingEvent.sequence,
+                opts.toolEventRange(),
+              );
+            }
+          } catch (error) {
+            status = "fail_closed";
+            await this.failClosedCoreTask(
+              agentId,
+              `project-agent turn recovery failed after ${reason}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else if (mustFailClosed) {
           await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
         } else if (!coreOwnsCancellation) {
           await this.appendCoreTaskEvent(
             agentId,
             `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
             "status",
-            { status, reason },
+            { turn_id: turnId, status, reason },
           ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));
         }
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
@@ -1880,11 +2017,58 @@ export class RuntimeServer {
     return json({ accepted: true, status: session.status() });
   }
 
+  /**
+   * Project Agents have no task terminal. The committed awaiting_user event is
+   * their immutable LearningEpisode boundary. Learning is a recoverable side
+   * effect: failure is logged for idempotent replay and never rewrites the
+   * already-settled primary conversation outcome.
+   */
+  private async sealProjectLearningEpisode(
+    handle: AgentHandle,
+    turnId: string,
+    userText: string,
+    assistantText: string,
+    status: string,
+    endEventSequence: number,
+    toolRange: { readonly start: number | null; readonly end: number | null },
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId || status !== "awaiting_user") return;
+    const observationKey = `turn:${turnId}`;
+    const episodeKey = `${observationKey}:${endEventSequence}`;
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "project-turn-episode.v1",
+      taskId: handle.taskId,
+      turnId,
+      endEventSequence,
+      userText,
+      assistantText,
+      status,
+      toolRange,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: assistantText.slice(0, 2_000),
+        toolEventStartSequence: toolRange.start,
+        toolEventEndSequence: toolRange.end,
+        evidenceRefs: [],
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal project LearningEpisode", error);
+    }
+  }
+
   /** Core-owned task terminals are immutable even if a free-agent session remains recoverable. */
   private terminalCoreTaskMessageConflict(agentId: string): Response | null {
     const handle = this.registry.get(agentId);
     if (
       !handle?.taskId ||
+      handle.agentRole === "project" ||
       (handle.status !== "succeeded" &&
         handle.status !== "failed" &&
         handle.status !== "fail_closed")
@@ -1990,6 +2174,7 @@ export class RuntimeServer {
   ): PromptStreamOptions & {
     finalize: () => void;
     sideTaskCompletionRequested: () => boolean;
+    toolEventRange: () => { readonly start: number | null; readonly end: number | null };
   } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
@@ -2001,6 +2186,8 @@ export class RuntimeServer {
      */
     const toolCalls = new Map<string, { name: string; args: string }>();
     let sideTaskCompletionRequested = false;
+    let firstToolEventSequence: number | null = null;
+    let lastToolEventSequence: number | null = null;
     const openText = (partId: string, kind: "text" | "reasoning"): void => {
       parts.set(partId, { kind, text: "" });
       hub.emit({
@@ -2014,6 +2201,7 @@ export class RuntimeServer {
       hub.emit({ type: "delta", partId, text });
     };
     return {
+      turnId,
       onTextStart: (partId) => openText(partId, "text"),
       onDelta: appendText,
       onReasoningStart: (partId) => openText(partId, "reasoning"),
@@ -2024,12 +2212,17 @@ export class RuntimeServer {
           type: "part",
           part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
         });
-        await this.appendCoreTaskEvent(
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
           "tool_call",
-          { tool_call_id: callId, name, args: fullArgs ?? args },
+          { turn_id: turnId, tool_call_id: callId, name, args: fullArgs ?? args },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
+        return event?.sequence;
       },
       onToolEnd: async (callId, ok, result, fullResult) => {
         hub.emit({
@@ -2064,12 +2257,16 @@ export class RuntimeServer {
           }),
           ok ? "ok" : "failed",
         );
-        await this.appendCoreTaskEvent(
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-result\0${callId}`).slice(0, 40)}`,
           "tool_result",
-          { tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
+          { turn_id: turnId, tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
       },
       finalize: () => {
         const ts = new Date().toISOString();
@@ -2080,22 +2277,24 @@ export class RuntimeServer {
         toolCalls.clear();
       },
       sideTaskCompletionRequested: () => sideTaskCompletionRequested,
+      toolEventRange: () => ({ start: firstToolEventSequence, end: lastToolEventSequence }),
     };
   }
 
-  private appendCoreTaskEvent(
+  private async appendCoreTaskEvent(
     agentId: string,
     eventId: string,
     type: "assistant_message" | "tool_call" | "tool_result" | "status",
     payload: Readonly<Record<string, unknown>>,
-  ): Promise<void> {
+  ): Promise<TaskConversationEventResult | undefined> {
     const handle = this.registry.get(agentId);
     const client = handle?.taskEvents ?? handle?.taskWorkspace;
-    if (!client) return Promise.resolve();
+    if (!client) return undefined;
     const previous = this.taskEventChains.get(agentId) ?? Promise.resolve();
+    let result: TaskConversationEventResult | undefined;
     const next = previous
       .catch(() => {})
-      .then(async () => { await client.appendEvent({ eventId, type, payload }); })
+      .then(async () => { result = await client.appendEvent({ eventId, type, payload }); })
       .catch((error) => {
         if (!this.taskEventFailures.has(agentId)) this.taskEventFailures.set(agentId, error);
         throw error;
@@ -2104,7 +2303,8 @@ export class RuntimeServer {
     void next.finally(() => {
       if (this.taskEventChains.get(agentId) === next) this.taskEventChains.delete(agentId);
     }).catch(() => {});
-    return next;
+    await next;
+    return result;
   }
 
   /** Wait until every event queued before result sealing is durably in Core. */
@@ -2132,12 +2332,18 @@ export class RuntimeServer {
     await this.persistTerminal(handle, "fail_closed", reason, cause).catch((error) => {
       this.logTaskSyncFailure(agentId, "persist local fail-closed state", error);
     });
-    await this.appendCoreTaskEvent(
+    const settlingEvent = await this.appendCoreTaskEvent(
       agentId,
       `te-${sha256Hex(`${agentId}\0status-fail-closed\0${reason}`).slice(0, 40)}`,
       "status",
       { status: "fail_closed", reason },
-    ).catch((error) => this.logTaskSyncFailure(agentId, "fail-closed status", error));
+    ).catch((error) => {
+      this.logTaskSyncFailure(agentId, "fail-closed status", error);
+      return undefined;
+    });
+    if (settlingEvent && handle.agentRole !== "project") {
+      await this.sealBoundedLearningEpisode(handle, settlingEvent.sequence);
+    }
   }
 
   private logTaskSyncFailure(agentId: string, action: string, error: unknown): void {
@@ -2261,6 +2467,16 @@ export class RuntimeServer {
     agentId: string,
     coreOwnsCancellation = false,
   ): Promise<Response> {
+    const pipeline = this.pipelineControllers.get(agentId);
+    if (pipeline) {
+      if (coreOwnsCancellation && this.registry.get(agentId)?.taskId) this.coreOwnedAbortIntents.add(agentId);
+      pipeline.abort(new Error("Pipeline aborted via web; in-flight remote job effects must be checked in Core"));
+      this.recordConversationAudit(agentId, "pipeline_abort");
+      return json({ aborted: true, status: "running" });
+    }
+    if (this.registry.get(agentId)?.busy) {
+      return errorResponse(409, "task_turn_finalizing", "Pipeline result persistence is in progress");
+    }
     const session = this.sessions.get(agentId);
     if (!session) {
       if (!(await this.agentExists(agentId))) {
@@ -2287,7 +2503,23 @@ export class RuntimeServer {
    * 取或懒装配 FreeAgentSession。agent 已确认存在（调用方先 agentExists）；
    * 装配失败（deps/model/snapshot）→ 返回 null（调用方返 503）。
    */
+  private readonly sessionAssemblies = new Map<string, Promise<FreeAgentSession | null>>();
+
   private async getOrCreateSession(agentId: string): Promise<FreeAgentSession | null> {
+    const existing = this.sessions.get(agentId);
+    if (existing) return existing;
+    const assembling = this.sessionAssemblies.get(agentId);
+    if (assembling) return assembling;
+    const pending = this.assembleSession(agentId);
+    this.sessionAssemblies.set(agentId, pending);
+    try {
+      return await pending;
+    } finally {
+      this.sessionAssemblies.delete(agentId);
+    }
+  }
+
+  private async assembleSession(agentId: string): Promise<FreeAgentSession | null> {
     const existing = this.sessions.get(agentId);
     if (existing) return existing;
     let projectId: string | undefined;
@@ -2303,6 +2535,7 @@ export class RuntimeServer {
     let processProfileVersion: string | null | undefined;
     let taskId: string | undefined;
     let taskKind: RuntimeTaskKind | undefined;
+    let agentRole: "project" | "run" | "side" = "run";
     let parentTaskId: string | undefined;
     let workspaceId: string | undefined;
     let authorization: TaskAuthorizationScope | undefined;
@@ -2328,6 +2561,7 @@ export class RuntimeServer {
       processProfileVersion = handle.processProfileVersion;
       taskId = handle.taskId;
       taskKind = handle.taskKind;
+      agentRole = handle.agentRole;
       parentTaskId = handle.parentTaskId;
       workspaceId = handle.workspaceId;
       authorization = handle.authorization;
@@ -2353,6 +2587,7 @@ export class RuntimeServer {
       processProfileVersion = state.processProfileVersion;
       taskId = state.taskId;
       taskKind = state.taskKind;
+      agentRole = state.agentRole ?? (state.taskKind === "side" ? "side" : "run");
       parentTaskId = state.parentTaskId;
       workspaceId = state.workspaceId;
       authorization = state.authorization;
@@ -2414,7 +2649,7 @@ export class RuntimeServer {
         requestedPart: part,
         defaultPart: this.config.defaultPart,
       });
-      const runtime = taskKind === "side"
+      const runtime = agentRole === "side"
         ? { ...resolved, executionMode: "free" as const }
         : resolved;
       executionMode = runtime.executionMode;
@@ -2487,6 +2722,8 @@ export class RuntimeServer {
       return null;
     }
 
+    const agentsDir = process.env.SYNTHIA_RUNS_DIR;
+    const initialConversation = await loadFreeAgentConversation(agentId, agentsDir);
     const deps: FreeAgentDeps = {
       model,
       tools: [
@@ -2494,9 +2731,13 @@ export class RuntimeServer {
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
         assembleVivadoTool(),
         assembleSkillDocTool(),
+        ...(this.config.selfEvolutionEnabled === true && handle?.evolution
+          ? assembleLearnedSkillTools()
+          : []),
         ...(taskKind === "side" ? [assembleSideTaskCompletionTool()] : []),
       ],
       systemPrompt,
+      ...(initialConversation ? { initialConversation } : {}),
       ...(executionMode === "engineering" && this.config.historicalMaterialsEnabled === true ? {
         loadReferenceContext: () => buildHistoricalMaterialReferenceContext(
           governance,
@@ -2511,6 +2752,7 @@ export class RuntimeServer {
       ...(workspaceId ? { workspaceId } : {}),
       ...(authorization ? { authorization } : {}),
       ...(taskWorkspace ? { workspace: taskWorkspace } : {}),
+      ...(handle?.evolution ? { evolution: handle.evolution } : {}),
       ...(inputHash ? { inputHash } : {}),
       ...(taskDescriptorHash ? { taskDescriptorHash } : {}),
       ...(initialState ? { initialState } : {}),
@@ -2520,7 +2762,7 @@ export class RuntimeServer {
       connector,
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
-      ...(process.env.SYNTHIA_RUNS_DIR ? { agentsDir: process.env.SYNTHIA_RUNS_DIR } : {}),
+      ...(agentsDir ? { agentsDir } : {}),
     };
 
     const session = createFreeAgentSession(agentId, deps);
@@ -2591,20 +2833,29 @@ export class RuntimeServer {
 
   // ----- core execution -----
 
+  private readonly pipelineControllers = new Map<string, AbortController>();
+
   private async executeAgent(
     agentId: string,
     trigger: "initial" | "resume",
   ): Promise<void> {
     const h = this.registry.get(agentId);
     if (!h) return;
+    // The governed loop is a bounded Run lifecycle. Project Agents always use
+    // the conversational session, even when the project itself is engineering.
+    if (h.agentRole !== "run") return;
     if (h.busy) return; // concurrent guard
 
     h.busy = true;
+    const controller = new AbortController();
+    this.pipelineControllers.set(agentId, controller);
 
     try {
       const agentState = await loadAgentState(agentId);
+      controller.signal.throwIfAborted();
 
       const loop = new LoopExecutor({
+        signal: controller.signal,
         model: h.model,
         connector: h.connector,
         governance: h.governance,
@@ -2616,11 +2867,13 @@ export class RuntimeServer {
         actorId: "synthia-runtime-server",
         onEvent: (e) => { h.audit.push(e); },
         onStateChange: async (state) => {
+          controller.signal.throwIfAborted();
           await saveAgentState(state);
           h.currentState = state;
           h.currentStage = state.currentStage;
           h.docs = { ...(state.docs ?? {}) };
           if (state.awaitingGate) h.awaitingGate = state.awaitingGate;
+          controller.signal.throwIfAborted();
           await this.appendAgentStateEvent(h, state);
         },
         onAwaitingApproval: (gate, submissionId, rid) => {
@@ -2648,9 +2901,28 @@ export class RuntimeServer {
         ? await loop.resume(agentState)
         : await loop.run(h.task, { agentId, agentState });
 
+      controller.signal.throwIfAborted();
+      // The execution is complete. Final persistence owns the state until busy clears.
+      this.pipelineControllers.delete(agentId);
       await this.applyResult(h, result);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
+      if (controller.signal.aborted) {
+        h.status = "failed";
+        h.endedReason = reason;
+        h.awaitingGate = undefined;
+        await this.persistTerminal(h, "failed", reason);
+        if (!this.coreOwnedAbortIntents.has(agentId)) {
+          await this.appendCoreTaskEvent(
+            agentId,
+            `te-${sha256Hex(`${agentId}\0pipeline-cancelled\0${h.currentState?.updatedAt}`).slice(0, 40)}`,
+            "status",
+            { status: "cancelled", reason },
+          );
+        }
+        StreamHub.for(agentId).emit({ type: "status", status: "cancelled", ts: new Date().toISOString() });
+        return;
+      }
       process.stderr.write(`[runtime-server] executeAgent failed for ${agentId}: ${reason}\n`);
       if (h.taskEvents ?? h.taskWorkspace) {
         await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
@@ -2662,10 +2934,12 @@ export class RuntimeServer {
       }
     } finally {
       h.busy = false;
+      this.pipelineControllers.delete(agentId);
     }
   }
 
   private async applyResult(h: AgentHandle, result: LoopResult): Promise<void> {
+    let settlingEvent: TaskConversationEventResult | undefined;
     if (result.awaitingGate) {
       h.status = "awaiting_approval";
       h.awaitingGate = result.awaitingGate;
@@ -2676,7 +2950,7 @@ export class RuntimeServer {
       h.awaitingGate = undefined;
       // Persist terminal state — the loop's finish() doesn't call onStateChange.
       await this.persistTerminal(h, result.status, result.endedReason, result.terminalCause);
-      if (h.currentState) await this.appendAgentStateEvent(h, h.currentState);
+      if (h.currentState) settlingEvent = await this.appendAgentStateEvent(h, h.currentState);
     }
 
     // Merge evidence (deduped by jobId) — evidence is per-executor-instance.
@@ -2685,21 +2959,63 @@ export class RuntimeServer {
         h.evidence.push(ev);
       }
     }
+    if (settlingEvent && h.agentRole === "run") {
+      await this.sealBoundedLearningEpisode(h, settlingEvent.sequence);
+    }
   }
 
-  private async appendAgentStateEvent(h: AgentHandle, state: AgentState): Promise<void> {
+  private async appendAgentStateEvent(
+    h: AgentHandle,
+    state: AgentState,
+  ): Promise<TaskConversationEventResult | undefined> {
     const payload = {
       status: state.status,
       current_stage: state.currentStage,
       ...(state.awaitingGate ? { awaiting_gate: state.awaitingGate } : {}),
       ...(state.endedReason ? { reason: state.endedReason } : {}),
     };
-    await this.appendCoreTaskEvent(
+    return await this.appendCoreTaskEvent(
       h.agentId,
       `te-${sha256Hex(`${h.agentId}\0agent-state\0${state.updatedAt}\0${JSON.stringify(payload)}`).slice(0, 40)}`,
       "status",
       payload,
     );
+  }
+
+  private async sealBoundedLearningEpisode(
+    handle: AgentHandle,
+    endEventSequence: number,
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId) return;
+    const terminalStatus = handle.status;
+    if (terminalStatus !== "succeeded" && terminalStatus !== "failed" && terminalStatus !== "fail_closed") return;
+    const observationKey = `task:${handle.taskId}`;
+    const episodeKey = `terminal:${endEventSequence}`;
+    const evidenceRefs = handle.evidence.map(item => item.jobId);
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "bounded-task-episode.v1",
+      taskId: handle.taskId,
+      endEventSequence,
+      status: terminalStatus,
+      reason: handle.endedReason ?? null,
+      evidenceRefs,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId: null,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: handle.endedReason ?? terminalStatus,
+        toolEventStartSequence: null,
+        toolEventEndSequence: null,
+        evidenceRefs,
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal bounded LearningEpisode", error);
+    }
   }
 
   private async persistTerminal(
@@ -2742,7 +3058,7 @@ export class RuntimeServer {
 
   private async monitorTick(): Promise<void> {
     const awaiting = [...this.registry.values()].filter(
-      (h) => h.status === "awaiting_approval" && !h.busy,
+      (h) => h.agentRole === "run" && h.status === "awaiting_approval" && !h.busy,
     );
     await Promise.allSettled(awaiting.map((h) => this.pollGate(h)));
   }
@@ -2800,6 +3116,7 @@ export class RuntimeServer {
         const wasRunning = !registeredNotStarted && state.status === "running";
         const processInstanceId = state.processInstanceId ?? "pi-default";
         const executionMode = inferExecutionMode(state);
+        const agentRole = state.agentRole ?? (state.taskKind === "side" ? "side" : "run");
 
         const lookupDeps = await this.depsFactory({
           projectId: state.projectId,
@@ -2809,7 +3126,7 @@ export class RuntimeServer {
           ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
           ...(state.authorization ? { authorization: state.authorization } : {}),
         });
-        const runtime = resolveProjectRuntime({
+        const resolvedRuntime = resolveProjectRuntime({
           requestFacts: {
             ...(state.projectType ? { projectType: normalizeKnownProjectType(state.projectType) } : {}),
             ...(state.processVersionId !== undefined ? { processVersionId: state.processVersionId } : {}),
@@ -2825,6 +3142,10 @@ export class RuntimeServer {
           requestedPart: state.part,
           defaultPart: this.config.defaultPart,
         });
+
+        const runtime = agentRole === "side"
+          ? { ...resolvedRuntime, executionMode: "free" as const }
+          : resolvedRuntime;
 
         const deps = await this.depsFactory({
           projectId: state.projectId,
@@ -2842,6 +3163,7 @@ export class RuntimeServer {
 
         const handle: AgentHandle = {
           agentId,
+          agentRole,
           ...(state.taskId ? { taskId: state.taskId } : {}),
           ...(state.taskKind ? { taskKind: state.taskKind } : {}),
           ...(state.parentTaskId ? { parentTaskId: state.parentTaskId } : {}),
@@ -2860,8 +3182,14 @@ export class RuntimeServer {
           ...(runtime.processProfileId !== undefined ? { processProfileId: runtime.processProfileId } : {}),
           ...(runtime.processProfileName !== undefined ? { processProfileName: runtime.processProfileName } : {}),
           ...(runtime.processProfileVersion !== undefined ? { processProfileVersion: runtime.processProfileVersion } : {}),
-          executionMode: state.taskKind === "side" ? "free" : runtime.executionMode,
-          status: registeredNotStarted ? "idle" : wasRunning ? "interrupted" : state.status,
+          executionMode: runtime.executionMode,
+          status: registeredNotStarted
+            ? "idle"
+            : wasRunning && agentRole === "project"
+              ? "awaiting_user"
+              : wasRunning
+                ? "interrupted"
+                : state.status,
           currentStage: state.currentStage,
           // `?? freeAgentLock.gate` 是为**本次修复之前**落盘的自由 agent 状态兜底：
           // 那些文件只写了 freeAgentLock，没有 awaitingGate，直接读会恢复成
@@ -2871,7 +3199,7 @@ export class RuntimeServer {
           audit: [],
           evidence: [],
           docs: { ...(state.docs ?? {}) },
-          endedReason: wasRunning
+          endedReason: wasRunning && agentRole !== "project"
             ? "interrupted by server restart"
             : state.endedReason,
           ...(state.terminalCause ? { terminalCause: state.terminalCause } : {}),
@@ -2882,6 +3210,7 @@ export class RuntimeServer {
             taskEvents: deps.taskEvents ?? deps.taskWorkspace,
           } : {}),
           ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+          ...(deps.evolution ? { evolution: deps.evolution } : {}),
           skillPrompts: this.config.skillPrompts,
           toolModelPolicyHash: this.config.toolModelPolicyHash,
           currentState: state,
@@ -2893,7 +3222,46 @@ export class RuntimeServer {
         // permanent zombie after Runtime restart. Legacy Runtime-only agents
         // retain the older local interrupted/failed recovery behavior.
         if (wasRunning) {
-          if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
+          if (agentRole === "project") {
+            const {
+              endedReason: _endedReason,
+              terminalCause: _terminalCause,
+              ...recoverableState
+            } = state;
+            const awaiting: AgentState = {
+              ...recoverableState,
+              status: "awaiting_user",
+              updatedAt: new Date().toISOString(),
+            };
+            try {
+              await saveAgentState(awaiting);
+              handle.currentState = awaiting;
+              delete handle.endedReason;
+              delete handle.terminalCause;
+              if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
+                const interruption = "Project Agent turn was interrupted by Runtime restart";
+                const recoveryKey = `${agentId}\0restart-recovery\0${state.updatedAt}`;
+                await this.appendCoreTaskEvent(
+                  agentId,
+                  `te-${sha256Hex(`${recoveryKey}\0assistant`).slice(0, 40)}`,
+                  "assistant_message",
+                  { text: `[error] ${interruption}` },
+                );
+                await this.appendCoreTaskEvent(
+                  agentId,
+                  `te-${sha256Hex(`${recoveryKey}\0status`).slice(0, 40)}`,
+                  "status",
+                  { status: "awaiting_user", reason: interruption },
+                );
+                await this.flushCoreTaskEvents(agentId);
+              }
+            } catch (error) {
+              await this.failClosedCoreTask(
+                agentId,
+                `project-agent restart recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          } else if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
             await this.failClosedCoreTask(
               agentId,
               "task execution interrupted by Runtime restart",
@@ -2935,11 +3303,22 @@ function parseHistoricalMaterialsFeatureFlag(value: string | undefined): boolean
   );
 }
 
+function parseSelfEvolutionFeatureFlag(value: string | undefined): boolean {
+  if (value === undefined || value === "0" || value === "false") return false;
+  if (value === "1" || value === "true") return true;
+  throw new Error(
+    "SYNTHIA_FEATURE_SELF_EVOLUTION must be exactly one of: 0, 1, false, true",
+  );
+}
+
 export async function createServerConfig(
   env: Record<string, string | undefined> = process.env,
 ): Promise<ServerConfig> {
   const historicalMaterialsEnabled = parseHistoricalMaterialsFeatureFlag(
     env.SYNTHIA_FEATURE_HISTORICAL_MATERIALS,
+  );
+  const selfEvolutionEnabled = parseSelfEvolutionFeatureFlag(
+    env.SYNTHIA_FEATURE_SELF_EVOLUTION,
   );
   const loader = new SkillLoader();
   const skillPrompts = await loader.buildPrompts();
@@ -2951,6 +3330,7 @@ export async function createServerConfig(
     gatePollMs: Number(env.SYNTHIA_GATE_POLL_MS ?? 8000),
     port: Number(env.SYNTHIA_RUNTIME_PORT ?? 8790),
     historicalMaterialsEnabled,
+    selfEvolutionEnabled,
   };
 }
 
@@ -3031,6 +3411,9 @@ export function createEnvDepsFactory(
     const taskEvents = taskId
       ? taskWorkspace ?? buildCoreTaskConversationClient(projectId, taskId, env)
       : undefined;
+    const evolution = taskId
+      ? buildCoreTaskEvolutionClient(projectId, taskId, env)
+      : undefined;
 
     return {
       model,
@@ -3038,6 +3421,7 @@ export function createEnvDepsFactory(
       governance,
       ...(taskEvents ? { taskEvents } : {}),
       ...(taskWorkspace ? { taskWorkspace } : {}),
+      ...(evolution ? { evolution } : {}),
     };
   };
 }

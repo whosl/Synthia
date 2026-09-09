@@ -17,7 +17,7 @@
  * Tcl. The default beforeToolCall hook blocks all such operations.
  */
 
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 import { saveAgentState, createAgentState, agentStatePath } from "./agent-state.ts";
@@ -27,6 +27,7 @@ import type {
   TaskAuthorizationScope,
   TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import type {
   AgentMessage,
   AgentTool,
@@ -54,6 +55,8 @@ export interface FreeAgentDeps {
   model: ConversationalModel;
   tools: readonly AgentTool[];
   systemPrompt: string;
+  /** Persisted dialogue restored after Runtime restart; its system prompt is refreshed. */
+  initialConversation?: LoadedFreeAgentConversation | null;
   /** Refresh low-trust reference data before each model call; never persisted. */
   loadReferenceContext?: () => Promise<string | null>;
   projectId: string;
@@ -64,6 +67,7 @@ export interface FreeAgentDeps {
   workspaceId?: string;
   authorization?: TaskAuthorizationScope;
   workspace?: TaskWorkspaceClient;
+  evolution?: TaskEvolutionClient;
   inputHash?: string;
   taskDescriptorHash?: string;
   /**
@@ -348,6 +352,18 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ? `${deps.systemPrompt.trim()}\n\n${REFERENCE_DATA_SYSTEM_POLICY}\n`
       : deps.systemPrompt;
     this.messages.push({ role: "system", content: systemPrompt });
+    const restored = deps.initialConversation;
+    if (restored) {
+      if (restored.agentId !== agentId) throw new Error("conversation identity mismatch");
+      this.messages.push(...restoreConversationMessages(restored.messages));
+      this.claimChecks.push(...(restored.claimChecks ?? []));
+      this.pendingSteer.push(...(restored.pendingSteer ?? []));
+      for (const artifact of restored.artifacts ?? []) {
+        this.artifactsById.set(artifact.revisionId, artifact);
+        this.artifactList.push(artifact);
+      }
+      for (const [id, members] of restored.snapshots ?? []) this.snapshotsById.set(id, members);
+    }
 
     this.agentState = deps.initialState
       ? { ...deps.initialState }
@@ -414,9 +430,15 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     }
   }
 
-  steer(text: string): void {
-    // Queue for injection after the next tool round (does not start a new prompt).
+  async steer(text: string): Promise<void> {
     this.pendingSteer.push(text);
+    await this.persistConversation();
+  }
+
+  private consumeSteer(): boolean {
+    if (this.pendingSteer.length === 0) return false;
+    this.messages.push({ role: "user", content: `[接管/纠偏] ${this.pendingSteer.splice(0).join("\n")}` });
+    return true;
   }
 
   abort(reason?: string): void {
@@ -458,6 +480,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       this.checkAbort();
 
+      if (this.consumeSteer()) await this.persist();
       const modelMessages = await this.messagesForModel();
 
       // Layer 3: beforeModelCall data-domain pre-check.
@@ -506,6 +529,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       this.checkAbort();
 
       if (turn.kind === "text") {
+        if (this.consumeSteer()) {
+          await this.persist();
+          continue;
+        }
         // 防呆 2：声称-记录一致性核查。绝不把「模型声称仿真通过 + 无 succeeded
         // 记录」并排展示给用户：拦截 → 回灌核查结论 → 模型重新生成。
         const claim = matchCompletionClaim(turn.content);
@@ -566,6 +593,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // Model converged to a plain-text reply — turn complete.
         this.messages.push({ role: "assistant", content: turn.content });
         await this.persist();
+        if (this.pendingSteer.length > 0) continue;
         return turn.content;
       }
 
@@ -584,13 +612,16 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // 工具执行期间（Vivado 一轮可达数分钟）流里必须有东西，否则前端只看得到
         // 一段死寂。开 part → 执行 → 同 id 转 done/error。
         const fullArgs = JSON.stringify(call.args ?? {});
-        await opts.onToolStart?.(
+        const toolEventSequence = await opts.onToolStart?.(
           call.toolCallId,
           call.name,
           truncateForStream(fullArgs),
           fullArgs,
         );
-        const result = await this.executeToolCall(call);
+        const result = await this.executeToolCall(call, {
+          turnId: opts.turnId ?? null,
+          ...(typeof toolEventSequence === "number" ? { toolEventSequence } : {}),
+        });
         await opts.onToolEnd?.(
           call.toolCallId,
           !result.isError,
@@ -607,15 +638,6 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         });
         await this.persist();
 
-        // Inject queued steer after each tool round completes.
-        if (this.pendingSteer.length > 0) {
-          const steers = this.pendingSteer.splice(0);
-          this.messages.push({
-            role: "user",
-            content: `[接管/纠偏] ${steers.join("\n")}`,
-          });
-          await this.persist();
-        }
       }
       // Loop back: the next model call sees the tool results.
     }
@@ -656,7 +678,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * Returns an error-shaped result on block / unknown tool / execution failure
    * so the model can self-correct.
    */
-  private async executeToolCall(call: AgentToolCall): Promise<AgentToolResult> {
+  private async executeToolCall(
+    call: AgentToolCall,
+    runtimeBinding: { readonly turnId: string | null; readonly toolEventSequence?: number },
+  ): Promise<AgentToolResult> {
     const ctx: ToolExecContext = {
       projectId: this.deps.projectId,
       ...(this.deps.taskId ? { taskId: this.deps.taskId } : {}),
@@ -665,6 +690,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.workspaceId ? { workspaceId: this.deps.workspaceId } : {}),
       ...(this.deps.authorization ? { authorization: this.deps.authorization } : {}),
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
+      ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
+      toolCallId: call.toolCallId,
+      turnId: runtimeBinding.turnId,
+      ...(runtimeBinding.toolEventSequence !== undefined
+        ? { toolEventSequence: runtimeBinding.toolEventSequence }
+        : {}),
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
@@ -833,25 +864,28 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     await this.persistConversation();
   }
 
-  private async persistConversation(): Promise<void> {
+  private conversationWrite: Promise<void> = Promise.resolve();
+
+  private persistConversation(): Promise<void> {
     const dir = this.deps.agentsDir ?? dirname(agentStatePath(this.agentId));
     const path = join(dir, `${this.agentId}.conversation.json`);
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      path,
-      JSON.stringify(
-        {
-          agentId: this.agentId,
-          status: this._status,
-          messages: this.messages,
-          // 防呆 2：claim-check 审计记录（无记录时省略，保持 sidecar 向后兼容）。
-          ...(this.claimChecks.length > 0 ? { claimChecks: this.claimChecks } : {}),
-        },
-        null,
-        2,
-      ) + "\n",
-      "utf8",
-    );
+    const payload = JSON.stringify({
+      agentId: this.agentId,
+      status: this._status,
+      messages: this.messages,
+      pendingSteer: this.pendingSteer,
+      artifacts: this.artifactList,
+      snapshots: [...this.snapshotsById],
+      ...(this.claimChecks.length > 0 ? { claimChecks: this.claimChecks } : {}),
+    }, null, 2) + "\n";
+    const write = this.conversationWrite.then(async () => {
+      await mkdir(dir, { recursive: true });
+      const temporary = `${path}.tmp`;
+      await writeFile(temporary, payload, "utf8");
+      await rename(temporary, path);
+    });
+    this.conversationWrite = write.catch(() => {});
+    return write;
   }
 
   /** Map FreeAgentStatus → AgentState status (pipeline-oriented but reused). */
@@ -891,9 +925,16 @@ export async function loadFreeAgentConversation(
   const path = join(dir, `${agentId}.conversation.json`);
   try {
     const raw = await readFile(path, "utf8");
-    return JSON.parse(raw) as LoadedFreeAgentConversation;
-  } catch {
-    return null;
+    const value = JSON.parse(raw) as LoadedFreeAgentConversation;
+    if (value.agentId !== agentId || !Array.isArray(value.messages)
+      || value.messages.some((m) => !m || !["system", "user", "assistant", "tool"].includes(m.role))
+      || (value.pendingSteer !== undefined && (!Array.isArray(value.pendingSteer) || value.pendingSteer.some((text) => typeof text !== "string")))) {
+      throw new Error("invalid conversation snapshot");
+    }
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
 }
 
@@ -902,6 +943,36 @@ export interface LoadedFreeAgentConversation {
   readonly agentId: string;
   readonly status: FreeAgentStatus;
   readonly messages: AgentMessage[];
+  readonly pendingSteer?: readonly string[];
+  readonly artifacts?: readonly RegisteredArtifactInfo[];
+  readonly snapshots?: readonly (readonly [string, readonly string[]])[];
   /** claim-check 审计记录（无命中时缺失；向后兼容旧 sidecar）。 */
   readonly claimChecks?: readonly ClaimCheckRecord[];
+}
+
+/** Close interrupted tool batches without replaying operations with unknown effects. */
+function restoreConversationMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+  const restored: AgentMessage[] = [];
+  const pending = new Map<string, AgentToolCall>();
+  const closePending = () => {
+    for (const call of pending.values()) restored.push({
+      role: "tool", toolCallId: call.toolCallId, name: call.name,
+      content: "Execution interrupted before a result was recorded; effects are unknown. Inspect current state before retrying.",
+      isError: true,
+    });
+    pending.clear();
+  };
+  const history = messages[0]?.role === "system" ? messages.slice(1) : messages;
+  for (const message of history) {
+    if (message.role !== "tool") closePending();
+    if (message.role === "tool") {
+      if (!pending.delete(message.toolCallId)) throw new Error("conversation has an unmatched tool result");
+    }
+    restored.push(message);
+    if (message.role === "assistant") {
+      for (const call of message.toolCalls ?? []) pending.set(call.toolCallId, call);
+    }
+  }
+  closePending();
+  return restored;
 }

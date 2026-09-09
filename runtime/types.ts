@@ -11,6 +11,7 @@
 
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
+export type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
 import { computeManifestHash, sha256Hex } from "../core/src/hashing.ts";
 import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 import { parseProcessProfile } from "./process-profile.ts";
@@ -173,6 +174,8 @@ export interface EvidenceContent {
  * only issues these versioned capability calls.
  */
 export interface LoopConnector {
+  /** Bind internal polling/retries to the current execution without mutating a shared adapter. */
+  withSignal?(signal: AbortSignal): LoopConnector;
   readonly id: string;
   /** True once capability drift has been detected — the loop fails closed. */
   readonly drift: boolean;
@@ -664,6 +667,8 @@ export interface AgentState {
   /** Core-issued task identity. For P3 tasks taskId === agentId. */
   readonly taskId?: string;
   readonly taskKind?: RuntimeTaskKind;
+  /** Durable lifecycle role. Project agents survive individual turns/runs. */
+  readonly agentRole?: "project" | "run" | "side";
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization?: TaskAuthorizationScope;

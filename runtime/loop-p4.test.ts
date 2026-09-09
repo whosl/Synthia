@@ -120,6 +120,7 @@ class P4Governance extends MockGovernanceClient {
       frozenAt: NOW, verdicts: {}, entries: [{
         name: `${operation}.log`, role: "tool_log", sha256: hash(operation), sizeBytes: 1,
         mediaType: "text/plain", storageUri: `content://sha256/${hash(operation)}`,
+        artifactClassification: "tool_run_evidence", usageClassification: "run_class_governed",
         completeness: "full", corrupt: false, verdict: null,
       }],
     };

@@ -18,6 +18,7 @@
  *   3. After reconnect, if drift is detected → fail-closed (no submit).
  */
 
+import { abortable, guardExecution } from "./execution-control.ts";
 import { RemoteConnectorError, type RemoteConnectorClient } from "../connector/remote.ts";
 import { sha256Hex, stableId } from "../core/src/hashing.ts";
 import { FailClosedError, VIVADO_CAPABILITY_VERSION, submissionSha } from "./loop.ts";
@@ -60,7 +61,7 @@ export class RemoteVivadoConnector implements LoopConnector {
   readonly lifecycleEvents: ConnectorLifecycleEvent[] = [];
   private primed = false;
 
-  constructor(opts: RemoteVivadoOptions) {
+  constructor(private readonly opts: RemoteVivadoOptions) {
     this.id = opts.connectorId;
     this.clientFactory = opts.clientFactory;
     this.client = opts.clientFactory();
@@ -70,6 +71,14 @@ export class RemoteVivadoConnector implements LoopConnector {
     this.clock = opts.now ?? Date.now;
     this.sleeper = opts.sleep ?? defaultSleep;
     this.onLifecycle = opts.onLifecycle;
+  }
+
+  withSignal(signal: AbortSignal): RemoteVivadoConnector {
+    return new RemoteVivadoConnector({
+      ...this.opts,
+      clientFactory: () => guardExecution(this.opts.clientFactory(), signal),
+      sleep: (ms) => abortable(() => this.sleeper(ms), signal),
+    });
   }
 
   get drift(): boolean { return this.client.hasCapabilityDrift; }

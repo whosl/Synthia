@@ -205,8 +205,10 @@ export function buildModuleGraph(sources: readonly ArtifactFile[]): ModuleGraph 
     const stripped = stripVerilogComments(s.content);
     const names: string[] = [];
     for (const m of stripped.matchAll(MODULE_DECL_RE)) {
-      if (!declFile.has(m[1])) declFile.set(m[1], s.path);
-      names.push(m[1]);
+      const name = m[1];
+      if (!name) continue;
+      if (!declFile.has(name)) declFile.set(name, s.path);
+      names.push(name);
     }
     modulesByFile.set(s.path, names);
     bodyByFile.set(s.path, stripModuleHeaders(stripped));
@@ -283,7 +285,8 @@ export function inferTopAndTestbench(
     return { topCandidates, testbenchCandidates: [], declaredModules };
   }
 
-  const top: InferredModuleRef = { name: topCandidates[0], file: g.declFile.get(topCandidates[0])! };
+  const topName = topCandidates[0]!;
+  const top: InferredModuleRef = { name: topName, file: g.declFile.get(topName)! };
 
   if (!needTestbench) {
     return { top, topCandidates, testbenchCandidates: [], declaredModules };
@@ -303,7 +306,12 @@ export function inferTopAndTestbench(
   return {
     top,
     ...(testbenchCandidates.length === 1
-      ? { testbench: { name: testbenchCandidates[0], file: g.declFile.get(testbenchCandidates[0])! } }
+      ? {
+          testbench: {
+            name: testbenchCandidates[0]!,
+            file: g.declFile.get(testbenchCandidates[0]!)!,
+          },
+        }
       : {}),
     topCandidates,
     testbenchCandidates,

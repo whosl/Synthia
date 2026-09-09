@@ -23,6 +23,7 @@
  * fail-closed. Raw Tcl is never sent.
  */
 
+import { guardExecution } from "./execution-control.ts";
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
 import type { ArtifactType, GateId } from "../core/src/domain/enums.ts";
@@ -120,6 +121,7 @@ export function permissionGate(
 }
 
 export interface LoopDeps {
+  readonly signal?: AbortSignal;
   readonly model: LoopModel;
   readonly connector: LoopConnector;
   readonly skillPrompts: {
@@ -160,7 +162,14 @@ export class LoopExecutor {
   private coreCurrentGate?: P4GateId;
   private coreProcessState?: ProcessStateV1;
 
-  constructor(deps: LoopDeps) { this.deps = deps; }
+  constructor(deps: LoopDeps) {
+    this.deps = deps.signal ? {
+      ...deps,
+      model: guardExecution(deps.model, deps.signal),
+      connector: guardExecution(deps.connector.withSignal?.(deps.signal) ?? deps.connector, deps.signal),
+      governance: guardExecution(deps.governance, deps.signal),
+    } : deps;
+  }
 
   /**
    * Execute a fresh run from the intake stage through to G4 submission.
@@ -415,7 +424,22 @@ export class LoopExecutor {
         stderr: diag.stderr, stdout: diag.stdout, attempt: round + 1, systemPrompt: skillPrompts.repair,
       }));
       simSources = repaired.sources;
-      if (repaired.testbench) simTb = repaired.testbench;
+      this.chainCtx.rtl = {
+        ...this.chainCtx.rtl!,
+        reasoning: `${this.chainCtx.rtl!.reasoning}\nRepair round ${round + 1}: ${repaired.reasoning}`,
+        sources: repaired.sources,
+      };
+      await this.registerRtlArtifact();
+      if (repaired.testbench) {
+        simTb = repaired.testbench;
+        this.chainCtx.tb = {
+          ...this.chainCtx.tb!,
+          reasoning: `${this.chainCtx.tb!.reasoning}\nRepair round ${round + 1}: ${repaired.reasoning}`,
+          testbench: repaired.testbench,
+        };
+        await this.registerTbArtifact();
+      }
+      await this.syncChainContextToState({});
       this.auditModel("repair", `repair round ${round + 1} applied`, repaired.sources.map(s => s.path).join(","), "ok");
       await this.runTool("validate_sources", {
         ...baseSubmission, operation: "validate_sources", sources: [...simSources, simTb], top: rtl.topModule,
@@ -837,7 +861,7 @@ export class LoopExecutor {
     const rev: RegisteredRevision = { ...raw, contentLocation: `rtl/${this.chainCtx.rtl.sources[0]?.path ?? "top.v"}` };
     this.chainCtx.rtlRevision = rev;
     this.pushAudit({ category: "governance", phase: "governance", action: `registered RTL artifact: ${rev.revisionId}`, result: "ok", detail: `top=${this.chainCtx.rtl.topModule}` });
-    await this.updateState({ rtlRevision: rev });
+    await this.updateState({ rtlRevision: rev, rtlArtifacts: { topModule: this.chainCtx.rtl.topModule, sources: this.chainCtx.rtl.sources } });
   }
 
   private async registerTbArtifact(): Promise<void> {
@@ -857,7 +881,7 @@ export class LoopExecutor {
     const rev: RegisteredRevision = { ...raw, contentLocation: file.path };
     this.chainCtx.tbRevision = rev;
     this.pushAudit({ category: "governance", phase: "governance", action: `registered TB artifact: ${rev.revisionId}`, result: "ok", detail: `top=${this.chainCtx.tb.testbenchModule} path=${file.path}` });
-    await this.updateState({ tbRevision: rev });
+    await this.updateState({ tbRevision: rev, tbArtifacts: { testbenchModule: this.chainCtx.tb.testbenchModule, testbench: this.chainCtx.tb.testbench } });
   }
 
   private async registerXdcArtifact(): Promise<void> {
@@ -884,6 +908,7 @@ export class LoopExecutor {
   // ----- agent-state persistence -----
 
   private async updateState(patch: Partial<AgentState>): Promise<void> {
+    this.deps.signal?.throwIfAborted();
     if (!this.agentState || !this.deps.onStateChange) return;
     this.agentState = { ...this.agentState, ...patch, updatedAt: new Date().toISOString() };
     await this.deps.onStateChange(this.agentState);
@@ -895,6 +920,7 @@ export class LoopExecutor {
    * gate-pause boundaries so --resume has everything it needs.
    */
   private async syncChainContextToState(extra: Partial<AgentState>): Promise<void> {
+    this.deps.signal?.throwIfAborted();
     if (!this.agentState || !this.deps.onStateChange) return;
     const docs: Record<string, RegisteredRevision> = {};
     for (const [stage, rev] of Object.entries(this.chainCtx.docRevisions)) {

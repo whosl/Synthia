@@ -15,6 +15,7 @@ import type {
   TaskAuthorizationScope,
   TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 
 /** JSON Schema 子集（OpenAI tool `parameters` 格式）。 */
 export type ToolParameters = Record<string, unknown>;
@@ -30,6 +31,14 @@ export interface ToolExecContext {
   readonly authorization?: TaskAuthorizationScope;
   /** Narrow isolated-workspace capability. Present for side tasks only. */
   readonly workspace?: TaskWorkspaceClient;
+  /** Task-bound Learned Skill facts. It never carries Distiller/Curator permissions. */
+  readonly evolution?: TaskEvolutionClient;
+  /** Runtime-owned identity for the currently executing model tool call. */
+  readonly toolCallId?: string;
+  /** Durable Project Agent turn id; null/undefined for bounded task execution. */
+  readonly turnId?: string | null;
+  /** Sequence of the tool_call event that Core committed before tool execution. */
+  readonly toolEventSequence?: number;
   /** Core 治理客户端（登记候选制品/快照/门禁）。 */
   readonly governance: GovernanceClient;
   /** Connector（经 Core 提交 Vivado Job）。无可用时为 null（工具须 fail-closed）。 */
@@ -136,7 +145,11 @@ export type ChatTurn =
 
 /** 对话式模型原语（多轮 tool-calling）。Slice A 在 model-client.ts 上实现 chat()。 */
 export interface ConversationalModel {
-  chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn>;
+  chat(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    signal?: AbortSignal,
+  ): Promise<ChatTurn>;
 }
 
 /**
@@ -166,6 +179,8 @@ export interface StreamingConversationalModel {
  * 思维链不落 audit（体量大、非回复内容），只在实时流里可见。
  */
 export interface PromptStreamOptions {
+  /** Runtime-owned durable turn id. Models cannot supply or override it. */
+  turnId?: string;
   /** 第一个文本 delta 到达（text part 创建，state=streaming）。 */
   onTextStart?: (partId: string) => void;
   /** 文本增量（追加到该 part）。 */
@@ -180,7 +195,7 @@ export interface PromptStreamOptions {
     name: string,
     args: string,
     fullArgs?: string,
-  ) => void | Promise<void>;
+  ) => void | number | Promise<void | number>;
   /** 工具执行结束（同一 part 转 done/error）；fullResult 供持久化完整事实。 */
   onToolEnd?: (
     callId: string,
@@ -219,8 +234,8 @@ export interface FreeAgentSession {
    * 不支持流式的模型自动回退缓冲 chat()，回调不触发但轮次结果不变。
    */
   prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
-  /** 运行中接管/纠偏（下一工具结束后注入上下文），不入队新 prompt。 */
-  steer(text: string): void;
+  /** 运行中纠偏；返回的 Promise 完成后已持久化，在模型或完整工具批次边界注入。 */
+  steer(text: string): void | Promise<void>;
   /** 立即终止。 */
   abort(reason?: string): void;
 }

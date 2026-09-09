@@ -39,6 +39,25 @@ function makeClient(protocol: ActionProtocol, poster: ChatPoster, opts: { maxPar
   return new ModelClient({ ...BASE_CFG, protocol, post: poster, maxParseRetries: opts.maxParseRetries ?? 1, networkRetries: opts.networkRetries ?? 0, timeoutMs: 1000 });
 }
 
+describe("ModelClient.chat cancellation", () => {
+  test("propagates AbortSignal to the buffered HTTP poster", async () => {
+    let observed: AbortSignal | undefined;
+    const poster: ChatPoster = async ({ signal }) => {
+      observed = signal;
+      return await new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const client = makeClient("json", poster);
+    const controller = new AbortController();
+    const result = client.chat([{ role: "user", content: "hello" }], [], controller.signal);
+    controller.abort(new DOMException("service stopping", "AbortError"));
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(observed).toBe(controller.signal);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Validators
 // ---------------------------------------------------------------------------

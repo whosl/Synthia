@@ -168,6 +168,9 @@ function buildConfig(skill: SkillEntry): SkillToolConfig {
   const registerOutput = runsVivado
     ? skill.outputs.find((o) => o.artifact_type !== "TOOL_RUN") ?? skill.outputs[0]
     : skill.outputs[0];
+  if (!registerOutput) {
+    throw new Error(`skill ${skill.skill_id} declares no output artifact`);
+  }
 
   // Frozen pack: every artifact_type value is a verified ArtifactType enum member.
   const registerType = registerOutput.artifact_type as ArtifactType;
@@ -527,7 +530,7 @@ export function assembleSkillTools(opts: AssembleSkillToolsOptions = {}): AgentT
     throw new Error(`skill pack at ${packPath} is malformed: expected { skills: [...] }`);
   }
   // Frozen, committed pack; structure validated above, fields read via SkillEntry.
-  const pack = parsed as SkillPackFile;
+  const pack = parsed as unknown as SkillPackFile;
   if (pack.skills.length === 0) {
     throw new Error(`skill pack at ${packPath} contains no skills`);
   }
