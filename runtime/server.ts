@@ -1601,10 +1601,27 @@ export class RuntimeServer {
     let release!: () => void;
     const turn = new Promise<void>((resolve) => { release = resolve; });
     this.messageDispatchTurns.set(agentId, turn);
+    const waitedAt = Date.now();
+    if (predecessor) {
+      // P2 observability: a slow predecessor (e.g. a recovery-path session
+      // rebuild) silently queues every later message behind the per-agent
+      // dispatch lock — the T1 AES run held it for ~30 minutes. Make the
+      // queueing visible at 5s and the stall loud at 60s so the next
+      // occurrence is diagnosable from the log alone.
+      const warning = setTimeout(() => {
+        process.stderr.write(`[runtime-server] message dispatch for ${agentId} queued ${Date.now() - waitedAt}ms behind a slow predecessor\n`);
+      }, 5_000);
+      predecessor.finally(() => clearTimeout(warning));
+    }
     await predecessor;
+    const dispatchStarted = Date.now();
     try {
       return await dispatch();
     } finally {
+      const heldMs = Date.now() - dispatchStarted;
+      if (heldMs > 10_000) {
+        process.stderr.write(`[runtime-server] message dispatch for ${agentId} took ${heldMs}ms\n`);
+      }
       release();
       if (this.messageDispatchTurns.get(agentId) === turn) {
         this.messageDispatchTurns.delete(agentId);
@@ -1962,12 +1979,38 @@ export class RuntimeServer {
         } else if (mustFailClosed) {
           await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
         } else if (!coreOwnsCancellation) {
-          await this.appendCoreTaskEvent(
+          // P1b: a pure free agent (no Core task-event wiring) is a durable
+          // conversation, exactly like the project-role branch above — a
+          // transport/model failure after retries ends THIS turn, not the
+          // agent. Recover to awaiting_user with an in-band system note (the
+          // H7 helper) so one resend continues the task, instead of marking
+          // the agent failed (the T1 AES run lost ~2.5h to exactly this).
+          const handle = this.registry.get(agentId);
+          if (handle) {
+            handle.status = "awaiting_user";
+            delete handle.endedReason;
+            delete handle.terminalCause;
+            if (handle.currentState) {
+              const {
+                endedReason: _endedReason,
+                terminalCause: _terminalCause,
+                ...recoverableState
+              } = handle.currentState;
+              const awaiting: AgentState = {
+                ...recoverableState,
+                status: "awaiting_user",
+                updatedAt: new Date().toISOString(),
+              };
+              await saveAgentState(awaiting);
+              handle.currentState = awaiting;
+            }
+          }
+          status = "awaiting_user";
+          await appendSystemNoteToConversation(
             agentId,
-            `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
-            "status",
-            { status, reason },
-          ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));
+            `模型/传输层错误打断了上一轮（${reason.slice(0, 200)}）。已恢复为待命状态；已完成的工具调用与登记产物有效，请从中断处继续任务。`,
+            `turn-error-${turnId}`,
+          ).catch(() => undefined);
         }
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
