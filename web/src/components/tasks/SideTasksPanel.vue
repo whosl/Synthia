@@ -39,6 +39,10 @@ const props = defineProps<{
   messageError: string | null;
   error: string | null;
   notice: string | null;
+  /** Embedded mode lives inside the right Agent pane instead of a modal drawer. */
+  embedded?: boolean;
+  /** Render only the Side Agent creation form for the ＋ pane. */
+  createOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -153,11 +157,13 @@ function shortCommit(value: string | null): string {
 }
 
 onMounted(() => {
+  if (props.embedded) return;
   returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   void nextTick(() => panelElement.value?.focus());
 });
 
 onBeforeUnmount(() => {
+  if (props.embedded) return;
   returnFocus?.focus();
   returnFocus = null;
 });
@@ -168,13 +174,14 @@ onBeforeUnmount(() => {
     v-if="open"
     ref="panelElement"
     class="side-tasks-panel"
-    role="dialog"
-    aria-modal="true"
+    :class="{ 'is-embedded': embedded, 'is-create-only': createOnly }"
+    :role="embedded ? 'region' : 'dialog'"
+    :aria-modal="embedded ? undefined : 'true'"
     aria-labelledby="side-tasks-title"
     tabindex="-1"
-    @keydown.esc="emit('close')"
+    @keydown.esc="embedded ? undefined : emit('close')"
   >
-    <header class="side-tasks-head">
+    <header v-if="!embedded" class="side-tasks-head">
       <div>
         <p class="side-tasks-kicker">P3 · 隔离探索</p>
         <h2 id="side-tasks-title">探索任务</h2>
@@ -189,19 +196,19 @@ onBeforeUnmount(() => {
     </div>
     <p v-if="notice" class="side-tasks-alert is-notice" role="status">{{ notice }}</p>
 
-    <section class="side-create-section">
+    <section v-if="createOnly || !embedded" class="side-create-section">
       <div class="side-create-toolbar">
         <div>
-          <strong>新建隔离探索</strong>
+          <strong>{{ createOnly ? "添加 Side Agent" : "新建隔离探索" }}</strong>
           <small v-if="baseCommit">绑定主工作区 {{ shortCommit(baseCommit) }}</small>
           <small v-else class="is-danger">缺少可信 Git HEAD，创建已禁用</small>
         </div>
-        <Button size="sm" :variant="createOpen ? 'ghost' : 'primary'" @click="toggleCreate">
+        <Button v-if="!createOnly" size="sm" :variant="createOpen ? 'ghost' : 'primary'" @click="toggleCreate">
           {{ createOpen ? "收起" : "新建探索" }}
         </Button>
       </div>
 
-      <form v-if="createOpen" class="side-create-form" @submit.prevent="submitCreate">
+      <form v-if="createOnly || createOpen" class="side-create-form" @submit.prevent="submitCreate">
         <label>
           <span>探索目标</span>
           <textarea
@@ -237,8 +244,8 @@ onBeforeUnmount(() => {
       </form>
     </section>
 
-    <div class="side-tasks-body">
-      <section class="side-task-list-pane" aria-label="探索任务列表">
+    <div v-if="!createOnly" class="side-tasks-body" :class="{ 'is-embedded': embedded }">
+      <section v-if="!embedded" class="side-task-list-pane" aria-label="探索任务列表">
         <div class="side-pane-title">
           <strong>任务记录</strong>
           <Button variant="ghost" size="sm" :loading="loading" :disabled="loading" @click="emit('refresh')">刷新</Button>
@@ -451,6 +458,16 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 24px var(--shadow-color);
 }
 
+.side-tasks-panel.is-embedded {
+  width: 100%;
+  min-width: 0;
+  box-shadow: none;
+}
+
+.side-tasks-panel.is-create-only {
+  overflow-y: auto;
+}
+
 .side-tasks-head,
 .side-create-toolbar,
 .side-pane-title,
@@ -654,6 +671,28 @@ onBeforeUnmount(() => {
   grid-template-columns: 260px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+}
+
+.side-tasks-body.is-embedded {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.side-tasks-panel.is-embedded .side-task-detail-pane {
+  padding: var(--space-3);
+}
+
+.side-tasks-panel.is-create-only .side-create-section {
+  border-bottom: 0;
+  padding: var(--space-4);
+}
+
+.side-tasks-panel.is-create-only .side-create-form {
+  grid-template-columns: 1fr;
+}
+
+.side-tasks-panel.is-create-only .side-create-actions,
+.side-tasks-panel.is-create-only .side-inline-error {
+  grid-column: auto;
 }
 
 .side-task-list-pane,
@@ -902,6 +941,10 @@ onBeforeUnmount(() => {
 @media (max-width: 720px) {
   .side-tasks-panel {
     width: 100vw;
+  }
+
+  .side-tasks-panel.is-embedded {
+    width: 100%;
   }
 
   .side-tasks-head,

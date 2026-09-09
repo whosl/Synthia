@@ -154,11 +154,19 @@ export function resolveMainTaskId(
   preferredTaskId: string | null,
   tasks: readonly TaskAgentSummary[],
 ): string | null {
-  const mainTasks = tasks.filter((task) => task.kind !== "side");
-  if (preferredTaskId && mainTasks.some((task) => task.agent_id === preferredTaskId)) {
+  const projectAgents = tasks.filter((task) => task.kind !== "side" && task.agent_role === "project");
+  if (preferredTaskId && projectAgents.some((task) => task.agent_id === preferredTaskId)) {
     return preferredTaskId;
   }
-  return mainTasks[0]?.agent_id ?? null;
+  if (projectAgents.length > 0) return projectAgents[0]!.agent_id;
+
+  // Compatibility for pre-0012 servers that do not expose agent_role at all.
+  // Explicit run rows are history and must never become the Project Agent.
+  const untypedLegacyMains = tasks.filter((task) => task.kind !== "side" && task.agent_role === undefined);
+  if (preferredTaskId && untypedLegacyMains.some((task) => task.agent_id === preferredTaskId)) {
+    return preferredTaskId;
+  }
+  return untypedLegacyMains[0]?.agent_id ?? null;
 }
 
 export interface TaskAbortAttempt {

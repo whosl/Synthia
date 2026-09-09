@@ -397,6 +397,8 @@ export interface TaskAgentSummary {
   readonly task_id?: string;
   readonly project_id: string;
   readonly kind?: "main" | "side";
+  /** Project = durable main dialogue; run = legacy/bounded execution history. */
+  readonly agent_role?: "project" | "run" | "side";
   readonly status: string;
   readonly current_stage: string | null;
   readonly awaiting_gate: string | null;
@@ -937,6 +939,8 @@ export interface BitstreamResultV1 {
   readonly target_part: string;
   readonly sha256: string;
   readonly size_bytes: number;
+  readonly artifact_classification: "tool_run_evidence";
+  readonly usage_classification: "run_class_governed";
   readonly generated_at: string;
 }
 

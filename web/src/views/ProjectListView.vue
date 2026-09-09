@@ -22,6 +22,7 @@ import {
   validateCreateProject,
   type ProjectType,
 } from "../domain/project.ts";
+import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 
 const router = useRouter();
 
@@ -228,7 +229,10 @@ async function submitCreate() {
 <template>
   <h1 class="page-title">
     项目列表
-    <button class="btn" style="float: right" @click="openCreateDialog">新建项目</button>
+    <span style="float: right; display: inline-flex; gap: 8px">
+      <router-link v-if="SELF_EVOLUTION_FEATURE_ENABLED" class="btn secondary" to="/evolution">进化</router-link>
+      <button class="btn" @click="openCreateDialog">新建项目</button>
+    </span>
   </h1>
   <p class="page-sub">我的项目与当前进展。</p>
 

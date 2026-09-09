@@ -11,6 +11,7 @@ import {
   TOOL_STATUS_TEXT,
   auditToParts,
   bitstreamFromEvidence,
+  conversationEventsToParts,
   replyErrorText,
   toolDurationLabel,
   type SynthiaLifecyclePart,
@@ -18,7 +19,7 @@ import {
   type SynthiaTextPart,
   type SynthiaToolPart,
 } from "../src/domain/parts.ts";
-import type { TaskAuditEvent, TaskAgentDetail } from "../src/api/types.ts";
+import type { SideTaskConversationEvent, TaskAuditEvent, TaskAgentDetail } from "../src/api/types.ts";
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
 
@@ -43,6 +44,65 @@ function makeDetail(overrides: Partial<TaskAgentDetail>): TaskAgentDetail {
     ...overrides,
   };
 }
+
+function conversationEvent(
+  sequence: number,
+  eventKind: SideTaskConversationEvent["event_kind"],
+  payload: Readonly<Record<string, unknown>>,
+): SideTaskConversationEvent {
+  return {
+    id: `te-${sequence}`,
+    sequence,
+    event_kind: eventKind,
+    payload,
+    payload_hash: String(sequence).padStart(64, "0"),
+    actor_type: eventKind === "user_message" ? "human" : "service",
+    actor_id: eventKind === "user_message" ? "admin" : "synthia-runtime",
+    created_at: `2026-08-25T10:00:${String(sequence).padStart(2, "0")}Z`,
+  };
+}
+
+describe("conversationEventsToParts：Project Agent 持久化对话", () => {
+  test("刷新后恢复多轮用户/Agent 文本并按 call id 更新工具卡", () => {
+    const parts = conversationEventsToParts([
+      conversationEvent(1, "user_message", { text: "检查当前状态" }),
+      conversationEvent(2, "tool_call", { tool_call_id: "call-1", name: "read_file", args: { path: "rtl/pwm.v" } }),
+      conversationEvent(3, "tool_result", { tool_call_id: "call-1", name: "read_file", ok: true, result: "module pwm;" }),
+      conversationEvent(4, "assistant_message", { text: "当前仍在 G0。" }),
+      conversationEvent(5, "user_message", { text: "继续" }),
+      conversationEvent(6, "assistant_message", { text: "[error] model unavailable" }),
+      conversationEvent(7, "status", { status: "awaiting_user" }),
+    ]);
+
+    expect(parts.map((part) => part.kind)).toEqual([
+      "text",
+      "agent_tool",
+      "text",
+      "text",
+      "text",
+    ]);
+    expect(textParts(parts).map((part) => [part.role, part.text])).toEqual([
+      ["user", "检查当前状态"],
+      ["agent", "当前仍在 G0。"],
+      ["user", "继续"],
+      ["agent", "[error] model unavailable"],
+    ]);
+    expect(parts[1]).toMatchObject({
+      id: "call-1",
+      state: "done",
+      name: "read_file",
+      result: "module pwm;",
+    });
+  });
+
+  test("持久化取消状态恢复为打断卡", () => {
+    expect(conversationEventsToParts([
+      conversationEvent(1, "status", { status: "cancelled" }),
+    ])).toEqual([
+      expect.objectContaining({ kind: "interrupt", text: "已打断当前回复，按新消息继续。" }),
+    ]);
+  });
+});
 
 function toolParts(parts: readonly SynthiaPart[]): SynthiaToolPart[] {
   return parts.filter((p): p is SynthiaToolPart => p.kind === "tool");

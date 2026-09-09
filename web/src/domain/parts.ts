@@ -22,7 +22,7 @@ import {
   normalizeStageId,
   STAGE_TO_TOOL_OP,
 } from "./tasks.ts";
-import type { TaskDocRef, TaskAgentDetail } from "../api/types.ts";
+import type { SideTaskConversationEvent, TaskDocRef, TaskAgentDetail } from "../api/types.ts";
 
 // ─── SynthiaPart 判别联合 ────────────────────────────────────────────
 
@@ -215,6 +215,86 @@ export const TOOL_STATUS_TEXT: Readonly<Record<ToolPartStatus, string>> = {
   completed: "完成",
   error: "未通过",
 };
+
+function conversationPayloadText(value: unknown, max = 4_000): string {
+  const text = typeof value === "string"
+    ? value
+    : value === undefined
+      ? ""
+      : JSON.stringify(value);
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+/** Core append-only conversation facts → refresh-stable Project Agent parts. */
+export function conversationEventsToParts(
+  events: readonly SideTaskConversationEvent[],
+): SynthiaPart[] {
+  const parts: SynthiaPart[] = [];
+  const tools = new Map<string, number>();
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
+    if (event.event_kind === "user_message" || event.event_kind === "assistant_message") {
+      const text = conversationPayloadText(event.payload.text).trim();
+      if (!text) continue;
+      const role = event.event_kind === "user_message" ? "user" as const : "agent" as const;
+      parts.push({
+        kind: "text",
+        id: `core-${event.id}`,
+        role,
+        state: "done",
+        text,
+        segments: role === "agent" ? segmentAgentReply(text) : null,
+      });
+      continue;
+    }
+    if (event.event_kind === "tool_call") {
+      const callId = typeof event.payload.tool_call_id === "string"
+        ? event.payload.tool_call_id
+        : event.id;
+      const part: SynthiaAgentToolPart = {
+        kind: "agent_tool",
+        id: callId,
+        state: "running",
+        name: typeof event.payload.name === "string" ? event.payload.name : "tool",
+        args: conversationPayloadText(event.payload.args, 400),
+        result: null,
+      };
+      tools.set(callId, parts.length);
+      parts.push(part);
+      continue;
+    }
+    if (event.event_kind === "tool_result") {
+      const callId = typeof event.payload.tool_call_id === "string"
+        ? event.payload.tool_call_id
+        : event.id;
+      const at = tools.get(callId);
+      const previous = at === undefined ? undefined : parts[at];
+      const completed: SynthiaAgentToolPart = {
+        kind: "agent_tool",
+        id: callId,
+        state: event.payload.ok === false ? "error" : "done",
+        name: typeof event.payload.name === "string"
+          ? event.payload.name
+          : previous?.kind === "agent_tool"
+            ? previous.name
+            : "tool",
+        args: previous?.kind === "agent_tool" ? previous.args : "",
+        result: conversationPayloadText(event.payload.result, 800),
+      };
+      if (at === undefined) parts.push(completed);
+      else parts[at] = completed;
+      continue;
+    }
+    if (event.event_kind === "status" && event.payload.status === "cancelled") {
+      parts.push({
+        kind: "interrupt",
+        id: `core-${event.id}`,
+        text: "已打断当前回复，按新消息继续。",
+        ts: event.created_at,
+      });
+    }
+  }
+  return parts;
+}
 
 /** 工具条耗时展示（null → 不显示；<2s 弱化为空，对齐 spec「completed 弱化+耗时」）。 */
 export function toolDurationLabel(durationMs: number | null): string | null {
