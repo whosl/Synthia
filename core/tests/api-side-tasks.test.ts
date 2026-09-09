@@ -469,7 +469,7 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     return { seeded, side, result, preview, adoptionId, reason, files };
   }
 
-  test("P3 engineering create rejects an active legacy Runtime main before either side writes", async () => {
+  test("Project Agent creation is independent from an active legacy Runtime run", async () => {
     const seeded = await seedEngineeringWorkspace();
     const legacyMainId = `legacy-main-${randomUUID()}`;
     runtime.seedRuntimeOnly({
@@ -483,22 +483,18 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     const response = await post(`/api/v1/projects/${seeded.projectId}/tasks`, {
       task: "不得开启第二条工程主线",
     });
-    expect(response.status).toBe(409);
-    expect(error(response.json)).toMatchObject({
-      code: "conflict",
-      message: "ENGINEERING_MAIN_AGENT_EXISTS",
-      details: {
-        projectId: seeded.projectId,
-        taskId: legacyMainId,
-        source: "runtime_legacy",
-      },
+    expect(response.status).toBe(201);
+    expect(data(response.json)).toMatchObject({ kind: "main", agent_role: "project" });
+    expect(runtime.created).toHaveLength(createdBefore + 1);
+    expect(runtime.created.at(-1)).toMatchObject({
+      execution_intent: "project_agent",
+      mode: "agent",
     });
-    expect(runtime.created).toHaveLength(createdBefore);
     const coreTasks = await harness.client.query(
-      "SELECT id FROM agent_task WHERE project_id=$1",
+      "SELECT id,agent_role FROM agent_task WHERE project_id=$1",
       [seeded.projectId],
     );
-    expect(coreTasks.rows).toHaveLength(0);
+    expect(coreTasks.rows).toEqual([expect.objectContaining({ agent_role: "project" })]);
   });
 
   test("P3 engineering main commits before Runtime create and binds before explicit start", async () => {
@@ -735,7 +731,7 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     ]);
   });
 
-  test("P3 engineering create trusts a terminal Core fact over a stale Runtime handle", async () => {
+  test("a terminal Project Agent is reused instead of creating another main", async () => {
     const seeded = await seedProject();
     await harness.client.query(
       `UPDATE agent_task
@@ -755,8 +751,14 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
           AND status IN ('queued','running','awaiting_user')`,
       [seeded.projectId],
     );
-    expect(activeCore.rows).toHaveLength(1);
-    expect(activeCore.rows[0].id).not.toBe(seeded.mainTaskId);
+    expect(activeCore.rows).toHaveLength(0);
+    const projectAgents = await harness.client.query(
+      "SELECT id,agent_role,status FROM agent_task WHERE project_id=$1 AND agent_role='project'",
+      [seeded.projectId],
+    );
+    expect(projectAgents.rows).toEqual([
+      expect.objectContaining({ id: seeded.mainTaskId, agent_role: "project", status: "failed" }),
+    ]);
   });
 
   test("main awaiting_user can spawn side; side writes never touch main or revisions", async () => {
@@ -1746,7 +1748,7 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     expect(facts.rows[0]).toEqual({ user_events: blockedStatuses.length, idempotency_rows: 0 });
   });
 
-  test("Core-owned main messages cannot bypass start or revive a terminal main", async () => {
+  test("Project Agent messages cannot bypass start and can recover after a terminal turn", async () => {
     const seeded = await seedEngineeringWorkspace();
     runtime.startError = new RuntimeClientError(503, "leave main queued", {
       retryable: true,
@@ -1758,43 +1760,45 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     expect(create.status).toBe(503);
     const taskId = String(runtime.created.at(-1)?.task_id);
 
-    for (const status of ["queued", "failed"] as const) {
-      if (status === "failed") {
-        await harness.client.query(
-          `UPDATE agent_task
-              SET status='failed',finished_at=now(),updated_at=now()
-            WHERE id=$1 AND project_id=$2`,
-          [taskId, seeded.projectId],
-        );
-      }
-      const response = await apiCall(
+    const queued = await apiCall(
+      harness.baseUrl,
+      `/api/v1/projects/${seeded.projectId}/tasks/${taskId}/message`,
+      {
+        method: "POST",
+        token: harness.ids.humanToken,
+        headers: { "idempotency-key": randomUUID() },
+        body: { text: "must not execute before start" },
+      },
+    );
+    expect(queued.status).toBe(409);
+    expect(error(queued.json)).toMatchObject({
+      code: "conflict",
+      message: "CORE_TASK_NOT_MESSAGEABLE",
+      details: { taskId, status: "queued" },
+    });
+
+    const recoveredStart = await post(`/api/v1/projects/${seeded.projectId}/tasks`, {
+      task: "remain queued for the message barrier test",
+    });
+    expect(recoveredStart.status).toBe(201);
+    await harness.client.query(
+      `UPDATE agent_task
+          SET status='failed',finished_at=now(),updated_at=now()
+        WHERE id=$1 AND project_id=$2`,
+      [taskId, seeded.projectId],
+    );
+    const recovered = await apiCall(
         harness.baseUrl,
         `/api/v1/projects/${seeded.projectId}/tasks/${taskId}/message`,
         {
           method: "POST",
           token: harness.ids.humanToken,
           headers: { "idempotency-key": randomUUID() },
-          body: { text: `must not execute main from ${status}` },
+          body: { text: "continue after a failed turn" },
         },
       );
-      expect(response.status, status).toBe(409);
-      expect(error(response.json), status).toMatchObject({
-        code: "conflict",
-        message: "CORE_TASK_NOT_MESSAGEABLE",
-        details: { taskId, status },
-      });
-    }
-
-    expect(runtime.messages).toEqual([]);
-    const facts = await harness.client.query(
-      `SELECT
-         (SELECT COUNT(*)::int FROM task_conversation_event
-           WHERE task_id=$1 AND project_id=$2 AND event_kind='user_message') AS user_events,
-         (SELECT COUNT(*)::int FROM idempotency_records
-           WHERE project_id=$2 AND operation=$3) AS idempotency_rows`,
-      [taskId, seeded.projectId, `send_core_task_message:${taskId}`],
-    );
-    expect(facts.rows[0]).toEqual({ user_events: 1, idempotency_rows: 0 });
+    expect(recovered.status).toBe(200);
+    expect(runtime.messages.at(-1)).toMatchObject({ taskId, text: "continue after a failed turn" });
   });
 
   test("side task authorization rejects legacy fields and governance escalation", async () => {

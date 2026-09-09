@@ -8,6 +8,7 @@ const projectHardeningMigration = readFileSync(new URL("../src/db/migrations/000
 const taskWorkspacesMigration = readFileSync(new URL("../src/db/migrations/0009_task_workspaces.sql", import.meta.url), "utf8");
 const processGateChecksMigration = readFileSync(new URL("../src/db/migrations/0010_process_gate_checks.sql", import.meta.url), "utf8");
 const deliveryReleaseMigration = readFileSync(new URL("../src/db/migrations/0011_delivery_release.sql", import.meta.url), "utf8");
+const projectAgentsMigration = readFileSync(new URL("../src/db/migrations/0012_project_agents.sql", import.meta.url), "utf8");
 const freshSchema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
 describe("PostgreSQL D1 contracts", () => {
   test("initial numbered migration creates fresh core schema", () => {
@@ -36,6 +37,7 @@ describe("PostgreSQL D1 contracts", () => {
       "0009_task_workspaces",
       "0010_process_gate_checks",
       "0011_delivery_release",
+      "0012_project_agents",
     ]) {
       expect(freshSchema).toContain(`('${version}')`);
     }
@@ -80,8 +82,8 @@ describe("PostgreSQL D1 contracts", () => {
     }
   });
   test("P3 task ownership and lifecycle constraints match the fresh schema", () => {
+    expect(taskWorkspacesMigration).toContain("agent_task_one_active_engineering_main_idx");
     for (const sql of [taskWorkspacesMigration, freshSchema]) {
-      expect(sql).toContain("agent_task_one_active_engineering_main_idx");
       expect(sql.match(/DEFERRABLE INITIALLY DEFERRED/g)?.length).toBeGreaterThanOrEqual(2);
       expect(sql).toMatch(/UNIQUE\s*\(task_id, output_hash\)/);
       expect(sql).toContain("FOREIGN KEY (project_id, project_type)");
@@ -96,6 +98,11 @@ describe("PostgreSQL D1 contracts", () => {
       expect(sql).toContain("task_adoption_state_guard");
       expect(sql).toContain("runtime_actor_id");
       expect(sql).toMatch(/OLD\.runtime_actor_id IS DISTINCT FROM NEW\.runtime_actor_id/);
+    }
+    for (const sql of [projectAgentsMigration, freshSchema]) {
+      expect(sql).toContain("agent_task_one_project_agent_idx");
+      expect(sql).toContain("agent_task_one_active_engineering_run_idx");
+      expect(sql).toContain("agent_role");
     }
     expect(taskWorkspacesMigration).toContain("CONSTRAINT agent_task_runtime_actor_fk REFERENCES user_account(uid)");
     expect(freshSchema).toContain("agent_task_runtime_actor_fk");

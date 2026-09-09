@@ -794,6 +794,18 @@ describe("RemoteConnectorAdapter — lease reconnect + parameters mapping", () =
     expect(Array.isArray(params.sources)).toBe(true);
   });
 
+  test("submitJob omits the empty API sources default for toolchain discovery", async () => {
+    const mock = new MockRemoteClient();
+    const adapter = makeAdapter(mock);
+    await adapter.submitJob(baseParams({
+      operation: "discover_toolchain",
+      parameters: { sources: [], constraints: [] },
+    }));
+    const params = mock.lastRequest!.parameters as Record<string, unknown>;
+    expect(params.operation).toBe("discover_toolchain");
+    expect("sources" in params).toBe(false);
+  });
+
   test("submitJob with exploratory omits approval", async () => {
     const mock = new MockRemoteClient();
     const adapter = makeAdapter(mock);
