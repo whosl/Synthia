@@ -549,6 +549,12 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { steered?: boolean; accepted?: boolean };
     expect(body.steered === true || body.accepted === true).toBe(true);
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const detail = await (await fetch(`${server.url}/tasks/${agentId}`)).json() as { status: string };
+      if (detail.status !== "running") return;
+      await Bun.sleep(5);
+    }
+    throw new Error("steered turn did not finish");
   });
 
   test("工具调用落 audit：本轮结束后 GET /tasks/:id 仍能回看调了什么", async () => {

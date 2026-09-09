@@ -137,7 +137,8 @@ export class StreamHub {
     const hub = this.hub;
     let stopped = false;
     let cursor = after ?? 0;
-    let stale = after !== undefined && hub.events.length > 0 && after < hub.events[0]!.seq - 1;
+    let stale = after !== undefined && (after > hub.seq
+      || (hub.events.length > 0 && after < hub.events[0]!.seq - 1));
     const cursorObj: StreamCursor = {
       get stopped() {
         return stopped;
@@ -157,7 +158,7 @@ export class StreamHub {
         if (stale) {
           stale = false;
           cursor = hub.seq;
-          return [{ type: "reset", seq: hub.seq, reason: "cursor older than retained window" }];
+          return [{ type: "reset", seq: hub.seq, reason: "cursor outside retained stream" }];
         }
         let pending = eventsSince(hub, cursor);
         if (pending.length === 0) {

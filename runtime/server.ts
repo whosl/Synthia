@@ -1774,6 +1774,10 @@ export class RuntimeServer {
       );
     }
 
+    const owner = this.registry.get(agentId);
+    if (owner?.busy || (owner?.executionMode === "engineering" && owner.agentRole === "run")) {
+      return errorResponse(409, "pipeline_message_not_supported", "Engineering pipelines cannot accept conversational messages; abort or resume the pipeline through its control endpoint");
+    }
     const session = await this.getOrCreateSession(agentId);
     if (!session) {
       return errorResponse(503, "capability_unavailable", "failed to assemble free-agent session (model/governance/snapshot)");
@@ -1782,7 +1786,7 @@ export class RuntimeServer {
     if (session.status() === "running") {
       // 运行中：注入纠偏上下文（下一工具结束后生效），不开新 prompt。
       this.recordConversationAudit(agentId, "user_message", text);
-      session.steer(text);
+      await session.steer(text);
       this.recordConversationAudit(agentId, "free_agent_steer");
       return json({ steered: true, status: session.status() });
     }
@@ -2359,6 +2363,16 @@ export class RuntimeServer {
     agentId: string,
     coreOwnsCancellation = false,
   ): Promise<Response> {
+    const pipeline = this.pipelineControllers.get(agentId);
+    if (pipeline) {
+      if (coreOwnsCancellation && this.registry.get(agentId)?.taskId) this.coreOwnedAbortIntents.add(agentId);
+      pipeline.abort(new Error("Pipeline aborted via web; in-flight remote job effects must be checked in Core"));
+      this.recordConversationAudit(agentId, "pipeline_abort");
+      return json({ aborted: true, status: "running" });
+    }
+    if (this.registry.get(agentId)?.busy) {
+      return errorResponse(409, "task_turn_finalizing", "Pipeline result persistence is in progress");
+    }
     const session = this.sessions.get(agentId);
     if (!session) {
       if (!(await this.agentExists(agentId))) {
@@ -2385,7 +2399,23 @@ export class RuntimeServer {
    * 取或懒装配 FreeAgentSession。agent 已确认存在（调用方先 agentExists）；
    * 装配失败（deps/model/snapshot）→ 返回 null（调用方返 503）。
    */
+  private readonly sessionAssemblies = new Map<string, Promise<FreeAgentSession | null>>();
+
   private async getOrCreateSession(agentId: string): Promise<FreeAgentSession | null> {
+    const existing = this.sessions.get(agentId);
+    if (existing) return existing;
+    const assembling = this.sessionAssemblies.get(agentId);
+    if (assembling) return assembling;
+    const pending = this.assembleSession(agentId);
+    this.sessionAssemblies.set(agentId, pending);
+    try {
+      return await pending;
+    } finally {
+      this.sessionAssemblies.delete(agentId);
+    }
+  }
+
+  private async assembleSession(agentId: string): Promise<FreeAgentSession | null> {
     const existing = this.sessions.get(agentId);
     if (existing) return existing;
     let projectId: string | undefined;
@@ -2697,6 +2727,8 @@ export class RuntimeServer {
 
   // ----- core execution -----
 
+  private readonly pipelineControllers = new Map<string, AbortController>();
+
   private async executeAgent(
     agentId: string,
     trigger: "initial" | "resume",
@@ -2709,11 +2741,15 @@ export class RuntimeServer {
     if (h.busy) return; // concurrent guard
 
     h.busy = true;
+    const controller = new AbortController();
+    this.pipelineControllers.set(agentId, controller);
 
     try {
       const agentState = await loadAgentState(agentId);
+      controller.signal.throwIfAborted();
 
       const loop = new LoopExecutor({
+        signal: controller.signal,
         model: h.model,
         connector: h.connector,
         governance: h.governance,
@@ -2725,11 +2761,13 @@ export class RuntimeServer {
         actorId: "synthia-runtime-server",
         onEvent: (e) => { h.audit.push(e); },
         onStateChange: async (state) => {
+          controller.signal.throwIfAborted();
           await saveAgentState(state);
           h.currentState = state;
           h.currentStage = state.currentStage;
           h.docs = { ...(state.docs ?? {}) };
           if (state.awaitingGate) h.awaitingGate = state.awaitingGate;
+          controller.signal.throwIfAborted();
           await this.appendAgentStateEvent(h, state);
         },
         onAwaitingApproval: (gate, submissionId, rid) => {
@@ -2757,9 +2795,28 @@ export class RuntimeServer {
         ? await loop.resume(agentState)
         : await loop.run(h.task, { agentId, agentState });
 
+      controller.signal.throwIfAborted();
+      // The execution is complete. Final persistence owns the state until busy clears.
+      this.pipelineControllers.delete(agentId);
       await this.applyResult(h, result);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
+      if (controller.signal.aborted) {
+        h.status = "failed";
+        h.endedReason = reason;
+        h.awaitingGate = undefined;
+        await this.persistTerminal(h, "failed", reason);
+        if (!this.coreOwnedAbortIntents.has(agentId)) {
+          await this.appendCoreTaskEvent(
+            agentId,
+            `te-${sha256Hex(`${agentId}\0pipeline-cancelled\0${h.currentState?.updatedAt}`).slice(0, 40)}`,
+            "status",
+            { status: "cancelled", reason },
+          );
+        }
+        StreamHub.for(agentId).emit({ type: "status", status: "cancelled", ts: new Date().toISOString() });
+        return;
+      }
       process.stderr.write(`[runtime-server] executeAgent failed for ${agentId}: ${reason}\n`);
       if (h.taskEvents ?? h.taskWorkspace) {
         await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
@@ -2771,6 +2828,7 @@ export class RuntimeServer {
       }
     } finally {
       h.busy = false;
+      this.pipelineControllers.delete(agentId);
     }
   }
 

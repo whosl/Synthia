@@ -188,6 +188,8 @@ export interface EvidenceContent {
  * only issues these versioned capability calls.
  */
 export interface LoopConnector {
+  /** Bind internal polling/retries to the current execution without mutating a shared adapter. */
+  withSignal?(signal: AbortSignal): LoopConnector;
   readonly id: string;
   /** True once capability drift has been detected — the loop fails closed. */
   readonly drift: boolean;

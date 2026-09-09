@@ -220,8 +220,8 @@ export interface FreeAgentSession {
    * 不支持流式的模型自动回退缓冲 chat()，回调不触发但轮次结果不变。
    */
   prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
-  /** 运行中接管/纠偏（下一工具结束后注入上下文），不入队新 prompt。 */
-  steer(text: string): void;
+  /** 运行中纠偏；返回的 Promise 完成后已持久化，在模型或完整工具批次边界注入。 */
+  steer(text: string): void | Promise<void>;
   /** 立即终止。 */
   abort(reason?: string): void;
 }
