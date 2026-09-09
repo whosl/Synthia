@@ -174,6 +174,23 @@ export interface ResponseError {
   readonly classification: DataClassification;
 }
 
+/** Legacy gateway response union retained for Runtime's in-process facade. */
+export type ApiResponse<T> =
+  | {
+      readonly ok: true;
+      readonly data: T;
+      readonly correlationId: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ErrorDetail & {
+        readonly category: string;
+        readonly correlationId: string;
+        readonly commandId: string | null;
+        readonly classification: DataClassification;
+      };
+    };
+
 export function makeError(args: {
   code: ErrorCode;
   message: string;
@@ -232,6 +249,6 @@ export function authorizationError(
     classification,
   });
 }
-export function error(code: string, category: string, message: string, correlationId: string, retryable = false): { ok: false; error: ErrorDetail & { code: string; category: string; classification: DataClassification } } {
+export function error(code: string, category: string, message: string, correlationId: string, retryable = false): ApiResponse<never> {
   return { ok: false, error: { code: code as ErrorCode, category, retryable, message, correlationId, detailsRef: null, commandId: null, classification: "UNCLASSIFIED" } };
 }

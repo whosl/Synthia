@@ -6,6 +6,7 @@ import type {
   ConfigurationSnapshot,
   Evidence,
   GateSubmission,
+  IdempotencyScope,
   Project,
   RoleAssignment,
   ToolRun,
@@ -27,7 +28,6 @@ export class ConflictError extends Error { constructor(message: string) { super(
 export class InvariantError extends Error { constructor(message: string) { super(message); this.name = "InvariantError"; } }
 
 export interface ApprovalActor { actorType: ActorType; actorId: string }
-export interface IdempotencyScope extends ApprovalActor { projectId: string; operation: string; key: string }
 interface IdempotencyRecord { hash: string; value: unknown }
 
 const entityMachine: Record<string, { assertTransition(from: never, to: never): void } | undefined> = {
@@ -140,8 +140,8 @@ export class MemoryRepository {
     return this.createToolRun(replacement);
   }
 
-  approvalsFor(submissionId: string): ApprovalRecord[] { return this.approvals.filter(item => item.gateSubmissionId === submissionId).map(structuredClone); }
-  baselinesFor(projectId: string): Baseline[] { return this.baselines.filter(item => item.projectId === projectId).map(structuredClone); }
+  approvalsFor(submissionId: string): ApprovalRecord[] { return this.approvals.filter(item => item.gateSubmissionId === submissionId).map((item) => structuredClone(item)); }
+  baselinesFor(projectId: string): Baseline[] { return this.baselines.filter(item => item.projectId === projectId).map((item) => structuredClone(item)); }
 
   idempotent<T>(key: string, action: () => T): T {
     return this.idempotentScoped({ actorType: "system", actorId: "legacy", projectId: "legacy", operation: "legacy", key }, null, action);

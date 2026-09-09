@@ -10,6 +10,7 @@ import {
   type TransactionClient,
 } from "../db/repository.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
+import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
 import type { SourceInput } from "./connector-port.ts";
 import { git, gitRaw, headSha } from "../workspace/git.ts";
 import { WorkspaceError, isRegisterablePath, validateWorkspacePath } from "../workspace/paths.ts";
@@ -62,7 +63,6 @@ const MAX_AUTHORIZED_WRITE_PATHS = 32;
 const MAX_SIDE_TASK_PATH_BYTES = 512;
 const MAX_SIDE_TASK_PATH_SEGMENTS = 32;
 const MAX_FILE_BYTES = 1024 * 1024;
-const ACTIVE_TASK_STATUSES = new Set(["queued", "running", "awaiting_user"]);
 const EVENT_KINDS = new Set(["user_message", "assistant_message", "tool_call", "tool_result", "status"]);
 const TASK_JOB_OPERATIONS = new Set(["validate_sources", "simulate", "synthesize", "implement"]);
 
@@ -100,6 +100,7 @@ interface SideTaskRow {
   readonly project_id: string;
   readonly project_type: "free" | "engineering";
   readonly kind: "side";
+  readonly agent_role: "side";
   readonly parent_task_id: string;
   readonly workspace_id: string;
   readonly runtime_agent_id: string | null;
@@ -120,6 +121,7 @@ interface AgentTaskRow {
   readonly id: string;
   readonly project_id: string;
   readonly kind: "main" | "side";
+  readonly agent_role: "project" | "run" | "side";
   readonly workspace_id: string | null;
   readonly runtime_agent_id: string | null;
   readonly runtime_actor_id: string | null;
@@ -206,7 +208,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
     await requireProjectAccess(ctx, tx, projectId);
     await requireConfiguredRuntimeActor(ctx, tx);
     const parentResult = await tx.query(
-      `SELECT t.id,t.kind,t.status,p.project_type,p.status AS project_status,
+      `SELECT t.id,t.kind,t.agent_role,t.status,p.project_type,p.status AS project_status,
               p.target_part,p.process_version_id,p.process_profile_id,
               p.process_profile_name,p.process_profile_version
          FROM agent_task t JOIN project p ON p.id=t.project_id
@@ -216,6 +218,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
     const parent = parentResult.rows[0] as {
       id: string;
       kind: string;
+      agent_role: string;
       status: string;
       project_type: "free" | "engineering";
       project_status: string;
@@ -225,7 +228,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
       process_profile_name: string | null;
       process_profile_version: string | null;
     } | undefined;
-    if (!parent || parent.kind !== "main" || !ACTIVE_TASK_STATUSES.has(parent.status)) {
+    if (!parent || parent.kind !== "main" || parent.agent_role !== "project") {
       throw notFoundError(`active main task not found: ${parentTaskId}`);
     }
     if (parent.project_status !== "active") throw conflictApiError("PROJECT_NOT_ACTIVE", { projectId });
@@ -244,10 +247,10 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
     const now = new Date().toISOString();
     await tx.query(
       `INSERT INTO agent_task
-         (id,project_id,project_type,kind,parent_task_id,workspace_id,process_instance_id,
+         (id,project_id,project_type,kind,agent_role,parent_task_id,workspace_id,process_instance_id,
           runtime_actor_id,objective,authorization_scope,status,input_hash,adoption_state,
           created_by_type,created_by,created_at,updated_at)
-       VALUES ($1,$2,$3,'side',$4,$5,NULL,$6,$7,$8::jsonb,'queued',$9,'pending',$10,$11,$12,$12)`,
+       VALUES ($1,$2,$3,'side','side',$4,$5,NULL,$6,$7,$8::jsonb,'queued',$9,'pending',$10,$11,$12,$12)`,
       [
         taskId,
         projectId,
@@ -273,6 +276,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
     const runtimeRequest = {
         task_id: taskId,
         task_kind: "side",
+        execution_intent: "side_agent",
         parent_task_id: parentTaskId,
         workspace_id: workspaceId,
         authorization_scope: authorizationScope as unknown as Readonly<Record<string, unknown>>,
@@ -712,7 +716,16 @@ export async function appendTaskEventHandler(ctx: RequestContext): Promise<Handl
       actorType: ctx.identity.actorType,
       actorId: ctx.identity.actorId,
     });
-    if (eventKind === "status") await applyRuntimeStatus(tx, task, payload);
+    if (eventKind === "status") {
+      await applyRuntimeStatus(tx, task, payload);
+      await sealLearningEpisodeAtStatus(tx, {
+        task,
+        sequence: next,
+        payload,
+        actorType: ctx.identity.actorType,
+        actorId: ctx.identity.actorId,
+      });
+    }
     return { task_id: taskId, event_id: eventId, sequence: next, replayed: false };
   }, (tx) => authorizeRuntimeTaskEvent(ctx, tx, projectId, taskId));
   return { status: 201, data: write.result };
@@ -847,6 +860,75 @@ export async function finalizeSideTaskResultHandler(ctx: RequestContext): Promis
               finished_at=now(),updated_at=now(),runtime_snapshot=runtime_snapshot || $4::jsonb
         WHERE id=$1 AND project_id=$2`,
       [taskId, projectId, snapshot.output_hash, JSON.stringify({ status: "succeeded", summary })],
+    );
+    // A side-task success has no later Runtime status callback. Seal the
+    // terminal event and LearningEpisode here, in the same transaction as the
+    // authoritative result, so Runtime must not send a forbidden duplicate
+    // `succeeded` callback merely to trigger self-evolution.
+    const terminalSequence = await nextEventSequence(tx, taskId);
+    const terminalPayload = {
+      status: "succeeded",
+      output_hash: snapshot.output_hash,
+      result_id: resultId,
+    };
+    await insertConversationEvent(tx, {
+      id: `te-${canonicalRequestHash({ taskId, resultId, terminalSequence, terminalPayload }).slice(0, 40)}`,
+      projectId,
+      taskId,
+      sequence: terminalSequence,
+      eventKind: "status",
+      payload: terminalPayload,
+      actorType: ctx.identity.actorType,
+      actorId: ctx.identity.actorId,
+    });
+    const observationKey = `task:${taskId}`;
+    const episodeKey = `terminal:${terminalSequence}`;
+    const episodeId = `lep_${canonicalRequestHash({ taskId, episodeKey }).slice(0, 40)}`;
+    await tx.query(
+      `INSERT INTO learning_episode
+        (id,project_id,task_id,observation_key,episode_key,turn_id,end_event_sequence,
+         content_hash,outcome_claim,tool_event_start_sequence,tool_event_end_sequence,
+         evidence_refs,created_by_type,created_by)
+       VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,NULL,NULL,$9::jsonb,$10,$11)`,
+      [
+        episodeId,
+        projectId,
+        taskId,
+        observationKey,
+        episodeKey,
+        terminalSequence,
+        canonicalRequestHash({
+          schema: "bounded-task-episode.v1",
+          taskId,
+          resultId,
+          outputHash: snapshot.output_hash,
+          terminalSequence,
+        }),
+        summary || null,
+        JSON.stringify([{ type: "task_result", id: resultId, hash: snapshot.output_hash }]),
+        ctx.identity.actorType,
+        ctx.identity.actorId,
+      ],
+    );
+    await tx.query(
+      `UPDATE skill_application
+          SET episode_id=$3,
+              state=CASE WHEN state IN ('open','closed_pending_episode') THEN 'pending_evaluation' ELSE state END,
+              end_event_sequence=CASE WHEN state='open' THEN $4 ELSE end_event_sequence END,
+              outcome_claim=CASE WHEN state='open' THEN NULL ELSE outcome_claim END,
+              human_corrections=CASE WHEN state='open' THEN 0 ELSE human_corrections END,
+              evidence_refs=CASE WHEN state='open' THEN '[]'::jsonb ELSE evidence_refs END,
+              tool_run_refs=CASE WHEN state='open' THEN '[]'::jsonb ELSE tool_run_refs END,
+              closed_at=CASE WHEN state='open' THEN
+                (SELECT created_at FROM task_conversation_event WHERE task_id=$1 AND sequence=$4)
+                ELSE closed_at END
+        WHERE task_id=$1 AND observation_key=$2 AND episode_id IS NULL`,
+      [taskId, observationKey, episodeId, terminalSequence],
+    );
+    await tx.query(
+      `INSERT INTO distillation_run(id,episode_id,state,created_at,updated_at)
+       VALUES ($1,$2,'queued',now(),now())`,
+      [`dst_${canonicalRequestHash({ taskId, episodeId }).slice(0, 40)}`, episodeId],
     );
     await appendOutbox(tx, ctx, taskId, "side_task.result_sealed", {
       taskId,
@@ -1897,7 +1979,9 @@ async function applyRuntimeStatus(
   if (task.kind === "side" && (raw === "awaiting_approval" || payload.awaiting_gate !== undefined)) {
     throw conflictApiError("SIDE_TASK_GOVERNANCE_FORBIDDEN", { taskId: task.id });
   }
-  const next = raw === "idle" || raw === "interrupted" || raw === "awaiting_approval"
+  const next = task.agent_role === "project" && (raw === "succeeded" || raw === "completed")
+    ? "awaiting_user"
+    : raw === "idle" || raw === "interrupted" || raw === "awaiting_approval"
     ? "awaiting_user"
     : raw === "aborted"
       ? "cancelled"
@@ -1916,7 +2000,9 @@ async function applyRuntimeStatus(
     cancelled: ["cancelled"],
     fail_closed: ["fail_closed"],
   };
-  if (!transitions[task.status]?.includes(next)) {
+  const projectAgentRecovery = task.agent_role === "project"
+    && new Set(["running", "awaiting_user", "failed", "cancelled", "fail_closed"]).has(next);
+  if (!projectAgentRecovery && !transitions[task.status]?.includes(next)) {
     throw conflictApiError("TASK_STATUS_CONFLICT", { from: task.status, to: next });
   }
   const terminal = next === "succeeded" || next === "failed" || next === "cancelled" || next === "fail_closed";

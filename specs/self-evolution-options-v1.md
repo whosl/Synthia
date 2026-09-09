@@ -1,5 +1,8 @@
 # Synthia 自我进化方案研究与启动计划（v0.1）
 
+> **历史研究记录，已被 `specs/self-evolution-v1.md` 取代。** 本文保留用于追踪早期
+> Knowledge/Prompt 优先、评测后生效方案的决策过程；不得再作为实现或验收依据。
+
 状态：研究/立项草案（不改变现有运行行为）
 日期：2026-08-20
 适用分支：当前 TypeScript/Bun 主线（`codex/self-evo`）

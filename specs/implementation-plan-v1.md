@@ -116,6 +116,8 @@ P2 和 P3 在 P1 的数据契约稳定后可以并行；P5 和 P6 在 P4 的正�
 
 > **2026-08-21 进度说明**：P3 第一切片已达到**本地可上手验证**状态，实现范围是 Core-owned main/side task、独立任务工作区、显式启动屏障、对话/结果事实、逐文件 diff、人工原子采纳和 Web 探索任务闭环。[`p3-task-workspaces-release.md`](./p3-task-workspaces-release.md) 记录的 fresh PostgreSQL、真实 Core↔Runtime 双 HTTP、桌面/390 px/320 px 浏览器验收、类型债对比、安全复核和拆分提交清单均已收敛。该状态不表示整个 P3 完成，更不表示 P4～P7 或组织试用门槛完成。
 
+> **2026-08-26 Project Agent 切片说明**：主对话已从一次性工程 Run 中拆出为每项目唯一、可跨轮次和 Runtime 重启恢复的 Project Agent；正式 Run 仍是独立入口，只有 Run 能推进受治理的 G0～G4。右侧窗格可创建隔离的 Side Agent，关闭标签只归档本地窗格，不删除 Core 事实。真实 Core/Runtime/PostgreSQL/Web 浏览器验证与已知环境限制见 [`project-agent-release.md`](./project-agent-release.md)。该切片没有自动启动 goal，也没有把当前项目从 G0 向前推进。
+
 ### P4：精简 G0～G4、正式证据、码流与交付
 
 **目标**：完成首版真正的工程闭环。

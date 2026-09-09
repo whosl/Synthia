@@ -35,6 +35,7 @@ import {
   type TransactionClient,
 } from "../db/repository.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
+import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
 import { headSha } from "../workspace/git.ts";
 import { ensureWorkspace, readTreeAt } from "../workspace/store.ts";
 import {
@@ -99,6 +100,7 @@ export interface RuntimeAgentSummary {
   readonly awaiting_gate?: string;
   readonly created_at?: string;
   readonly kind?: "main" | "side";
+  readonly agent_role?: "project" | "run" | "side";
   readonly parent_task_id?: string | null;
   readonly workspace_id?: string | null;
 }
@@ -114,6 +116,7 @@ export interface RuntimeAgentDetail {
   readonly evidence?: readonly RuntimeEvidenceEntry[];
   readonly reason?: string;
   readonly kind?: "main" | "side";
+  readonly agent_role?: "project" | "run" | "side";
   readonly parent_task_id?: string | null;
   readonly workspace_id?: string | null;
 }
@@ -158,6 +161,8 @@ export interface RuntimeClient {
     /** P3 Core-owned identity. Runtime must reuse this id idempotently. */
     task_id?: string;
     task_kind?: "main" | "side";
+    /** Explicit lifecycle intent; project_agent never starts the governed loop. */
+    execution_intent?: "project_agent" | "run" | "side_agent";
     parent_task_id?: string;
     workspace_id?: string;
     authorization_scope?: Readonly<Record<string, unknown>>;
@@ -304,6 +309,7 @@ export class HttpRuntimeClient implements RuntimeClient {
     process_profile_version?: string | null;
     task_id?: string;
     task_kind?: "main" | "side";
+    execution_intent?: "project_agent" | "run" | "side_agent";
     parent_task_id?: string;
     workspace_id?: string;
     authorization_scope?: Readonly<Record<string, unknown>>;
@@ -726,12 +732,6 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
 
 // ─── P3 Core-owned task facts ───────────────────────────────────────────────
 
-const ACTIVE_MAIN_TASK_STATES = [
-  "queued",
-  "running",
-  "awaiting_user",
-] as const;
-
 const MAIN_AUTHORIZATION_SCOPE = Object.freeze({
   schema: "task-scope.v1",
   workspace: "project",
@@ -748,6 +748,7 @@ interface CoreTaskRow {
   readonly project_id: string;
   readonly project_type: "free" | "engineering";
   readonly kind: "main" | "side";
+  readonly agent_role: "project" | "run" | "side";
   readonly parent_task_id: string | null;
   readonly workspace_id: string | null;
   readonly runtime_agent_id: string | null;
@@ -787,6 +788,12 @@ function stableTaskId(ctx: RequestContext, projectId: string, kind: "main" | "si
   return `task-${digest.slice(0, 32)}`;
 }
 
+/** One stable Project Agent identity per project, independent of actor/retry key. */
+function projectAgentTaskId(projectId: string): string {
+  const digest = canonicalRequestHash({ schema: "project-agent-id.v1", projectId });
+  return `task-${digest.slice(0, 32)}`;
+}
+
 function baseManifestHash(files: readonly { path: string; contentHash: string; content: string }[]): string {
   const canonical = [...files]
     .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -807,6 +814,7 @@ function taskSummary(row: CoreTaskRow): RuntimeAgentSummary & Record<string, unk
     task_id: row.id,
     project_id: row.project_id,
     kind: row.kind,
+    agent_role: row.agent_role,
     parent_task_id: row.parent_task_id,
     workspace_id: row.workspace_id,
     objective: row.objective,
@@ -867,52 +875,6 @@ function isReadableRuntimeMain(
 
 function asReadableRuntimeMain<T extends RuntimeAgentSummary>(task: T): T & { kind: "main" } {
   return { ...task, kind: "main" };
-}
-
-function isTerminalRuntimeTaskStatus(value: unknown): boolean {
-  return value === "succeeded"
-    || value === "failed"
-    || value === "cancelled"
-    || value === "fail_closed";
-}
-
-interface CoreTaskIdentityRow {
-  readonly id: string;
-  readonly runtime_agent_id: string | null;
-  readonly runtime_actor_id: string | null;
-  readonly kind: "main" | "side";
-  readonly status: RuntimeTaskStatus;
-}
-
-async function findActiveRuntimeOnlyMain(
-  runtime: RuntimeClient,
-  projectId: string,
-  coreTasks: readonly CoreTaskIdentityRow[],
-): Promise<RuntimeAgentSummary | null> {
-  let listed: RuntimeListResponse;
-  try {
-    listed = await runtime.listTasks(projectId);
-  } catch (error) {
-    throw mapRuntimeError(error);
-  }
-  if (!Array.isArray(listed?.agents)) {
-    throw capabilityUnavailableError("runtime task list is malformed");
-  }
-
-  // Core facts win even when Runtime still retains a stale handle for a task
-  // Core has already marked terminal. Everything else must be an explicit
-  // Runtime main; side or missing/unknown kinds cannot block or become the
-  // engineering mainline through this compatibility check.
-  const coreIdentities = new Set<string>();
-  for (const task of coreTasks) {
-    coreIdentities.add(task.id);
-    if (task.runtime_agent_id) coreIdentities.add(task.runtime_agent_id);
-  }
-  return listed.agents.find((candidate) => (
-    isReadableRuntimeMain(candidate, projectId)
-    && !coreIdentities.has(candidate.agent_id)
-    && !isTerminalRuntimeTaskStatus(candidate.status)
-  )) ?? null;
 }
 
 async function requireCoreOwnedTask(
@@ -1019,6 +981,7 @@ async function findCoreOwnedTaskForWriteTx(
 }
 
 function requireCoreTaskMessageable(task: CoreTaskRow): void {
+  if (task.agent_role === "project" && task.status !== "queued") return;
   if (task.status !== "running" && task.status !== "awaiting_user") {
     throw conflictApiError("CORE_TASK_NOT_MESSAGEABLE", {
       taskId: task.id,
@@ -1035,7 +998,7 @@ async function appendConversationEventRecord(
   eventId: string,
   eventKind: string,
   payload: unknown,
-): Promise<void> {
+): Promise<number> {
   const payloadHash = canonicalRequestHash(payload);
   const inserted = await client.query(
     `WITH locked AS (
@@ -1048,7 +1011,7 @@ async function appendConversationEventRecord(
      INSERT INTO task_conversation_event
        (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id)
      SELECT $3,$2,$1,value,$4,$5::jsonb,$6,$7,$8 FROM next_sequence
-     RETURNING id`,
+     RETURNING sequence`,
     [
       taskId,
       projectId,
@@ -1061,6 +1024,7 @@ async function appendConversationEventRecord(
     ],
   );
   if (inserted.rows.length === 0) throw notFoundError(`task not found: ${taskId}`);
+  return Number((inserted.rows[0] as { sequence: number | string }).sequence);
 }
 
 type RuntimeCreateTaskBody = Parameters<RuntimeClient["createTask"]>[0];
@@ -1139,45 +1103,55 @@ async function createCoreOwnedMainTask(
   explicitPi: string | null,
 ): Promise<HandlerResult> {
   const runtime = requireRuntime(ctx);
-  const taskId = stableTaskId(ctx, projectId, "main");
+  const taskId = projectAgentTaskId(projectId);
 
   const { result } = await runCoreIdempotent<CoreMainCreateRecord>(ctx, "create_core_task", projectId, async (tx) => {
     await requireConfiguredRuntimeActor(ctx, tx);
     const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
-    if (taskContext.projectType === "engineering") {
-      const existing = await tx.query(
-        `SELECT id,runtime_agent_id,runtime_actor_id,kind,status
-           FROM agent_task
-          WHERE project_id = $1`,
-        [projectId],
-      );
-      const coreTasks = existing.rows as CoreTaskIdentityRow[];
-      const activeCoreMain = coreTasks.find((candidate) => (
-        candidate.kind === "main"
-        && (ACTIVE_MAIN_TASK_STATES as readonly string[]).includes(candidate.status)
-      ));
-      if (activeCoreMain) {
-        throw conflictApiError("ENGINEERING_MAIN_AGENT_EXISTS", {
-          projectId,
-          taskId: activeCoreMain.id,
-          source: "core",
-        });
-      }
-
-      // resolveProcessInstance holds the project row FOR UPDATE, so all Core
-      // main-task creates for this project serialize around this bounded
-      // Runtime read and the subsequent insert. This cannot lock an old
-      // client that still writes Runtime directly; rollout must stop those old
-      // writers before enabling P3. Runtime uncertainty therefore fails closed.
-      const activeLegacyMain = await findActiveRuntimeOnlyMain(runtime, projectId, coreTasks);
-      if (activeLegacyMain) {
-        throw conflictApiError("ENGINEERING_MAIN_AGENT_EXISTS", {
-          projectId,
-          taskId: activeLegacyMain.agent_id,
-          source: "runtime_legacy",
-        });
-      }
+    const existingProjectAgent = await tx.query(
+      `SELECT id,objective,input_hash,authorization_scope,runtime_snapshot
+         FROM agent_task
+        WHERE project_id=$1 AND agent_role='project'
+        FOR UPDATE`,
+      [projectId],
+    );
+    const existing = existingProjectAgent.rows[0] as {
+      id: string;
+      objective: string;
+      input_hash: string;
+      authorization_scope: Readonly<Record<string, unknown>>;
+      runtime_snapshot: unknown;
+    } | undefined;
+    if (existing) {
+      const snapshot = asRuntimeSnapshot(existing.runtime_snapshot);
+      const persistedPart = typeof snapshot.agent_part === "string" && snapshot.agent_part.trim()
+        ? snapshot.agent_part.trim()
+        : taskContext.targetPart;
+      return {
+        taskId: existing.id,
+        inputHash: existing.input_hash,
+        requiresExplicitStart: true,
+        runtimeRequest: {
+          task_id: existing.id,
+          task_kind: "main",
+          execution_intent: "project_agent",
+          authorization_scope: existing.authorization_scope,
+          input_hash: existing.input_hash,
+          project_id: projectId,
+          task: existing.objective,
+          ...(persistedPart ? { part: persistedPart } : {}),
+          ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
+          mode: "agent" as const,
+          project_type: taskContext.projectType,
+          ...(taskContext.processVersionId ? { process_version_id: taskContext.processVersionId } : {}),
+          ...(taskContext.processProfileId ? { process_profile_id: taskContext.processProfileId } : {}),
+          ...(taskContext.processProfileName ? { process_profile_name: taskContext.processProfileName } : {}),
+          ...(taskContext.processProfileVersion ? { process_profile_version: taskContext.processProfileVersion } : {}),
+        },
+      };
     }
+    // Legacy main/run handles remain readable history, but they no longer own
+    // the project's durable dialogue or block Project Agent creation.
 
     const controlledDir = await ensureWorkspace(projectId);
     const baseCommit = await headSha(controlledDir);
@@ -1194,13 +1168,14 @@ async function createCoreOwnedMainTask(
       authorizationScope: MAIN_AUTHORIZATION_SCOPE,
     });
     const now = new Date().toISOString();
+    const effectivePart = part ?? taskContext.targetPart;
 
     await tx.query(
       `INSERT INTO agent_task
-       (id,project_id,project_type,kind,parent_task_id,workspace_id,process_instance_id,
+       (id,project_id,project_type,kind,agent_role,parent_task_id,workspace_id,process_instance_id,
           runtime_actor_id,objective,authorization_scope,status,input_hash,adoption_state,
-          created_by_type,created_by,created_at,updated_at)
-       VALUES ($1,$2,$3,'main',NULL,NULL,$4,$5,$6,$7::jsonb,'queued',$8,'not_applicable',$9,$10,$11,$11)`,
+          runtime_snapshot,created_by_type,created_by,created_at,updated_at)
+       VALUES ($1,$2,$3,'main','project',NULL,NULL,$4,$5,$6,$7::jsonb,'queued',$8,'not_applicable',$9::jsonb,$10,$11,$12,$12)`,
       [
         taskId,
         projectId,
@@ -1210,6 +1185,7 @@ async function createCoreOwnedMainTask(
         task,
         JSON.stringify(MAIN_AUTHORIZATION_SCOPE),
         inputHash,
+        JSON.stringify({ agent_role: "project", agent_part: effectivePart }),
         ctx.identity.actorType,
         ctx.identity.actorId,
         now,
@@ -1237,7 +1213,6 @@ async function createCoreOwnedMainTask(
       kind: "main",
       inputHash,
     });
-    const effectivePart = part ?? taskContext.targetPart;
     return {
       taskId,
       inputHash,
@@ -1245,15 +1220,14 @@ async function createCoreOwnedMainTask(
       runtimeRequest: {
         task_id: taskId,
         task_kind: "main",
+        execution_intent: "project_agent",
         authorization_scope: MAIN_AUTHORIZATION_SCOPE,
         input_hash: inputHash,
         project_id: projectId,
         task,
         ...(effectivePart ? { part: effectivePart } : {}),
         ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
-        ...(taskContext.projectType === "free" || taskContext.legacyCompatibility
-          ? { mode: "agent" as const }
-          : {}),
+        mode: "agent" as const,
         project_type: taskContext.projectType,
         ...(taskContext.processVersionId ? { process_version_id: taskContext.processVersionId } : {}),
         ...(taskContext.processProfileId ? { process_profile_id: taskContext.processProfileId } : {}),
@@ -1319,6 +1293,7 @@ async function createCoreOwnedMainTask(
       agentId: result.taskId,
       task_id: result.taskId,
       kind: "main" as const,
+      agent_role: "project" as const,
       parent_task_id: null,
       workspace_id: null,
       status: persisted.status,
@@ -1675,7 +1650,7 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
           [current.id, projectId],
         );
         if (cancelled.rows.length > 0) {
-          await appendConversationEventRecord(
+          const terminalSequence = await appendConversationEventRecord(
             tx,
             ctx,
             projectId,
@@ -1684,6 +1659,13 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
             "status",
             { status: "cancelled" },
           );
+          await sealLearningEpisodeAtStatus(tx, {
+            task: current,
+            sequence: terminalSequence,
+            payload: { status: "cancelled" },
+            actorType: ctx.identity.actorType,
+            actorId: ctx.identity.actorId,
+          });
         }
         return { response };
       },

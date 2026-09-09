@@ -98,6 +98,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const ACTIVE_SUBMISSION_STATES = ["preparing", "submitted", "checking", "in_review"] as const;
 const TERMINAL_RUN_STATES = new Set(["rejected", "succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
+const GOVERNED_EVIDENCE_CLASSIFICATION = "tool_run_evidence" as const;
+const GOVERNED_EVIDENCE_USAGE = "run_class_governed" as const;
 
 async function runP4SessionLockedIdempotent<T>(
   ctx: RequestContext,
@@ -1707,6 +1709,7 @@ async function buildG4Facts(
        LEFT JOIN tool_run_evidence_manifest m
          ON m.tool_run_id = tr.id AND m.project_id = tr.project_id
       WHERE tr.project_id = $1 AND tr.formal_input_approval_id = $2
+        AND tr.run_class = 'formal' AND tr.binding_version = 'formal-input.v1'
         AND tr.operation = ANY($3::text[])
       ORDER BY tr.operation, tr.created_at DESC, tr.id DESC`,
     [projectId, approval.id, FORMAL_OPERATIONS],
@@ -1718,10 +1721,16 @@ async function buildG4Facts(
   const runs = FORMAL_OPERATIONS.map((operation) => newestByOperation.get(operation)).filter(Boolean) as Record<string, unknown>[];
   const implement = newestByOperation.get("implement");
   const bitstreamResult = implement ? await tx.query(
-    `SELECT * FROM bitstream_result
-      WHERE project_id = $1 AND work_version_id = $2 AND tool_run_id = $3
-        AND class = 'formal'
-      ORDER BY created_at DESC LIMIT 1`,
+    `SELECT bitstream.*
+       FROM bitstream_result bitstream
+       JOIN tool_run run
+         ON run.id=bitstream.tool_run_id AND run.project_id=bitstream.project_id
+      WHERE bitstream.project_id = $1 AND bitstream.work_version_id = $2
+        AND bitstream.tool_run_id = $3
+        AND bitstream.class = 'formal' AND run.run_class = 'formal'
+        AND bitstream.artifact_classification = 'tool_run_evidence'
+        AND bitstream.usage_classification = 'run_class_governed'
+      ORDER BY bitstream.created_at DESC LIMIT 1`,
     [projectId, work.id, implement.id],
   ) : { rows: [] };
   const bitstream = bitstreamResult.rows[0] as Record<string, unknown> | undefined ?? null;
@@ -1852,11 +1861,18 @@ async function buildG4Facts(
     }));
     if (run.evidence_manifest_id) {
       const evidenceResult = await tx.query(
-        `SELECT id, name, role, evidence_kind, sha256, size_bytes,
-                media_type, uri, verdict
-           FROM tool_run_evidence_entry
-          WHERE project_id = $1 AND manifest_id = $2
-          ORDER BY name`,
+        `SELECT evidence.id, evidence.name, evidence.role, evidence.evidence_kind,
+                evidence.sha256, evidence.size_bytes, evidence.media_type,
+                evidence.uri, evidence.verdict, evidence.artifact_classification,
+                evidence.usage_classification
+           FROM tool_run_evidence_entry evidence
+           JOIN tool_run run
+             ON run.id=evidence.tool_run_id AND run.project_id=evidence.project_id
+          WHERE evidence.project_id = $1 AND evidence.manifest_id = $2
+            AND run.run_class = 'formal'
+            AND evidence.artifact_classification = 'tool_run_evidence'
+            AND evidence.usage_classification = 'run_class_governed'
+          ORDER BY evidence.name`,
         [projectId, run.evidence_manifest_id],
       );
       for (const entry of evidenceResult.rows as Record<string, unknown>[]) {
@@ -1869,7 +1885,14 @@ async function buildG4Facts(
           size_bytes: numberValue(entry.size_bytes),
           media_type: String(entry.media_type),
           storage_uri: `evidence-entry://${String(entry.id)}`,
-          provenance: { schema: "delivery-provenance.v1", toolRunId: run.id, role: entry.role, verdict: entry.verdict },
+          provenance: {
+            schema: "delivery-provenance.v1",
+            toolRunId: run.id,
+            role: entry.role,
+            verdict: entry.verdict,
+            artifactClassification: entry.artifact_classification,
+            usageClassification: entry.usage_classification,
+          },
         });
       }
     }
@@ -1884,7 +1907,14 @@ async function buildG4Facts(
       size_bytes: numberValue(bitstream.size_bytes),
       media_type: "application/octet-stream",
       storage_uri: String(bitstream.storage_uri),
-      provenance: { schema: "delivery-provenance.v1", class: "formal", toolRunId: bitstream.tool_run_id, inputHash: bitstream.input_hash },
+      provenance: {
+        schema: "delivery-provenance.v1",
+        class: "formal",
+        artifactClassification: bitstream.artifact_classification,
+        usageClassification: bitstream.usage_classification,
+        toolRunId: bitstream.tool_run_id,
+        inputHash: bitstream.input_hash,
+      },
     });
   }
   items.sort((left, right) => {
@@ -2003,7 +2033,21 @@ function gateChecks(
     add({ code: "drc.clean", severity: "hard", passed: drc.determined === true && drc.clean === true && drc.errorCount === 0, details: drc, evidenceRefs: implement ? [{ type: "tool_run_evidence_manifest", id: implement.evidence_manifest_id }] : [] });
     add({ code: "timing.met", severity: "hard", passed: timing.determined === true && timing.met === true && (g4?.expectedClocks.length ?? 0) > 0 && missingClocks.length === 0, details: { ...timing, expectedClocks: g4?.expectedClocks ?? [], missingClocks }, evidenceRefs: implement ? [{ type: "tool_run_evidence_manifest", id: implement.evidence_manifest_id }] : [] });
     add({ code: "evidence.frozen", severity: "hard", passed: allRuns, details: { operations: Object.fromEntries(FORMAL_OPERATIONS.map((operation) => [operation, runMap.get(operation)?.evidence_manifest_id ?? null])) }, evidenceRefs: (g4?.runs ?? []).map((run) => ({ type: "tool_run_evidence_manifest", id: run.evidence_manifest_id })) });
-    add({ code: "bitstream.formal", severity: "hard", passed: g4?.bitstream?.class === "formal", details: { bitstreamResultId: g4?.bitstream?.id ?? null, class: g4?.bitstream?.class ?? null }, evidenceRefs: g4?.bitstream ? [{ type: "bitstream_result", id: g4.bitstream.id }] : [] });
+    const formalBitstream = g4?.bitstream?.class === "formal"
+      && g4.bitstream.artifact_classification === GOVERNED_EVIDENCE_CLASSIFICATION
+      && g4.bitstream.usage_classification === GOVERNED_EVIDENCE_USAGE;
+    add({
+      code: "bitstream.formal",
+      severity: "hard",
+      passed: formalBitstream,
+      details: {
+        bitstreamResultId: g4?.bitstream?.id ?? null,
+        class: g4?.bitstream?.class ?? null,
+        artifactClassification: g4?.bitstream?.artifact_classification ?? null,
+        usageClassification: g4?.bitstream?.usage_classification ?? null,
+      },
+      evidenceRefs: g4?.bitstream ? [{ type: "bitstream_result", id: g4.bitstream.id }] : [],
+    });
     add({
       code: "delivery.manifest_sealed",
       severity: "hard",
@@ -2791,7 +2835,7 @@ async function assembleFormalInput(
     `SELECT id, runtime_actor_id
        FROM agent_task
       WHERE id = $1 AND project_id = $2 AND project_type = 'engineering'
-        AND kind = 'main' AND process_instance_id = $3
+        AND kind = 'main' AND agent_role = 'project' AND process_instance_id = $3
         AND status IN ('queued','running','awaiting_user')`,
     [input.authorizedTaskId, projectId, work.process_instance_id],
   );
@@ -3187,7 +3231,8 @@ async function authorizeFormalSubmitter(
   const task = await query.query(
     `SELECT 1 FROM agent_task
       WHERE id = $1 AND project_id = $2 AND kind = 'main'
-        AND runtime_actor_id = $3 AND status IN ('queued','running','awaiting_user')`,
+        AND agent_role = 'project'
+        AND runtime_actor_id = $3 AND status IN ('queued','running','awaiting_user','failed','cancelled','fail_closed')`,
     [approval.authorized_task_id, ctx.params.projectId!, ctx.identity.actorId],
   );
   if (task.rows.length === 0) throw forbiddenError("FORMAL_INPUT_BOUND_RUNTIME_REQUIRED");
@@ -3484,6 +3529,8 @@ function evidenceEntryPublic(row: Record<string, unknown>): Record<string, unkno
     sizeBytes: numberValue(row.size_bytes),
     mediaType: row.media_type,
     storageUri: row.uri,
+    artifactClassification: row.artifact_classification,
+    usageClassification: row.usage_classification,
     completeness: row.completeness,
     corrupt: row.corrupt,
     verdict: row.verdict,
@@ -3507,6 +3554,7 @@ async function selectFrozenEvidence(
   if (!manifest) throw conflictApiError("EVIDENCE_NOT_FROZEN", { jobId });
   const entriesResult = await query.query(
     `SELECT name, role, sha256, size_bytes, media_type, uri,
+            artifact_classification, usage_classification,
             completeness, corrupt, verdict
        FROM tool_run_evidence_entry
       WHERE project_id = $1 AND manifest_id = $2
@@ -3645,8 +3693,9 @@ async function classifyBitstream(
        formal_input_approval_id, snapshot_id, readiness_id, input_hash,
        engineering_config_hash, prerequisite_baseline_id, target_part,
        toolchain_profile_hash, constraint_hash, sha256, size_bytes,
+       artifact_classification, usage_classification,
        storage_uri, generated_by_type, generated_by, generated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
              'system','synthia-core',now())
      ON CONFLICT (tool_run_id, evidence_entry_name) DO NOTHING`,
     [
@@ -3669,6 +3718,8 @@ async function classifyBitstream(
       approval?.constraint_hash ?? null,
       bitstream.sha256,
       bitstream.sizeBytes,
+      GOVERNED_EVIDENCE_CLASSIFICATION,
+      GOVERNED_EVIDENCE_USAGE,
       `content://sha256/${bitstream.sha256}`,
     ],
   );
@@ -3804,8 +3855,9 @@ export async function freezeP4EvidenceHandler(ctx: RequestContext): Promise<Hand
         `INSERT INTO tool_run_evidence_entry
           (id, project_id, manifest_id, tool_run_id, name, role,
            evidence_kind, uri, sha256, size_bytes, media_type,
-           completeness, corrupt, verdict, source_entry_names, managed_content)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'full',false,$12::jsonb,'{}',$13)`,
+           artifact_classification, usage_classification, completeness, corrupt,
+           verdict, source_entry_names, managed_content)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'full',false,$14::jsonb,'{}',$15)`,
         [
           `eve_${sha256Hex(`${manifestId}:${entry.name}`).slice(0, 40)}`,
           projectId,
@@ -3818,6 +3870,8 @@ export async function freezeP4EvidenceHandler(ctx: RequestContext): Promise<Hand
           entry.sha256,
           entry.sizeBytes,
           entry.mediaType,
+          GOVERNED_EVIDENCE_CLASSIFICATION,
+          GOVERNED_EVIDENCE_USAGE,
           entry.verdict === null ? null : JSON.stringify(entry.verdict),
           Buffer.from(entry.bytes),
         ],
@@ -3966,7 +4020,8 @@ export async function listP4BitstreamsHandler(ctx: RequestContext): Promise<Hand
             class, formal_input_approval_id, snapshot_id, readiness_id,
             input_hash, engineering_config_hash, prerequisite_baseline_id,
             target_part, toolchain_profile_hash, constraint_hash, sha256,
-            size_bytes, storage_uri, generated_by_type, generated_by,
+            size_bytes, artifact_classification, usage_classification,
+            storage_uri, generated_by_type, generated_by,
             generated_at, created_at
        FROM bitstream_result WHERE project_id = $1
       ORDER BY generated_at DESC, id`,
@@ -4634,8 +4689,14 @@ async function deliveryItemBytes(
   }
   if (item.source_type === "tool_run_evidence_entry") {
     const result = await query.query(
-      `SELECT managed_content FROM tool_run_evidence_entry
-        WHERE id = $1 AND project_id = $2`,
+      `SELECT evidence.managed_content
+         FROM tool_run_evidence_entry evidence
+         JOIN tool_run run
+           ON run.id=evidence.tool_run_id AND run.project_id=evidence.project_id
+        WHERE evidence.id = $1 AND evidence.project_id = $2
+          AND run.run_class = 'formal'
+          AND evidence.artifact_classification = 'tool_run_evidence'
+          AND evidence.usage_classification = 'run_class_governed'`,
       [item.source_id, projectId],
     );
     const content = (result.rows[0] as { managed_content?: Uint8Array } | undefined)?.managed_content;
@@ -4646,12 +4707,19 @@ async function deliveryItemBytes(
     const result = await query.query(
       `SELECT e.managed_content
          FROM bitstream_result b
+         JOIN tool_run run
+           ON run.id = b.tool_run_id AND run.project_id = b.project_id
          JOIN tool_run_evidence_entry e
            ON e.manifest_id = b.evidence_manifest_id
           AND e.tool_run_id = b.tool_run_id
           AND e.project_id = b.project_id
           AND e.name = b.evidence_entry_name
-        WHERE b.id = $1 AND b.project_id = $2 AND b.class = 'formal'`,
+        WHERE b.id = $1 AND b.project_id = $2
+          AND b.class = 'formal' AND run.run_class = 'formal'
+          AND b.artifact_classification = 'tool_run_evidence'
+          AND b.usage_classification = 'run_class_governed'
+          AND e.artifact_classification = b.artifact_classification
+          AND e.usage_classification = b.usage_classification`,
       [item.source_id, projectId],
     );
     const content = (result.rows[0] as { managed_content?: Uint8Array } | undefined)?.managed_content;

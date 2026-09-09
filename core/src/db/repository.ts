@@ -8,7 +8,8 @@
 
 import type { Client } from "pg";
 import { artifactRevisionMachine, gateSubmissionMachine, baselineMachine, toolRunMachine, traceRelationMachine } from "../domain/state-machines.ts";
-import type { ArtifactRevision, ArtifactRevisionState, Baseline, ConfigurationSnapshot, Evidence, GateSubmission, GateSubmissionState, ToolRun, TraceRelation } from "../domain/entities.ts";
+import type { ArtifactRevision, Baseline, ConfigurationSnapshot, Evidence, GateSubmission, ToolRun, TraceRelation } from "../domain/entities.ts";
+import type { ArtifactRevisionState, GateSubmissionState } from "../domain/enums.ts";
 
 // ── ArtifactRevision ──────────────────────────────────────────────────────────
 
@@ -38,7 +39,7 @@ export async function transitionRevisionState(
     [revisionId],
   );
   if (rows.length === 0) throw new Error(`Revision not found: ${revisionId}`);
-  const from = rows[0].state;
+  const from = rows[0]!.state;
   artifactRevisionMachine.assertTransition(from, to);
   await client.query(
     "UPDATE artifact_revision SET state = $1 WHERE id = $2",
@@ -102,7 +103,7 @@ export async function transitionSubmissionState(
     [submissionId],
   );
   if (rows.length === 0) throw new Error(`Submission not found: ${submissionId}`);
-  const from = rows[0].state;
+  const from = rows[0]!.state;
   gateSubmissionMachine.assertTransition(from, to);
   const updated = await client.query("UPDATE gate_submission SET state = $1 WHERE id = $2 AND state = $3", [to, submissionId, from]);
   if ((updated.rowCount ?? 0) !== 1) throw new Error("STATE_TRANSITION_CONFLICT");
@@ -162,7 +163,7 @@ export async function transitionToolRunState(
     [agentId],
   );
   if (rows.length === 0) throw new Error(`ToolRun not found: ${agentId}`);
-  const from = rows[0].state;
+  const from = rows[0]!.state;
   toolRunMachine.assertTransition(from, to);
   const updated = await client.query("UPDATE tool_run SET state = $1 WHERE id = $2 AND state = $3", [to, agentId, from]);
   if ((updated.rowCount ?? 0) !== 1) throw new Error("STATE_TRANSITION_CONFLICT");
