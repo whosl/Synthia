@@ -333,14 +333,19 @@ export class HttpRuntimeClient implements RuntimeClient {
   }
 
   async sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown> {
-    // A free-agent turn (context + tool calls + generation) takes minutes,
-    // not seconds — never the 15s control-path timeout.
+    // The Runtime message endpoint returns `{accepted:true}` (or a 4xx) in
+    // seconds — the multi-minute TURN runs in the background and is consumed
+    // via stream/audit. The previous 10-minute timeout conflated the two and
+    // turned a stuck Runtime dispatch (observed: a recovery-path session
+    // rebuild held the per-agent dispatch lock for ~30 minutes in the T1 AES
+    // run) into a silent client-side hang with no error. 90s bounds the
+    // accept path generously while making any stall loud.
     return this.request(
       "POST",
       `/tasks/${encodeURIComponent(agentId)}/message`,
       { text },
       {
-        timeoutMs: 10 * 60_000,
+        timeoutMs: 90_000,
         ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
       },
     );
