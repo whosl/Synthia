@@ -354,6 +354,34 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
     return message;
   }
 
+  /**
+   * Transient transport failures (socket closed mid-generation, ECONNRESET,
+   * fetch aborted) surface as thrown errors from the provider client. A
+   * dropped connection killed a whole multi-minute turn in the T1 AES run
+   * and marked the agent failed — retry transient-looking failures here
+   * before letting anything reach the turn level.
+   */
+  private isTransientTransportError(err: unknown): boolean {
+    const text = err instanceof Error ? `${err.message} ${err.cause instanceof Error ? err.cause.message : ""}` : String(err);
+    return /socket connection was closed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|fetch failed|network|Connection closed unexpectedly|aborted/i.test(text);
+  }
+
+  private async withTransportRetry<T>(op: () => Promise<T>): Promise<T> {
+    const attempts = Math.max(1, this.config.networkRetries ?? 2) + 1;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await op();
+      } catch (err) {
+        lastErr = err;
+        if (attempt === attempts || !this.isTransientTransportError(err)) throw err;
+        const backoffMs = 2_000 * attempt;
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+    }
+    throw lastErr;
+  }
+
   private async postChatCompletion(body: string, timeoutMs: number): Promise<ChatCompletionResponse> {
     let request: ChatWireRequest;
     try {
@@ -367,11 +395,11 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
       this.config.toolMaxTokens ?? 4096,
     );
     try {
-      const message = await this.requireSuccess(this.completeFn(
+      const message = await this.withTransportRetry(() => this.requireSuccess(this.completeFn(
         this.piModel,
         context,
         this.options(maxTokens, { timeoutMs }),
-      ));
+      )));
       return assistantToChatCompletion(message);
     } catch (error) {
       const status = statusFromError(error);
@@ -385,11 +413,11 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
 
   async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
     const context = agentMessagesToContext(messages, tools, this.piModel, this.now);
-    const message = await this.requireSuccess(this.completeFn(
+    const message = await this.withTransportRetry(() => this.requireSuccess(this.completeFn(
       this.piModel,
       context,
       this.options(this.config.chatMaxTokens ?? 16_384),
-    ));
+    )));
     return assistantToChatTurn(message);
   }
 
@@ -419,11 +447,11 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
     };
     bump();
     try {
-      const eventStream = this.streamFn(
+      const eventStream = await this.withTransportRetry(() => Promise.resolve(this.streamFn(
         this.piModel,
         context,
         this.options(this.config.chatMaxTokens ?? 16_384, { signal: controller.signal }),
-      );
+      )));
       for await (const event of eventStream) {
         bump();
         if (event.type === "text_start") { emitted = true; opts.onTextStart?.(); }

@@ -120,3 +120,55 @@ describe("PiAnthropicRuntimeModel", () => {
     expect(capturedContext).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// P1: transient transport retry (T1 AES run: one socket drop killed a turn)
+// ---------------------------------------------------------------------------
+
+describe("PiAnthropicRuntimeModel transport retry (P1)", () => {
+  function okAssistant(): AssistantMessage {
+    return fakeAssistant();
+  }
+
+  test("a transient socket-close error is retried and the turn survives", async () => {
+    let calls = 0;
+    const deps: PiAnthropicDeps = {
+      complete: async () => {
+        calls++;
+        if (calls === 1) throw new Error("The socket connection was closed unexpectedly.");
+        return okAssistant();
+      },
+    };
+    const model = new PiAnthropicRuntimeModel({ ...CONFIG, networkRetries: 2 }, deps);
+    const turn = await model.chat([{ role: "user", content: "hi" }], []);
+    expect(turn.kind).toBe("text");
+    expect(calls).toBe(2);
+  });
+
+  test("non-transient errors are not retried", async () => {
+    let calls = 0;
+    const deps: PiAnthropicDeps = {
+      complete: async () => {
+        calls++;
+        throw new Error("401 invalid api key");
+      },
+    };
+    const model = new PiAnthropicRuntimeModel({ ...CONFIG, networkRetries: 2 }, deps);
+    expect(model.chat([{ role: "user", content: "hi" }], [])).rejects.toThrow("401");
+    await new Promise(r => setTimeout(r, 50));
+    expect(calls).toBe(1);
+  });
+
+  test("retry budget exhausted rethrows the last transport error", async () => {
+    let calls = 0;
+    const deps: PiAnthropicDeps = {
+      complete: async () => {
+        calls++;
+        throw new Error("fetch failed: ECONNRESET");
+      },
+    };
+    const model = new PiAnthropicRuntimeModel({ ...CONFIG, networkRetries: 1 }, deps);
+    await expect(model.chat([{ role: "user", content: "hi" }], [])).rejects.toThrow("ECONNRESET");
+    expect(calls).toBe(2); // 1 + 1 retry
+  });
+});
