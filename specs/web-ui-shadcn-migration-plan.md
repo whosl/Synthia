@@ -1,6 +1,6 @@
 # Web 前端重组迁移计划：shadcn-vue + Reka UI + Tailwind v4
 
-状态：已确认方向（2026-09-10） · 试点：LoginView
+状态：✅ 全部完成（2026-09-10 启动，2026-09-11 收尾）
 
 ## 1. 目标与边界
 
@@ -102,3 +102,13 @@
 - shadcn-vue CLI 需要 `bun` 在 PATH 上（`spawn bun ENOENT`），用 `export PATH="$HOME/.bun/bin:$PATH"` 解决；registry 偶发抖动，重试即可。
 - Tailwind v4 utilities 在 layer 内，未分层的旧 scoped CSS 优先级更高——迁移期内若有类冲突，以删旧样式为准，别叠 `!important`。
 - `@theme inline` 里 `--font-sans: var(--font-sans)` 会自引用成环，字体栈需写字面量。
+
+## 8. 完成记录（2026-09-11）
+
+六个阶段全部落地，五个提交：试点基建 → 原语替换（AppButton/AppBadge 包装、Resizable 三栏、vue-sonner）→ 门户页 + portal.css 删除（796 行）→ 三个大面板 + 对话区换皮 → ProjectView 收尾（notice→toast×13、veil→utilities）+ 全局清扫（StageRail→Dialog、Icon.vue 删除、evolution/* 补迁）→ 最终清扫（notice prop 管道删除、层叠残余缩减）。
+
+终态：手写 CSS 从 ~6,050 行降到不足 400 行（残余仅为 keyframes、Vue Transition 类、`:deep()` markdown 排版、以及必须压过未分层 `pre/code` 元素规则的极少数规则，均带注释说明）；`web/src/styles/portal.css`、`ui/Icon.vue`、`StatusBadge.vue` 等手写原语全部删除。校验：vue-tsc 干净，`bun test` 510 全过，build 成功；浏览器/mock 巡检 /projects、/approvals、/projects/p1 及窄屏断点全部正常，双主题令牌链实测正确。
+
+过程中的额外收益：修掉多处引用不存在令牌（--state-success/--state-warning/--danger/--surface）的死样式（PermissionCard 深色下一直是奶油色）；style.css 元素规则迁入 `@layer base`，Tailwind 工具类不再被全局 reset 反杀。
+
+已知留白（不阻塞，按需跟进）：三个面板的 notice prop 已删但 EvolutionView 自有 notice 横幅保留；`--space-7` 未定义导致的零 padding 属原作者 bug（保持原样）；TaskSwitcher 行高随 shadcn DropdownMenuItem 默认密度有 ~2px 变化；vue-sonner 主题样式走运行时变量绑定，后续可换 class 方案。
