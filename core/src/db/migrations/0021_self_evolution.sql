@@ -431,7 +431,7 @@ CREATE TRIGGER curator_remediation_audit_append_only BEFORE UPDATE OR DELETE ON 
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0013_self_evolution')
+  VALUES ('0021_self_evolution')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

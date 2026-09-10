@@ -2478,7 +2478,7 @@ CREATE TRIGGER evolution_eval_operation_fact_append_only BEFORE UPDATE OR DELETE
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0014_evolution_eval')
+  VALUES ('0022_evolution_eval')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

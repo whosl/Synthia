@@ -176,7 +176,7 @@ CREATE TRIGGER delivery_release_classification_guard
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_delivery_release_classification();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0018_evidence_authority_classification')
+VALUES ('0026_evidence_authority_classification')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

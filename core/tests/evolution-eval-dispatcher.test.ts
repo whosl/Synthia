@@ -28,7 +28,7 @@ import {
 } from "../src/services/evolution-eval-connector-port.ts";
 
 const migration = readFileSync(
-  new URL("../src/db/migrations/0017_evolution_eval_dispatcher.sql", import.meta.url),
+  new URL("../src/db/migrations/0025_evolution_eval_dispatcher.sql", import.meta.url),
   "utf8",
 );
 
@@ -324,7 +324,7 @@ describe("evolution-eval dispatcher trust plane", () => {
       "synthia_validate_evolution_eval_retention_receipt_terminal",
     );
     expect(migration).toContain("receipt.connector_state='cleaned'");
-    expect(migration).toContain("0017_evolution_eval_dispatcher");
+    expect(migration).toContain("0025_evolution_eval_dispatcher");
   });
 
   test("claim commits before returning and uses SKIP LOCKED reclaim fencing", async () => {

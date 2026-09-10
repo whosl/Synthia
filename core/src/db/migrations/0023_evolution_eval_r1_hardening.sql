@@ -298,7 +298,7 @@ CREATE TRIGGER evolution_eval_reconcile_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0015_evolution_eval_r1_hardening')
+  VALUES ('0023_evolution_eval_r1_hardening')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

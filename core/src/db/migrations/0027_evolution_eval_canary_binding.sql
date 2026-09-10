@@ -42,7 +42,7 @@ CREATE TRIGGER evolution_eval_canary_binding_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0019_evolution_eval_canary_binding')
+VALUES ('0027_evolution_eval_canary_binding')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

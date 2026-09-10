@@ -52,7 +52,7 @@ const ROUTER_SOURCE = readFileSync(
   "utf8",
 );
 const DISPATCHER_MIGRATION_SOURCE = readFileSync(
-  new URL("../src/db/migrations/0017_evolution_eval_dispatcher.sql", import.meta.url),
+  new URL("../src/db/migrations/0025_evolution_eval_dispatcher.sql", import.meta.url),
   "utf8",
 );
 const FRESH_SCHEMA_SOURCE = readFileSync(

@@ -607,7 +607,7 @@ END;
 $$;
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0016_evolution_eval_r2_core')
+  VALUES ('0024_evolution_eval_r2_core')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

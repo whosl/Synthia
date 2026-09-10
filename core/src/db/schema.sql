@@ -6091,7 +6091,7 @@ CREATE TRIGGER evolution_eval_operation_fact_append_only BEFORE UPDATE OR DELETE
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0014_evolution_eval')
+  VALUES ('0022_evolution_eval')
   ON CONFLICT (version) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS evolution_eval_reconcile_fact (
@@ -6391,7 +6391,7 @@ CREATE TRIGGER evolution_eval_reconcile_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0015_evolution_eval_r1_hardening')
+  VALUES ('0023_evolution_eval_r1_hardening')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -7005,7 +7005,7 @@ END;
 $$;
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0016_evolution_eval_r2_core')
+  VALUES ('0024_evolution_eval_r2_core')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -7853,7 +7853,7 @@ CREATE TRIGGER evolution_eval_temp_cleanup_owner_guard
   BEFORE INSERT OR UPDATE OR DELETE ON evolution_eval_temp_cleanup_owner
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_evolution_eval_temp_cleanup_owner();
 
-INSERT INTO schema_migrations(version) VALUES ('0017_evolution_eval_dispatcher')
+INSERT INTO schema_migrations(version) VALUES ('0025_evolution_eval_dispatcher')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -8036,7 +8036,7 @@ CREATE TRIGGER delivery_release_classification_guard
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_delivery_release_classification();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0018_evidence_authority_classification')
+VALUES ('0026_evidence_authority_classification')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -8084,7 +8084,7 @@ CREATE TRIGGER evolution_eval_canary_binding_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0019_evolution_eval_canary_binding')
+VALUES ('0027_evolution_eval_canary_binding')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
