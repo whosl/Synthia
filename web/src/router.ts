@@ -14,6 +14,7 @@ const LoginView = () => import("./views/LoginView.vue");
 const ProjectsView = () => import("./views/ProjectListView.vue");
 const ProjectView = () => import("./views/ProjectView.vue");
 const ApprovalsView = () => import("./views/ApprovalsView.vue");
+const EvolutionView = () => import("./views/EvolutionView.vue");
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -22,6 +23,7 @@ export const router = createRouter({
     { path: "/login", name: "login", component: LoginView, meta: { public: true } },
     { path: "/projects", name: "projects", component: ProjectsView },
     { path: "/projects/:id", name: "project", component: ProjectView },
+    { path: "/evolution", name: "evolution", component: EvolutionView },
     // 列表页第二批并入项目页顶栏可达的 /inbox（spec §3.6）；详情页已被就地审批取代。
     { path: "/approvals", name: "approvals", component: ApprovalsView },
     {

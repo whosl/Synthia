@@ -455,10 +455,10 @@ describe.skipIf(!DATABASE_URL)("P4 formal flow API — real PostgreSQL", () => {
   async function createMainTask(projectId: string, processInstanceId: string, taskId: string): Promise<void> {
     await harness.client.query(
       `INSERT INTO agent_task
-        (id, project_id, project_type, kind, process_instance_id,
+        (id, project_id, project_type, kind, agent_role, process_instance_id,
          runtime_actor_id, objective, authorization_scope, status, input_hash,
          adoption_state, created_by_type, created_by)
-       VALUES ($1,$2,'engineering','main',$3,$4,'P4 fixture task','{}'::jsonb,
+       VALUES ($1,$2,'engineering','main','project',$3,$4,'P4 fixture task','{}'::jsonb,
                'running',$5,'not_applicable','human',$6)`,
       [taskId, projectId, processInstanceId, harness.ids.serviceUid, sha256Hex(`task:${taskId}`), harness.ids.humanUid],
     );

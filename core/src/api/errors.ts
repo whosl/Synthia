@@ -14,6 +14,29 @@ import type { DatabaseError } from "pg";
 export type ApiErrorCode =
   | "validation"
   | "authorization"
+  | "EVOLUTION_SCOPE_FORBIDDEN"
+  | "EVOLUTION_EVAL_INVALID_REQUEST"
+  | "EVOLUTION_EVAL_OPERATION_FORBIDDEN"
+  | "EVOLUTION_EVAL_TIMEOUT_INVALID"
+  | "EVOLUTION_EVAL_RESOURCE_LIMIT"
+  | "EVOLUTION_EVAL_FORBIDDEN"
+  | "EVOLUTION_EVAL_NOT_FOUND"
+  | "EVOLUTION_LEASE_CONFLICT"
+  | "EVOLUTION_EVAL_BINDING_CONFLICT"
+  | "EVOLUTION_EVAL_IDEMPOTENCY_CONFLICT"
+  | "EVOLUTION_EVAL_BUDGET_EXHAUSTED"
+  | "EVOLUTION_EVAL_SERIAL_CONFLICT"
+  | "EVOLUTION_EVAL_RUN_NOT_ACTIVE"
+  | "EVOLUTION_EVAL_WORKSPACE_SEALED"
+  | "EVOLUTION_EVAL_TERMINAL_CONFLICT"
+  | "EVOLUTION_EVAL_EVIDENCE_NOT_READY"
+  | "EVOLUTION_EVAL_RECONCILIATION_REQUIRED"
+  | "EVOLUTION_EVAL_UNKNOWN_REQUIRES_COMPLETE"
+  | "EVOLUTION_EVAL_EVIDENCE_REQUIRES_COMPLETE"
+  | "EVOLUTION_EVAL_EVIDENCE_CORRUPT"
+  | "EVOLUTION_EVAL_CONNECTOR_UNAVAILABLE"
+  | "EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE"
+  | "EVOLUTION_EVAL_SPOOL_FULL"
   | "conflict"
   | "not_found"
   | "capability_unavailable"
@@ -44,6 +67,29 @@ export function unauthorizedError(message: string, details?: unknown): ApiError 
 /** 403 — authenticated identity lacks permission for this operation. */
 export function forbiddenError(message: string, details?: unknown): ApiError {
   return new ApiError("authorization", 403, message, false, details);
+}
+
+/** 403 — a known token illegally combines or duplicates singleton capability scopes. */
+export function evolutionScopeForbiddenError(): ApiError {
+  return new ApiError(
+    "EVOLUTION_SCOPE_FORBIDDEN",
+    403,
+    "EVOLUTION_SCOPE_FORBIDDEN",
+    false,
+    null,
+  );
+}
+
+export type EvolutionEvalApiErrorCode = Extract<ApiErrorCode, `EVOLUTION_${string}`>;
+
+/** Frozen Appendix-B error envelope for the dedicated evolution-eval surface. */
+export function evolutionEvalApiError(
+  code: EvolutionEvalApiErrorCode,
+  httpStatus: number,
+  retryable = false,
+  details: unknown = null,
+): ApiError {
+  return new ApiError(code, httpStatus, code, retryable, details);
 }
 
 export function conflictApiError(message: string, details?: unknown, retryable = false): ApiError {

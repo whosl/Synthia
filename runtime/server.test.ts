@@ -28,6 +28,13 @@ import {
 } from "./agent-state.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 import type { AgentMessage, AgentTool, ChatTurn, ConversationalModel, FreeAgentSession } from "./agent-types.ts";
+import type {
+  LearnedSkillSearchResult,
+  LearnedSkillVersion,
+  LearningEpisodeResult,
+  SkillApplicationResult,
+  TaskEvolutionClient,
+} from "./evolution-client.ts";
 import type { ImportedMaterialSummary, ProcessStateV1, ProjectInfo } from "./types.ts";
 import {
   type EvaluatedGateSubmissionV1,
@@ -312,6 +319,49 @@ function makeFactory(
   return async () => ({ model, connector, governance } as any);
 }
 
+class RecordingTaskEvolutionClient implements TaskEvolutionClient {
+  readonly episodes: Array<Parameters<TaskEvolutionClient["createEpisode"]>[0]> = [];
+
+  constructor(
+    readonly projectId: string,
+    readonly taskId: string,
+  ) {}
+
+  async search(): Promise<LearnedSkillSearchResult> {
+    return { items: [], learnedSkillsEnabled: true };
+  }
+
+  async view(): Promise<LearnedSkillVersion> {
+    throw new Error("not used");
+  }
+
+  async createApplication(): Promise<SkillApplicationResult> {
+    throw new Error("not used");
+  }
+
+  async attachSupportingSkill(): Promise<SkillApplicationResult> {
+    throw new Error("not used");
+  }
+
+  async closeApplication(): Promise<SkillApplicationResult> {
+    throw new Error("not used");
+  }
+
+  async createEpisode(
+    input: Parameters<TaskEvolutionClient["createEpisode"]>[0],
+  ): Promise<LearningEpisodeResult> {
+    this.episodes.push(input);
+    return {
+      episodeId: `episode-${this.episodes.length}`,
+      observationKey: input.observationKey,
+      episodeKey: input.episodeKey,
+      distillationState: "queued",
+      boundApplicationIds: [],
+      replayed: false,
+    };
+  }
+}
+
 const SIDE_TASK_AUTHORIZATION: TaskAuthorizationScope = {
   schema: "task-scope.v1",
   workspace: "isolated",
@@ -584,6 +634,7 @@ afterEach(async () => {
 describe("RuntimeServer — historical-material feature configuration", () => {
   test("defaults off and accepts only explicit false values", async () => {
     expect((await createServerConfig({})).historicalMaterialsEnabled).toBe(false);
+    expect((await createServerConfig({})).selfEvolutionEnabled).toBe(false);
     expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "0" })).historicalMaterialsEnabled).toBe(false);
     expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "false" })).historicalMaterialsEnabled).toBe(false);
   });
@@ -591,12 +642,17 @@ describe("RuntimeServer — historical-material feature configuration", () => {
   test("accepts only explicit true values", async () => {
     expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "1" })).historicalMaterialsEnabled).toBe(true);
     expect((await createServerConfig({ SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "true" })).historicalMaterialsEnabled).toBe(true);
+    expect((await createServerConfig({ SYNTHIA_FEATURE_SELF_EVOLUTION: "1" })).selfEvolutionEnabled).toBe(true);
+    expect((await createServerConfig({ SYNTHIA_FEATURE_SELF_EVOLUTION: "true" })).selfEvolutionEnabled).toBe(true);
   });
 
   test("rejects ambiguous feature values instead of silently enabling", async () => {
     await expect(createServerConfig({
       SYNTHIA_FEATURE_HISTORICAL_MATERIALS: "TRUE",
     })).rejects.toThrow("SYNTHIA_FEATURE_HISTORICAL_MATERIALS must be exactly one of");
+    await expect(createServerConfig({
+      SYNTHIA_FEATURE_SELF_EVOLUTION: "yes",
+    })).rejects.toThrow("SYNTHIA_FEATURE_SELF_EVOLUTION must be exactly one of");
   });
 });
 
@@ -1068,6 +1124,10 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
         .toBe(200);
       await model.started.promise;
 
+      const busyList = await fetch(`${server.url}/tasks`);
+      const busyBody = await busyList.json() as { agents: Record<string, unknown>[] };
+      expect(busyBody.agents.find((agent) => agent.agent_id === taskId)?.busy).toBe(true);
+
       const messageKey = `steer-${crypto.randomUUID()}`;
       const sendSteer = () => fetch(`${server.url}/tasks/${taskId}/message`, {
         method: "POST",
@@ -1102,6 +1162,14 @@ describe("RuntimeServer — Core-issued task descriptors", () => {
 
       model.release.resolve();
       expect((await waitForStatus(server, taskId, ["awaiting_user"])).status).toBe("awaiting_user");
+      let settledBusy: unknown = true;
+      for (let attempt = 0; attempt < 50 && settledBusy !== false; attempt += 1) {
+        const idleList = await fetch(`${server.url}/tasks`);
+        const idleBody = await idleList.json() as { agents: Record<string, unknown>[] };
+        settledBusy = idleBody.agents.find((agent) => agent.agent_id === taskId)?.busy;
+        if (settledBusy !== false) await Bun.sleep(2);
+      }
+      expect(settledBusy).toBe(false);
     } finally {
       model.release.resolve();
       await server.stop();
@@ -2286,6 +2354,72 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     }
   });
 
+  test("a sealed Project Agent turn creates one episode at the committed awaiting_user boundary", async () => {
+    const projectId = "p-project-evolution";
+    const taskId = `project-evolution-${crypto.randomUUID()}`;
+    const events: Array<{ type: string; payload: Readonly<Record<string, unknown>> }> = [];
+    const taskEvents: TaskConversationClient = {
+      projectId,
+      taskId,
+      async appendEvent(input) {
+        events.push({ type: input.type, payload: input.payload });
+        return { taskId, eventId: input.eventId, sequence: events.length, replayed: false };
+      },
+    };
+    const evolution = new RecordingTaskEvolutionClient(projectId, taskId);
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
+      projectType: "engineering",
+      processVersionId: "GJB_REF_V1",
+      processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1",
+      processProfileVersion: "GJB_REF_V1",
+      targetPart: "xc7k70tfbv676-1",
+    }), "pi-project-evolution");
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(
+      makeConfig({ selfEvolutionEnabled: true }),
+      async () => ({
+        model: new CounterScriptedModel(),
+        connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+        governance,
+        taskEvents,
+        evolution,
+      }),
+      () => model,
+    );
+    await server.start();
+    try {
+      const create = await postTaskRaw(server, {
+        project_id: projectId,
+        process_instance_id: "pi-project-evolution",
+        task: "learn from this turn",
+        mode: "agent",
+        task_id: taskId,
+        task_kind: "main",
+        execution_intent: "project_agent",
+        authorization_scope: MAIN_TASK_AUTHORIZATION,
+      });
+      expect(create.status).toBe(201);
+      createdAgentIds.push(taskId);
+      expect((await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" })).status).toBe(200);
+      expect((await waitForStatus(server, taskId, ["awaiting_user", "fail_closed"])).status)
+        .toBe("awaiting_user");
+      for (let i = 0; i < 20 && evolution.episodes.length === 0; i += 1) await Bun.sleep(5);
+
+      expect(evolution.episodes).toHaveLength(1);
+      const episode = evolution.episodes[0]!;
+      expect(episode.observationKey).toStartWith("turn:");
+      expect(episode.episodeKey).toBe(`${episode.observationKey}:${episode.endEventSequence}`);
+      expect(events[episode.endEventSequence - 1]).toMatchObject({
+        type: "status",
+        payload: { turn_id: episode.turnId, status: "awaiting_user" },
+      });
+      expect(model.calls[0]!.tools.map(tool => tool.name)).toContain("learned_skill_search");
+    } finally {
+      await server.stop();
+    }
+  });
+
   test("a Project Agent turn failure stays conversational and the same agent accepts the next turn", async () => {
     const projectId = "p-core-project-turn-recovery";
     const taskId = `project-agent-${crypto.randomUUID()}`;
@@ -2343,11 +2477,15 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         .toBe("awaiting_user");
       expect(events).toContainEqual({
         type: "assistant_message",
-        payload: { text: "[error] temporary model outage" },
+        payload: { turn_id: expect.any(String), text: "[error] temporary model outage" },
       });
       expect(events).toContainEqual({
         type: "status",
-        payload: { status: "awaiting_user", reason: "temporary model outage" },
+        payload: {
+          turn_id: expect.any(String),
+          status: "awaiting_user",
+          reason: "temporary model outage",
+        },
       });
       expect(await loadAgentState(taskId)).toMatchObject({
         agentId: taskId,
@@ -2371,7 +2509,10 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       });
       expect(events).toContainEqual({
         type: "assistant_message",
-        payload: { text: "recovered on the same project agent" },
+        payload: {
+          turn_id: expect.any(String),
+          text: "recovered on the same project agent",
+        },
       });
     } finally {
       await server.stop();
@@ -2448,13 +2589,13 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       expect(model.calls).toHaveLength(1);
       expect(events).toContainEqual({
         type: "assistant_message",
-        payload: { text: "ok" },
+        payload: { turn_id: expect.any(String), text: "ok" },
       });
       expect(events.at(-1)).toEqual({
         type: "status",
-        // Runtime's conversational status is idle; Core projects that durable
-        // event to awaiting_user for the Project Agent lifecycle.
-        payload: { status: "idle" },
+        // Project Agent turns settle explicitly so LearningEpisode can bind an
+        // immutable Core event boundary without inventing a task terminal.
+        payload: { turn_id: expect.any(String), status: "awaiting_user" },
       });
     } finally {
       await server.stop();

@@ -12,6 +12,18 @@ export interface CoreFeatureFlags {
   readonly sideTasks: boolean;
   /** P4 formal G0-G4 execution, bitstream classification, and delivery writes. */
   readonly formalDelivery: boolean;
+  /** Self-evolution Learned Skill creation, discovery, application, and curation. */
+  readonly selfEvolution: boolean;
+  /** Runs recovery/retention dispatcher duties; independently default-off. */
+  readonly evolutionEvalDispatcherHost: boolean;
+  /** Allows new external evolution_eval effects; independently default-off. */
+  readonly evolutionEvalExecution: boolean;
+}
+
+export interface EvolutionEvalExecutionPlane {
+  readonly dispatcherHostEnabled: boolean;
+  readonly allowNewEffects: boolean;
+  readonly rolloutEnabled: boolean;
 }
 
 export interface CoreFeatureFlagOptions {
@@ -25,6 +37,9 @@ export const DISABLED_CORE_FEATURE_FLAGS: CoreFeatureFlags = Object.freeze({
   historicalMaterials: false,
   sideTasks: false,
   formalDelivery: false,
+  selfEvolution: false,
+  evolutionEvalDispatcherHost: false,
+  evolutionEvalExecution: false,
 });
 
 /** Parse a boolean environment flag without accepting ambiguous spellings. */
@@ -61,5 +76,78 @@ export function resolveCoreFeatureFlags(options: CoreFeatureFlagOptions = {}): C
     "SYNTHIA_FEATURE_FORMAL_DELIVERY",
     (options.env ?? process.env).SYNTHIA_FEATURE_FORMAL_DELIVERY,
   );
-  return Object.freeze({ historicalMaterials, sideTasks, formalDelivery });
+  const injectedSelfEvolution = options.features?.selfEvolution;
+  if (injectedSelfEvolution !== undefined && typeof injectedSelfEvolution !== "boolean") {
+    throw new TypeError("features.selfEvolution must be a boolean");
+  }
+  const selfEvolution = injectedSelfEvolution ?? parseBooleanFeatureFlag(
+    "SYNTHIA_FEATURE_SELF_EVOLUTION",
+    (options.env ?? process.env).SYNTHIA_FEATURE_SELF_EVOLUTION,
+  );
+  const injectedEvolutionEvalDispatcherHost = options.features?.evolutionEvalDispatcherHost;
+  if (
+    injectedEvolutionEvalDispatcherHost !== undefined
+    && typeof injectedEvolutionEvalDispatcherHost !== "boolean"
+  ) {
+    throw new TypeError("features.evolutionEvalDispatcherHost must be a boolean");
+  }
+  const evolutionEvalDispatcherHost = injectedEvolutionEvalDispatcherHost
+    ?? parseBooleanFeatureFlag(
+      "SYNTHIA_FEATURE_EVOLUTION_EVAL_DISPATCHER_HOST",
+      (options.env ?? process.env).SYNTHIA_FEATURE_EVOLUTION_EVAL_DISPATCHER_HOST,
+    );
+  const injectedEvolutionEvalExecution = options.features?.evolutionEvalExecution;
+  if (
+    injectedEvolutionEvalExecution !== undefined
+    && typeof injectedEvolutionEvalExecution !== "boolean"
+  ) {
+    throw new TypeError("features.evolutionEvalExecution must be a boolean");
+  }
+  const evolutionEvalExecution = injectedEvolutionEvalExecution ?? parseBooleanFeatureFlag(
+    "SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION",
+    (options.env ?? process.env).SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION,
+  );
+  return Object.freeze({
+    historicalMaterials,
+    sideTasks,
+    formalDelivery,
+    selfEvolution,
+    evolutionEvalDispatcherHost,
+    evolutionEvalExecution,
+  });
+}
+
+/**
+ * Resolve the three independent rollout gates used by the dispatcher host.
+ *
+ * Pause is deliberately absent: it is durable database policy and is checked
+ * again by the dispatcher immediately before every new effect. Startup flags
+ * cannot cache or override it.
+ */
+export function resolveEvolutionEvalExecutionPlane(
+  flags: Pick<
+    CoreFeatureFlags,
+    "evolutionEvalDispatcherHost" | "evolutionEvalExecution" | "selfEvolution"
+  >,
+): EvolutionEvalExecutionPlane {
+  const dispatcherHostEnabled = flags.evolutionEvalDispatcherHost;
+  const allowNewEffects = flags.evolutionEvalExecution;
+  const rolloutEnabled = flags.selfEvolution;
+  if (allowNewEffects && !dispatcherHostEnabled) {
+    throw new Error(
+      "SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION requires "
+      + "SYNTHIA_FEATURE_EVOLUTION_EVAL_DISPATCHER_HOST",
+    );
+  }
+  if (allowNewEffects && !rolloutEnabled) {
+    throw new Error(
+      "SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION requires "
+      + "SYNTHIA_FEATURE_SELF_EVOLUTION",
+    );
+  }
+  return Object.freeze({
+    dispatcherHostEnabled,
+    allowNewEffects,
+    rolloutEnabled,
+  });
 }

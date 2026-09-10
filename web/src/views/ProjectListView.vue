@@ -16,6 +16,7 @@ import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import Button from "../components/ui/AppButton.vue";
 import Icon from "../components/ui/Icon.vue";
+import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 
 const router = useRouter();
 const {
@@ -53,12 +54,17 @@ function projectCreated(id: string) {
         <h1>项目工作台<span class="heading-dot">.</span></h1>
         <p class="secondary-text">从自由探索到正式交付，在这里继续你的工程。</p>
       </div>
-      <Button
-        variant="primary"
-        class="primary-action"
-        @click="showCreate = true"
-        ><Icon name="plus" />新建项目</Button
-      >
+      <div class="primary-action" style="display: inline-flex; gap: 8px; align-items: center">
+        <router-link
+          v-if="SELF_EVOLUTION_FEATURE_ENABLED"
+          class="btn secondary"
+          to="/evolution"
+          >进化</router-link
+        >
+        <Button variant="primary" @click="showCreate = true"
+          ><Icon name="plus" />新建项目</Button
+        >
+      </div>
     </div>
 
     <div class="overview-stats" aria-label="工作空间概况">
