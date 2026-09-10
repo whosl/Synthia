@@ -262,7 +262,7 @@ export function conversationEventsToParts(
         id: callId,
         state: "running",
         name: typeof event.payload.name === "string" ? event.payload.name : "tool",
-        args: conversationPayloadText(event.payload.args, 400),
+        args: conversationPayloadText(event.payload.args, 2_000),
         result: null,
       };
       tools.set(callId, parts.length);
@@ -285,7 +285,7 @@ export function conversationEventsToParts(
             ? previous.name
             : "tool",
         args: previous?.kind === "agent_tool" ? previous.args : "",
-        result: conversationPayloadText(event.payload.result, 800),
+        result: conversationPayloadText(event.payload.result, 4_000),
       };
       if (at === undefined) parts.push(completed);
       else parts[at] = completed;

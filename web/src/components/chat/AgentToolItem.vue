@@ -12,6 +12,7 @@
  */
 import { computed, ref, watch } from "vue";
 import type { SynthiaAgentToolPart } from "../../domain/parts.ts";
+import { formatToolPayload } from "../../domain/tool-detail.ts";
 import Badge from "../ui/Badge.vue";
 
 const props = defineProps<{ part: SynthiaAgentToolPart }>();
@@ -50,15 +51,26 @@ function toggle(): void {
   expanded.value = !expanded.value;
 }
 
-/** 入参美化：能解析成 JSON 就缩进展示，否则原样（服务端截断后可能不是合法 JSON）。 */
-const argsText = computed(() => {
+/** 入参美化：能解析成 JSON 就块样式展示，否则原样（服务端截断后可能不是合法 JSON）。 */
+const argsText = computed(() => formatToolPayload(props.part.args));
+
+/** 结果美化：与入参同一格式化器——工具结果常是（可能双重编码的）JSON 字符串。 */
+const resultText = computed(() => {
+  if (props.part.result === null) return "";
+  return formatToolPayload(props.part.result);
+});
+
+/**
+ * 头部显示名：带 operation 入参的工具（vivado_run/fpga-sim-run 等）追加具体
+ * 操作（「vivado_run: simulate」）。用正则而非 JSON.parse——入参可能被截断，
+ * 不是合法 JSON；截断尾巴里 operation 排在前面，照样提得到。
+ */
+const displayName = computed(() => {
+  const name = props.part.name || "工具调用";
   const raw = props.part.args.trim();
-  if (!raw || raw === "{}") return "";
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
+  if (!raw) return name;
+  const match = raw.match(/"operation"\s*:\s*"([^"]+)"/);
+  return match ? `${name}: ${match[1]}` : name;
 });
 </script>
 
@@ -74,7 +86,7 @@ const argsText = computed(() => {
     >
       <span class="agent-tool-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
       <span class="agent-tool-glyph" aria-hidden="true">{{ STATE_GLYPH[part.state] }}</span>
-      <span class="agent-tool-name">{{ part.name || "工具调用" }}</span>
+      <span class="agent-tool-name">{{ displayName }}</span>
       <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
     </div>
     <div v-if="expanded" class="agent-tool-detail">
@@ -82,9 +94,9 @@ const argsText = computed(() => {
         <div class="agent-tool-label">入参</div>
         <pre class="agent-tool-code">{{ argsText }}</pre>
       </template>
-      <template v-if="part.result !== null">
+      <template v-if="resultText">
         <div class="agent-tool-label">结果</div>
-        <pre class="agent-tool-code">{{ part.result }}</pre>
+        <pre class="agent-tool-code">{{ resultText }}</pre>
       </template>
     </div>
   </div>
