@@ -3151,7 +3151,7 @@ INSERT INTO schema_migrations(version)
   VALUES ('0011_delivery_release')
   ON CONFLICT (version) DO NOTHING;
 
--- Self-evolution v1 fact layer (equivalent to 0021_self_evolution).
+-- Self-evolution v1 fact layer (equivalent to 0028_self_evolution).
 
 -- Self-evolution is a separate Core fact domain. Learned Skills never share
 -- storage with the read-only System Skill pack and never carry capabilities.
@@ -3584,7 +3584,7 @@ CREATE TRIGGER curator_remediation_audit_append_only BEFORE UPDATE OR DELETE ON 
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 -- schema.sql is a complete fresh-install snapshot through 0013 plus the
--- self-evolution fact layer (0021-0027). Recording the
+-- self-evolution fact layer (0028-0034). Recording the
 -- represented migration baseline prevents a later migrate() run from treating
 -- explicit free projects as pre-0006 legacy rows.
 INSERT INTO schema_migrations(version) VALUES
@@ -3602,13 +3602,13 @@ INSERT INTO schema_migrations(version) VALUES
   ('0011_delivery_release'),
   ('0012_project_agents'),
   ('0013_binary_workspace_documents'),
-  ('0021_self_evolution'),
-  ('0022_evolution_eval'),
-  ('0023_evolution_eval_r1_hardening'),
-  ('0024_evolution_eval_r2_core'),
-  ('0025_evolution_eval_dispatcher'),
-  ('0026_evidence_authority_classification'),
-  ('0027_evolution_eval_canary_binding')
+  ('0028_self_evolution'),
+  ('0029_evolution_eval'),
+  ('0030_evolution_eval_r1_hardening'),
+  ('0031_evolution_eval_r2_core'),
+  ('0032_evolution_eval_dispatcher'),
+  ('0033_evidence_authority_classification'),
+  ('0034_evolution_eval_canary_binding')
 ON CONFLICT (version) DO NOTHING;
 BEGIN;
 
@@ -6091,7 +6091,7 @@ CREATE TRIGGER evolution_eval_operation_fact_append_only BEFORE UPDATE OR DELETE
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0022_evolution_eval')
+  VALUES ('0029_evolution_eval')
   ON CONFLICT (version) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS evolution_eval_reconcile_fact (
@@ -6391,7 +6391,7 @@ CREATE TRIGGER evolution_eval_reconcile_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0023_evolution_eval_r1_hardening')
+  VALUES ('0030_evolution_eval_r1_hardening')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -7005,7 +7005,7 @@ END;
 $$;
 
 INSERT INTO schema_migrations(version)
-  VALUES ('0024_evolution_eval_r2_core')
+  VALUES ('0031_evolution_eval_r2_core')
   ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -7853,7 +7853,7 @@ CREATE TRIGGER evolution_eval_temp_cleanup_owner_guard
   BEFORE INSERT OR UPDATE OR DELETE ON evolution_eval_temp_cleanup_owner
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_evolution_eval_temp_cleanup_owner();
 
-INSERT INTO schema_migrations(version) VALUES ('0025_evolution_eval_dispatcher')
+INSERT INTO schema_migrations(version) VALUES ('0032_evolution_eval_dispatcher')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -8036,7 +8036,7 @@ CREATE TRIGGER delivery_release_classification_guard
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_delivery_release_classification();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0026_evidence_authority_classification')
+VALUES ('0033_evidence_authority_classification')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
@@ -8084,7 +8084,7 @@ CREATE TRIGGER evolution_eval_canary_binding_append_only
   FOR EACH ROW EXECUTE FUNCTION synthia_reject_append_only_mutation();
 
 INSERT INTO schema_migrations(version)
-VALUES ('0027_evolution_eval_canary_binding')
+VALUES ('0034_evolution_eval_canary_binding')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

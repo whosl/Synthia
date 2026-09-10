@@ -861,7 +861,7 @@ CREATE TRIGGER evolution_eval_temp_cleanup_owner_guard
   BEFORE INSERT OR UPDATE OR DELETE ON evolution_eval_temp_cleanup_owner
   FOR EACH ROW EXECUTE FUNCTION synthia_validate_evolution_eval_temp_cleanup_owner();
 
-INSERT INTO schema_migrations(version) VALUES ('0025_evolution_eval_dispatcher')
+INSERT INTO schema_migrations(version) VALUES ('0032_evolution_eval_dispatcher')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

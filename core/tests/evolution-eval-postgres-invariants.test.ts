@@ -1668,7 +1668,7 @@ describe.skipIf(!DATABASE_URL)("evolution-eval PostgreSQL adversarial invariants
   test("production migrate() creates the fresh evolution-eval schema", async () => {
     const result = await client.query(
       `SELECT version FROM schema_migrations
-        WHERE version='0022_evolution_eval'`,
+        WHERE version='0029_evolution_eval'`,
     );
     expect(result.rowCount).toBe(1);
   });

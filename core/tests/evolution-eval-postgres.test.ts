@@ -167,7 +167,7 @@ describe.skipIf(!DATABASE_URL)("evolution-eval PostgreSQL migration parity", () 
       "formal",
       "evolution_eval",
     ]);
-    expect(migratedSnapshot.migrations.at(-1)).toBe("0027_evolution_eval_canary_binding");
+    expect(migratedSnapshot.migrations.at(-1)).toBe("0034_evolution_eval_canary_binding");
     expect(migratedSnapshot.triggers.some((row) => row.tgname === "evolution_eval_stable_state_guard"))
       .toBe(true);
   }, 30_000);
@@ -474,7 +474,7 @@ describe.skipIf(!DATABASE_URL)("evolution-eval PostgreSQL migration parity", () 
       let captured: unknown;
       try {
         await migrate({
-          transformMigration: (name, sql) => name === "0022_evolution_eval.sql"
+          transformMigration: (name, sql) => name === "0029_evolution_eval.sql"
             ? sql.replace(
               /COMMIT;\s*$/,
               "SELECT synthia_injected_migration_failure();\n\nCOMMIT;\n",
@@ -492,7 +492,7 @@ describe.skipIf(!DATABASE_URL)("evolution-eval PostgreSQL migration parity", () 
       const rolledBack = await probe.query(
         `SELECT to_regclass('public.evolution_eval_run') AS eval_table,
                 EXISTS (SELECT 1 FROM schema_migrations
-                         WHERE version='0022_evolution_eval') AS marker,
+                         WHERE version='0029_evolution_eval') AS marker,
                 EXISTS (
                   SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid
                    WHERE t.typname='run_class' AND e.enumlabel='evolution_eval'
@@ -509,7 +509,7 @@ describe.skipIf(!DATABASE_URL)("evolution-eval PostgreSQL migration parity", () 
       const recovered = new Client({ connectionString: databaseUrl(failureName) });
       await recovered.connect();
       const marker = await recovered.query(
-        "SELECT version FROM schema_migrations WHERE version='0022_evolution_eval'",
+        "SELECT version FROM schema_migrations WHERE version='0029_evolution_eval'",
       );
       expect(marker.rowCount).toBe(1);
       await recovered.end();

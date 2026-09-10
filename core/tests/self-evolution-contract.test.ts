@@ -7,15 +7,15 @@ import { errorEnvelope } from "../src/api/envelope.ts";
 import { rolloutOffSettingsTransitionAllowed } from "../src/api/self-evolution-handlers.ts";
 
 const migration = readFileSync(
-  new URL("../src/db/migrations/0021_self_evolution.sql", import.meta.url),
+  new URL("../src/db/migrations/0028_self_evolution.sql", import.meta.url),
   "utf8",
 );
 const evalMigration = readFileSync(
-  new URL("../src/db/migrations/0022_evolution_eval.sql", import.meta.url),
+  new URL("../src/db/migrations/0029_evolution_eval.sql", import.meta.url),
   "utf8",
 );
 const evalHardeningMigration = readFileSync(
-  new URL("../src/db/migrations/0023_evolution_eval_r1_hardening.sql", import.meta.url),
+  new URL("../src/db/migrations/0030_evolution_eval_r1_hardening.sql", import.meta.url),
   "utf8",
 );
 const schema = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
@@ -41,8 +41,8 @@ describe("self-evolution v1 static contracts", () => {
       expect(migration).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
       expect(schema).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
     }
-    expect(migration).toContain("VALUES ('0021_self_evolution')");
-    expect(schema).toContain("('0021_self_evolution')");
+    expect(migration).toContain("VALUES ('0028_self_evolution')");
+    expect(schema).toContain("('0028_self_evolution')");
   });
 
   test("0014 and fresh schema preserve dedicated evolution-eval facts", () => {
@@ -135,7 +135,7 @@ describe("self-evolution v1 static contracts", () => {
       expect(sql).toContain("WHERE fact_type='frozen'");
       expect(sql).not.toContain("UNIQUE (eval_job_id,manifest_hash)");
     }
-    expect(evalMigration).toContain("VALUES ('0022_evolution_eval')");
+    expect(evalMigration).toContain("VALUES ('0029_evolution_eval')");
   });
 
   test("0015 and fresh schema preserve typed reconcile intent ownership", () => {
@@ -150,8 +150,8 @@ describe("self-evolution v1 static contracts", () => {
       expect(sql).toContain("evolution eval audit must have exactly one typed reverse owner");
       expect(sql).toContain("evolution eval outbox must have exact aggregate/type and one reverse owner");
     }
-    expect(evalHardeningMigration).toContain("VALUES ('0023_evolution_eval_r1_hardening')");
-    expect(schema).toContain("VALUES ('0023_evolution_eval_r1_hardening')");
+    expect(evalHardeningMigration).toContain("VALUES ('0030_evolution_eval_r1_hardening')");
+    expect(schema).toContain("VALUES ('0030_evolution_eval_r1_hardening')");
   });
 
   test("immutable facts, one primary, CAS and evidence identity are database-enforced", () => {

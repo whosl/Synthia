@@ -6,7 +6,7 @@ import { migrate } from "../src/db/client.ts";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? "";
 const MIGRATION = readFileSync(
-  new URL("../src/db/migrations/0026_evidence_authority_classification.sql", import.meta.url),
+  new URL("../src/db/migrations/0033_evidence_authority_classification.sql", import.meta.url),
   "utf8",
 );
 const FRESH_SCHEMA = readFileSync(new URL("../src/db/schema.sql", import.meta.url), "utf8");
@@ -41,7 +41,7 @@ describe("evidence authority classification contracts", () => {
       expect(sql).toContain("bitstream_result_classification_guard");
       expect(sql).toContain("delivery_release_item_classification_guard");
       expect(sql).toContain("delivery_release_classification_guard");
-      expect(sql).toContain("0026_evidence_authority_classification");
+      expect(sql).toContain("0033_evidence_authority_classification");
     }
   });
 
