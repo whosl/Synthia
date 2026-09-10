@@ -43,6 +43,7 @@ function required(name: string): string {
 
 const model = new EvolutionModelAdapter(
   createRuntimeModelFromEnv({
+    ...process.env,
     ...(process.env.SYNTHIA_EVOLUTION_MODEL_NAME !== undefined
       ? { SYNTHIA_MODEL_NAME: process.env.SYNTHIA_EVOLUTION_MODEL_NAME }
       : {}),
