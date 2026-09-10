@@ -26,7 +26,7 @@ import type {
 
 export const EVOLUTION_WORKER_SCHEMA_VERSION = "evolution-worker.v1";
 export const DISTILLER_PROMPT_VERSION = "distiller-prompt.v3";
-export const CURATOR_PROMPT_VERSION = "curator-prompt.v1";
+export const CURATOR_PROMPT_VERSION = "curator-prompt.v2";
 export const EVOLUTION_MODEL_OUTPUT_MAX_BYTES = 1_500_000;
 export const EVOLUTION_LEASE_MIN_SECONDS = 30;
 export const EVOLUTION_LEASE_MAX_SECONDS = 900;
@@ -62,6 +62,9 @@ export const CURATOR_SYSTEM_PROMPT = [
   "Do not treat the main Agent's outcome claim as authoritative.",
   "Every evaluation must cite only evidence ids or hashes supplied for that application.",
   "Return one remediation per distinct primary skill: no_op, patch, scope_change, or state_action.",
+  'Top-level output is exactly {"evaluations":[...],"remediations":[...]} — no other keys.',
+  "Each evaluation is exactly {application_id, outcome, confidence, reason, evidence_refs, supersedes_id}: confidence is 0..1, evidence_refs cites supplied evidence ids/hashes, supersedes_id is null unless replacing an earlier evaluation id.",
+  'Each remediation is exactly {skill_id, action} for "no_op", plus "patch" (the full skill object) for "patch", plus "state_action" for "state_action".',
   "The worker derives active-version/control CAS fields; never invent permissions or execute assets.",
 ].join("\n");
 
