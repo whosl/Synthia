@@ -32,8 +32,11 @@ import {
 import { loadAgentState } from "./agent-state.ts";
 import {
   appendSystemNoteToConversation,
+  buildSummaryPrompt,
   compactForContextWindow,
   loadFreeAgentConversation,
+  serializeMessagesForSummary,
+  tailSplitIndex,
   type ContextPolicy,
 } from "./free-agent.ts";
 import type {
@@ -1271,5 +1274,151 @@ describe("free-agent: watermark compaction in the model view", () => {
     const lastCall = model.calls[2]!;
     const toolMsgs = lastCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
     expect(toolMsgs[0]!.content).not.toContain("context-compacted:");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM structured summary compaction
+// ---------------------------------------------------------------------------
+
+describe("summary helpers (pure)", () => {
+  test("serializeMessagesForSummary truncates tool bodies and inline args", () => {
+    const long = "X".repeat(5_000);
+    const text = serializeMessagesForSummary([
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+      { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "fpga-tb-write", args: { content: long } }] },
+      { role: "tool", toolCallId: "t1", name: "fpga-tb-write", content: long },
+    ]);
+    expect(text).toContain("[System]: sys");
+    expect(text).toContain("[User]: go");
+    expect(text).toContain("[Assistant tool call]: fpga-tb-write(");
+    expect(text).toContain("[Tool result fpga-tb-write]:");
+    expect(text).toContain("clipped");
+    // 每行都有界：全文 5000 字符绝不该整段出现。
+    expect(text).not.toContain("X".repeat(3_000));
+  });
+
+  test("buildSummaryPrompt: first pass vs incremental merge", () => {
+    const first = buildSummaryPrompt({ prior: null, region: "[User]: go" });
+    expect(first).toContain("<conversation>");
+    expect(first).not.toContain("<prior-summary>");
+    expect(first).toContain("## Objective");
+    const second = buildSummaryPrompt({ prior: "OLD SUMMARY", region: "[User]: more" });
+    expect(second).toContain("<prior-summary>\nOLD SUMMARY");
+    expect(second).toContain("the conversation wins");
+  });
+
+  test("tailSplitIndex keeps a bounded tail and never crosses the system message", () => {
+    const msgs: AgentMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "u".repeat(400) },
+      { role: "assistant", content: "a".repeat(400) },
+      { role: "user", content: "t".repeat(40) },
+    ];
+    // 只够最后一条（~10 tokens）：切点 = 3。
+    expect(tailSplitIndex(msgs, 20)).toBe(3);
+    // 预算为 0：切点 = 消息长度（尾部为空，全部进摘要区）。
+    expect(tailSplitIndex(msgs, 0)).toBe(4);
+  });
+});
+
+describe("free-agent: LLM summary compaction", () => {
+  const policy: ContextPolicy = {
+    contextWindow: 1_000,
+    compactTriggerRatio: 0.5,
+    keepToolResults: 8,
+    toolResultBudgetChars: 10_000, // 关掉机械层，专测摘要层
+    summaryKeepTokens: 100,
+  };
+
+  test("watermark triggers a summary call; model view = system + summary + raw tail", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      // 第 3 次调用是摘要请求（messagesForModel 发起），回放摘要文本。
+      txt("## Objective\n- 完成两份文档登记"),
+      txt("两份候选已登记。"),
+    ]);
+    const { session, agentId } = makeSession({ model, governance: gov, contextPolicy: policy });
+
+    await session.prompt("登记两份 intake 文档");
+
+    // 摘要请求长这样：单条 user，含模板与旧区序列化。
+    const summaryCall = model.calls[2]!;
+    expect(summaryCall.messages).toHaveLength(1);
+    const summaryPrompt = summaryCall.messages[0]!;
+    if (summaryPrompt.role !== "user") throw new Error("expected user prompt");
+    expect(summaryPrompt.content).toContain("## Objective");
+    expect(summaryPrompt.content).toContain("[User]: 登记两份 intake 文档");
+    expect(summaryPrompt.content).toContain("[Tool result fpga-intake]");
+
+    // 主循环的最终调用：视图 = [system, 摘要 user, 尾部原文]；tc1 已被摘要吃掉。
+    const finalCall = model.calls[3]!;
+    expect(finalCall.messages[0]!.role).toBe("system");
+    const summaryView = finalCall.messages[1]!;
+    if (summaryView.role !== "user") throw new Error("expected summary view message");
+    expect(summaryView.content).toContain("Synthia context summary");
+    expect(summaryView.content).toContain("完成两份文档登记");
+    const toolMsgs = finalCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolMsgs.map((t) => t.toolCallId)).toEqual(["tc2"]);
+
+    // 持久会话保留全部原文。
+    const persisted = await loadFreeAgentConversation(agentId, agentsDir);
+    const persistedTools = (persisted?.messages ?? []).filter((m) => m.role === "tool");
+    expect(persistedTools.map((t) => (t as Extract<AgentMessage, { role: "tool" }>).toolCallId)).toEqual(["tc1", "tc2"]);
+  });
+
+  test("summary failure falls back to mechanical truncation", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt(""), // 摘要调用返回空文本 → 视为失败
+      txt("完成。"),
+    ]);
+    const { session } = makeSession({
+      model,
+      governance: gov,
+      contextPolicy: { ...policy, keepToolResults: 1, toolResultBudgetChars: 60 },
+    });
+
+    await session.prompt("登记两份");
+
+    const finalCall = model.calls[3]!;
+    const toolMsgs = finalCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    // 摘要失败 → 机械层接管：旧结果带压缩标记。
+    expect(toolMsgs[0]!.toolCallId).toBe("tc1");
+    expect(toolMsgs[0]!.content).toContain("context-compacted:");
+  });
+
+  test("incremental merge: second trigger includes the prior summary", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt("## Objective\n- 第一版摘要"),
+      call("tc3", "fpga-intake", { content: "# Three", filename: "doc/intake/three.md" }),
+      txt("## Objective\n- 第二版合并摘要"),
+      txt("最终回复"),
+    ]);
+    const { session } = makeSession({ model, governance: gov, contextPolicy: policy });
+
+    await session.prompt("登记三份文档");
+
+    // 第 4 次调用是第二次摘要请求（r3 的 turn 无 usage，水位沿用 900）：包含
+    // <prior-summary> 与旧摘要文本。
+    const secondSummary = model.calls[4]!;
+    const promptText = secondSummary.messages[0]!.content;
+    if (typeof promptText !== "string") throw new Error("expected string content");
+    expect(promptText).toContain("<prior-summary>");
+    expect(promptText).toContain("第一版摘要");
+
+    // 最终视图的摘要消息是第二版。
+    const finalCall = model.calls[5]!;
+    const summaryView = finalCall.messages[1]!;
+    if (summaryView.role !== "user") throw new Error("expected summary view message");
+    expect(summaryView.content).toContain("第二版合并摘要");
   });
 });

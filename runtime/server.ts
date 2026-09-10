@@ -836,12 +836,16 @@ function contextPolicyFromEnv(
   const ratio = Number(env.SYNTHIA_MODEL_COMPACT_RATIO);
   const keep = Number(env.SYNTHIA_MODEL_COMPACT_KEEP_RESULTS);
   const budget = Number(env.SYNTHIA_MODEL_COMPACT_TOOL_BUDGET);
+  const keepTokens = Number(env.SYNTHIA_MODEL_COMPACT_SUMMARY_KEEP);
+  const summaryOff = env.SYNTHIA_MODEL_COMPACT_SUMMARY === "0" || env.SYNTHIA_MODEL_COMPACT_SUMMARY === "false";
   return {
     contextPolicy: {
       contextWindow: Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 200_000,
       ...(Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? { compactTriggerRatio: ratio } : {}),
       ...(Number.isFinite(keep) && keep >= 0 ? { keepToolResults: keep } : {}),
       ...(Number.isFinite(budget) && budget > 0 ? { toolResultBudgetChars: budget } : {}),
+      ...(summaryOff ? { summaryEnabled: false } : {}),
+      ...(Number.isFinite(keepTokens) && keepTokens > 0 ? { summaryKeepTokens: keepTokens } : {}),
     },
   };
 }

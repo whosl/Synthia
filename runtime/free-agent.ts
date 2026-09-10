@@ -70,11 +70,135 @@ export interface ContextPolicy {
   readonly keepToolResults?: number;
   /** 旧工具结果保留的字符预算（默认 1200）。 */
   readonly toolResultBudgetChars?: number;
+  /** LLM 结构化摘要（默认开启；false 时退化为纯机械截断）。 */
+  readonly summaryEnabled?: boolean;
+  /** 尾部保留预算（token 估算，默认 8000）。 */
+  readonly summaryKeepTokens?: number;
 }
 
 const DEFAULT_COMPACT_RATIO = 0.7;
 const DEFAULT_KEEP_TOOL_RESULTS = 8;
 const DEFAULT_TOOL_BUDGET_CHARS = 1_200;
+const DEFAULT_SUMMARY_KEEP_TOKENS = 8_000;
+const SUMMARY_TOOL_CONTENT_CAP = 2_000;
+const SUMMARY_TOOL_ARGS_CAP = 500;
+
+/** 摘要模板（移植自 opencode compaction.ts：六节结构 + 事实保全规则）。 */
+const SUMMARY_TEMPLATE = [
+  "Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.",
+  "<template>",
+  "## Objective",
+  "- [one or two brief sentences describing what the user is trying to accomplish]",
+  "",
+  "## Important Details",
+  "- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or \"(none)\"]",
+  "",
+  "## Work State",
+  "### Completed",
+  "- [finished work, verified facts, or changes made; otherwise \"(none)\"]",
+  "",
+  "### Active",
+  "- [current work, partial changes, or investigation state; otherwise \"(none)\"]",
+  "",
+  "### Blocked",
+  "- [blockers, failing commands, or unknowns; otherwise \"(none)\"]",
+  "",
+  "## Next Move",
+  "1. [immediate concrete action, or \"(none)\"]",
+  "2. [next action if known, or \"(none)\"]",
+  "",
+  "## Relevant Files",
+  "- [file or directory path: why it matters, or \"(none)\"]",
+  "</template>",
+  "",
+  "Rules:",
+  "- Keep every section, even when empty.",
+  "- Use terse bullets, not prose paragraphs.",
+  "- Preserve exact file paths, symbols, commands, job ids, error strings, and identifiers when known.",
+  "- Do not mention the summary process or that context was compacted.",
+].join("\n");
+
+const SUMMARY_UPDATE_INSTRUCTIONS = [
+  "The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.",
+  "",
+  "When combining:",
+  "- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.",
+  "- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.",
+  "- Add new progress, decisions, constraints, and context from the conversation.",
+  "- Move completed work from \"Active\" to \"Completed\".",
+  "- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.",
+  "- Update \"Objective\" and \"Next Move\" to reflect the current work state.",
+].join("\n");
+
+/** 模型视图里摘要消息的固定前缀（user 角色，紧随 system）。 */
+const SUMMARY_VIEW_PREFIX = "[Synthia context summary — the earlier conversation was compacted into this summary. Treat it as reliable context; on conflict, recent messages below win.]\n\n";
+
+/** 粗略 token 估算（字符/4）。只用于分区选择与防溢出守卫，水位本身用网关实测。 */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function clipText(value: string, cap: number): string {
+  return value.length <= cap ? value : `${value.slice(0, cap)}\n…[clipped ${value.length - cap} chars]`;
+}
+
+/**
+ * 把消息区序列化为摘要提示词的对话文本（opencode 形态的角色行）。
+ * 工具结果 2000 chars、工具入参 500 chars 截断——内联源码不再全文进摘要请求。
+ */
+export function serializeMessagesForSummary(messages: readonly AgentMessage[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (message.role === "tool") {
+      lines.push(`[Tool result ${message.name}]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    } else if (message.role === "assistant") {
+      if (message.content) lines.push(`[Assistant]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+      for (const call of message.toolCalls ?? []) {
+        lines.push(`[Assistant tool call]: ${call.name}(${clipText(JSON.stringify(call.args ?? {}), SUMMARY_TOOL_ARGS_CAP)})`);
+      }
+    } else if (message.role === "system") {
+      lines.push(`[System]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    } else {
+      lines.push(`[User]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    }
+  }
+  return lines.join("\n\n");
+}
+
+/** 摘要请求体：无旧摘要=首次生成；有=增量合并（旧摘要作废、对话冲突优先）。 */
+export function buildSummaryPrompt(opts: { prior: string | null; region: string }): string {
+  const conversation = `Here is the conversation so far:\n\n<conversation>\n${opts.region}\n</conversation>`;
+  if (!opts.prior) {
+    return [
+      conversation,
+      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+      SUMMARY_TEMPLATE,
+    ].join("\n\n");
+  }
+  return [
+    conversation,
+    `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${opts.prior}\n</prior-summary>`,
+    SUMMARY_UPDATE_INSTRUCTIONS,
+    SUMMARY_TEMPLATE,
+  ].join("\n\n");
+}
+
+/** 尾部保留区切点：从末尾按估算预算累计（永不越过 index 0 的 system）。 */
+export function tailSplitIndex(messages: readonly AgentMessage[], keepTokens: number): number {
+  let total = 0;
+  let split = messages.length;
+  for (let i = messages.length - 1; i >= 1; i -= 1) {
+    const message = messages[i]!;
+    const size = message.role === "assistant"
+      ? estimateTokens(message.content ?? "") + (message.toolCalls ?? []).reduce(
+        (sum, call) => sum + estimateTokens(JSON.stringify(call.args ?? {})), 0)
+      : estimateTokens(message.content);
+    if (total + size > keepTokens) break;
+    total += size;
+    split = i;
+  }
+  return Math.max(1, split);
+}
 
 export interface FreeAgentDeps {
   model: ConversationalModel;
@@ -383,6 +507,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private readonly deps: FreeAgentDeps;
   /** 最近一次模型调用回报的输入 token 数；null = 网关未回报，水位管理停摆。 */
   private lastPromptTokens: number | null = null;
+  /**
+   * LLM 结构化摘要缓存：text = 当前摘要，coveredUpTo = messages 里已被摘要
+   * 覆盖到的下标（该下标之后的消息仍以原文进模型视图）。仅内存态——runtime
+   * 重启后丢失，下次水位触发会重建（代价一次摘要调用，正确性不受影响）。
+   */
+  private compactionSummary: { text: string; coveredUpTo: number } | null = null;
   private readonly toolMap: ReadonlyMap<string, AgentTool>;
   private readonly messages: AgentMessage[] = [];
 
@@ -529,12 +659,30 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   // ----- core loop -----
 
   private async messagesForModel(): Promise<readonly AgentMessage[]> {
-    // 上下文水位投影：只影响发给模型的视图，持久会话保持全文。
-    const compacted = this.deps.contextPolicy
-      ? compactForContextWindow(this.messages, this.deps.contextPolicy, this.lastPromptTokens)
-      : this.messages;
+    // 上下文水位管理：只影响发给模型的视图，持久会话保持全文。
+    // 第一层 LLM 结构化摘要（旧区 → 六节摘要 + 尾部原文），第二层机械截断
+    // （尾部内更旧工具结果的有界摘录）。摘要失败/关闭时退化为纯机械截断。
+    let view: readonly AgentMessage[] = this.messages;
+    const policy = this.deps.contextPolicy;
+    if (policy) {
+      await this.maybeCompactBySummary(policy);
+      if (this.compactionSummary && this.messages[0]?.role === "system") {
+        const tail = compactForContextWindow(
+          this.messages.slice(this.compactionSummary.coveredUpTo),
+          policy,
+          this.lastPromptTokens,
+        );
+        view = [
+          this.messages[0]!,
+          { role: "user", content: `${SUMMARY_VIEW_PREFIX}${this.compactionSummary.text}` },
+          ...tail,
+        ];
+      } else {
+        view = compactForContextWindow(this.messages, policy, this.lastPromptTokens);
+      }
+    }
     const loader = this.deps.loadReferenceContext;
-    if (!loader) return compacted;
+    if (!loader) return view;
     let raw: string | null;
     try {
       raw = await loader();
@@ -544,13 +692,45 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       raw = null;
     }
     const trimmed = raw?.trim();
-    if (!trimmed) return compacted;
+    if (!trimmed) return view;
     const framed = trimmed.startsWith(REFERENCE_DATA_MARKER)
       ? trimmed
       : `${REFERENCE_DATA_MARKER}\n${trimmed}`;
-    const [system, ...conversation] = compacted;
-    if (!system || system.role !== "system") return compacted;
+    const [system, ...conversation] = view;
+    if (!system || system.role !== "system") return view;
     return [system, { role: "user", content: `${framed}\n` }, ...conversation];
+  }
+
+  /**
+   * 水位触发的 LLM 结构化摘要（opencode compaction 形态）：
+   * 旧区序列化（工具结果/入参就地截断）→ 六节模板生成或增量合并 → 缓存。
+   * 防递归：摘要请求自身超窗口预算时放弃（退化为机械截断）；摘要调用的
+   * usage 不回采水位（它量的是摘要提示词，不是主对话）。
+   */
+  private async maybeCompactBySummary(policy: ContextPolicy): Promise<void> {
+    if (policy.summaryEnabled === false) return;
+    const ratio = policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO;
+    if (this.lastPromptTokens === null || this.lastPromptTokens < policy.contextWindow * ratio) return;
+    const split = tailSplitIndex(this.messages, policy.summaryKeepTokens ?? DEFAULT_SUMMARY_KEEP_TOKENS);
+    const covered = this.compactionSummary?.coveredUpTo ?? 1;
+    if (split <= covered) return;
+    const region = serializeMessagesForSummary(this.messages.slice(covered, split));
+    if (!region.trim()) return;
+    const prompt = buildSummaryPrompt({ prior: this.compactionSummary?.text ?? null, region });
+    // 摘要请求也要能装进窗口：超预算直接放弃，机械截断兜底。预留量按窗口
+    // 比例（大窗口 2000、小窗口 20%），避免小窗口下守卫恒真。
+    const reserve = Math.min(2_000, Math.floor(policy.contextWindow * 0.2));
+    if (estimateTokens(prompt) > policy.contextWindow - reserve) return;
+    try {
+      const turn = await this.deps.model.chat([{ role: "user", content: prompt }], []);
+      const text = turn.kind === "text" ? turn.content.trim() : "";
+      if (!text) return;
+      this.compactionSummary = { text, coveredUpTo: split };
+    } catch (error) {
+      process.stderr.write(
+        `[free-agent] summary compaction failed for ${this.agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
   }
 
   /**
