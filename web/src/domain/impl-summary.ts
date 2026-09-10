@@ -1,5 +1,5 @@
 /**
- * 物理实现进度卡的展示语义（纯函数，供 ImplProgressCard 与测试使用）。
+ * 物理实现进度的展示语义（纯函数，供 ImplProgressChip 与测试使用）。
  *
  * 五格进度条 = validate → simulate → synthesize → implement → 码流。
  * 状态归约：never/running/succeeded/failed 四类；码流格独立于 implement 格
@@ -51,6 +51,23 @@ export function implProgressText(summary: ToolSummary): string {
   if (cells.every(cell => cell.state === "succeeded")) return "全流程通过（含码流）";
   const last = passed[passed.length - 1]!;
   return `推进到：${last.label}`;
+}
+
+/**
+ * 顶栏摘要 chip 的一行文案：最深到达格 + 计数（如「布局布线 4✓」「仿真 4✗」）。
+ * 未产出码流（探索流）不算「到达」，避免把合成失败态误报为当前阶段。
+ */
+export function implChipText(summary: ToolSummary): string {
+  const cells = implCells(summary);
+  const current = [...cells]
+    .reverse()
+    .find(cell => cell.state !== "never" && (cell.key !== "bitstream" || cell.state === "succeeded"));
+  if (!current) return "未开始";
+  if (current.state === "running") return `${current.label} · 运行中`;
+  if (current.state === "succeeded") {
+    return current.key === "bitstream" ? `${current.label} ✓` : `${current.label} ${current.detail.split("/")[0]}`;
+  }
+  return `${current.label} ${current.detail.split("/")[1] ?? "✗"}`;
 }
 
 /** 时序大数字的着色语义：违例红、达标绿、未知灰。 */

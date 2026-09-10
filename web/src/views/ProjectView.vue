@@ -6,7 +6,6 @@ import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
 import Button from "../components/ui/Button.vue";
 import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
-import ImplProgressCard from "../components/impl/ImplProgressCard.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
@@ -192,7 +191,8 @@ import type {
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
 import Splitter from "../components/ui/Splitter.vue";
 import TopBar from "../components/layout/TopBar.vue";
-import ProjectProgressCard from "../components/impl/ProjectProgressCard.vue";
+import ProjectProgressChip from "../components/impl/ProjectProgressChip.vue";
+import ImplProgressChip from "../components/impl/ImplProgressChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
@@ -2421,7 +2421,20 @@ function onToggleChatOverlay(): void {
         @toggle-tree-drawer="onToggleTreeDrawer"
         @toggle-chat-overlay="onToggleChatOverlay"
         @logout="onLogout"
-      />
+      >
+        <template #progress>
+          <ProjectProgressChip
+            :stage-chain="stageChain"
+            :empty-text="stageEmptyText"
+            @select-stage="onSelectStage"
+          />
+          <ImplProgressChip
+            v-if="toolSummary"
+            :summary="toolSummary"
+            :load-sta-report="staReportLoader"
+          />
+        </template>
+      </TopBar>
     </header>
     <div v-if="project" class="project-view-meta" aria-label="项目类型与流程版本">
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
@@ -2450,20 +2463,6 @@ function onToggleChatOverlay(): void {
           <span v-if="materialSnapshots.length > 0" class="project-view-materials-count">{{ materialSnapshots.length }}</span>
         </button>
       </div>
-    </div>
-
-    <div v-if="project" class="project-view-progress" aria-label="项目进度总览">
-      <ProjectProgressCard
-        :stage-chain="stageChain"
-        :empty-text="stageEmptyText"
-        @select-stage="onSelectStage"
-      />
-      <ImplProgressCard
-        v-if="toolSummary"
-        class="project-view-impl-card"
-        :summary="toolSummary"
-        :load-sta-report="staReportLoader"
-      />
     </div>
 
     <div v-if="loadErrorText" class="project-view-error" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
@@ -2720,6 +2719,9 @@ function onToggleChatOverlay(): void {
 }
 
 .project-view-topbar {
+  position: relative;
+  /* 摘要 chip 的悬浮面板要盖住下方三栏；veil（更晚的同级兄弟）仍在其上 */
+  z-index: 20;
   flex: none;
   height: var(--topbar-height);
   background: var(--surface-panel);
@@ -2743,22 +2745,6 @@ function onToggleChatOverlay(): void {
   align-items: center;
   gap: var(--space-2);
   margin-left: auto;
-}
-
-.project-view-progress {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: stretch;
-  flex: none;
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-panel);
-}
-
-.project-view-progress .project-view-impl-card {
-  flex: 1 1 auto;
-  min-width: 0;
 }
 
 .project-view-materials-button,

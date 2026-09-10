@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
- * 顶栏（spec §3.1）：返回按钮 + 项目名 + 主题切换 + 用户区。
- * G0–G4 阶段条已上移到页面顶部进度带（ProjectProgressCard），不再占顶栏。
+ * 顶栏（spec §3.1）：返回按钮 + 项目名 + 进度摘要插槽 + 主题切换 + 用户区。
+ * progress 插槽由 ProjectView 注入两个摘要 chip（项目门链 / 物理实现），
+ * TopBar 自身不感知进度数据。
  *
  * 受控组件：只吃 TopBarProps，只吐 TopBarEmits（views/project-view-contract.ts）。
  * 返回项目列表是纯本地导航，不跨栏耦合数据，因此不走 emit，直接用 router 完成。
@@ -41,6 +42,10 @@ function onBack(): void {
       </button>
     </div>
 
+    <div class="topbar-progress">
+      <slot name="progress" />
+    </div>
+
     <div class="topbar-right">
       <router-link class="topbar-inbox" to="/approvals" aria-label="审批中心" title="审批中心"><Icon name="inbox" :size="17" /></router-link>
       <button
@@ -77,11 +82,20 @@ function onBack(): void {
 }
 
 .topbar-left {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.topbar-progress {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+  /* 不能加 overflow: hidden —— 摘要 chip 的悬浮面板是绝对定位子元素，会被裁掉 */
 }
 
 .topbar-project-name {
@@ -93,8 +107,7 @@ function onBack(): void {
 }
 
 .topbar-right {
-  flex: 1 1 auto;
-  justify-content: flex-end;
+  flex: none;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -141,6 +154,7 @@ function onBack(): void {
   .topbar-left { flex: 1; gap: 3px; }
   .topbar-project-name { max-width: 110px; font-size: 12px; }
   .topbar-right { gap: 2px; }
+  .topbar-progress { order: 3; flex: 1 1 100%; height: auto; padding: 2px 8px 6px; overflow: visible; }
   .topbar-right :deep(.task-switcher-trigger) { max-width: 85px; }
 }
 </style>

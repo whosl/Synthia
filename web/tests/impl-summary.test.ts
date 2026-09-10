@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatNs, implCells, implProgressText, timingStatusTone } from "../src/domain/impl-summary.ts";
+import { formatNs, implCells, implChipText, implProgressText, timingStatusTone } from "../src/domain/impl-summary.ts";
 import type { ToolSummary } from "../src/api/types.ts";
 
 function summary(partial: Partial<ToolSummary> = {}): ToolSummary {
@@ -58,6 +58,35 @@ describe("implProgressText", () => {
       bitstream: { generated: true, jobId: "j", at: "t" },
     });
     expect(implProgressText(full)).toBe("全流程通过（含码流）");
+  });
+});
+
+describe("implChipText", () => {
+  test("未开始 / 成功计数 / 失败计数", () => {
+    expect(implChipText(summary())).toBe("未开始");
+    expect(implChipText(summary({ stages: [stage("implement", "succeeded", 4, 0)] }))).toBe("布局布线 4✓");
+    expect(implChipText(summary({ stages: [stage("simulate", "failed", 0, 4)] }))).toBe("仿真 4✗");
+  });
+
+  test("最深到达格优先；未产出码流不算到达（探索流）", () => {
+    const p4 = summary({
+      stages: [
+        stage("validate_sources", "succeeded", 6, 0),
+        stage("simulate", "failed", 5, 1),
+        stage("synthesize", "failed", 5, 2),
+        stage("implement", "succeeded", 4, 0),
+      ],
+    });
+    expect(implChipText(p4)).toBe("布局布线 4✓");
+  });
+
+  test("formal 码流生成后 chip 显示码流 ✓；运行中显示运行中", () => {
+    const formal = summary({
+      stages: [stage("implement", "succeeded", 4, 0)],
+      bitstream: { generated: true, jobId: "j", at: "t" },
+    });
+    expect(implChipText(formal)).toBe("码流 ✓");
+    expect(implChipText(summary({ stages: [stage("synthesize", "running", 0, 0)] }))).toBe("综合 · 运行中");
   });
 });
 
