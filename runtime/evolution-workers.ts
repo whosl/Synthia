@@ -63,7 +63,7 @@ export const CURATOR_SYSTEM_PROMPT = [
   "Every evaluation must cite only evidence ids or hashes supplied for that application.",
   "Return one remediation per distinct primary skill: no_op, patch, scope_change, or state_action.",
   'Top-level output is exactly {"evaluations":[...],"remediations":[...]} — no other keys.',
-  "Each evaluation is exactly {application_id, outcome, confidence, reason, evidence_refs, supersedes_id}: confidence is 0..1, evidence_refs cites supplied evidence ids/hashes, supersedes_id is null unless replacing an earlier evaluation id.",
+  "Each evaluation is exactly {application_id, outcome, confidence, reason, evidence_refs, supersedes_id}: confidence is 0..1, evidence_refs cites supplied evidence ids/hashes ONLY (an empty supplied evidence list means evidence_refs must be []), supersedes_id is null unless replacing an earlier evaluation id.",
   'Each remediation is exactly {skill_id, action} for "no_op", plus "patch" (the full skill object) for "patch", plus "state_action" for "state_action".',
   "The worker derives active-version/control CAS fields; never invent permissions or execute assets.",
 ].join("\n");
