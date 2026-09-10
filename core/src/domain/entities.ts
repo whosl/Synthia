@@ -14,6 +14,7 @@ import type {
   BaselineKind,
   BaselineState,
   DataClassification,
+  ProjectType,
   GateId,
   GateSubmissionState,
   RunClass,
@@ -29,7 +30,12 @@ export interface Project {
   scope: string;
   dataClassification: DataClassification;
   standardVersion: string;       // e.g. "GB/T 33781-2017"
-  targetPart: string;            // e.g. "xc7vx690tffg1761-2" (Q-002)
+  targetPart: string | null;     // e.g. "xc7vx690tffg1761-2" (Q-002)
+  projectType?: ProjectType;
+  processVersionId?: string | null;
+  processProfileId?: string | null;
+  processProfileVersion?: string | null;
+  processProfileName?: string | null;
   toolchainProfileRef: string | null;
   createdAt: string;             // ISO 8601
   status: "active" | "archived";
@@ -41,6 +47,14 @@ export interface ProcessInstance {
   gateProfileVersion: string;
   currentGate: GateId;
   createdAt: string;
+}
+
+export interface ProcessVersion {
+  id: string;
+  profileId: string;
+  version: string;
+  name: string;
+  status: "active" | "retired";
 }
 
 export interface RoleAssignment {
@@ -72,7 +86,8 @@ export interface ArtifactRevision {
   parentRevisionId: string | null;
   contentHash: string;           // SHA-256 of content (FLOW-002 §2)
   contentLocation: string;       // git ref, DB jsonb, or object storage URI
-  content: string | null;        // inline content when stored in DB; null when out-of-band
+  content: string | null;        // UTF-8 text or canonical Base64 when stored inline
+  contentEncoding?: "utf8" | "base64";
   schemaVersion: string;
   sourceIds: string[];           // source artifact/requirement/decision/run IDs
   dataClassification: DataClassification;
@@ -89,6 +104,8 @@ export interface ArtifactRevision {
 export interface ConfigurationSnapshot {
   id: string;
   projectId: string;
+  /** P4 snapshots are owned by one active work version; legacy snapshots stay null. */
+  workVersionId?: string | null;
   memberRevisionIds: string[];   // frozen list of artifact revision IDs
   traceRelationIds: string[];    // frozen trace relation IDs
   gateProfileVersion: string;

@@ -24,3 +24,8 @@ const message = computed(() => {
 <template>
   <div class="notice" :class="forbidden ? 'forbidden' : 'error'" role="alert">{{ message }}</div>
 </template>
+
+<style scoped>
+.notice { padding: 12px 16px; margin: 0 0 16px; border: 1px solid color-mix(in srgb, var(--state-danger) 28%, var(--border-subtle)); border-radius: 8px; background: color-mix(in srgb, var(--state-danger) 6%, var(--surface-panel)); color: var(--state-danger); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.notice.forbidden { color: var(--state-warn); border-color: color-mix(in srgb, var(--state-warn) 30%, var(--border-subtle)); }
+</style>

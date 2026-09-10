@@ -9,7 +9,9 @@ import {
   describeAuditEvent,
   isTerminalStatus,
   normalizeStageId,
-  shortRunId,
+  prepareTaskAbortAttempt,
+  resolveMainTaskId,
+  shortAgentId,
 } from "../src/domain/tasks.ts";
 
 describe("阶段链硬编码与 Contract 一致", () => {
@@ -164,7 +166,37 @@ describe("轮询清理", () => {
   });
 });
 
-describe("run 状态辅助", () => {
+describe("agent 状态辅助", () => {
+  test("abort 失败重试复用同一幂等键，切换任务才生成新 attempt", () => {
+    let created = 0;
+    const createKey = () => `abort-${++created}`;
+    const first = prepareTaskAbortAttempt(null, "main-1", createKey);
+    const retry = prepareTaskAbortAttempt(first, "main-1", createKey);
+    const switched = prepareTaskAbortAttempt(retry, "main-2", createKey);
+
+    expect(first).toEqual({ taskId: "main-1", idempotencyKey: "abort-1" });
+    expect(retry).toBe(first);
+    expect(switched).toEqual({ taskId: "main-2", idempotencyKey: "abort-2" });
+  });
+
+  test("主工作台只接受主任务 id，side 深链回落到有效主任务或空", () => {
+    const main = {
+      agent_id: "main-1",
+      task_id: "main-1",
+      project_id: "p1",
+      kind: "main" as const,
+      status: "running",
+      current_stage: null,
+      awaiting_gate: null,
+      created_at: "2026-08-21T00:00:00.000Z",
+    };
+    const side = { ...main, agent_id: "side-1", task_id: "side-1", kind: "side" as const };
+    expect(resolveMainTaskId("main-1", [main, side])).toBe("main-1");
+    expect(resolveMainTaskId("side-1", [main, side])).toBe("main-1");
+    expect(resolveMainTaskId("missing", [main, side])).toBe("main-1");
+    expect(resolveMainTaskId("side-1", [side])).toBeNull();
+  });
+
   test("终态判定与状态文案", () => {
     expect(isTerminalStatus("succeeded")).toBe(true);
     expect(isTerminalStatus("failed")).toBe(true);
@@ -174,8 +206,13 @@ describe("run 状态辅助", () => {
     expect(TASK_STATUS_TEXT.awaiting_approval).toBe("等待批准");
   });
 
-  test("run_id 短码", () => {
-    expect(shortRunId("run-12345678-abcd-ef00")).toBe("12345678…");
-    expect(shortRunId("run-abc")).toBe("abc");
+  test("agent_id 短码", () => {
+    expect(shortAgentId("agent-12345678-abcd-ef00")).toBe("12345678…");
+    expect(shortAgentId("agent-abc")).toBe("abc");
+  });
+
+  test("agent_id 短码：仍认 run- 旧前缀（改名前落盘的 state 恢复后仍带旧 id）", () => {
+    expect(shortAgentId("run-12345678-abcd-ef00")).toBe("12345678…");
+    expect(shortAgentId("run-abc")).toBe("abc");
   });
 });

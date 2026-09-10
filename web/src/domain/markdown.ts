@@ -1,12 +1,15 @@
 /**
- * 轻量 Markdown 渲染（marked 单依赖）。输出供 v-html 使用。
+ * 轻量 Markdown 渲染（marked + DOMPurify）。输出供 v-html 使用，**已净化**。
  *
- * 说明：内容源为内网受控环境中的 Agent 产物（候选修订），非任意用户输入；
- * 平台切片一期运行在内网可信域（core router 注释 B4），故不额外引入 sanitize 依赖。
+ * 内容源是 Agent 产物与对话文本，不是绝对可信的静态资源；这里在源头统一净化，
+ * 调用方无需（也不应）各自再接一层 sanitize——避免出现"某个新调用点忘了净化"
+ * 的缺口（spec §5.1）。
+ *
  * mangle/headerIds 关闭以避免生成附带锚点。
  */
 
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 
 marked.setOptions({
   gfm: true,
@@ -15,5 +18,17 @@ marked.setOptions({
 
 export function renderMarkdown(source: string): string {
   // async: false 保证同步返回 string（类型签名仍含 Promise，窄化为 string）
-  return marked.parse(source, { async: false }) as string;
+  const html = marked.parse(source, { async: false }) as string;
+  return sanitize(html);
+}
+
+/**
+ * DOMPurify 依赖 DOM。浏览器里恒可用；无 DOM 环境（如未注册 DOM 的单测）直接抛错，
+ * 而不是降级返回原始 HTML——静默放行会让"以为净化过了"的假设无声失效。
+ */
+function sanitize(html: string): string {
+  if (typeof DOMPurify.sanitize !== "function") {
+    throw new Error("renderMarkdown 需要 DOM 环境：DOMPurify 在当前运行时不可用");
+  }
+  return DOMPurify.sanitize(html);
 }

@@ -16,8 +16,16 @@ export {
   capabilityUnavailableError,
   internalError,
 } from "./errors.ts";
+export { getProjectToolSummaryHandler, parseStaSummary } from "./tool-summary.ts";
+export type { ToolSummary, ToolSummaryStage, ToolSummaryTiming } from "./tool-summary.ts";
 export { routeApi } from "./router.ts";
 export { startSynthiaServer } from "./server.ts";
+export {
+  DISABLED_CORE_FEATURE_FLAGS,
+  parseBooleanFeatureFlag,
+  resolveCoreFeatureFlags,
+} from "./feature-flags.ts";
+export type { CoreFeatureFlags, CoreFeatureFlagOptions } from "./feature-flags.ts";
 export {
   createTaskHandler,
   getTaskHandler,
@@ -29,8 +37,8 @@ export {
 export type {
   RuntimeClient,
   RuntimeDocRef,
-  RuntimeRunSummary,
-  RuntimeRunDetail,
+  RuntimeAgentSummary,
+  RuntimeAgentDetail,
   RuntimeListResponse,
   RuntimeCreateResponse,
   RuntimeTaskStatus,

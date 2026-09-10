@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "documents": [
+    {
+      "id": "XILINX-XTP213-VC709-SCHEMATICS-REV1.0",
+      "vendor": "Xilinx",
+      "category": "board-schematic",
+      "title": "XTP213 - VC709 Schematics (Rev 1.0)",
+      "status": "available",
+      "board": {
+        "model": "VC709",
+        "revision": "1.0",
+        "fpgaPartFamily": "XC7VX690T",
+        "package": "FFG1761"
+      },
+      "pageCount": 57,
+      "sha256": "0416d4239a8c68d5188a56b6622f248e816ac6c3f1b8445023d06c7a114cc44c",
+      "file": "boards/xilinx/vc709/XTP213-VC709-schematics-rev1.0.pdf",
+      "source": {
+        "kind": "user-supplied-vendor-archive",
+        "archiveFile": "vc709_Schematic_xtp213_rev1_0_cluster.zip",
+        "archiveSha256": "f15b813c4a94f7b87454ff0a4ee2e4af57546806100ad1969dae8070fe219606",
+        "embeddedPdfFile": "vc709_Schematic_xtp213_rev1_0.pdf",
+        "locator": "Xilinx VC709 Rev 1.0 schematic archive supplied by the user"
+      },
+      "security": {
+        "activeContentPresent": true,
+        "policy": "reference-only; do not execute embedded JavaScript, form actions, attachments, or links"
+      }
+    },
+    {
+      "id": "XILINX-VC709-MASTER-XDC-REV1.0",
+      "vendor": "Xilinx",
+      "category": "board-reference-constraints",
+      "title": "VC709 Master XDC (Rev 1.0)",
+      "status": "available",
+      "board": {
+        "model": "VC709",
+        "revision": "1.0",
+        "fpgaPartFamily": "XC7VX690T",
+        "package": "FFG1761"
+      },
+      "sha256": "17db6cbb80f71a1c52a4c59ab3d0be28246c0cc55d1bfb95cd89edd81e3ef1d2",
+      "file": "boards/xilinx/vc709/VC709-master-XDC-rev1.0.xdc",
+      "source": {
+        "kind": "user-supplied-vendor-archive",
+        "archiveFile": "vc709_XDC_rdf0202_rev1_0.zip",
+        "archiveSha256": "f96e93b125b9378d04a947ad72158f255245957430e7c5e6ecf4fa14baec9aed",
+        "embeddedFile": "vc709_r1.0_ucf.xdc",
+        "locator": "Xilinx VC709 Rev 1.0 reference constraints archive contained in the user-supplied XTP213 cluster"
+      }
+    }
+  ]
+}

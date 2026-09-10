@@ -75,12 +75,58 @@ describe("action validators", () => {
   test("makeXdcValidator(false) rejects XDC containing IOSTANDARD", () => {
     const v = makeXdcValidator(false);
     expect(() => v({ reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property IOSTANDARD LVCMOS33 [get_ports clk]\n" }] })).toThrow(/IOSTANDARD/);
+    expect(() => v({
+      reasoning: "dict assignment",
+      constraints: [{ path: "top.xdc", content: "set_property -dict {PACKAGE_PIN AH15 IOSTANDARD LVCMOS33} [get_ports clk]\n" }],
+    })).toThrow(/PACKAGE_PIN|IOSTANDARD/);
   });
-  test("makeXdcValidator(false) accepts XDC with only clock + DRC downgrade (no pin assignments)", () => {
+  test("makeXdcValidator(false) allows comments documenting missing pin facts", () => {
+    const v = makeXdcValidator(false, ["clock"]);
+    expect(v({
+      reasoning: "fail closed",
+      constraints: [{
+        path: "top.xdc",
+        content: "# PACKAGE_PIN and IOSTANDARD are intentionally absent until board facts are verified.\ncreate_clock -period 10 [get_ports clock]\n",
+      }],
+    }).phase).toBe("generate_xdc");
+  });
+  test("makeXdcValidator(false) accepts a clock-only fail-closed XDC", () => {
     const v = makeXdcValidator(false);
-    const smoke = "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\ncreate_clock -period 10.0 [get_ports clk]\n";
-    const a = v({ reasoning: "smoke", constraints: [{ path: "top.xdc", content: smoke }] });
+    const candidate = "create_clock -period 10.0 [get_ports clk]\n";
+    const a = v({ reasoning: "candidate", constraints: [{ path: "top.xdc", content: candidate }] });
     expect(a.phase).toBe("generate_xdc");
+  });
+  test("makeXdcValidator(false) rejects NSTD-1/UCIO-1 severity overrides", () => {
+    const v = makeXdcValidator(false);
+    for (const check of ["NSTD-1", "UCIO-1"]) {
+      expect(() => v({
+        reasoning: "unsafe",
+        constraints: [{ path: "top.xdc", content: `set_property SEVERITY {Warning} [get_drc_checks ${check}]\n` }],
+      })).toThrow(/must NOT override/);
+    }
+    expect(() => v({
+      reasoning: "unsafe dict form",
+      constraints: [{ path: "top.xdc", content: "set_property -dict {SEVERITY Warning} [get_drc_checks {NSTD-1 UCIO-1}]\n" }],
+    })).toThrow(/must NOT override/);
+  });
+  test("makeXdcValidator rejects get_ports references absent from the RTL top", () => {
+    const v = makeXdcValidator(false, ["clock", "reset", "rx_data"]);
+    expect(() => v({
+      reasoning: "wrong port",
+      constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports clk]\n" }],
+    })).toThrow(/unknown RTL top-level port.*clk/);
+    expect(v({
+      reasoning: "right port",
+      constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports clock]\nset_output_delay 1 -clock sys_clk [get_ports {rx_data[0]}]\n" }],
+    }).phase).toBe("generate_xdc");
+    expect(() => v({
+      reasoning: "options are not accepted as a port-name bypass",
+      constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports -quiet clk]\n" }],
+    })).toThrow(/unknown RTL top-level port/);
+    expect(() => makeXdcValidator(false, [])({
+      reasoning: "no verified RTL ports",
+      constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports clk]\n" }],
+    })).toThrow(/unknown RTL top-level port/);
   });
   test("makeXdcValidator(true) allows PACKAGE_PIN (when verified pin data exists)", () => {
     const v = makeXdcValidator(true);
@@ -94,10 +140,7 @@ describe("action validators", () => {
     expect(msg).toContain("PACKAGE_PIN");
     expect(msg).not.toContain("{{");
     expect(msg).not.toContain("|");
-    // Should mention the template elements in natural language
-    expect(msg).toContain("create_clock");
-    expect(msg).toContain("NSTD-1");
-    expect(msg).toContain("UCIO-1");
+    expect(msg).toContain("no verified pin table");
   });
 });
 
@@ -242,8 +285,8 @@ describe("ModelClient.emitAction", () => {
     const { poster, count } = scriptedPoster([
       // First: model hallucinates PACKAGE_PIN
       () => ({ content: { reasoning: "r", constraints: [{ path: "top.xdc", content: "set_property PACKAGE_PIN AH15 [get_ports clk]\n" }] } }),
-      // Second: model corrects to smoke-only XDC (no pins)
-      () => ({ content: { reasoning: "smoke", constraints: [{ path: "top.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\ncreate_clock -period 10 [get_ports clk]\n" }] } }),
+      // Second: model corrects to a fail-closed clock-only XDC (no pins)
+      () => ({ content: { reasoning: "candidate", constraints: [{ path: "top.xdc", content: "create_clock -period 10 [get_ports clk]\n" }] } }),
     ]);
     const client = makeClient("json", poster, { maxParseRetries: 1 });
     const out = await client.emitAction(xdcReq, makeXdcValidator(false));
@@ -254,23 +297,20 @@ describe("ModelClient.emitAction", () => {
     expect(count()).toBe(2);
   });
 
-  test("generateXdc prompt (no pin table) contains verbatim template with no format pollution", async () => {
+  test("generateXdc prompt keeps missing board facts fail-closed", async () => {
     let capturedBody = "";
     const poster: ChatPoster = async (input) => {
       capturedBody = input.body;
-      return { status: 200, json: { choices: [{ message: { content: JSON.stringify({ reasoning: "smoke", constraints: [{ path: "top.xdc", content: "create_clock -name sys_clk -period 10.000 [get_ports clk]\nset_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\n" }] }) } }] }, text: "" };
+      return { status: 200, json: { choices: [{ message: { content: JSON.stringify({ reasoning: "candidate", constraints: [{ path: "top.xdc", content: "create_clock -name sys_clk -period 10.000 [get_ports clk]\n" }] }) } }] }, text: "" };
     };
     const client = new ModelClient({ ...BASE_CFG, protocol: "json", post: poster, maxParseRetries: 0, networkRetries: 0, timeoutMs: 1000 });
     await client.generateXdc("top", "xc7k70tfbv676-1", "sys", false);
-    // The body must contain the verbatim template
-    expect(capturedBody).toContain("create_clock -name sys_clk -period 10.000");
-    expect(capturedBody).toContain("set_property SEVERITY");
+    expect(capturedBody).toContain("fail-closed");
     expect(capturedBody).toContain("NSTD-1");
     expect(capturedBody).toContain("UCIO-1");
     // No double-brace or pipe pollution
     expect(capturedBody).not.toContain("{{");
-    // The instruction must be positive (template-first), not just a prohibition
-    expect(capturedBody).toContain("EXACTLY the following template");
+    expect(capturedBody).not.toContain("set_property SEVERITY {Warning}");
   });
 
 });

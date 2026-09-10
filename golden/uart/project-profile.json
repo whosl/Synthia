@@ -1,0 +1,248 @@
+{
+  "schema": "synthia-golden-project-profile.v1",
+  "project_id": "GOLDEN-UART",
+  "profile_version": "v2.6-candidate",
+  "decided_at": "2026-08-28",
+  "decision_authority": "project-owner",
+  "approval_state": "candidate_pending_human_review",
+  "hardware": {
+    "device_family": "AMD Xilinx Virtex-7",
+    "device": "XC7VX690T",
+    "selected_candidate_part": "xc7vx690tffg1761-2",
+    "part_verification": {
+      "state": "verified_exploratory",
+      "query": "get_parts -quiet xc7vx690tffg1761-2",
+      "result": "xc7vx690tffg1761-2",
+      "vivado": "2021.1 build 3247384",
+      "connector": "vivado-66-vc709",
+      "toolchain_profile_hash": "dffba16f6b8ba5b71a7fe7c732690231b1e58e78a3b2a4824a2512aa6fc788bc",
+      "job_id": "vc709-query-direct-diff-sstl15-20260828"
+    },
+    "board": {
+      "class": "Virtex-7 690T evaluation board",
+      "manufacturer": "AMD/Xilinx",
+      "model": "VC709",
+      "revision": "Rev 1.0 candidate",
+      "device_marking": "XC7VX690T-2FFG1761C",
+      "state": "verified_from_amd_ug887_and_xilinx_xtp213",
+      "authoritative_guide": "AMD UG887 v1.6 plus Xilinx XTP213 Rev 1.0 and VC709 Master XDC Rev 1.0",
+      "guide_sha256": "a02229d8dcc2e8f02d0355d7089e2acc175e4b0e3f4cf86227361434321b1dcc",
+      "schematic_document_id": "XILINX-XTP213-VC709-SCHEMATICS-REV1.0",
+      "schematic_package": "AMD XTP213 VC709 Schematics Rev 1.0",
+      "schematic_archive_state": "available_in_hardware_reference_library",
+      "reference_constraints_document_id": "XILINX-VC709-MASTER-XDC-REV1.0"
+    },
+    "topology": {
+      "core_top": "uart_top",
+      "board_wrapper": "uart_board_top",
+      "serial_path": "onboard_usb_uart",
+      "wrapper_state": "implemented_candidate",
+      "behavior": "115200 8N1 USB-UART byte echo"
+    }
+  },
+  "clock_and_protocol": {
+    "core_clock_hz": 100000000,
+    "board_clock_hz": 200000000,
+    "clock_source_state": "verified_from_amd_ug887_and_xilinx_xtp213",
+    "clock_generation": "MMCME2_BASE 200 MHz to 100 MHz",
+    "baseline_uart": {
+      "baud": 9600,
+      "data_bits": 8,
+      "parity": "none",
+      "stop_bits": 1
+    },
+    "extended_regression_baud": [
+      115200
+    ]
+  },
+  "electrical_and_pins": {
+    "policy": "derive_only_from_authoritative_board_materials",
+    "state": "candidate_constraints_implemented",
+    "pins": {
+      "sysclk_p": {
+        "pin": "H19",
+        "iostandard": "DIFF_SSTL15"
+      },
+      "sysclk_n": {
+        "pin": "G18",
+        "iostandard": "DIFF_SSTL15"
+      },
+      "cpu_reset": {
+        "pin": "AV40",
+        "iostandard": "LVCMOS18",
+        "active": "high"
+      },
+      "uart_txd": {
+        "pin": "AU36",
+        "iostandard": "LVCMOS18"
+      },
+      "uart_rxd": {
+        "pin": "AU33",
+        "iostandard": "LVCMOS18"
+      }
+    },
+    "configuration": {
+      "CFGBVS": "GND",
+      "CONFIG_VOLTAGE": 1.8
+    },
+    "source_documents": [
+      "XILINX-XTP213-VC709-SCHEMATICS-REV1.0",
+      "XILINX-VC709-MASTER-XDC-REV1.0"
+    ],
+    "remaining_review": [
+      "hardware owner confirms the physical board revision",
+      "define and execute approved board-level confirmation tests"
+    ]
+  },
+  "exploratory_verification": {
+    "evidence_dir": "golden/uart/evidence/vc709-prebit-20260828-diff-sstl15",
+    "evidence_state": "current_corrected_constraint_direct_exploratory",
+    "constraint_revision": "post-XTP213-correction: SYSCLK uses official DIFF_SSTL15",
+    "constraint_sha256": "69ff446877b535cf1301db74e1a699dc1fca6d71e3603776b5fe141ea3dd051e",
+    "rerun_requirement": "completed on 2026-08-28 through frozen Mac-to-66 direct transport; independent review and formal approval remain pending",
+    "query_job": "vc709-query-direct-diff-sstl15-20260828",
+    "validate_job": "vc709-validate-direct-diff-sstl15-20260828",
+    "simulate_9600_job": "vc709-sim-9600-direct-20260828",
+    "simulate_115200_job": "vc709-sim-115200-direct-20260828",
+    "synthesize_job": "vc709-synth-direct-diff-sstl15-20260828",
+    "implement_job": "vc709-implement-prebit-diff-sstl15-20260828",
+    "methodology_violations": 0,
+    "cdc": "CDC-3 Info x1; two-stage ASYNC_REG UART RX synchronizer",
+    "drc_violations": 0,
+    "wns_ns": 7.63,
+    "whs_ns": 0.093,
+    "resources": {
+      "lut": 55,
+      "ff": 62,
+      "bram": 0,
+      "dsp": 0
+    },
+    "bitstream_generated": false,
+    "classification": "direct_exploratory_corrected_constraint_not_approved"
+  },
+  "direct_transport": {
+    "state": "verified_and_frozen",
+    "path": "Mac_to_66",
+    "target": "100.96.223.49",
+    "hostname": "DESKTOP-DVFFB09",
+    "login_identity": "DESKTOP-DVFFB09\\admin",
+    "login_sid": "S-1-5-21-2561815994-3878748218-1101284459-1001",
+    "ssh_host_key_fingerprint": "SHA256:jZVimVML+3vYKaaMK30EakIxOvOWiilN6FjBW/4uhfY",
+    "authentication_public_key_fingerprint": "SHA256:7mMmeZ4rm1zPIVNGtD/ZpuIHrJ0OJXPVLZA4MPcoknE",
+    "effective_config_evidence": "golden/uart/evidence/vc709-prebit-20260828-diff-sstl15/transport-direct",
+    "jump_host": null,
+    "prior_140_transport_used": false
+  },
+  "historical_evidence": {
+    "evidence_dir": "golden/uart/evidence/vc709-prebit-20260827",
+    "constraint_revision": "pre-XTP213-correction: SYSCLK used DIFF_SSTL15_DCI",
+    "classification": "historical_superseded_not_an_input_to_v2.5"
+  },
+  "assurance": {
+    "criticality_scheme": "project_defined",
+    "criticality": "non_safety_critical_low",
+    "rigor": "medium_assurance",
+    "mandatory_activities": [
+      "two_stage_rx_synchronizer_and_cdc_review",
+      "requirements_design_code_test_bidirectional_traceability",
+      "code_and_functional_coverage_with_approved_denominators",
+      "independent_verification",
+      "synthesis_implementation_drc_and_sta_on_the_verified_target_part",
+      "board_regression_after_authoritative_hardware_inputs_exist"
+    ],
+    "coverage_targets": {
+      "functional_coverage": "100_percent_of_requirement_items",
+      "statement_coverage": "100_percent",
+      "branch_coverage": "90_percent_minimum_with_documented_waivers"
+    },
+    "gate_level_simulation": "required_with_sdf",
+    "lint": {
+      "tools": [
+        "vivado_synthesis_lint",
+        "verilator_lint"
+      ],
+      "waiver_required": true
+    },
+    "cdc_method": "vivado_report_cdc_plus_manual_review"
+  },
+  "roles": [
+    {
+      "role": "project_owner",
+      "assignee": "陈志远",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "system_safety",
+      "assignee": "刘明辉",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "requirements",
+      "assignee": "张晓雯",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "plds_design",
+      "assignee": "王建国",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "verification",
+      "assignee": "李文博",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "independent_v_and_v",
+      "assignee": "赵国庆",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "quality_assurance",
+      "assignee": "吴雅琴",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "configuration_management",
+      "assignee": "郑海涛",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "standards_document_control",
+      "assignee": "孙丽华",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "hardware_board_owner",
+      "assignee": "周建军",
+      "state": "placeholder_persona_pending_real_appointment"
+    },
+    {
+      "role": "release_approver",
+      "assignee": "杨德华",
+      "state": "placeholder_persona_pending_real_appointment"
+    }
+  ],
+  "agent_boundary": "Synthia may prepare candidate artifacts and evidence indexes but cannot act as an authenticated human reviewer, approver, baseline authority, or release authority.",
+  "role_appointment_note": "虚拟示例角色：全部 11 个角色由不同虚拟人名担任以满足独立性示范；实际批准动作仍由仓库所有者执行，正式使用前须替换为真实任命。",
+  "standards_applicability_decisions": {
+    "gjb_10158_2021": "applicable_included",
+    "gjb_z_192_2021": "applicable_guidance_only_not_mandatory",
+    "gbt_8566_2022": "pending_controlled_copy_sync_source_140_unreachable",
+    "scanned_pdf_acceptance": "accepted_with_source_level_annotation_in_cm_records"
+  },
+  "board_validation": {
+    "board": "Xilinx VC709 Rev 1.0",
+    "board_in_hand": true,
+    "part_confirmed_on_board": "XC7VX690T-2FFG1761 confirmed by owner",
+    "serial_interface": "onboard CP2103 USB-UART plus terminal on host 66",
+    "instruments": "none_available_software_only_serial_validation_accepted",
+    "long_run_duration": "2_hours_alternating_9600_115200_error_count_zero",
+    "power": "standard 12V adapter, actual voltage to be recorded"
+  },
+  "authorizations": {
+    "bitstream_generation": "authorized_by_owner_2026-08-28",
+    "board_download_and_confirmation": "authorized_by_owner_2026-08-28",
+    "synthia_formal_flow_g0_g4_b0_b1_b2": "authorized_by_owner_2026-08-28",
+    "g4_release_approval_path": "G4 review package prepared for release_approver role"
+  }
+}

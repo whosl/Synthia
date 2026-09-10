@@ -1,0 +1,15 @@
+{
+  "schema": "vivado-input-manifest.v1",
+  "jobId": "vc709-query-r2-20260827",
+  "projectId": "p1",
+  "operation": "query_parts",
+  "runClass": "exploratory",
+  "inputHash": null,
+  "toolchainHash": "dffba16f6b8ba5b71a7fe7c732690231b1e58e78a3b2a4824a2512aa6fc788bc",
+  "top": null,
+  "testbench": null,
+  "part": "xc7vx690tffg1761-2",
+  "stopBeforeBitstream": null,
+  "sources": [],
+  "constraints": []
+}

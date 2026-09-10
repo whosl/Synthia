@@ -1,247 +1,303 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
-import { api } from "../main.ts";
-import { createProject, listGateSubmissions, listProjects, listTasks } from "../api/index.ts";
-import type { GateSubmission, Project, TaskRunSummary } from "../api/types.ts";
+import { api } from "../api/service.ts";
+import { useProjectOverview } from "../composables/use-project-overview.ts";
+import { filterProjects, formatActivity } from "../domain/project-overview.ts";
 import {
-  GATE_REVIEW_NAMES,
-  PROJECT_STATUS_TEXT,
-  currentGate,
-  deriveGateLanes,
-  type GateId,
-} from "../domain/gates.ts";
+  processVersionText,
+  projectType,
+  projectTypeText,
+} from "../domain/project.ts";
+import { PROJECT_STATUS_TEXT } from "../domain/gates.ts";
+import PageShell from "../components/layout/PageShell.vue";
+import CreateProjectDialog from "../components/projects/CreateProjectDialog.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import Button from "../components/ui/Button.vue";
+import Icon from "../components/ui/Icon.vue";
 
 const router = useRouter();
-
-const projects = ref<Project[]>([]);
-const loading = ref(true);
-const error = ref<unknown>(null);
-
-/** 每个项目的门禁泳道（推导当前阶段用）。 */
-const lanesByProject = ref<Map<string, ReturnType<typeof deriveGateLanes>>>(new Map());
-/** 每个项目的最近活动时间（提交/任务/创建时间取最大）。 */
-const lastActivityByProject = ref<Map<string, string>>(new Map());
-
-// ── 我的待办 ──────────────────────────────────────────────────────────
-interface PendingApproval {
-  readonly project: Project;
-  readonly submission: GateSubmission;
-}
-interface ActiveTask {
-  readonly project: Project;
-  readonly run: TaskRunSummary;
-}
-
-const pendingApprovals = ref<PendingApproval[]>([]);
-const activeTasks = ref<ActiveTask[]>([]);
-
-const todoCount = computed(() => pendingApprovals.value.length + activeTasks.value.length);
-
-function reviewName(gate: string): string {
-  return GATE_REVIEW_NAMES[gate as GateId] ?? gate;
-}
-
-/** 项目当前阶段的人话描述（如「设计审查等待批准」）。 */
-function stageText(projectId: string): string {
-  const lanes = lanesByProject.value.get(projectId);
-  if (!lanes) return "—";
-  const gate = currentGate(lanes);
-  if (!gate) return "全部审查已通过";
-  const name = GATE_REVIEW_NAMES[gate];
-  switch (lanes[gate]) {
-    case "in_review": return `${name}等待批准`;
-    case "rejected": return `${name}被驳回`;
-    default: return `${name}未开始`;
-  }
-}
-
-function lastActivity(projectId: string): string | null {
-  const ts = lastActivityByProject.value.get(projectId);
-  return ts ?? null;
-}
-
-onMounted(async () => {
-  try {
-    const list = await listProjects(api);
-    projects.value = list;
-
-    const lanes = new Map<string, ReturnType<typeof deriveGateLanes>>();
-    const activity = new Map<string, string>();
-    const approvals: PendingApproval[] = [];
-    const tasks: ActiveTask[] = [];
-
-    await Promise.all(
-      list.map(async (project) => {
-        const maxTs = (a: string, b: string | null | undefined) => (b && b > a ? b : a);
-        let latest = project.created_at;
-        try {
-          const [subs, runList] = await Promise.all([
-            listGateSubmissions(api, project.id),
-            listTasks(api, project.id).catch(() => ({ runs: [] as readonly TaskRunSummary[] })),
-          ]);
-          lanes.set(project.id, deriveGateLanes(subs));
-          for (const sub of subs) {
-            latest = maxTs(latest, sub.submitted_at ?? sub.created_at);
-            if (sub.state === "in_review") approvals.push({ project, submission: sub });
-          }
-          for (const run of runList.runs) {
-            latest = maxTs(latest, run.created_at);
-            if (run.status === "running" || run.status === "awaiting_approval") {
-              tasks.push({ project, run });
-            }
-          }
-        } catch {
-          lanes.set(project.id, deriveGateLanes([]));
-        }
-        activity.set(project.id, latest);
-      }),
-    );
-
-    lanesByProject.value = lanes;
-    lastActivityByProject.value = activity;
-    pendingApprovals.value = approvals.sort((a, b) =>
-      (a.submission.submitted_at ?? a.submission.created_at) < (b.submission.submitted_at ?? b.submission.created_at) ? 1 : -1,
-    );
-    activeTasks.value = tasks.sort((a, b) => (a.run.created_at < b.run.created_at ? 1 : -1));
-  } catch (err) {
-    error.value = err;
-  } finally {
-    loading.value = false;
-  }
-});
-
-// ── 新建项目对话框 ─────────────────────────────────────────────────────
-const showCreateDialog = ref(false);
-const newProjectName = ref("");
-const newProjectPart = ref("xc7k70tfbv676-1");
-const creating = ref(false);
-const createError = ref<unknown>(null);
-
-function openCreateDialog() {
-  newProjectName.value = "";
-  newProjectPart.value = "xc7k70tfbv676-1";
-  createError.value = null;
-  showCreateDialog.value = true;
-}
-
-async function submitCreate() {
-  const name = newProjectName.value.trim();
-  if (name.length === 0 || creating.value) return;
-  creating.value = true;
-  createError.value = null;
-  try {
-    const project = await createProject(
-      api,
-      {
-        id: `proj-${crypto.randomUUID().slice(0, 8)}`,
-        name,
-        data_classification: "D1",
-        target_part: newProjectPart.value.trim() || "xc7k70tfbv676-1",
-      },
-      crypto.randomUUID(),
-    );
-    showCreateDialog.value = false;
-    await router.push(`/projects/${project.id}`);
-  } catch (err) {
-    createError.value = err;
-  } finally {
-    creating.value = false;
-  }
+const {
+  rows,
+  loading,
+  refreshing,
+  error,
+  reviews,
+  activeTasks,
+  incompleteRows,
+  reload,
+} = useProjectOverview(api);
+const query = ref("");
+const type = ref("all");
+const showCreate = ref(false);
+const visibleRows = computed(() =>
+  filterProjects(rows.value, query.value, type.value),
+);
+const filters = [
+  { id: "all", label: "全部项目" },
+  { id: "engineering", label: "工程项目" },
+  { id: "free", label: "自由项目" },
+];
+function projectCreated(id: string) {
+  showCreate.value = false;
+  void router.push({ name: "project", params: { id } });
 }
 </script>
 
 <template>
-  <h1 class="page-title">
-    项目列表
-    <button class="btn" style="float: right" @click="openCreateDialog">新建项目</button>
-  </h1>
-  <p class="page-sub">我的项目与当前进展。</p>
-
-  <ErrorNotice v-if="error" :error="error" />
-  <div v-if="loading" class="muted">加载中…</div>
-
-  <template v-else>
-    <!-- 我的待办：等待我批准的审查 + 我正在跑的任务 -->
-    <div class="panel todo-panel">
-      <h2>我的待办 <span class="muted" style="font-weight: 400">（{{ todoCount }}）</span></h2>
-      <div v-if="todoCount === 0" class="muted">现在没有需要你处理的事。</div>
-      <ul v-else class="todo-list">
-        <li v-for="item in pendingApprovals" :key="item.submission.id">
-          <StatusBadge text="待我批准" kind="warn" />
-          <router-link :to="`/approvals/${item.project.id}/${item.submission.id}`">
-            {{ item.project.name }} · {{ reviewName(item.submission.gate) }}
-          </router-link>
-          <span class="muted" style="font-size: 12px">
-            提交于 {{ new Date(item.submission.submitted_at ?? item.submission.created_at).toLocaleString("zh-CN") }}
-          </span>
-        </li>
-        <li v-for="item in activeTasks" :key="item.run.run_id">
-          <StatusBadge :text="item.run.status === 'awaiting_approval' ? '等待批准' : '进行中'" kind="accent" />
-          <router-link :to="`/projects/${item.project.id}?run=${item.run.run_id}`">
-            {{ item.project.name }} · 任务执行中
-          </router-link>
-          <span class="muted" style="font-size: 12px">
-            发起于 {{ new Date(item.run.created_at).toLocaleString("zh-CN") }}
-          </span>
-        </li>
-      </ul>
+  <PageShell section="projects">
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">YOUR WORKSPACE</p>
+        <h1>项目工作台<span class="heading-dot">.</span></h1>
+        <p class="secondary-text">从自由探索到正式交付，在这里继续你的工程。</p>
+      </div>
+      <Button
+        variant="primary"
+        class="primary-action"
+        @click="showCreate = true"
+        ><Icon name="plus" />新建项目</Button
+      >
     </div>
 
-    <div class="panel">
-      <table class="data" v-if="projects.length > 0">
-        <thead>
-          <tr>
-            <th>项目名称</th>
-            <th>状态</th>
-            <th>当前阶段</th>
-            <th>最近活动</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="p in projects" :key="p.id">
-            <td>
-              <router-link :to="`/projects/${p.id}`"><strong>{{ p.name }}</strong></router-link>
-            </td>
-            <td>
-              <StatusBadge :text="PROJECT_STATUS_TEXT[p.status] ?? p.status" :kind="p.status === 'active' ? 'ok' : 'plain'" />
-            </td>
-            <td>{{ stageText(p.id) }}</td>
-            <td class="muted" style="white-space: nowrap">
-              {{ lastActivity(p.id) ? new Date(lastActivity(p.id)!).toLocaleString("zh-CN") : "—" }}
-            </td>
-            <td>
-              <router-link :to="`/projects/${p.id}`">进入项目</router-link>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-else class="muted">暂无项目，点击右上「新建项目」开始。</div>
-    </div>
-  </template>
-
-  <!-- 新建项目对话框 -->
-  <div v-if="showCreateDialog" class="dialog-mask" @click.self="showCreateDialog = false">
-    <div class="dialog panel" role="dialog" aria-label="新建项目">
-      <h2>新建项目</h2>
-      <ErrorNotice v-if="createError" :error="createError" />
-      <label class="field">
-        <span>项目名称（必填）</span>
-        <input v-model="newProjectName" type="text" placeholder="如：星载图像处理模块" :disabled="creating" />
-      </label>
-      <label class="field">
-        <span>目标器件（预填，可修改）</span>
-        <input v-model="newProjectPart" type="text" :disabled="creating" />
-      </label>
-      <div class="row-actions">
-        <button class="btn" :disabled="newProjectName.trim().length === 0 || creating" @click="submitCreate">
-          {{ creating ? "创建中…" : "创建并进入总览" }}
-        </button>
-        <button class="btn secondary" :disabled="creating" @click="showCreateDialog = false">取消</button>
+    <div class="overview-stats" aria-label="工作空间概况">
+      <div class="stat-card">
+        <span class="stat-icon"><Icon name="folder" :size="22" /></span>
+        <div>
+          <span class="stat-label">全部项目</span
+          ><strong>{{ loading ? "—" : rows.length }}</strong>
+        </div>
+        <span class="stat-caption">工程与探索</span>
+      </div>
+      <router-link class="stat-card" to="/approvals"
+        ><span class="stat-icon tone-amber"
+          ><Icon name="inbox" :size="22"
+        /></span>
+        <div>
+          <span class="stat-label">等待审批</span
+          ><strong
+            >{{ loading ? "—" : reviews.length
+            }}<small
+              v-if="
+                !loading &&
+                incompleteRows.some((row) =>
+                  row.issues.some((issue) => issue.label === '待审批记录'),
+                )
+              "
+              >+</small
+            ></strong
+          >
+        </div>
+        <Icon name="arrow"
+      /></router-link>
+      <div class="stat-card">
+        <span class="stat-icon tone-green"
+          ><Icon name="spark" :size="22"
+        /></span>
+        <div>
+          <span class="stat-label">活跃主任务</span
+          ><strong
+            >{{ loading ? "—" : activeTasks.length
+            }}<small
+              v-if="
+                !loading &&
+                incompleteRows.some((row) =>
+                  row.issues.some((issue) => issue.label === '任务状态'),
+                )
+              "
+              >+</small
+            ></strong
+          >
+        </div>
+        <span class="stat-caption">进行中 / 等待确认</span>
       </div>
     </div>
-  </div>
+
+    <ErrorNotice v-if="error" :error="error" />
+    <div v-if="incompleteRows.length" class="partial-notice" role="status">
+      <Icon name="inbox" /><span
+        >{{
+          incompleteRows.length
+        }}
+        个项目的部分状态未能加载，以下数量可能不完整。<span
+          v-for="row in incompleteRows"
+          :key="row.project.id"
+          class="partial-detail"
+          >{{ row.project.name }}：{{
+            row.issues.map((issue) => issue.label).join("、")
+          }}</span
+        ></span
+      ><Button :loading="refreshing" @click="reload">重试</Button>
+    </div>
+
+    <section class="projects-section" aria-labelledby="projects-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="projects-title">
+            我的项目 <span class="count-label">{{ visibleRows.length }}</span>
+          </h2>
+          <p>按最近活动排序</p>
+        </div>
+        <Button variant="ghost" :loading="refreshing" @click="reload"
+          ><Icon name="refresh" :size="16" />刷新</Button
+        >
+      </div>
+      <div class="project-toolbar">
+        <div class="filter-tabs" role="group" aria-label="筛选项目类型">
+          <button
+            v-for="filter in filters"
+            :key="filter.id"
+            type="button"
+            :aria-pressed="type === filter.id"
+            :class="{ active: type === filter.id }"
+            @click="type = filter.id"
+          >
+            {{ filter.label }}
+          </button>
+        </div>
+        <label class="search-field"
+          ><Icon name="search" :size="17" /><input
+            v-model="query"
+            type="search"
+            aria-label="搜索项目"
+            placeholder="搜索项目名称或器件…"
+        /></label>
+      </div>
+      <div
+        v-if="loading"
+        class="skeleton-list"
+        role="status"
+        aria-label="正在加载项目"
+      >
+        <div v-for="n in 3" :key="n" class="skeleton-row">
+          <span />
+          <div><i /><i /></div>
+        </div>
+        <span class="visually-hidden">正在加载项目…</span>
+      </div>
+      <div v-else-if="error && !rows.length" class="empty-state">
+        <Icon name="refresh" :size="34" />
+        <h3>项目暂时无法加载</h3>
+        <p>连接恢复后可以重试。</p>
+        <Button :loading="refreshing" @click="reload">重新加载</Button>
+      </div>
+      <div v-else-if="!rows.length" class="empty-state">
+        <Icon name="folder" :size="40" />
+        <h3>你的第一个项目，从这里开始</h3>
+        <p>选择自由探索，或按照工程流程推进。</p>
+        <Button variant="primary" @click="showCreate = true">新建项目</Button>
+      </div>
+      <div v-else-if="!visibleRows.length" class="empty-state">
+        <Icon name="search" :size="34" />
+        <h3>没有找到匹配的项目</h3>
+        <p>试试其他名称、器件，或调整项目类型。</p>
+        <Button
+          @click="
+            query = '';
+            type = 'all';
+          "
+          >清除筛选</Button
+        >
+      </div>
+      <div v-else class="project-list">
+        <router-link
+          v-for="row in visibleRows"
+          :key="row.project.id"
+          :to="{ name: 'project', params: { id: row.project.id } }"
+          class="project-row"
+          :aria-label="`进入项目：${row.project.name}`"
+        >
+          <span
+            class="project-symbol"
+            :class="{ free: projectType(row.project) === 'free' }"
+            ><Icon
+              :name="projectType(row.project) === 'free' ? 'spark' : 'chip'"
+              :size="23"
+          /></span>
+          <div class="project-identity">
+            <h3>{{ row.project.name }}</h3>
+            <p>
+              <span>{{ projectTypeText(projectType(row.project)) }}</span
+              ><span v-if="row.project.target_part" class="mono">{{
+                row.project.target_part
+              }}</span
+              ><span v-else>{{
+                projectType(row.project) === "free"
+                  ? "按自己的节奏探索"
+                  : processVersionText(row.project)
+              }}</span>
+            </p>
+          </div>
+          <div class="project-stage">
+            <span>{{ row.stage }}</span>
+            <div
+              v-if="row.progress"
+              class="stage-progress"
+              :aria-label="`已完成 ${row.progress.done} / ${row.progress.total} 个阶段`"
+            >
+              <i
+                v-for="n in row.progress.total"
+                :key="n"
+                :class="{ done: n <= row.progress.done }"
+              />
+            </div>
+            <span v-else class="project-stage-hint">{{
+              row.issues.length ? "部分信息待恢复" : "随时进入工作区"
+            }}</span>
+          </div>
+          <div class="project-activity">
+            <StatusBadge
+              :text="
+                PROJECT_STATUS_TEXT[row.project.status] ?? row.project.status
+              "
+              :kind="row.project.status === 'active' ? 'ok' : 'plain'"
+            /><time :datetime="row.updatedAt">{{
+              formatActivity(row.updatedAt)
+            }}</time>
+          </div>
+          <Icon name="arrow" :size="18" />
+        </router-link>
+      </div>
+    </section>
+
+    <section class="activity-strip" aria-labelledby="activity-title">
+      <div class="activity-title">
+        <span class="session-dot" />
+        <h2 id="activity-title">正在推进</h2>
+      </div>
+      <p v-if="loading" class="secondary-text">正在读取任务状态…</p>
+      <p v-else-if="!activeTasks.length" class="secondary-text">
+        {{
+          incompleteRows.length || error
+            ? "已加载的项目中暂无活跃主任务。"
+            : "目前没有运行中的主任务，可以进入项目开始新的工作。"
+        }}
+      </p>
+      <div v-else class="activity-links">
+        <router-link
+          v-for="item in activeTasks"
+          :key="`${item.project.id}:${item.task.agent_id}`"
+          :to="{
+            name: 'project',
+            params: { id: item.project.id },
+            query: { run: item.task.agent_id },
+          }"
+          ><span>{{ item.project.name }}</span
+          ><StatusBadge
+            :text="
+              item.task.status === 'awaiting_approval' ? '等待确认' : '进行中'
+            "
+            :kind="
+              item.task.status === 'awaiting_approval' ? 'warn' : 'accent'
+            " /><Icon name="arrow" :size="14"
+        /></router-link>
+      </div>
+    </section>
+    <CreateProjectDialog
+      v-if="showCreate"
+      @close="showCreate = false"
+      @created="projectCreated"
+    />
+  </PageShell>
 </template>

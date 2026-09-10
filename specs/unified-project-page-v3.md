@@ -1,8 +1,10 @@
-# Synthia 统一项目页 v3 规格（grill 定稿）
+# Synthia 统一项目页 v3 规格（已替代）
 
-- 状态：已确认（2026-08-16 grill 十二问定稿）
+- 状态：已被 v4 与 [`product-baseline-v1.md`](product-baseline-v1.md) 替代，仅保留作历史参考
 - 上游：specs/ui-redesign-v1.md（分层原则）、v2（术语）继续有效；本文取代统一页 v2 布局（B+就地审批卡版）
 - 前置依赖标注：〔准直播〕=可先用 3s 轮询实现，真流式需 Runtime SSE 端点；〔打断〕=需 Runtime abort+重 prompt 组合
+
+> 本文的全屏多会话任务切换、固定 GJB 阶段和自动经验入库假设不再作为新功能依据；请使用主 Agent + 侧边探索任务、已确认资料默认检索和精简 G0～G4 定义。
 
 ## 1. 灵魂：对话+工程双主体
 

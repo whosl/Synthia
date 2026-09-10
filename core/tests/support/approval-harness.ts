@@ -21,6 +21,12 @@ const MIGRATIONS_PATH = join(__dirname, "..", "..", "src", "db", "migrations");
 
 /** Tables touched by the approval slice, in FK-safe order for truncation. */
 const SLICE_TABLES = [
+  "import_audit_event",
+  "import_source_relation",
+  "import_file_entry",
+  "import_source",
+  "import_snapshot",
+  "project_source_relation",
   "baseline",
   "approved_gate_result",
   "approval_record",
@@ -55,7 +61,12 @@ export async function applyMigrations(client: Client): Promise<void> {
     const present = await client.query("SELECT 1 FROM schema_migrations WHERE version = $1", [version]);
     if (present.rows.length > 0) continue;
     const raw = readFileSync(join(MIGRATIONS_PATH, migration), "utf-8");
-    const sql = raw.replace(/^BEGIN;\s*/i, "").replace(/COMMIT;\s*$/i, "").trim();
+    // Numbered files may have a comment header before BEGIN. Anchoring BEGIN to
+    // the start of the whole file left the client inside one long transaction,
+    // so fresh-database API tests could not see bootstrapped identities through
+    // the server pool. Remove only standalone outer transaction marker lines;
+    // PL/pgSQL BEGIN blocks do not use the `BEGIN;` line form.
+    const sql = raw.replace(/^\s*BEGIN;\s*$/gmi, "").replace(/^\s*COMMIT;\s*$/gmi, "").trim();
     await client.query(sql);
   }
 }
@@ -247,4 +258,3 @@ export function makeApproveInput(
 export function validRequestHash(payload: unknown = { ok: true }): string {
   return hashPayload(payload);
 }
-

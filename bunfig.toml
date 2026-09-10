@@ -1,0 +1,6 @@
+[test]
+# `bun test` from the repository root discovers Web tests as well as
+# Core/Runtime/Connector tests. Markdown sanitization binds DOMPurify during
+# module evaluation, so the same preload used by `web/bunfig.toml` must run for
+# the repository-wide gate too.
+preload = ["./web/tests/setup-dom.ts"]

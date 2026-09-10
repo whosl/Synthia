@@ -1,42 +1,25 @@
 <script setup lang="ts">
-import { computed } from "vue";
+/**
+ * 应用根组件（v4 重写）。
+ *
+ * - 登录页独占视口（无侧栏）；
+ * - 登录后不再有全局侧栏——三栏项目页（ProjectView.vue）自己占满视口，
+ *   顶栏内的项目名/任务切换/主题/用户菜单取代了旧版侧栏导航（spec §2）；
+ * - 主题在此处初始化一次（domain/theme.ts:initTheme），写入 `<html data-theme>`，
+ *   之后的手动切换由 ProjectView 顶栏发起，写回同一份 localStorage 记忆。
+ */
+import { onMounted } from "vue";
 import { useRoute } from "vue-router";
-import { useAuthStore } from "./stores/auth.ts";
+import { viewKey } from "./domain/navigation.ts";
+import { initTheme } from "./domain/theme.ts";
 
 const route = useRoute();
-const auth = useAuthStore();
 
-const isLogin = computed(() => route.name === "login");
-const projectId = computed(() => (route.name === "project-unified" ? String(route.params.id) : null));
+onMounted(() => {
+  initTheme();
+});
 </script>
 
 <template>
-  <div v-if="isLogin" class="login-wrap">
-    <router-view />
-  </div>
-
-  <div v-else class="layout">
-    <aside class="sidebar">
-      <div class="brand">
-        Synthia
-        <small>工程治理平台</small>
-      </div>
-      <nav>
-        <router-link to="/projects" :class="{ active: route.name === 'projects' }">项目列表</router-link>
-        <router-link v-if="projectId" :to="`/projects/${projectId}`" :class="{ active: route.name === 'project-unified' }">
-          项目
-        </router-link>
-        <router-link to="/approvals" :class="{ active: route.name === 'approvals' || route.name === 'approval-detail' }">
-          审批中心
-        </router-link>
-      </nav>
-      <div class="session">
-        <div class="muted" style="color: var(--c-sidebar-fg)">已登录（会话 Token）</div>
-        <a href="#" style="color: var(--c-sidebar-fg)" @click.prevent="auth.logout(); $router.push({ name: 'login' })">退出登录</a>
-      </div>
-    </aside>
-    <main class="main">
-      <router-view />
-    </main>
-  </div>
+  <router-view :key="viewKey(route)" />
 </template>

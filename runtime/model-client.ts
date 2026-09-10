@@ -40,6 +40,12 @@ export interface ModelClientConfig {
   readonly toolMaxTokens?: number;
   /** Max output tokens for doc phases (intake/behavior/architecture/register). Default 8192. */
   readonly docMaxTokens?: number;
+  /** Max output tokens for the free-agent conversational path (chat/chatStream).
+   *  Default 16384 — separate from {@link toolMaxTokens} because a chat turn may
+   *  carry a whole source file, while the pipeline phases emit one bounded action.
+   *  Counts **visible** tokens only: measured on the grok-4.6 gateway, reasoning
+   *  tokens are billed on top and are not charged against this cap. */
+  readonly chatMaxTokens?: number;
   /** When true, log raw response summaries to stderr (no secrets). */
   readonly debug?: boolean;
   /** Injectable for tests (buffered path). */
@@ -49,12 +55,30 @@ export interface ModelClientConfig {
   /** Stream idle watchdog: abort when no bytes arrive for this long.
    *  Default 120000ms; 0 disables (no total timeout on streams). */
   readonly streamIdleTimeoutMs?: number;
+  /**
+   * 流式建连失败后，降级为一次非流式请求（默认 true）。
+   *
+   * 实测（grok-4.6 网关，同一 prompt 交叉对照，见 specs/agent-stream-benchmark.md §1.3）：
+   * 非流式 4/4 成功、约 26s；流式首字节要 55–65s，恰好骑在网关 60s 首字节上限上，
+   * 5 次里 504 了 4 次——**与 reasoning_effort 无关**（low 一样 504），是这个网关的
+   * SSE 通道本身慢 2.6 倍。重试治不了它（每次都要再赔 60s），非流式却总能出结果。
+   * 所以「流式挂了就闷一轮」不如「流式挂了就换非流式，慢一点但有答案」。
+   *
+   * 代价：降级那一轮没有打字机效果，回复一次性出现。
+   */
+  readonly streamFallbackToBuffered?: boolean;
+  /** Reasoning budget for reasoning-capable models, sent as `reasoning_effort`.
+   *  Omitted from the request when unset, so non-reasoning models are unaffected. */
+  readonly reasoningEffort?: string;
 }
 
 /** Low-level streaming poster abstraction. Unlike {@link ChatPoster} this
- *  returns the raw Response so the SSE body can be consumed incrementally. */
+ *  returns the raw Response so the SSE body can be consumed incrementally.
+ *  `signal` carries the idle watchdog (see {@link ModelClientConfig.streamIdleTimeoutMs});
+ *  it must cover the header wait too, not just the body, because a gateway that
+ *  never sends a first byte hangs before the body ever exists. */
 export interface ChatStreamPoster {
-  (input: { url: string; headers: Record<string, string>; body: string }): Promise<Response>;
+  (input: { url: string; headers: Record<string, string>; body: string; signal?: AbortSignal }): Promise<Response>;
 }
 
 export interface ChatMessage {
@@ -130,8 +154,11 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
     networkRetries: env.SYNTHIA_MODEL_NETWORK_RETRIES ? Number(env.SYNTHIA_MODEL_NETWORK_RETRIES) : 2,
     toolMaxTokens: env.SYNTHIA_MODEL_TOOL_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_TOOL_MAX_TOKENS) : 4096,
     docMaxTokens: env.SYNTHIA_MODEL_DOC_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_DOC_MAX_TOKENS) : 8192,
+    chatMaxTokens: env.SYNTHIA_MODEL_CHAT_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_CHAT_MAX_TOKENS) : 16_384,
     debug: env.SYNTHIA_MODEL_DEBUG === "1" || env.SYNTHIA_MODEL_DEBUG === "true",
     streamIdleTimeoutMs: env.SYNTHIA_MODEL_STREAM_IDLE_MS ? Number(env.SYNTHIA_MODEL_STREAM_IDLE_MS) : 120_000,
+    streamFallbackToBuffered: env.SYNTHIA_MODEL_STREAM_FALLBACK !== "0" && env.SYNTHIA_MODEL_STREAM_FALLBACK !== "false",
+    ...(env.SYNTHIA_MODEL_REASONING_EFFORT?.trim() ? { reasoningEffort: env.SYNTHIA_MODEL_REASONING_EFFORT.trim() } : {}),
   };
 }
 
@@ -140,10 +167,42 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
 // timeout (a long streamed turn must not be aborted merely for being long)
 // ---------------------------------------------------------------------------
 
-const defaultPostStream: ChatStreamPoster = async ({ url, headers, body }) => {
-  const res = await fetch(url, { method: "POST", headers, body });
+const defaultPostStream: ChatStreamPoster = async ({ url, headers, body, signal }) => {
+  const res = await fetch(url, { method: "POST", headers, body, ...(signal ? { signal } : {}) });
   return res;
 };
+
+/** 一次流式尝试的空闲看门狗句柄。 */
+interface StreamWatchdog {
+  /** 传给 fetch 的中止信号；idleMs<=0（关闭看门狗）时为 undefined。 */
+  readonly signal: AbortSignal | undefined;
+  /** 收到字节时调用，重置计时。 */
+  readonly bump: () => void;
+  /** 释放计时器（必须在成功/失败两条路径上都调到，否则进程被空计时器吊住）。 */
+  readonly stop: () => void;
+}
+
+/**
+ * 空闲看门狗：连续 `idleMs` 没有任何字节到达就中止请求。
+ *
+ * 覆盖**首字节等待**，不只是流中间——网关卡在「模型还没吐第一个 token」时
+ * 连 body 都还不存在，只看 body 的看门狗永远不会触发。`idleMs <= 0` 表示关闭
+ * （配置注释里承诺的语义），此时不装信号也不装计时器。
+ */
+function startStreamWatchdog(idleMs: number): StreamWatchdog {
+  if (!(idleMs > 0)) return { signal: undefined, bump: () => {}, stop: () => {} };
+  const ctrl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const stop = (): void => {
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  const bump = (): void => {
+    stop();
+    timer = setTimeout(() => ctrl.abort(new Error(`model-client.chatStream: no bytes from upstream for ${idleMs}ms`)), idleMs);
+  };
+  bump();
+  return { signal: ctrl.signal, bump, stop };
+}
 
 // ---------------------------------------------------------------------------
 // SSE stream consumption (chat completions, stream: true)
@@ -152,6 +211,10 @@ const defaultPostStream: ChatStreamPoster = async ({ url, headers, body }) => {
 /** Wire shape of one streaming delta (OpenAI-compatible). */
 interface WireDelta {
   content?: string | null;
+  /** 思维链增量。OpenAI 兼容层没有统一字段名：DeepSeek/Qwen/vLLM 用
+   *  `reasoning_content`，OpenRouter 等用 `reasoning`；两者都接。 */
+  reasoning_content?: string | null;
+  reasoning?: string | null;
   tool_calls?: Array<{
     index?: number;
     id?: string;
@@ -160,8 +223,30 @@ interface WireDelta {
 }
 
 /**
+ * delta 中的思维链片段（字段名因供应商而异，取第一个非空的）。
+ *
+ * TODO(reasoning): 当前部署下这个函数**永远返回空串**——直连探针实测（见
+ * specs/agent-stream-benchmark.md §1.3①），这个网关每个 delta 只带
+ * `['content','role']`，`reasoning_content` / `reasoning` 一个都不转发，尽管
+ * `reasoning_tokens` 照常计费（xhigh 4424 / low 1475）。于是从这里往下游整条
+ * 管线（onReasoningStart → SSE reasoning 事件 → SynthiaReasoningPart →
+ * ReasoningItem.vue）在生产中从未触发过。
+ *
+ * **刻意不删**：错的是上游不吐，不是这套解析。已拍板挂起，留到多模型适配时换一个
+ * 转发思维链的上游一并解决（specs/agent-stream-benchmark.md §4.1）。改上游时按
+ * `TODO(reasoning)` 搜索即可捞全三个改动点（本函数 / web 的 SynthiaReasoningPart /
+ * ProjectView 的 toProcessPart）。
+ */
+function reasoningFragment(delta: WireDelta): string {
+  const v = delta.reasoning_content ?? delta.reasoning;
+  return typeof v === "string" ? v : "";
+}
+
+/**
  * Consume a `stream: true` chat-completions SSE body. Aggregates:
  * - text deltas → accumulated text (+ {@link onDelta} per fragment);
+ * - reasoning deltas → {@link onReasoning} per fragment (思维链不进 `text`，
+ *   它不是回复内容，只用于前端「思考过程」展示）；
  * - tool_calls deltas → per-index argument string concatenation (the model
  *   streams `arguments` in arbitrary fragments; OpenAI-compatible servers
  *   send `index` on every fragment, `id`/`name` usually only on the first).
@@ -175,6 +260,11 @@ export async function consumeChatSSE(
   opts: {
     onTextStart?: () => void;
     onDelta?: (text: string) => void;
+    /** 思维链首个片段到达（用于开一个 reasoning part）。 */
+    onReasoningStart?: () => void;
+    onReasoning?: (text: string) => void;
+    /** 每收到一段字节就回调一次（含心跳/注释行），供空闲看门狗续命。 */
+    onActivity?: () => void;
   } = {},
 ): Promise<ChatStreamResult> {
   const reader = body.getReader();
@@ -183,6 +273,7 @@ export async function consumeChatSSE(
   let carry = ""; // partial line carried across stream reads
   let text = "";
   let textStarted = false;
+  let reasoningStarted = false;
   let finishReason: string | null = null;
   let done = false;
   /** index → mutable aggregation cell (dynamic numeric keys). */
@@ -222,6 +313,14 @@ export async function consumeChatSSE(
     if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
     const delta = choice.delta;
     if (!delta) return;
+    const reasoning = reasoningFragment(delta);
+    if (reasoning) {
+      if (!reasoningStarted) {
+        reasoningStarted = true;
+        opts.onReasoningStart?.();
+      }
+      opts.onReasoning?.(reasoning);
+    }
     if (typeof delta.content === "string" && delta.content.length > 0) {
       if (!textStarted) {
         textStarted = true;
@@ -249,6 +348,7 @@ export async function consumeChatSSE(
   try {
     while (!done) {
       const { value, done: streamEnd } = await reader.read();
+      opts.onActivity?.(); // 任何一次读到字节都给看门狗续命
       if (streamEnd) {
         // Stream ended without [DONE]: flush any trailing partial event.
         if (carry) {
@@ -589,59 +689,105 @@ export class ModelClient implements LoopModel, ConversationalModel {
   async chatStream(
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
-    opts: { onTextStart?: () => void; onDelta?: (text: string) => void } = {},
+    opts: {
+      onTextStart?: () => void;
+      onDelta?: (text: string) => void;
+      onReasoningStart?: () => void;
+      onReasoning?: (text: string) => void;
+    } = {},
   ): Promise<ChatTurn> {
     const postStream = this.postStream ?? defaultPostStream;
     const { url, headers, body } = this.buildChatRequest(messages, tools, { stream: true });
+    const maxNetwork = Math.max(0, this.cfg.networkRetries ?? 2);
+    const idleMs = this.cfg.streamIdleTimeoutMs ?? 120_000;
 
-    let netAttempt = 0;
-    let response: Response;
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    /**
+     * 建连阶段彻底失败 → 降级非流式再试一次（见 streamFallbackToBuffered 的实测依据）。
+     * 降级也失败时抛**流式那条**错误：它带着网关状态码，前端的 replyErrorText 靠它分类；
+     * 非流式的二次错误只写 debug 日志，不覆盖首因。
+     */
+    const giveUp = async (err: Error): Promise<ChatTurn> => {
+      if (this.cfg.streamFallbackToBuffered === false) throw err;
+      if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: giving up on SSE (${err.message}), falling back to buffered chat()\n`);
       try {
-        response = await postStream({ url, headers, body });
-        break;
-      } catch (e) {
-        netAttempt++;
-        if (netAttempt > maxNetwork) throw e;
-        await sleep(backoffMs(netAttempt));
+        return await this.chat(messages, tools);
+      } catch (fallbackErr) {
+        if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: buffered fallback also failed (${String(fallbackErr)})\n`);
+        throw err;
       }
-    }
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`model-client.chatStream: upstream returned ${response.status}`);
+    };
+
+    // 只在「建连 + 状态码」这一段重试。一旦开始消费 SSE、deltas 已经推给前端，
+    // 再重试就会让同一轮回复在信息流里出现两遍，所以流中失败一律上抛。
+    let response: Response | null = null;
+    let watchdog: StreamWatchdog | null = null;
+    for (let attempt = 1; ; attempt++) {
+      watchdog?.stop();
+      watchdog = startStreamWatchdog(idleMs);
+      let res: Response;
+      try {
+        res = await postStream({ url, headers, body, ...(watchdog.signal ? { signal: watchdog.signal } : {}) });
+      } catch (e) {
+        watchdog.stop();
+        if (attempt > maxNetwork) return await giveUp(e instanceof Error ? e : new Error(String(e)));
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+      if (res.status >= 200 && res.status < 300) {
+        response = res;
+        break;
+      }
+      // 504 等网关错误是**正常返回的响应**，不会抛异常——早先这里直接抛错，
+      // 于是上游一次抖动就打死整轮（emitAction 对 5xx 是会重试的，两边本该一致）。
+      const detail = await res.text().catch(() => "");
+      watchdog.stop();
+      const retryable = res.status >= 500 || res.status === 408 || res.status === 429;
+      if (retryable && attempt <= maxNetwork) {
+        if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: HTTP ${res.status}, retry ${attempt}/${maxNetwork}\n`);
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+      return await giveUp(new Error(
+        `model-client.chatStream: upstream returned ${res.status}` +
+        (detail ? ` — ${detail.slice(0, 200).replace(/\s+/g, " ").trim()}` : ""),
+      ));
     }
 
-    const sseBody = response.body;
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!sseBody || !contentType.includes("text/event-stream")) {
-      // Upstream ignored stream:true — parse the buffered JSON body.
-      if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: non-SSE response (${contentType || "no content-type"}), falling back to buffered parse\n`);
-      const text = await response.text();
-      let json: unknown;
-      try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
-      return parseChatTurn(json);
-    }
+    try {
+      const sseBody = response.body;
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!sseBody || !contentType.includes("text/event-stream")) {
+        // Upstream ignored stream:true — parse the buffered JSON body.
+        if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: non-SSE response (${contentType || "no content-type"}), falling back to buffered parse\n`);
+        const text = await response.text();
+        let json: unknown;
+        try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
+        return parseChatTurn(json);
+      }
 
-    const result = await consumeChatSSE(sseBody, opts);
-    if (this.cfg.debug) {
-      process.stderr.write(
-        `[model-debug] chatStream: finish=${result.finishReason ?? "?"} ` +
-        `tool_calls=${result.toolCalls.length} text_len=${result.text.length}\n`,
-      );
+      const result = await consumeChatSSE(sseBody, { ...opts, onActivity: watchdog.bump });
+      if (this.cfg.debug) {
+        process.stderr.write(
+          `[model-debug] chatStream: finish=${result.finishReason ?? "?"} ` +
+          `tool_calls=${result.toolCalls.length} text_len=${result.text.length}\n`,
+        );
+      }
+      if (result.toolCalls.length > 0) {
+        const calls: AgentToolCall[] = result.toolCalls.map((c) => {
+          let args: unknown;
+          if (c.argsRaw) {
+            try { args = JSON.parse(c.argsRaw); } catch { args = c.argsRaw; }
+          } else {
+            args = {};
+          }
+          return { toolCallId: c.id, name: c.name, args };
+        });
+        return { kind: "tool_calls", calls, content: result.text || null };
+      }
+      return { kind: "text", content: result.text };
+    } finally {
+      watchdog.stop();
     }
-    if (result.toolCalls.length > 0) {
-      const calls: AgentToolCall[] = result.toolCalls.map((c) => {
-        let args: unknown;
-        if (c.argsRaw) {
-          try { args = JSON.parse(c.argsRaw); } catch { args = c.argsRaw; }
-        } else {
-          args = {};
-        }
-        return { toolCallId: c.id, name: c.name, args };
-      });
-      return { kind: "tool_calls", calls, content: result.text || null };
-    }
-    return { kind: "text", content: result.text };
   }
 
   /** Shared request builder for chat()/chatStream(). */
@@ -656,13 +802,14 @@ export class ModelClient implements LoopModel, ConversationalModel {
     const body: Record<string, unknown> = {
       model: this.cfg.model,
       temperature: 0,
-      max_tokens: this.cfg.toolMaxTokens ?? 4096,
+      max_tokens: this.cfg.chatMaxTokens ?? 16_384,
       messages: messages.map(toWireMessage),
     };
     if (wireTools.length > 0) {
       body.tools = wireTools;
       body.tool_choice = "auto";
     }
+    if (this.cfg.reasoningEffort) body.reasoning_effort = this.cfg.reasoningEffort;
     if (opts.stream) body.stream = true;
     return {
       url: `${this.cfg.baseUrl}/chat/completions`,
@@ -718,6 +865,7 @@ export class ModelClient implements LoopModel, ConversationalModel {
     } else {
       base.response_format = { type: "json_object" };
     }
+    if (this.cfg.reasoningEffort) base.reasoning_effort = this.cfg.reasoningEffort;
     return {
       url: `${this.cfg.baseUrl}/chat/completions`,
       headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey}` },
@@ -761,32 +909,34 @@ export class ModelClient implements LoopModel, ConversationalModel {
     return outcome.action as TbGeneration;
   }
 
-  async generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration> {
+  async generateXdc(
+    topModule: string,
+    part: string,
+    systemPrompt: string,
+    allowPinAssignments: boolean,
+    upstream?: UpstreamArtifacts,
+    topPorts?: readonly string[],
+  ): Promise<XdcGeneration> {
     const pinGuidance = allowPinAssignments
       ? "You MAY include PACKAGE_PIN and IOSTANDARD assignments IF AND ONLY IF you have verified pin data from the hardware manual. Do not invent pin numbers."
       : [
           "No verified pin table is available for this target part.",
           "Do NOT output any PACKAGE_PIN or IOSTANDARD assignment — those would be fabricated.",
-          "Instead, output EXACTLY the following template verbatim, changing only the clock port name if your design uses a different clock signal name:",
-          "",
-          "```",
-          "# Flow-validation smoke constraints (no verified pin table for this target)",
-          "create_clock -name sys_clk -period 10.000 [get_ports clk]",
-          "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]",
-          "set_property SEVERITY {Warning} [get_drc_checks UCIO-1]",
-          "```",
-          "",
-          "These constraints downgrade the two DRC checks that fail on unconstrained-pin designs so write_bitstream completes.",
-          "This is a flow-validation smoke design, not a hardware-deployment bitstream.",
+          "Do NOT change the SEVERITY of NSTD-1, UCIO-1, or any other DRC check.",
+          "Generate only constraints justified by the task and the verified RTL ports. A known primary clock may receive create_clock; omit physical pin, I/O standard, Bank-voltage, and external I/O-delay constraints until their facts are supplied.",
+          "The resulting candidate must remain fail-closed: implementation is expected to stop before bitstream generation while required board facts are missing.",
         ].join("\n");
+    const portGuidance = topPorts && topPorts.length > 0
+      ? `Verified RTL top-level ports: ${topPorts.join(", ")}. Every get_ports reference must name one of these ports exactly (bus elements may use an index).`
+      : "The Runtime could not extract the RTL top-level ports. Do not guess a port name; return no get_ports-based constraint unless an upstream interface contract proves it.";
     const outcome = await this.emitAction(
       {
         phase: "generate_xdc", systemPrompt,
-        userMessage: this.withUpstream(`Target part: ${part}\nRTL top module: ${topModule}\n\n${pinGuidance}`, upstream),
+        userMessage: this.withUpstream(`Target part: ${part}\nRTL top module: ${topModule}\n${portGuidance}\n\n${pinGuidance}`, upstream),
         actionName: "generate_xdc", actionDescription: "Produce XDC constraints for the target part.",
         schema: XDC_SCHEMA,
       },
-      makeXdcValidator(allowPinAssignments),
+      makeXdcValidator(allowPinAssignments, topPorts),
     );
     return outcome.action as XdcGeneration;
   }
@@ -922,7 +1072,7 @@ const SOURCE_EXTS = [".v", ".sv", ".vh"] as const;
 const XDC_EXTS = [".xdc"] as const;
 
 function asFile(v: unknown, field: string): ArtifactFile {
-  return asFiles([v], field, { kind: "source", extensions: SOURCE_EXTS })[0];
+  return asFiles([v], field, { kind: "source", extensions: SOURCE_EXTS })[0]!;
 }
 
 export const RTL_SCHEMA = {
@@ -974,10 +1124,43 @@ export const XDC_SCHEMA = {
   required: ["reasoning", "constraints"],
 } as const;
 
-/** Regex detecting PACKAGE_PIN / IOSTANDARD pin assignments in XDC content. */
-const XDC_PIN_RE = /\b(?:set_property\s+(?:PACKAGE_PIN|IOSTANDARD)|PACKAGE_PIN|IOSTANDARD)\b/i;
+/** Detect actual PACKAGE_PIN / IOSTANDARD assignments, not explanatory comments. */
+function assignsUnverifiedPinFacts(content: string): boolean {
+  return content.split(/\r?\n/).some((rawLine) => {
+    const line = rawLine.split("#", 1)[0]!.trim();
+    return /\bset_property\b/i.test(line) && /\b(?:PACKAGE_PIN|IOSTANDARD)\b/i.test(line);
+  });
+}
+/** Missing board facts must never be bypassed by weakening Vivado DRC policy. */
+function overridesBlockingDrcSeverity(content: string): boolean {
+  return content.split(/\r?\n/).some((line) =>
+    /\bset_property\b/i.test(line) &&
+    /\bSEVERITY\b/i.test(line) &&
+    /\bget_drc_checks\b/i.test(line) &&
+    /\b(?:NSTD-1|UCIO-1)\b/i.test(line));
+}
 
-export function makeXdcValidator(allowPinAssignments: boolean): ActionValidator {
+function xdcPortReferences(content: string): string[] {
+  const ports: string[] = [];
+  const re = /\[get_ports\s+(?:\{([^}]*)\}|"([^"]*)"|([^\]]*))\]/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    const raw = match[1] ?? match[2] ?? match[3] ?? "";
+    for (const token of raw.trim().split(/\s+/)) {
+      if (token) ports.push(token);
+    }
+  }
+  return ports;
+}
+
+function basePortName(reference: string): string {
+  return reference.replace(/\[[^\]]+\]$/, "");
+}
+
+export function makeXdcValidator(
+  allowPinAssignments: boolean,
+  topPorts?: readonly string[],
+): ActionValidator {
   return (raw: unknown): LoopAction => {
     if (!raw || typeof raw !== "object") err("xdc action must be an object");
     const o = raw as Record<string, unknown>;
@@ -985,8 +1168,21 @@ export function makeXdcValidator(allowPinAssignments: boolean): ActionValidator 
     const constraints = asFiles(o.constraints, "constraints", { kind: "constraint", extensions: XDC_EXTS });
     if (!allowPinAssignments) {
       for (const c of constraints) {
-        if (XDC_PIN_RE.test(c.content)) {
-          err(`constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target. Use only a clock constraint and the two DRC severity downgrades. Output exactly this template, changing only the clock port name if needed: create_clock -name sys_clk -period 10.000 [get_ports clk] then set_property SEVERITY Warning for DRC checks NSTD-1 and UCIO-1.`);
+        if (assignsUnverifiedPinFacts(c.content)) {
+          err("constraints content must NOT contain PACKAGE_PIN or IOSTANDARD assignments because no verified pin table is available for this target");
+        }
+        if (overridesBlockingDrcSeverity(c.content)) {
+          err("constraints content must NOT override NSTD-1 or UCIO-1 severity; missing board facts must remain blocking");
+        }
+      }
+    }
+    if (topPorts !== undefined) {
+      const known = new Set(topPorts);
+      for (const c of constraints) {
+        const unknown = xdcPortReferences(c.content)
+          .filter((reference) => !known.has(basePortName(reference)));
+        if (unknown.length > 0) {
+          err(`constraints content references unknown RTL top-level port(s): ${[...new Set(unknown)].join(", ")}. Verified ports: ${topPorts.join(", ")}`);
         }
       }
     }

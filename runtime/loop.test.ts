@@ -12,6 +12,7 @@ import {
   VIVADO_CAPABILITY_VERSION,
   FAKE_CAPABILITIES,
   WORKER_RESULT_NAME,
+  fakeEvidence,
   renderFailureDiagnostics,
   extractTopicKeywords,
   extractModulePorts,
@@ -25,7 +26,7 @@ import {
   type GovernanceClient,
   type LoopModel,
   type RtlGeneration,
-  type RunState,
+  type AgentState,
   type TbGeneration,
   type XdcGeneration,
   type RepairGeneration,
@@ -37,7 +38,7 @@ import {
 
 const RTL: ArtifactFile = { path: "counter.v", content: "module counter(input clk,input rst_n,output reg[7:0] c);always@(posedge clk)if(!rst_n)c<=0;else c<=c+1;endmodule\n" };
 const TB: ArtifactFile = { path: "tb_counter.v", content: "module tb_counter;reg clk=0;reg rst_n=0;wire[7:0] c;counter d(.clk(clk),.rst_n(rst_n),.c(c));always #5 clk=~clk;initial begin rst_n=0;#20;rst_n=1;repeat(3)@(posedge clk);$display(\"PASS\");$finish;end endmodule\n" };
-const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\nset_property SEVERITY {Warning} [get_drc_checks UCIO-1]\ncreate_clock -period 10 [get_ports clk]\n" };
+const XDC: ArtifactFile = { path: "synthia.xdc", content: "# Missing board I/O facts remain blocking.\ncreate_clock -period 10 [get_ports clk]\n" };
 
 const DOC_INTAKE: DocGeneration = { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Counter 需求梳理摘要\n## Task Summary\n8-bit counter.\n## Acceptance Criteria\nCounts up." };
 const DOC_BEHAVIOR: DocGeneration = { phase: "generate_behavior_wave", reasoning: "ok", docPath: "doc/spec/behavior_spec.md", content: "# Behavior Spec\n## Rules\nR1: counter increments on clock." };
@@ -72,6 +73,7 @@ function makeLoop(
   opts: {
     maxRepairRounds?: number;
     governance?: GovernanceClient;
+    acceptanceTestbench?: TbGeneration;
   } = {},
 ) {
   const governance = opts.governance ?? new NoGovernanceClient();
@@ -84,6 +86,7 @@ function makeLoop(
     part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
     toolModelPolicyHash: "policy-v1",
     maxRepairRounds: opts.maxRepairRounds,
+    acceptanceTestbench: opts.acceptanceTestbench,
   });
 }
 
@@ -175,6 +178,62 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
     expect(model.repairs).toHaveLength(1);
     expect(model.repairs[0]!.stderr).toContain("undefined signal");
     expect(model.repairs[0]!.attempt).toBe(1);
+    expect(result.rtl?.sources).toEqual([RTL]);
+    expect(result.testbench?.testbench).toEqual(TB);
+  });
+
+  test("external acceptance failure repairs RTL while the evaluator TB remains immutable", async () => {
+    let simulateCalls = 0;
+    const connector = new FakeVivadoConnector({
+      behavior: {
+        respond: (req, idx) => {
+          if (req.operation === "simulate") {
+            simulateCalls++;
+            if (simulateCalls === 2) {
+              return {
+                status: "failed" as const,
+                jobId: "job-external-fail",
+                operation: req.operation,
+                inputSha256: "external-fail",
+                stderr: "acceptance assertion failed",
+                errorCode: "VIVADO_SIMULATION_FAILED",
+                evidence: { jobId: "job-external-fail", entries: [] },
+              };
+            }
+          }
+          return successBehavior().respond(req, idx);
+        },
+      },
+    });
+    const repairedRtl: ArtifactFile = {
+      path: "counter.v",
+      content: RTL.content.replace("c<=c+1", "c<=c+8'd1"),
+    };
+    const model = new FullChainModel({
+      repairResponse: {
+        phase: "repair",
+        reasoning: "fix DUT only",
+        sources: [repairedRtl],
+        testbench: { path: "tb/weakened.v", content: "module weakened; initial $display(\"PASS\"); endmodule\n" },
+      },
+    });
+    const acceptance: TbGeneration = {
+      phase: "generate_testbench",
+      reasoning: "evaluator-owned",
+      testbenchModule: "acceptance_counter",
+      testbench: { path: "acceptance/counter_tb.sv", content: "module acceptance_counter; initial $display(\"PASS\"); endmodule\n" },
+    };
+    const loop = makeLoop(model, connector, { acceptanceTestbench: acceptance });
+    const result = await loop.run("计数器");
+    expect(result.status).toBe("succeeded");
+    expect(connector.callCount("simulate")).toBe(3);
+    expect(connector.callCount("validate_sources")).toBe(2);
+    expect(result.rtl?.sources).toEqual([repairedRtl]);
+    expect(result.testbench?.testbench).toEqual(TB);
+    expect(result.audit.some((event) => event.action === "external_acceptance failed")).toBe(true);
+    expect(result.audit.some((event) => event.action === "external_acceptance passed")).toBe(true);
+    expect(result.audit.some((event) => event.detail?.includes("evaluator TB unchanged"))).toBe(false);
+    expect(model.repairs[0]?.stderr).toContain("immutable");
   });
 
   test("repair budget exhausted (3) → fail-closed", async () => {
@@ -198,7 +257,7 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
   function failOnceWithWorkerResultBehavior() {
     let failed = false;
     return {
-      respond: (req: { operation: string }, _idx: number) => {
+      respond: (req: { operation: string; top: string }, _idx: number) => {
         if (req.operation === "simulate" && !failed) {
           failed = true;
           return {
@@ -224,7 +283,7 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
           operation: req.operation as never,
           inputSha256: "wr-sha",
           stdout: "PASS",
-          evidence: { jobId: "fake-job-ok", entries: [{ name: "result.txt", sha256: "r".repeat(64), sizeBytes: 4, mediaType: "text/plain" }] },
+          evidence: fakeEvidence(req.operation as never, req.top),
         };
       },
     };
@@ -367,6 +426,29 @@ describe("LoopExecutor — tool scenarios (no-governance auto-approve)", () => {
     expect(connector.callCount("implement")).toBe(1);
   });
 
+  test("Runtime rejects a stale Worker success when sta.rpt is unconstrained", async () => {
+    const unconstrained = `Timing Summary Report
+WNS(ns) TNS(ns)
+0.000 0.000
+All user specified timing constraints are met.
+There are 71 register/latch pins with no clock driven by root clock pin: clock (HIGH)
+There are no user specified timing constraints.
+`;
+    const connector = new FakeVivadoConnector({
+      behavior: successBehavior(),
+      evidenceReader: async (_jobId, name) => ({
+        content: name === "sta.rpt" ? unconstrained : "",
+        sha256: "e".repeat(64),
+        truncated: false,
+        mediaType: "text/plain",
+      }),
+    });
+    const result = await makeLoop(new FullChainModel(), connector).run("计数器");
+    expect(result.status).toBe("fail_closed");
+    expect(result.endedReason).toContain("unconstrained");
+    expect(result.audit.some((event) => event.errorCode === "VIVADO_TIMING_UNCONSTRAINED")).toBe(true);
+  });
+
   test("synthesize failed → loop fail_closed (implement not reached)", async () => {
     const connector = new FakeVivadoConnector({
       behavior: {
@@ -448,9 +530,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     // Phase 1: run → stops at G1
     gov.setSubmitResult("in_review");
     const r1 = await loop.run("计数器", {
-      runId: "test-run-1",
-      runState: {
-        runId: "test-run-1", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-agent-1",
+      agentState: {
+        agentId: "test-agent-1", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -464,8 +546,8 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
 
     // Phase 2: resume → runs behavior_wave → stops at G2
     const r2 = await loop.resume({
-      runId: "test-run-1", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
-      createdAt: r1.runId!, updatedAt: new Date().toISOString(),
+      agentId: "test-agent-1", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      createdAt: r1.agentId!, updatedAt: new Date().toISOString(),
       currentStage: "intake", status: "awaiting_approval", awaitingGate: "G1",
       docs: { intake: { revisionId: "rev-1", artifactId: "art-1", version: 1, contentHash: "h1" } },
       gateSubmissions: { G1: g1SubmissionId },
@@ -484,9 +566,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     gov.setSubmitResult("in_review");
     gov.setGateState("sub-mock-1", "approved"); // G1
     const r1 = await loop.run("计数器", {
-      runId: "test-g3",
-      runState: {
-        runId: "test-g3", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-g3",
+      agentState: {
+        agentId: "test-g3", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "behavior_wave", status: "awaiting_approval", awaitingGate: "G2",
         docs: {
@@ -512,9 +594,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
     const loop = makeLoop(new FullChainModel(), connector, { governance: gov });
     const result = await loop.run("计数器", {
-      runId: "test-g4-full",
-      runState: {
-        runId: "test-g4-full", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-g4-full",
+      agentState: {
+        agentId: "test-g4-full", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -536,9 +618,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     // Run to G1
     gov.setSubmitResult("in_review");
     const r1 = await loop.run("计数器", {
-      runId: "test-reject",
-      runState: {
-        runId: "test-reject", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-reject",
+      agentState: {
+        agentId: "test-reject", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -552,7 +634,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
 
     // Resume → fail-closed
     const r2 = await loop.resume({
-      runId: "test-reject", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-reject", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       currentStage: "intake", status: "awaiting_approval", awaitingGate: "G1",
       docs: { intake: { revisionId: "rev-1", artifactId: "art-1", version: 1, contentHash: "h1" } },
@@ -571,9 +653,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
 
     gov.setSubmitResult("in_review");
     const r1 = await loop.run("计数器", {
-      runId: "test-withdraw",
-      runState: {
-        runId: "test-withdraw", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-withdraw",
+      agentState: {
+        agentId: "test-withdraw", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -585,7 +667,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     gov.setGateState(g1Sub, "withdrawn");
 
     const r2 = await loop.resume({
-      runId: "test-withdraw", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-withdraw", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       currentStage: "intake", status: "awaiting_approval", awaitingGate: "G1",
       docs: { intake: { revisionId: "rev-1", artifactId: "art-1", version: 1, contentHash: "h1" } },
@@ -603,9 +685,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
 
     gov.setSubmitResult("in_review");
     const r1 = await loop.run("计数器", {
-      runId: "test-waiting",
-      runState: {
-        runId: "test-waiting", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-waiting",
+      agentState: {
+        agentId: "test-waiting", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -617,7 +699,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     gov.setGateState(g1Sub, "in_review"); // still in review
 
     const r2 = await loop.resume({
-      runId: "test-waiting", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-waiting", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       currentStage: "intake", status: "awaiting_approval", awaitingGate: "G1",
       docs: { intake: { revisionId: "rev-1", artifactId: "art-1", version: 1, contentHash: "h1" } },
@@ -634,9 +716,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
     const loop = makeLoop(new FullChainModel(), connector, { governance: gov });
     await loop.run("计数器", {
-      runId: "test-artifacts",
-      runState: {
-        runId: "test-artifacts", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-artifacts",
+      agentState: {
+        agentId: "test-artifacts", task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -664,7 +746,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     const gov = new MockGovernanceClient();
     gov.setSubmitResult("in_review");
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
-    const calls: Array<{ gate: string; submissionId: string; runId: string }> = [];
+    const calls: Array<{ gate: string; submissionId: string; agentId: string }> = [];
     const loop = new LoopExecutor({
       model: new FullChainModel(), connector, governance: gov,
       skillPrompts: {
@@ -673,22 +755,22 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
       },
       part: "xc7k70tfbv676-1", projectId: "p1", processInstanceId: "pi-1",
       toolModelPolicyHash: "policy-v1",
-      onAwaitingApproval: (gate, submissionId, runId) => calls.push({ gate, submissionId, runId }),
+      onAwaitingApproval: (gate, submissionId, agentId) => calls.push({ gate, submissionId, agentId }),
     });
-    await loop.run("计数器", { runId: "test-cb" });
+    await loop.run("计数器", { agentId: "test-cb" });
     expect(calls.length).toBe(1);
     expect(calls[0]!.gate).toBe("G1");
-    expect(calls[0]!.runId).toBe("test-cb");
+    expect(calls[0]!.agentId).toBe("test-cb");
   });
 
-  test("run-state persistence: G1 pause → save to disk → load → resume round-trip", async () => {
+  test("agent-state persistence: G1 pause → save to disk → load → resume round-trip", async () => {
     const gov = new MockGovernanceClient();
     gov.setSubmitResult("in_review");
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
 
     // Capture saved states.
-    let savedState: RunState | undefined;
-    const runId = "test-persist-rt";
+    let savedState: AgentState | undefined;
+    const agentId = "test-persist-rt";
 
     const loop1 = new LoopExecutor({
       model: new FullChainModel(), connector, governance: gov,
@@ -702,9 +784,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     });
 
     const r1 = await loop1.run("计数器", {
-      runId,
-      runState: {
-        runId, task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId,
+      agentState: {
+        agentId, task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -720,6 +802,7 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     expect(savedState!.gateSubmissions?.G1).toBeTruthy();
     expect(savedState!.docs?.intake).toBeTruthy();
     expect(savedState!.docs?.intake?.revisionId).toBeTruthy();
+    expect(savedState!.docArtifacts).toEqual([DOC_INTAKE]);
 
     // Simulate loading from disk and resuming.
     const g1Sub = savedState!.gateSubmissions!.G1!;
@@ -750,8 +833,8 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
     const origGenRtl = model.generateRtl.bind(model);
     model.generateRtl = async () => { rtlCallCount++; return origGenRtl(); };
 
-    let savedState: RunState | undefined;
-    const runId = "test-tool-resume";
+    let savedState: AgentState | undefined;
+    const agentId = "test-tool-resume";
 
     // Phase 1: run through all gates (auto-approved), generate RTL,
     // but crash at validate by using a connector that throws on validate_sources.
@@ -779,9 +862,9 @@ describe("LoopExecutor — GJB gate flow with governance", () => {
 
     // Run — will crash at validate_sources after RTL is generated.
     const r1 = await loop1.run("计数器", {
-      runId,
-      runState: {
-        runId, task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId,
+      agentState: {
+        agentId, task: "计数器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},
@@ -849,6 +932,10 @@ describe("extractModulePorts", () => {
   });
   test("bare-name (non-ANSI) port list fallback", () => {
     expect(extractModulePorts("module top(clk, rst, data);", "top")).toEqual(["clk", "rst", "data"]);
+  });
+  test("skips a parameter block before extracting ANSI ports", () => {
+    const src = "module uart_transceiver #(parameter integer CLK_FREQ=100000000)(input wire clock,input wire reset,output wire txd);";
+    expect(extractModulePorts(src, "uart_transceiver")).toEqual(["clock", "reset", "txd"]);
   });
 });
 
@@ -1020,13 +1107,13 @@ describe("LoopExecutor — conformity repair version monotonicity", () => {
     expect(rev.version).toBe(2);
   });
 
-  test("conformity repair persists version=2 in run-state (resume continuity)", async () => {
+  test("conformity repair persists version=2 in agent-state (resume continuity)", async () => {
     const gov = new MockGovernanceClient();
     gov.setSubmitResult("approved"); // auto-approve all gates
     const connector = new FakeVivadoConnector({ behavior: successBehavior() });
     const model = new OffTopicDocModel();
 
-    let savedState: RunState | undefined;
+    let savedState: AgentState | undefined;
     const loop = new LoopExecutor({
       model, connector, governance: gov,
       skillPrompts: { rtl: "rtl", tb: "tb", xdc: "xdc", repair: "repair", intake: "intake", behaviorWave: "behavior", architecture: "arch", registerSpec: "reg" },
@@ -1035,9 +1122,9 @@ describe("LoopExecutor — conformity repair version monotonicity", () => {
       onStateChange: async (state) => { savedState = state; },
     });
     const result = await loop.run("实现一个 UART 收发器", {
-      runId: "test-version-persist",
-      runState: {
-        runId: "test-version-persist", task: "实现一个 UART 收发器", part: "xc7k70tfbv676-1", projectId: "p1",
+      agentId: "test-version-persist",
+      agentState: {
+        agentId: "test-version-persist", task: "实现一个 UART 收发器", part: "xc7k70tfbv676-1", projectId: "p1",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         currentStage: "intake", status: "running",
         docs: {}, gateSubmissions: {}, gateDecisions: {},

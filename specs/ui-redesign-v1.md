@@ -1,9 +1,11 @@
-# Synthia Web UI 重设计规格（v1）
+# Synthia Web UI 重设计规格（v1 · 部分替代）
 
-- 状态：草案，待项目负责人确认
+- 状态：部分替代；用户可见产品边界以 [`product-baseline-v1.md`](product-baseline-v1.md) 为准
 - 日期：2026-08-13
 - 范围：现有四个页面 + 任务工作台的信息架构与交互重设计；不改技术栈（Vue3+Vite+Pinia）、不改 API 契约
 - 上游：`synthia-platform-docs-discussion-freeze-20260730` 冻结包；本规格为特性级 spec，验收以本文为准
+
+> 本文的分层、信息隐藏和单人开发/评审原则仍可参考；“所有项目固定 GJB 阶段”和“新建项目只填名称并默认器件”已被两类项目与流程选择规则替代。
 
 ## 1. 问题陈述
 

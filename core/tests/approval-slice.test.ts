@@ -31,7 +31,7 @@ import {
   type ApproveGateSubmissionInput,
   type ApproveGateSubmissionResult,
 } from "../src/services/approval.ts";
-import { ConflictError, InvariantError } from "../src/memory-repository.ts";
+import { ConflictError, InvariantError } from "../src/errors.ts";
 import { withTransaction, type TransactionClient } from "../src/db/repository.ts";
 
 // The entire suite is skipped when no live database is configured. Skipped

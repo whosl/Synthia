@@ -212,9 +212,10 @@ describe.skipIf(!DATABASE_URL)("api gaps — Web UI-1 slice (real PostgreSQL)", 
       const rows = envelopeData(res.json) as Record<string, unknown>[];
       expect(rows.length).toBe(1);
       expect(rows[0]!.id).toBe(g.submissionId);
-      for (const f of ["id", "gate", "state", "snapshot_id", "process_instance_id", "submitter_id", "submitted_at", "created_at"]) {
+      for (const f of ["id", "gate", "state", "snapshot_id", "process_instance_id", "work_version_id", "submitter_id", "submitted_at", "created_at"]) {
         expect(f in rows[0]!).toBe(true);
       }
+      expect(rows[0]!.work_version_id).toBeNull();
       expect(rows[0]!.state).toBe("in_review");
     });
 

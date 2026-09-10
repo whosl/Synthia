@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { createCloudflareAccessTokenProvider, createCloudflareRemoteConnector, createCloudflareRemoteTransport, createEnvironmentSecretResolver } from "./http.ts";
+import { createCloudflareAccessTokenProvider, createCloudflareRemoteConnector, createCloudflareRemoteTransport, createEnvironmentSecretResolver,
+  createMtlsDirectRemoteConnector,
+} from "./http.ts";
 import { RemoteConnectorError, type RemoteEnvelope } from "./remote.ts";
 
 const envelope: RemoteEnvelope<Record<string, never>> = {
@@ -73,5 +75,66 @@ describe("Cloudflare Access remote transport", () => {
     const result = await transport.request("/discover", { method: "POST", body: envelope });
     expect(result.status).toBe(403);
     expect(result.body).toMatchObject({ error_code: "ACCESS_DENIED" });
+  });
+
+  test("maps a Cloudflare HTML access page to ACCESS_DENIED even with an edge 200", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => new Response("<!doctype html><html><title>Cloudflare Access</title></html>", { status: 200 }),
+    });
+    const result = await transport.request("/discover", { method: "POST", body: envelope });
+    expect(result.body).toMatchObject({ error_code: "ACCESS_DENIED" });
+  });
+
+  test("does not misclassify an unrelated HTML failure as Cloudflare Access", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => new Response("<!doctype html><html><title>Upstream error</title></html>", { status: 502 }),
+    });
+    const result = await transport.request("/discover", { method: "POST", body: envelope });
+    expect(result.body).toMatchObject({ error_code: "REMOTE_PROTOCOL_ERROR" });
+  });
+
+  test("maps response body download failures to retryable remote unavailable", async () => {
+    const transport = createCloudflareRemoteTransport({
+      endpointUrl: "https://connect.wenzhuolin.xyz",
+      tokenProvider: async () => ({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => { throw new DOMException("timed out", "TimeoutError"); },
+      }) as Response,
+    });
+    await expect(transport.request("/discover", { method: "POST", body: envelope }))
+      .rejects.toMatchObject({ code: "REMOTE_UNAVAILABLE", retryable: true });
+  });
+});
+
+// ─── direct mTLS connector factory ───────────────────────────────────────────
+
+describe("mTLS direct connector factory", () => {
+  const base = {
+    allowlist: ["100.96.223.49"],
+    actor: { actor_type: "service" as const, actor_id: "core-test" },
+    classification: "internal" as const,
+    projectId: "p1",
+  };
+
+  test("rejects config without endpoint_url", () => {
+    expect(() => createMtlsDirectRemoteConnector({ ...base, endpoint: {} })).toThrow("endpoint_url");
+  });
+
+  test("rejects config without cert paths", () => {
+    expect(() => createMtlsDirectRemoteConnector({ ...base, endpoint: { endpoint_url: "https://100.96.223.49:8444" } })).toThrow("client_cert_path");
+  });
+
+  test("rejects unreadable mTLS material", () => {
+    expect(() =>
+      createMtlsDirectRemoteConnector({
+        ...base,
+        endpoint: { endpoint_url: "https://100.96.223.49:8444", client_cert_path: "/nonexistent/a.pem", client_key_path: "/nonexistent/b.pem", server_ca_path: "/nonexistent/c.pem" },
+      }),
+    ).toThrow("unreadable");
   });
 });

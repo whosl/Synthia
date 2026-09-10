@@ -1,26 +1,17 @@
-# =============================================================================
-# 文件名称 : uart.xdc
-# 目标器件 : xc7k70tfbv676-1
-# 用途说明 : 仿真验证 / 综合冒烟测试用约束（非板级引脚映射）。
-#            仅定义主时钟约束；顶层端口未绑定物理引脚，故对 NSTD-1 与
-#            UCIO-1 两条 DRC 检查降级豁免。
-# =============================================================================
-
-# ---- 主时钟约束 ----
-# 顶层 clk 端口，100 MHz，周期 10.000 ns
-create_clock -name sys_clk -period 10.000 [get_ports clk]
-
-# 其余顶层信号（rst / tx_start / tx_data / txd / rx_data 等）均位于唯一
-# 时钟域 clk 下，由 sys_clk 自动传播约束，无需额外创建。
-
-# =============================================================================
-# I/O 约束豁免（smoke 用途，无板级引脚分配）
-# -----------------------------------------------------------------------------
-# NSTD-1 : 设计中存在未绑定物理引脚的顶层端口（本工程仅做功能仿真与综合
-#          冒烟，顶层端口经环回直接连接，不映射到封装引脚）。
-# UCIO-1 : 顶层端口缺少 I/O 标准（IOSTANDARD）约束，原因同上。
-# 处置   : 将上述两条 DRC 检查降级为 Warning，使综合 / 实现 flow 不因此
-#          中断。正式板级移植时须删除本豁免并补全 PACKAGE_PIN / IOSTANDARD。
-# =============================================================================
-set_property SEVERITY WARNING [get_drc_checks NSTD-1]
-set_property SEVERITY WARNING [get_drc_checks UCIO-1]
+# VC709 Rev 1.0 / XC7VX690T-2FFG1761C. Pin/electrical facts: AMD UG887 v1.6.
+set_property PACKAGE_PIN H19 [get_ports sysclk_p]
+set_property PACKAGE_PIN G18 [get_ports sysclk_n]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_p]
+set_property IOSTANDARD DIFF_SSTL15 [get_ports sysclk_n]
+create_clock -name sysclk_200 -period 5.000 [get_ports sysclk_p]
+set_property PACKAGE_PIN AV40 [get_ports cpu_reset]
+set_property IOSTANDARD LVCMOS18 [get_ports cpu_reset]
+set_property PACKAGE_PIN AU36 [get_ports uart_txd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_txd]
+set_property PACKAGE_PIN AU33 [get_ports uart_rxd]
+set_property IOSTANDARD LVCMOS18 [get_ports uart_rxd]
+# UART and pushbutton are asynchronous; no fictitious synchronous I/O delay.
+set_false_path -from [get_ports uart_rxd] -to [get_pins u_uart/u_uart_rx/rxd_meta_reg/D]
+set_false_path -from [get_ports cpu_reset]
+set_property CFGBVS GND [current_design]
+set_property CONFIG_VOLTAGE 1.8 [current_design]

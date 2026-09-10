@@ -36,10 +36,6 @@ export interface ConformityArtifact {
 }
 
 /** Result of a content-conformity check. */
-export interface ConformityResult {
-  readonly ok: boolean;
-  readonly problems: readonly string[];
-}
 
 /** Artifact types treated as authoritative requirements sources for keywords. */
 const REQUIREMENTS_TYPES: Readonly<Record<string, true>> = {

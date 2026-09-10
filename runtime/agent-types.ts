@@ -6,10 +6,16 @@
  * 但对外只暴露本契约。
  *
  * 设计取向（见 plan.md 基座修正）：不引入 pi-agent-core/dsh/Cordis。
- * 在现有自带 ModelClient 上自建自由 tool-calling 循环，GJB 三层钩子自控。
+ * Synthia 自建自由 tool-calling 循环、掌握 GJB 三层钩子；模型传输层可使用
+ * pi-ai 的 provider adapter，但不得把工具执行或治理控制交给第三方 agent loop。
  */
 
 import type { ArtifactType, GateId, GovernanceClient, LoopConnector } from "./types.ts";
+import type {
+  RuntimeTaskKind,
+  TaskAuthorizationScope,
+  TaskWorkspaceClient,
+} from "./task-workspace-client.ts";
 
 /** JSON Schema 子集（OpenAI tool `parameters` 格式）。 */
 export type ToolParameters = Record<string, unknown>;
@@ -17,6 +23,14 @@ export type ToolParameters = Record<string, unknown>;
 /** 工具执行上下文：注入治理能力（Core）与 Connector。工具内不得绕过 Core 直连 Worker。 */
 export interface ToolExecContext {
   readonly projectId: string;
+  /** Core-issued task identity. Legacy sessions omit these fields. */
+  readonly taskId?: string;
+  readonly taskKind?: RuntimeTaskKind;
+  readonly parentTaskId?: string;
+  readonly workspaceId?: string;
+  readonly authorization?: TaskAuthorizationScope;
+  /** Narrow isolated-workspace capability. Present for side tasks only. */
+  readonly workspace?: TaskWorkspaceClient;
   /** Core 治理客户端（登记候选制品/快照/门禁）。 */
   readonly governance: GovernanceClient;
   /** Connector（经 Core 提交 Vivado Job）。无可用时为 null（工具须 fail-closed）。 */
@@ -47,7 +61,7 @@ export interface RegisteredArtifactInfo {
  * - **门禁锁定**：`core_submit_gate` 成功后调用 {@link lockForGate} 进入「等待批准」状态；
  *   在该状态下会话在**工具执行层硬拦**除 `core_check_gate` 外的一切 skill/vivado 工具调用。
  *   {@link core_check_gate} 返回 `approved` 时 {@link unlockGate} 解除；`rejected`/`withdrawn`
- *   保持锁定。锁定状态持久化进 run-state（重启后仍锁定）。
+ *   保持锁定。锁定状态持久化进 agent-state（重启后仍锁定）。
  * - **登记簿**：skill 工具登记候选时调用 {@link recordArtifact}，`core_create_snapshot`
  *   记录快照成员；`core_submit_gate` 据此在提交前运行主题/名称/端口符合性校验。
  */
@@ -60,7 +74,7 @@ export interface FreeAgentController {
   lockForGate(gate: GateId, submissionId: string): void;
   /** 解除锁定（批准到达）并持久化。 */
   unlockGate(): void;
-  /** 流程实例 id（createGateSubmission 入参；来自 run-state）。 */
+  /** 流程实例 id（createGateSubmission 入参；来自 agent-state）。 */
   readonly processInstanceId: string;
   /** 记录已登记候选制品（符合性校验用）。 */
   recordArtifact(info: RegisteredArtifactInfo): void;
@@ -128,25 +142,53 @@ export interface ConversationalModel {
 
 /**
  * 可选流式扩展：chat 的 `stream:true` 变体。模型文本增量实时回调
- * （onDelta），聚合结果与 chat() 等价。未实现者由会话回退到缓冲 chat()。
+ * （onDelta）、思维链增量实时回调（onReasoning），聚合结果与 chat() 等价。
+ * 未实现者由会话回退到缓冲 chat()。
  */
 export interface StreamingConversationalModel {
   chatStream(
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
-    opts: { onTextStart?: () => void; onDelta?: (text: string) => void },
+    opts: {
+      onTextStart?: () => void;
+      onDelta?: (text: string) => void;
+      onReasoningStart?: () => void;
+      onReasoning?: (text: string) => void;
+    },
   ): Promise<ChatTurn>;
 }
 
 /**
  * prompt 的流式选项（SSE 切片）：模型文本 delta 实时写入会话消息流
  * （流式 text part），完整轮次结束照旧落 audit（free_agent_reply）。
+ *
+ * 思维链（reasoning）与工具调用（tool）同样实时上流——否则模型推理的那段
+ * （实测 8–40 秒）与工具执行期间前端完全空白，看上去就是「没有流式输出」。
+ * 思维链不落 audit（体量大、非回复内容），只在实时流里可见。
  */
 export interface PromptStreamOptions {
   /** 第一个文本 delta 到达（text part 创建，state=streaming）。 */
   onTextStart?: (partId: string) => void;
   /** 文本增量（追加到该 part）。 */
   onDelta?: (partId: string, text: string) => void;
+  /** 第一个思维链 delta 到达（reasoning part 创建，state=streaming）。 */
+  onReasoningStart?: (partId: string) => void;
+  /** 思维链增量（追加到该 part）。 */
+  onReasoningDelta?: (partId: string, text: string) => void;
+  /** 工具开始执行（tool part 创建，state=running）；fullArgs 供持久化完整事实。 */
+  onToolStart?: (
+    callId: string,
+    name: string,
+    args: string,
+    fullArgs?: string,
+  ) => void | Promise<void>;
+  /** 工具执行结束（同一 part 转 done/error）；fullResult 供持久化完整事实。 */
+  onToolEnd?: (
+    callId: string,
+    ok: boolean,
+    result: string,
+    fullResult?: string,
+  ) => void | Promise<void>;
 }
 
 /** 会话状态机。 */
@@ -160,9 +202,16 @@ export type FreeAgentStatus =
 
 /** 自由 Agent 会话。server/web 面向此接口编程（Slice D）。 */
 export interface FreeAgentSession {
-  readonly runId: string;
+  readonly agentId: string;
   readonly projectId: string;
   status(): FreeAgentStatus;
+  /**
+   * 当前锁定的门（会话停在门审查上时非 undefined）。
+   *
+   * server 在轮次边界据此回写 `handle.awaitingGate` —— 自由 agent 不走
+   * `executeAgent`，handle 没有别的写入者（见 `syncHandleFromSession`）。
+   */
+  readonly lockedGate: { readonly gate: GateId; readonly submissionId: string } | undefined;
   /**
    * 新指令或闲聊。内部循环：chat → 若 tool_calls 则逐个执行（含钩子）→ 回填 → 再 chat，
    * 直到模型返回纯文本。返回该文本。可被 steer()/abort() 打断。
@@ -171,8 +220,8 @@ export interface FreeAgentSession {
    * 不支持流式的模型自动回退缓冲 chat()，回调不触发但轮次结果不变。
    */
   prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
-  /** 运行中接管/纠偏（下一工具结束后注入上下文），不入队新 prompt。 */
-  steer(text: string): void;
+  /** 运行中纠偏；返回的 Promise 完成后已持久化，在模型或完整工具批次边界注入。 */
+  steer(text: string): void | Promise<void>;
   /** 立即终止。 */
   abort(reason?: string): void;
 }

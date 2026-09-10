@@ -11,13 +11,15 @@ import {
   TOOL_STATUS_TEXT,
   auditToParts,
   bitstreamFromEvidence,
+  conversationEventsToParts,
+  replyErrorText,
   toolDurationLabel,
   type SynthiaLifecyclePart,
   type SynthiaPart,
   type SynthiaTextPart,
   type SynthiaToolPart,
 } from "../src/domain/parts.ts";
-import type { TaskAuditEvent, TaskRunDetail } from "../src/api/types.ts";
+import type { SideTaskConversationEvent, TaskAuditEvent, TaskAgentDetail } from "../src/api/types.ts";
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
 
@@ -27,10 +29,10 @@ function audit(partial: Partial<TaskAuditEvent> & Pick<TaskAuditEvent, "category
   return { ts: ts ?? `2026-08-17T10:00:${String(seq).padStart(2, "0")}Z`, seq, ...partial };
 }
 
-function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
+function makeDetail(overrides: Partial<TaskAgentDetail>): TaskAgentDetail {
   seq = 0;
   return {
-    run_id: "run-test",
+    agent_id: "agent-test",
     project_id: "proj-1",
     status: "running",
     current_stage: null,
@@ -42,6 +44,65 @@ function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
     ...overrides,
   };
 }
+
+function conversationEvent(
+  sequence: number,
+  eventKind: SideTaskConversationEvent["event_kind"],
+  payload: Readonly<Record<string, unknown>>,
+): SideTaskConversationEvent {
+  return {
+    id: `te-${sequence}`,
+    sequence,
+    event_kind: eventKind,
+    payload,
+    payload_hash: String(sequence).padStart(64, "0"),
+    actor_type: eventKind === "user_message" ? "human" : "service",
+    actor_id: eventKind === "user_message" ? "admin" : "synthia-runtime",
+    created_at: `2026-08-25T10:00:${String(sequence).padStart(2, "0")}Z`,
+  };
+}
+
+describe("conversationEventsToParts：Project Agent 持久化对话", () => {
+  test("刷新后恢复多轮用户/Agent 文本并按 call id 更新工具卡", () => {
+    const parts = conversationEventsToParts([
+      conversationEvent(1, "user_message", { text: "检查当前状态" }),
+      conversationEvent(2, "tool_call", { tool_call_id: "call-1", name: "read_file", args: { path: "rtl/pwm.v" } }),
+      conversationEvent(3, "tool_result", { tool_call_id: "call-1", name: "read_file", ok: true, result: "module pwm;" }),
+      conversationEvent(4, "assistant_message", { text: "当前仍在 G0。" }),
+      conversationEvent(5, "user_message", { text: "继续" }),
+      conversationEvent(6, "assistant_message", { text: "[error] model unavailable" }),
+      conversationEvent(7, "status", { status: "awaiting_user" }),
+    ]);
+
+    expect(parts.map((part) => part.kind)).toEqual([
+      "text",
+      "agent_tool",
+      "text",
+      "text",
+      "text",
+    ]);
+    expect(textParts(parts).map((part) => [part.role, part.text])).toEqual([
+      ["user", "检查当前状态"],
+      ["agent", "当前仍在 G0。"],
+      ["user", "继续"],
+      ["agent", "[error] model unavailable"],
+    ]);
+    expect(parts[1]).toMatchObject({
+      id: "call-1",
+      state: "done",
+      name: "read_file",
+      result: "module pwm;",
+    });
+  });
+
+  test("持久化取消状态恢复为打断卡", () => {
+    expect(conversationEventsToParts([
+      conversationEvent(1, "status", { status: "cancelled" }),
+    ])).toEqual([
+      expect.objectContaining({ kind: "interrupt", text: "已打断当前回复，按新消息继续。" }),
+    ]);
+  });
+});
 
 function toolParts(parts: readonly SynthiaPart[]): SynthiaToolPart[] {
   return parts.filter((p): p is SynthiaToolPart => p.kind === "tool");
@@ -66,7 +127,15 @@ describe("auditToParts：工具四态转移", () => {
     const parts = auditToParts(makeDetail({ status: "running", current_stage: "synthesize" }));
     const tools = toolParts(parts);
     expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ op: "synthesize", title: "综合", status: "pending", time: { start: null, end: null }, durationMs: null });
+    expect(tools[0]).toMatchObject({
+      op: "synthesize",
+      title: "综合",
+      status: "pending",
+      time: { start: null, end: null },
+      durationMs: null,
+      jobId: null,
+      errorCode: null,
+    });
   });
 
   test("权限门事件：pending → running（time.start 记录）", () => {
@@ -102,6 +171,9 @@ describe("auditToParts：工具四态转移", () => {
     expect(tools[0]!.time).toEqual({ start: "2026-08-17T10:00:10Z", end: "2026-08-17T10:02:10Z" });
     expect(tools[0]!.durationMs).toBe(120_000);
     expect(tools[0]!.errorText).toBeNull();
+    // 成功事件不带 jobId/errorCode 时兜底为 null（本用例的 toolDone 未设置 jobId）。
+    expect(tools[0]!.jobId).toBeNull();
+    expect(tools[0]!.errorCode).toBeNull();
   });
 
   test("失败事件：running → error（人话 errorText，可展开）", () => {
@@ -119,13 +191,15 @@ describe("auditToParts：工具四态转移", () => {
     expect(tools[0]!.status).toBe("error");
     expect(tools[0]!.errorText).toBe("仿真未能完成，任务已安全停止。技术详情见运行记录。");
     expect(tools[0]!.errorText).not.toMatch(/X/); // 错误码不进对话流（L3）
+    // 错误码/jobId 仍在 part 数据上（记录面板用），只是不进 errorText 人话展开区。
+    expect(tools[0]!.errorCode).toBe("X");
   });
 
   test("无权限门事件的完成事件 → 直接 completed part（容错）", () => {
     const parts = auditToParts(makeDetail({ status: "running", audit: [toolDone("validate_sources")] }));
     const tools = toolParts(parts);
     expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ op: "validate_sources", status: "completed", title: "编译检查" });
+    expect(tools[0]).toMatchObject({ op: "validate_sources", status: "completed", title: "编译检查", jobId: null, errorCode: null });
     expect(tools[0]!.time.start).toBeNull();
   });
 
@@ -138,6 +212,41 @@ describe("auditToParts：工具四态转移", () => {
     expect(toolDurationLabel(1500)).toBeNull();
     expect(toolDurationLabel(2000)).toBe("2s");
     expect(toolDurationLabel(125_000)).toBe("2m5s");
+  });
+});
+
+// ─── jobId / errorCode 关联（跳转运行记录面板用，见 domain/records.ts）───
+
+describe("auditToParts：tool_call 事件的 jobId/errorCode 透传", () => {
+  test("成功事件带 jobId → part.jobId 透传，errorCode 恒为 null（即使事件本身携带）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        status: "running",
+        audit: [
+          audit({ category: "tool_call", phase: "synthesize", action: "synthesize succeeded", result: "ok", jobId: "job-abc", errorCode: "SHOULD_NOT_APPEAR" }),
+        ],
+      }),
+    );
+    const tools = toolParts(parts);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.jobId).toBe("job-abc");
+    // 映射代码只在失败态透传 errorCode；成功态即便事件本身带了错误码也不应出现在 part 上。
+    expect(tools[0]!.errorCode).toBeNull();
+  });
+
+  test("失败事件带 jobId + errorCode → 两者都透传到 part", () => {
+    const parts = auditToParts(
+      makeDetail({
+        status: "fail_closed",
+        audit: [
+          audit({ category: "tool_call", phase: "implement", action: "implement failed", result: "failed", jobId: "job-abc", errorCode: "SOME_CODE" }),
+        ],
+      }),
+    );
+    const tools = toolParts(parts);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.jobId).toBe("job-abc");
+    expect(tools[0]!.errorCode).toBe("SOME_CODE");
   });
 });
 
@@ -327,6 +436,29 @@ describe("auditToParts：用户气泡、打断标记与提示卡", () => {
     // 英文错误原文不进对话流
     expect(notes[1]!.kind === "note" && notes[1].text.includes("boom")).toBe(false);
   });
+
+  test("reply_error 按 detail 分类给出可操作文案，且都不回显英文原文", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["model-client.chatStream: upstream returned 504 — <html>bad gateway</html>", "超时"],
+      ["model-client.chatStream: no bytes from upstream for 600000ms", "长时间没有输出"],
+      ["model-client.chat: upstream returned 429", "限流"],
+      ["model-client.chat: upstream returned 401", "认证失败"],
+      ["model-client.chat: upstream returned 503", "HTTP 503"],
+      ["fetch failed: ECONNREFUSED 127.0.0.1:8790", "连不上模型服务"],
+      ["This model's maximum context length is 262144 tokens", "上下文超出"],
+    ];
+    for (const [detail, expected] of cases) {
+      const text = replyErrorText(detail);
+      expect(text).toContain(expected);
+      // 约定：原文里的英文/技术串一个都不许漏进对话流
+      for (const token of detail.split(/[\s:—]+/).filter((t) => /^[A-Za-z][A-Za-z.\-_]{3,}$/.test(t))) {
+        expect(text.includes(token)).toBe(false);
+      }
+    }
+    // 认不出来的原因 → 兜底句，同样不回显 detail
+    expect(replyErrorText("some brand new failure")).toBe("本轮回复出现错误，未能完成。可在下方重发消息。");
+    expect(replyErrorText(undefined)).toContain("重发");
+  });
 });
 
 // ─── 门禁 / 产物 / 证据 / 终态 ───────────────────────────────────────
@@ -436,5 +568,78 @@ describe("bitstreamFromEvidence", () => {
     ];
     expect(bitstreamFromEvidence(ev)).toEqual({ name: "b.bit", sha256: "2", sizeBytes: 2 });
     expect(bitstreamFromEvidence([{ entries: [] }])).toBeNull();
+  });
+});
+
+// ─── free_agent_tool：工具调用落 audit（刷新后可回看） ────────────────
+
+describe("auditToParts：free_agent_tool", () => {
+  const toolEvent = (detail: unknown, result: "ok" | "failed" = "ok") =>
+    audit({ category: "model", phase: "loop", action: "free_agent_tool", result, detail: JSON.stringify(detail) });
+
+  test("落成 agent_tool 卡，id 取 runtime 的 callId（与 SSE 那张卡同 id 才能去重）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [toolEvent({ id: "call_7", name: "read_file", args: '{"path":"top.v"}', result: "module top…" })],
+      }),
+    );
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toEqual({
+      kind: "agent_tool",
+      id: "call_7",
+      state: "done",
+      name: "read_file",
+      args: '{"path":"top.v"}',
+      result: "module top…",
+    });
+  });
+
+  test("result=failed → error 态", () => {
+    const parts = auditToParts(
+      makeDetail({ audit: [toolEvent({ id: "c1", name: "vivado_run", args: "{}", result: "boom" }, "failed")] }),
+    );
+    expect((parts[0] as { state: string }).state).toBe("error");
+  });
+
+  test("detail 解不出来整条丢弃，不渲染空壳卡", () => {
+    const broken = auditToParts(
+      makeDetail({ audit: [audit({ category: "model", phase: "loop", action: "free_agent_tool", result: "ok", detail: "{not json" })] }),
+    );
+    expect(broken).toHaveLength(0);
+
+    const nameless = auditToParts(makeDetail({ audit: [toolEvent({ id: "c1", args: "{}", result: "x" })] }));
+    expect(nameless).toHaveLength(0);
+
+    const noDetail = auditToParts(
+      makeDetail({ audit: [audit({ category: "model", phase: "loop", action: "free_agent_tool", result: "ok" })] }),
+    );
+    expect(noDetail).toHaveLength(0);
+  });
+
+  test("工具卡切断叙述段：工具前后的回复不粘成一条", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "我先看一下代码。" }),
+          toolEvent({ id: "c1", name: "read_file", args: "{}", result: "ok" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "看完了，问题在时序。" }),
+        ],
+      }),
+    );
+    expect(parts.map((p) => p.kind)).toEqual(["text", "agent_tool", "text"]);
+    expect(textParts(parts).map((p) => p.text)).toEqual(["我先看一下代码。", "看完了，问题在时序。"]);
+  });
+
+  test("工具卡排在同轮回复之前（audit seq 即真实时序）", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [
+          audit({ category: "model", phase: "loop", action: "user_message", detail: "查一下 top.v" }),
+          toolEvent({ id: "c1", name: "read_file", args: "{}", result: "ok" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "读到了。" }),
+        ],
+      }),
+    );
+    expect(parts.map((p) => p.kind)).toEqual(["text", "agent_tool", "text"]);
   });
 });

@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { access, constants } from "node:fs/promises";
 import { WorkerRuntime, type WorkerExecution, type WorkerRuntimeOptions, type WorkerExecutionResult } from "./worker.ts";
 import { VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest } from "./vivado.ts";
-import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot, type JobRequest } from "./remote.ts";
+import type { JobRequest } from "./index.ts";
+import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot } from "./remote.ts";
 
 interface WorkerConfig extends ConnectorEndpoint {
   listen_host: string;
@@ -26,6 +27,44 @@ function required(value: unknown, name: string): string {
   return value;
 }
 
+/**
+ * Keep the outer Connector request and the inner Vivado request on one
+ * identity. Legacy exploratory requests may omit the newer inputHash member,
+ * but may never provide a conflicting one. Formal requests must bind both the
+ * immutable input hash and the discovered toolchain profile exactly.
+ */
+export function workerRequestBindingMatches(
+  request: JobRequest,
+  candidate: unknown,
+  toolchainProfileHash: string,
+  configured?: { readonly vivadoBinary: string; readonly part: string },
+): boolean {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+  const binding = candidate as Record<string, unknown>;
+  const identityBinding = binding.jobId === request.jobId
+    && binding.projectId === request.projectId
+    && binding.operation === request.operation
+    && binding.runClass === request.runClass;
+  const inputBinding = request.runClass === "formal"
+    ? binding.inputHash === request.input
+    : binding.inputHash === undefined || binding.inputHash === request.input;
+  const toolchainBinding = request.runClass !== "formal"
+    || binding.toolchainHash === toolchainProfileHash;
+  const nested = binding.toolchain === undefined
+    ? undefined
+    : binding.toolchain && typeof binding.toolchain === "object" && !Array.isArray(binding.toolchain)
+      ? binding.toolchain as Record<string, unknown>
+      : null;
+  if (nested === null) return false;
+  const profileBinding = nested?.profileHash === undefined || nested.profileHash === toolchainProfileHash;
+  const configuredBinding = configured === undefined || (
+    (nested?.vivadoBinary === undefined || nested.vivadoBinary === configured.vivadoBinary)
+    && (nested?.part === undefined || nested.part === configured.part)
+    && (binding.part === undefined || binding.part === configured.part)
+  );
+  return identityBinding && inputBinding && toolchainBinding && profileBinding && configuredBinding;
+}
+
 async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json"): Promise<WorkerConfig> {
   const config = JSON.parse(await readFile(path, "utf8")) as WorkerConfig;
   for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "vivado_part", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"] as const) required(config[name], name);
@@ -35,7 +74,7 @@ async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthi
 }
 
 function execution(config: WorkerConfig): WorkerExecution {
-  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary });
+  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, part: config.vivado_part, profileHash: config.toolchain_profile_hash });
   return {
     async discover(): Promise<DiscoverySnapshot> {
       try { await access(config.vivado_binary, constants.X_OK); } catch { return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] }; }
@@ -44,13 +83,17 @@ function execution(config: WorkerConfig): WorkerExecution {
     async execute(request: JobRequest, _workspace: string): Promise<WorkerExecutionResult> {
       const candidate = (request as JobRequest & { parameters?: unknown }).parameters;
       if (!candidate || typeof candidate !== "object") return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
+      if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: config.vivado_part })) {
+        const jobId = request.jobId ?? "worker";
+        return { outcome: "failure", error_code: "FORMAL_BINDING_MISMATCH", output: JSON.stringify({ status: "rejected", jobId, errorCode: "FORMAL_BINDING_MISMATCH" }), evidence: { jobId, entries: [] } };
+      }
       const vivadoRequest = {
         ...candidate as VivadoRequest,
         toolchain: {
-          ...((candidate as VivadoRequest).toolchain ?? {}),
-          vivadoBinary: (candidate as VivadoRequest).toolchain?.vivadoBinary ?? config.vivado_binary,
-          part: (candidate as VivadoRequest).toolchain?.part ?? config.vivado_part,
-          profileHash: (candidate as VivadoRequest).toolchain?.profileHash ?? config.toolchain_profile_hash,
+          requiredLicense: (candidate as VivadoRequest).toolchain?.requiredLicense,
+          vivadoBinary: config.vivado_binary,
+          part: config.vivado_part,
+          profileHash: config.toolchain_profile_hash,
         },
       } as VivadoRequest;
       let result;
@@ -68,6 +111,7 @@ function execution(config: WorkerConfig): WorkerExecution {
       if (result.phase !== undefined) meta.phase = result.phase;
       if (result.phaseExitCode !== undefined) meta.phaseExitCode = result.phaseExitCode;
       if (result.simulatorStdout !== undefined) meta.simulatorStdout = result.simulatorStdout;
+      if (result.logDigest !== undefined) meta.logDigest = result.logDigest;
       if (result.stdout !== undefined) meta.stdout = result.stdout;
       if (result.stderr !== undefined) meta.stderr = result.stderr;
       if (result.errorCode !== undefined) meta.errorCode = result.errorCode;

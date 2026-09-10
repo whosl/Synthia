@@ -2,8 +2,9 @@
 /**
  * Synthia Core — bootstrap initial platform identities (IF-001 first slice)
  *
- * Creates the first human admin and a platform service account, each with one
- * random bearer token. The token PLAINTEXT is printed exactly once to stdout;
+ * Creates the first human admin, ordinary Core service, and task Runtime
+ * service accounts, each with one random bearer token. The token PLAINTEXT is
+ * printed exactly once to stdout;
  * only its SHA-256 hash is persisted in `auth_token`. Re-runnable: existing
  * users are upserted; each run mints a fresh token (revoke old tokens manually
  * via SQL when rotating).
@@ -11,9 +12,10 @@
  * Usage:
  *   DATABASE_URL=postgres://... bun run core/scripts/bootstrap-admin.ts
  *
- * Output: two lines like
+ * Output: three lines like
  *   ADMIN_TOKEN=syn_<64 hex>
  *   SERVICE_TOKEN=syn_<64 hex>
+ *   TASK_RUNTIME_TOKEN=syn_<64 hex>
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
@@ -54,12 +56,21 @@ const IDENTITIES: readonly IdentitySpec[] = [
   },
   {
     uid: "synthia-service",
-    cn: "Synthia Service",
-    displayName: "Platform Service Account",
+    cn: "Synthia Core Service",
+    displayName: "Synthia Core Service",
     mail: "service@synthia.local",
     actorType: "service",
     scopes: ["core:write", "core:read"],
     envVar: "SERVICE_TOKEN",
+  },
+  {
+    uid: "synthia-runtime",
+    cn: "Synthia Task Runtime",
+    displayName: "Synthia Task Runtime Service",
+    mail: "runtime@synthia.local",
+    actorType: "service",
+    scopes: ["core:task-runtime"],
+    envVar: "TASK_RUNTIME_TOKEN",
   },
 ];
 

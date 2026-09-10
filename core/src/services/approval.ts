@@ -23,7 +23,7 @@ import type { DataClassification, GateId } from "../domain/enums.ts";
 import { GATE_TO_BASELINE, isMilestoneGate } from "../domain/enums.ts";
 import type { ApproverActor, IdempotencyScope } from "../domain/entities.ts";
 import { gateSubmissionMachine } from "../domain/state-machines.ts";
-import { ConflictError, InvariantError } from "../memory-repository.ts";
+import { ConflictError, InvariantError } from "../errors.ts";
 import {
   appendApprovalRecord,
   appendOutboxEventInTx,

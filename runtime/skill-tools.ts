@@ -27,6 +27,7 @@ import { readFileSync } from "node:fs";
 import type { ArtifactType } from "../core/src/domain/enums.ts";
 import type { AgentTool, AgentToolResult, ToolExecContext } from "./agent-types.ts";
 import { NoGovernanceClient } from "./types.ts";
+import { isRecord as isPlainObject } from "./utils.ts";
 
 /** Default pack path, relative to the repo root (the runtime's CWD). */
 const DEFAULT_PACK_PATH = "skills/fpga/skill-pack.json";
@@ -68,6 +69,9 @@ interface SkillToolConfig {
   readonly contentPath: string;
   /** What the model must place in `content` (rendered into the JSON Schema). */
   readonly contentHint: string;
+  /** Skill whose declared primary output is a TOOL_RUN — it registers the
+   *  model-compiled report instead, and the result says so explicitly. */
+  readonly runsVivado: boolean;
   /** Hard upstream artifact dependencies (verified via governance reads). Empty = no gate. */
   readonly requiresUpstream: readonly UpstreamReq[];
   readonly upstream: string;
@@ -94,7 +98,7 @@ const UPSTREAM_GUIDANCE: Readonly<Record<string, string>> = {
   "fpga-hw-manual-extraction":
     "偏入口；可参照 fpga-intake 的 doc/intake/summary.md 限定硬件范围。",
   "fpga-xdc-gen":
-    "fpga-hw-manual-extraction（extracted_facts.json 须 status=complete 且每条映射带 source_ref/evidence_kind）+ fpga-rtl-build（板级顶层端口）。",
+    "fpga-hw-manual-extraction（extracted_facts.json 逐条带 source_ref/evidence_kind）+ fpga-rtl-build（板级顶层端口）。主约束两轴判定：时钟轴（clock_facts 有 explicit/derived 主时钟事实）齐备即可产出 clock-only 约束（timing-only/exploratory 声明，不含引脚映射）；完整约束须引脚/电气轴亦齐备（每端口 PACKAGE_PIN/IOSTANDARD 非 fallback）。",
 };
 
 /** A hard upstream artifact dependency a skill's preconditions make absolute. */
@@ -151,9 +155,6 @@ function afterPath(desc: string): string {
 }
 
 /** Plain-object type guard: narrows `unknown` to a string-indexed record. */
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
 
 function buildConfig(skill: SkillEntry): SkillToolConfig {
   const runsVivado = skill.required_capabilities.some((c) => c.startsWith("vivado-"));
@@ -176,7 +177,8 @@ function buildConfig(skill: SkillEntry): SkillToolConfig {
   // Full description: purpose + structured addendum so the model can decide.
   const lines: string[] = [skill.purpose, ""];
   lines.push(
-    `[制品] 登记候选（candidate，非 approved）：${contentPath}（${registerType}）。入参 content=制品全文，可选 filename/notes。`,
+    `[制品] 写入工作区并登记候选（candidate，非 approved）：${contentPath}（${registerType}）。` +
+      `入参 content=制品全文，可选 filename/notes。同一路径重复调用会出下一版（v2、v3…）。`,
   );
   if (skill.preconditions.length > 0) {
     lines.push(`[前置] ${skill.preconditions.join("；")}`);
@@ -216,7 +218,10 @@ function buildParameters(config: SkillToolConfig): Record<string, unknown> {
       },
       filename: {
         type: "string",
-        description: `目标文件路径（相对仓库根）。省略时按技能约定登记为 ${config.contentPath}。`,
+        description:
+          `目标文件的工作区相对路径，顶层目录须是 rtl/ tb/ doc/ prj/constr/（RULE-25 §2）。` +
+          `省略时写入 ${config.contentPath}。文件已存在时按同一路径出下一版；` +
+          `若该文件有人手改动尚未登记，写入会被拒绝，请先读它的当前内容。`,
       },
       notes: {
         type: "string",
@@ -264,6 +269,29 @@ async function findMissingUpstream(
   return null;
 }
 
+/** Side tasks verify upstreams inside their isolated clone, never in formal artifacts. */
+async function findMissingSideUpstream(
+  ctx: ToolExecContext,
+  reqs: readonly UpstreamReq[],
+): Promise<UpstreamReq | "read-error" | null> {
+  if (!ctx.workspace) return "read-error";
+  let paths: readonly string[];
+  try {
+    paths = (await ctx.workspace.listTree()).map((entry) => entry.path);
+  } catch {
+    return "read-error";
+  }
+  for (const req of reqs) {
+    const prefix = req.type === "RTL_SOURCE_SET"
+      ? "rtl/"
+      : req.type === "TB_SOURCE_SET"
+        ? "tb/"
+        : null;
+    if (!prefix || !paths.some((path) => path.startsWith(prefix))) return req;
+  }
+  return null;
+}
+
 function buildTool(config: SkillToolConfig): AgentTool {
   return {
     name: config.skillId,
@@ -300,14 +328,30 @@ function buildTool(config: SkillToolConfig): AgentTool {
         };
       }
 
+      // 技能包里有 `rtl/<module>.v` 这种带占位符的默认路径。以前只是登记时的一个
+      // 字符串，现在会真的在盘上造出一个叫 `<module>.v` 的文件——必须让模型点名。
+      if (/[<>]/.test(filename)) {
+        return {
+          content:
+            `前置校验失败（fail-closed，未写工作区）：${config.skillId} 的默认路径 ${config.contentPath} 含占位符，` +
+            `请用 \`filename\` 给出真实路径（例如 rtl/pwm.v）。`,
+          isError: true,
+        };
+      }
+
       // (a) Hard upstream-artifact preconditions: skills with an absolute
       //     dependency (e.g. tb-write needs RTL) verify the upstream artifact
       //     exists in Core with a live revision before registering. Missing →
       //     fail-closed naming the producing skill (drives self-correction).
       //     NoGovernanceClient (dev/debug) cannot verify and is exempted;
       //     a read failure is also fail-closed (cannot confirm preconditions).
-      if (config.requiresUpstream.length > 0 && !(ctx.governance instanceof NoGovernanceClient)) {
-        const missing = await findMissingUpstream(ctx, config.requiresUpstream);
+      if (
+        config.requiresUpstream.length > 0 &&
+        (ctx.taskKind === "side" || !(ctx.governance instanceof NoGovernanceClient))
+      ) {
+        const missing = ctx.taskKind === "side"
+          ? await findMissingSideUpstream(ctx, config.requiresUpstream)
+          : await findMissingUpstream(ctx, config.requiresUpstream);
         if (missing !== null) {
           if (missing === "read-error") {
             return {
@@ -329,58 +373,118 @@ function buildTool(config: SkillToolConfig): AgentTool {
       //     do not consult ctx.connector: this tool only registers a candidate
       //     report. The real TOOL_RUN evidence comes from the separate vivado tool.
 
-      // (c) Register the candidate. declared_status is always candidate — the
-      //     governance API registers candidates only; there is no approved path.
-      let rev;
+      // P3 side tasks write only to their Core-owned isolated workspace. The
+      // response intentionally exposes no ArtifactRevision identity: until a
+      // human adopts it, this file is not part of the formal artifact chain.
+      if (ctx.taskKind === "side") {
+        if (!ctx.workspace || !ctx.taskId || !ctx.workspaceId) {
+          return {
+            content:
+              `写入探索副本失败（fail-closed）：${config.skillId} 缺少 Core-issued task workspace capability。`,
+            isError: true,
+          };
+        }
+        let write;
+        try {
+          write = await ctx.workspace.writeFiles({
+            files: [{ path: filename, content }],
+            changeReason: notes ? `side task skill output | ${notes}` : "side task skill output",
+            artifactType: config.registerType,
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          return {
+            content:
+              `写入探索副本失败（fail-closed，正式项目未变更）：${config.skillId} → ${filename}。原因：${reason}`,
+            isError: true,
+          };
+        }
+        const entry = write.registered[0] ?? write.unchanged[0];
+        if (!entry) {
+          return {
+            content: `探索副本写入后 Core 未回报文件身份（fail-closed）：${config.skillId} → ${filename}。`,
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            "已写入侧边任务探索副本（尚未采纳，不进入正式制品链）：",
+            `  taskId       : ${ctx.taskId}`,
+            `  workspaceId  : ${ctx.workspaceId}`,
+            `  skill        : ${config.skillId}`,
+            `  file         : ${entry.path} (${config.registerType})`,
+            `  workspaceCommit: ${write.commit}`,
+            `  contentHash  : ${entry.contentHash}`,
+            "  formalImpact : none（用户采纳前不创建 artifact/revision/snapshot/gate）",
+            "",
+            `上游建议：${config.upstream}`,
+          ].join("\n"),
+        };
+      }
+
+      // (c) Write the candidate into the real workspace and register it. The
+      //     file lands on disk under RULE-25 first, then Core reconciles it into
+      //     the next candidate revision — versions come from Core, so the same
+      //     path can be re-registered as v2, v3, … The old client-side
+      //     `version: 1` made every re-registration a guaranteed 409.
+      let write;
       try {
-        rev = await ctx.governance.registerCandidateArtifact({
-          // artifactId becomes a URL path segment on the Core route and is a
-          // GLOBAL primary key — include the project id so identical skill
-          // outputs across projects/runs do not collide, and normalize
-          // slashes/colons from doc paths for URL safety.
-          artifactId: `fpga-${ctx.projectId}-${config.skillId}-${filename}`.replace(/[^A-Za-z0-9._-]/g, "-"),
+        write = await ctx.governance.writeWorkspaceFiles({
+          files: [{ path: filename, content }],
+          changeReason: notes ? `skill candidate | ${notes}` : `skill candidate (free-agent)`,
           artifactType: config.registerType,
-          title: `${config.skillId}: ${filename}`,
-          content,
-          contentLocation: filename,
-          changeReason: notes
-            ? `skill candidate | ${notes}`
-            : `skill candidate (free-agent)`,
-          version: 1,
         });
       } catch (err) {
         // (d) Any Core failure → isError, never fake success.
         const msg = err instanceof Error ? err.message : String(err);
-        const conflict = /RESOURCE_CONFLICT|version/i.test(msg);
+        const dirty = /WORKSPACE_FILE_DIRTY|未登记的人工改动/.test(msg);
+        const badPath = /RULE-25|WORKSPACE_PATH_INVALID/.test(msg);
         return {
           content:
-            `Core 候选登记失败（fail-closed）：${config.skillId} → ${filename}（${config.registerType}）。原因：${msg}` +
-            (conflict
-              ? " 该 artifact 已有候选修订；本工具按 version=1 登记首次候选，修订重登需会话层版本追踪（非本工具职责）。"
+            `写入工作区失败（fail-closed，未登记）：${config.skillId} → ${filename}（${config.registerType}）。原因：${msg}` +
+            (dirty
+              ? " 这个文件有人正在改且尚未登记，不能被覆盖。请先读取它的当前内容，在此基础上修改后再写。"
+              : "") +
+            (badPath
+              ? ` 路径须是工作区相对路径，顶层目录只能是 rtl/ tb/ sim/ doc/ prj/constr/（RULE-25 §2）。本技能的默认路径是 ${config.contentPath}。`
               : ""),
           isError: true,
         };
       }
 
+      // 只送了一个文件，所以回报里至多一条；用 Core 规范化后的路径为准。
+      const entry = write.registered[0] ?? write.unchanged[0];
+      if (!entry) {
+        return {
+          content: `写入工作区后 Core 未回报登记结果（fail-closed）：${config.skillId} → ${filename}。请重试。`,
+          isError: true,
+        };
+      }
+      const isNewVersion = write.registered.length > 0;
+      const path = entry.path;
+
       // (c2) Record the candidate in the session registry so the gate tool can
       //      run content-conformity on it before submission. No-op outside a
       //      free-agent session (pipeline loop does not set ctx.freeAgent).
       ctx.freeAgent?.recordArtifact({
-        revisionId: rev.revisionId,
+        revisionId: entry.revisionId,
         artifactType: config.registerType,
         content,
-        contentLocation: filename,
-        title: `${config.skillId}: ${filename}`,
+        contentLocation: path,
+        title: `${config.skillId}: ${path}`,
       });
 
       // (c) Result: candidate summary (visibly candidate, never approved).
       const lines: string[] = [
-        "已登记候选制品（candidate，非 approved）：",
+        isNewVersion
+          ? "已写入工作区并登记候选制品（candidate，非 approved）："
+          : "内容与已登记的最新一版完全相同，未产生新版本（文件已在工作区）：",
         `  skill      : ${config.skillId}`,
-        `  artifact   : ${filename} (${config.registerType})`,
-        `  revisionId : ${rev.revisionId}`,
-        `  version    : ${rev.version}`,
-        `  contentHash: ${rev.contentHash}`,
+        `  file       : ${path} (${config.registerType})`,
+        `  commit     : ${write.commit}`,
+        `  revisionId : ${entry.revisionId}`,
+        `  version    : ${entry.version}`,
+        `  contentHash: ${entry.contentHash}`,
         `  size       : ${content.length} chars`,
       ];
 
@@ -402,11 +506,6 @@ function buildTool(config: SkillToolConfig): AgentTool {
 // Public API — Slice B fixed signature.
 // ---------------------------------------------------------------------------
 
-export interface AssembleSkillToolsOptions {
-  /** Path to the skill pack JSON (default: skills/fpga/skill-pack.json). */
-  readonly packPath?: string;
-}
-
 /**
  * Load the FPGA skill pack and assemble every skill as a model-selectable
  * {@link AgentTool}. Returns one tool per skill (10 for the current pack),
@@ -414,16 +513,15 @@ export interface AssembleSkillToolsOptions {
  *
  * @throws if the pack cannot be read or contains no skills.
  */
-export function assembleSkillTools(opts: AssembleSkillToolsOptions = {}): AgentTool[] {
-  const packPath = opts.packPath ?? DEFAULT_PACK_PATH;
-  const parsed: unknown = JSON.parse(readFileSync(packPath, "utf8"));
+export function assembleSkillTools(): AgentTool[] {
+  const parsed: unknown = JSON.parse(readFileSync(DEFAULT_PACK_PATH, "utf8"));
   if (!isPlainObject(parsed) || !Array.isArray(parsed.skills)) {
-    throw new Error(`skill pack at ${packPath} is malformed: expected { skills: [...] }`);
+    throw new Error(`skill pack at ${DEFAULT_PACK_PATH} is malformed: expected { skills: [...] }`);
   }
   // Frozen, committed pack; structure validated above, fields read via SkillEntry.
   const pack = parsed as SkillPackFile;
   if (pack.skills.length === 0) {
-    throw new Error(`skill pack at ${packPath} contains no skills`);
+    throw new Error(`skill pack at ${DEFAULT_PACK_PATH} contains no skills`);
   }
 
   return pack.skills.map((skill) => buildTool(buildConfig(skill)));

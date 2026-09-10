@@ -1,43 +1,34 @@
-import type { RouteRecordRaw } from "vue-router";
+/**
+ * 路由（v4 重写）：/login、/projects、/projects/:id（三栏 ProjectView）。
+ *
+ * - 旧版单页对话流 UnifiedProjectView 与 demo 布局路由全部收敛掉（D1/D4）；
+ * - 审批详情页已随「就地审批」（第二批 step 6）退休，旧链接改重定向到项目页的
+ *   `?sub=` 深链；`/approvals` 列表页仍留着，等 step 9 的 `/inbox` 一起换掉
+ *   （spec D23：跨项目待办见 §3.6/§7 R6）；
+ * - 旧 view 文件不删除，只是不再被路由引用（孤儿文件，留待集成阶段清理）。
+ */
 import { createRouter, createWebHistory } from "vue-router";
 import { readToken } from "./stores/auth.ts";
-import { LEGACY_ROUTES, unifiedRedirectTarget } from "./domain/unified.ts";
 
 const LoginView = () => import("./views/LoginView.vue");
-const ProjectListView = () => import("./views/ProjectListView.vue");
-const UnifiedProjectView = () => import("./views/UnifiedProjectView.vue");
+const ProjectsView = () => import("./views/ProjectListView.vue");
+const ProjectView = () => import("./views/ProjectView.vue");
 const ApprovalsView = () => import("./views/ApprovalsView.vue");
-const ApprovalDetailView = () => import("./views/ApprovalDetailView.vue");
-const legacyRedirects: RouteRecordRaw[] = LEGACY_ROUTES.map((rule) => ({
-  path: rule.path,
-  redirect: (to) => {
-    const params: Record<string, string> = {};
-    for (const [key, value] of Object.entries(to.params)) {
-      params[key] = Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
-    }
-    const query: Record<string, string | undefined> = {};
-    for (const [key, value] of Object.entries(to.query)) {
-      query[key] = Array.isArray(value) ? (value[0] ?? undefined) : (value ?? undefined);
-    }
-    return unifiedRedirectTarget(rule, params, query);
-  },
-}));
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", redirect: "/projects" },
     { path: "/login", name: "login", component: LoginView, meta: { public: true } },
-    { path: "/projects", name: "projects", component: ProjectListView },
-    // 统一项目页（UI-3 方案 B+就地审批）：总览/工作台/审批/记录收敛为单页
-    { path: "/projects/:id", name: "project-unified", component: UnifiedProjectView },
-    ...legacyRedirects,
-    { path: "/demo/a", name: "demo-a", component: () => import("./views/demos/DemoLayoutA.vue") },
-    { path: "/demo/b", name: "demo-b", component: () => import("./views/demos/DemoLayoutB.vue") },
-    { path: "/demo/c", name: "demo-c", component: () => import("./views/demos/DemoLayoutC.vue") },
-    { path: "/demo/d", name: "demo-d", component: () => import("./views/demos/DemoLayoutD.vue") },
+    { path: "/projects", name: "projects", component: ProjectsView },
+    { path: "/projects/:id", name: "project", component: ProjectView },
+    // 列表页第二批并入项目页顶栏可达的 /inbox（spec §3.6）；详情页已被就地审批取代。
     { path: "/approvals", name: "approvals", component: ApprovalsView },
-    { path: "/approvals/:projectId/:subId", name: "approval-detail", component: ApprovalDetailView },
+    {
+      path: "/approvals/:projectId/:subId",
+      name: "approval-detail",
+      redirect: (to) => ({ path: `/projects/${to.params.projectId}`, query: { sub: String(to.params.subId) } }),
+    },
     { path: "/:pathMatch(.*)*", redirect: "/projects" },
   ],
 });

@@ -38,7 +38,9 @@
 ```text
 skills/fpga/
 ├── skill-pack.json            # 技能包清单（synthia.skill-pack.v1）
-├── rules/                     # 包级规则（路由、门禁、布局、工具链/Tcl 边界、交接、失败路由、产物状态）
+├── references/standards/      # 标准 PDF、检索转写、来源/哈希/缺口机器清单
+├── references/hardware/       # 板卡/器件/接口资料、来源与哈希机器清单
+├── rules/                     # 包级规则（路由、门禁、文档、布局、工具链/Tcl 边界、交接、失败路由、产物状态）
 └── skills/<skill-id>/
     ├── SKILL.md               # 技能说明（用途/边界/输入/流程/产物/证据/失败处理/交接）
     ├── templates/             # 可复用工程模板
@@ -53,6 +55,7 @@ skills/fpga/
 |---|---|
 | `rules/00-skill-routing.md` | 技能路由、协议时序敏感判定、生成/编辑分界、候选质量闸门与重试 |
 | `rules/10-intake-gate.md` | 需求入口门禁与快速放行条件 |
+| `rules/15-documentation-standard.md` | FPGA 标准集来源边界、缺口，以及文档、术语、开发、配置、测试和证据要求 |
 | `rules/20-file-context.md` | HDL/约束/仿真文件上下文路由 |
 | `rules/25-workspace-layout.md` | 候选工作区布局与路径/数据域契约 |
 | `rules/30-toolchain-and-tcl-boundary.md` | 强类型能力表、post-mvp 未启用项、Tcl 授权边界 |

@@ -18,7 +18,7 @@ import {
   type ReplySegment,
 } from "../src/domain/reply-segments.ts";
 import { auditToParts } from "../src/domain/parts.ts";
-import type { TaskAuditEvent, TaskRunDetail } from "../src/api/types.ts";
+import type { TaskAuditEvent, TaskAgentDetail } from "../src/api/types.ts";
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
 
@@ -37,10 +37,10 @@ function audit(partial: Partial<TaskAuditEvent> & Pick<TaskAuditEvent, "category
   return { ts: `2026-08-14T00:00:${String(seq).padStart(2, "0")}Z`, seq, ...partial };
 }
 
-function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
+function makeDetail(overrides: Partial<TaskAgentDetail>): TaskAgentDetail {
   seq = 0;
   return {
-    run_id: "run-1",
+    agent_id: "agent-1",
     project_id: "proj-1",
     status: "idle",
     current_stage: null,

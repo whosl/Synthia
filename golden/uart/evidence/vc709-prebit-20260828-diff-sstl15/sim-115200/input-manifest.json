@@ -1,0 +1,52 @@
+{
+  "schema": "vivado-input-manifest.v1",
+  "jobId": "vc709-sim-115200-direct-20260828",
+  "projectId": "p1",
+  "operation": "simulate",
+  "runClass": "exploratory",
+  "inputHash": null,
+  "toolchainHash": "dffba16f6b8ba5b71a7fe7c732690231b1e58e78a3b2a4824a2512aa6fc788bc",
+  "top": "uart_top",
+  "testbench": "uart_115200_tb",
+  "part": "xc7vx690tffg1761-2",
+  "stopBeforeBitstream": null,
+  "sources": [
+    {
+      "path": "rtl/baud_gen.v",
+      "sha256": "d6382fd9cd8b87b38a284c0fa64dc092d59568b30d536f6873a0a9436a027d68",
+      "sizeBytes": 2437,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_rx.v",
+      "sha256": "355a368ebc720c038719fb2f13e7cbe4f49b006641a942c604e1e8ed33f78bf3",
+      "sizeBytes": 6150,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_top.v",
+      "sha256": "63b16be8f494f10111fc91c5c64426d7584d8dc3c37fe98db7faa31de9405892",
+      "sizeBytes": 1518,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "rtl/uart_tx.v",
+      "sha256": "1b6c21c39c2f27875c7ecfcb451731127c1fc6a60019f8e4da325a50d5537b1d",
+      "sizeBytes": 4056,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "tb/uart_115200_tb.sv",
+      "sha256": "d062792dbe6d5337f3468899fac379492360ef5f61e85b71cc4fa4194431dfee",
+      "sizeBytes": 268,
+      "mediaType": "application/octet-stream"
+    },
+    {
+      "path": "tb/uart_tb.sv",
+      "sha256": "5dbcb3f9f6fa305d43f4efb3f99d6c147aa9a1b102a1024d1351bb3039ce812d",
+      "sizeBytes": 17969,
+      "mediaType": "application/octet-stream"
+    }
+  ],
+  "constraints": []
+}

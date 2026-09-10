@@ -5,18 +5,25 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mock": "VITE_MOCK=1 VITE_FEATURE_HISTORICAL_MATERIALS=1 VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 vite",
     "build": "vite build",
     "check": "vue-tsc --noEmit",
+    "gen:mock-hashes": "bun run scripts/gen-mock-hashes.ts",
     "test": "bun test"
   },
   "dependencies": {
+    "dompurify": "^3.2.0",
     "marked": "^12.0.0",
+    "monaco-editor": "^0.52.0",
     "pinia": "^2.2.6",
     "vue": "^3.5.13",
     "vue-router": "^4.4.5"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/jsdom": "^30.0.0",
     "@vitejs/plugin-vue": "^5.2.1",
+    "jsdom": "^30.0.1",
     "typescript": "^5.6.0",
     "vite": "^6.0.3",
     "vue-tsc": "^2.1.10"

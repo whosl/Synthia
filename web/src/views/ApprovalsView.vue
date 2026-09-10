@@ -1,95 +1,233 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { api } from "../main.ts";
-import { listGateSubmissions, listProjects } from "../api/index.ts";
-import type { GateSubmission, Project } from "../api/types.ts";
-import {
-  BASELINE_NAMES,
-  GATE_REVIEW_NAMES,
-  GATE_TO_BASELINE,
-  isMilestoneGate,
-  type GateId,
-} from "../domain/gates.ts";
+import { computed, ref } from "vue";
+import { api } from "../api/service.ts";
+import { useProjectOverview } from "../composables/use-project-overview.ts";
+import { formatActivity } from "../domain/project-overview.ts";
+import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import Button from "../components/ui/Button.vue";
+import Icon from "../components/ui/Icon.vue";
 
-interface PendingItem {
-  readonly project: Project;
-  readonly submission: GateSubmission;
-}
-
-const items = ref<PendingItem[]>([]);
-const loading = ref(true);
-const error = ref<unknown>(null);
-
-function reviewName(gate: string): string {
-  return GATE_REVIEW_NAMES[gate as GateId] ?? gate;
-}
-
-onMounted(async () => {
-  try {
-    // 跨项目聚合：遍历项目拉取等待批准的审查提交
-    const projects = await listProjects(api);
-    const grouped = await Promise.all(
-      projects.map(async (project) => {
-        const subs = await listGateSubmissions(api, project.id, "in_review");
-        return subs.map((submission) => ({ project, submission }));
-      }),
-    );
-    items.value = grouped
-      .flat()
-      .sort((a, b) => ((a.submission.submitted_at ?? a.submission.created_at) < (b.submission.submitted_at ?? b.submission.created_at) ? 1 : -1));
-  } catch (err) {
-    error.value = err;
-  } finally {
-    loading.value = false;
-  }
-});
+const { loading, refreshing, error, reviews, incompleteRows, reload } =
+  useProjectOverview(api);
+const query = ref("");
+const visibleReviews = computed(() =>
+  reviews.value.filter((item) =>
+    `${item.project.name} ${item.title} ${item.submission.submitter_id}`
+      .toLocaleLowerCase()
+      .includes(query.value.trim().toLocaleLowerCase()),
+  ),
+);
+const missingReviews = computed(() =>
+  incompleteRows.value.filter((row) =>
+    row.issues.some((issue) => issue.label === "待审批记录"),
+  ),
+);
 </script>
 
 <template>
-  <h1 class="page-title">审批中心</h1>
-  <p class="page-sub">所有项目中等待批准的审查提交。Agent 产物均为候选，批准/驳回由人来执行。</p>
-
-  <ErrorNotice v-if="error" :error="error" />
-  <div v-if="loading" class="muted">加载中…</div>
-
-  <div v-else class="panel">
-    <table class="data" v-if="items.length > 0">
-      <thead>
-        <tr>
-          <th>项目</th>
-          <th>审查项</th>
-          <th>提交人</th>
-          <th>提交时间</th>
-          <th></th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in items" :key="item.submission.id">
-          <td>{{ item.project.name }}</td>
-          <td>
-            <strong :title="item.submission.gate">{{ reviewName(item.submission.gate) }}</strong>
-          </td>
-          <td>{{ item.submission.submitter_id }}</td>
-          <td class="muted" style="white-space: nowrap">
-            {{ item.submission.submitted_at ? new Date(item.submission.submitted_at).toLocaleString("zh-CN") : "—" }}
-          </td>
-          <td>
-            <StatusBadge
-              v-if="isMilestoneGate(item.submission.gate)"
-              :text="`批准将建立${BASELINE_NAMES[GATE_TO_BASELINE[item.submission.gate]!]}`"
-              kind="accent"
-            />
-            <span v-else class="muted">—</span>
-          </td>
-          <td>
-            <router-link :to="`/approvals/${item.project.id}/${item.submission.id}`">处理</router-link>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <div v-else class="muted">当前没有等待批准的审查提交。</div>
-  </div>
+  <PageShell section="approvals">
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">REVIEW & CONTINUE</p>
+        <h1>每次确认，都有依据<span class="heading-dot">.</span></h1>
+        <p class="secondary-text">
+          集中查看待审批提交，进入项目核对快照、证据并作出决定。
+        </p>
+      </div>
+      <Button :loading="refreshing" @click="reload"
+        ><Icon name="refresh" :size="16" />刷新</Button
+      >
+    </div>
+    <div class="review-summary">
+      <span class="stat-icon tone-amber"><Icon name="inbox" :size="24" /></span>
+      <div>
+        <strong>{{ loading ? "—" : reviews.length }} 项等待审批</strong>
+        <p>
+          {{
+            missingReviews.length || error
+              ? "部分项目尚未加载，待审批数量可能不完整。"
+              : "批准或驳回后，项目将按流程继续推进。"
+          }}
+        </p>
+      </div>
+    </div>
+    <ErrorNotice v-if="error" :error="error" />
+    <div v-if="missingReviews.length" class="partial-notice" role="status">
+      <Icon name="inbox" /><span
+        >以下项目的审批记录未加载，其他项目仍可处理。<span
+          v-for="row in missingReviews"
+          :key="row.project.id"
+          class="partial-detail"
+          >{{ row.project.name }}</span
+        ></span
+      ><Button :loading="refreshing" @click="reload">重试</Button>
+    </div>
+    <section aria-labelledby="reviews-title">
+      <div class="section-heading">
+        <h2 id="reviews-title">
+          待审批记录
+          <span class="count-label">{{ visibleReviews.length }}</span>
+        </h2>
+        <label class="search-field"
+          ><Icon name="search" :size="16" /><input
+            v-model="query"
+            type="search"
+            aria-label="搜索审批记录"
+            placeholder="搜索项目、阶段或提交人…"
+        /></label>
+      </div>
+      <div v-if="loading" class="empty-state" role="status">
+        正在读取各项目的审批记录…
+      </div>
+      <div v-else-if="error && !reviews.length" class="empty-state">
+        <Icon name="refresh" :size="36" />
+        <h3>暂时无法获取审批记录</h3>
+        <p>请检查连接后重试。</p>
+        <Button :loading="refreshing" @click="reload">重新加载</Button>
+      </div>
+      <div v-else-if="!visibleReviews.length" class="empty-state">
+        <Icon :name="query ? 'search' : 'check'" :size="38" />
+        <h3>
+          {{
+            query
+              ? "没有匹配的审批记录"
+              : missingReviews.length
+                ? "已加载的项目暂无待审批记录"
+                : "当前没有待审批记录"
+          }}
+        </h3>
+        <p>
+          {{
+            query
+              ? "试试其他关键词。"
+              : missingReviews.length
+                ? "请重试加载其他项目，确认完整的待办。"
+                : "可以返回项目，继续下一步工程工作。"
+          }}
+        </p>
+        <Button v-if="query" @click="query = ''">清除搜索</Button
+        ><router-link v-else to="/projects">返回项目工作台 →</router-link>
+      </div>
+      <div v-else class="review-list">
+        <article
+          v-for="item in visibleReviews"
+          :key="`${item.project.id}:${item.submission.id}`"
+          class="review-card"
+        >
+          <span class="stat-icon tone-amber"><Icon name="inbox" /></span>
+          <div class="review-body">
+            <div class="review-title">
+              <h3>{{ item.title }}</h3>
+              <StatusBadge text="等待确认" kind="warn" />
+            </div>
+            <p>{{ item.project.name }}</p>
+            <span class="secondary-text"
+              >{{ item.submission.submitter_id }} 提交 ·
+              {{
+                formatActivity(
+                  item.submission.submitted_at ?? item.submission.created_at,
+                )
+              }}</span
+            >
+          </div>
+          <router-link
+            class="review-action"
+            :to="{
+              name: 'project',
+              params: { id: item.project.id },
+              query: { sub: item.submission.id },
+            }"
+            >查看并处理<Icon name="arrow" :size="16"
+          /></router-link>
+        </article>
+      </div>
+    </section>
+  </PageShell>
 </template>
+
+<style scoped>
+.review-summary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-panel);
+  padding: 24px;
+  margin-bottom: 32px;
+}
+.review-summary strong {
+  font-size: 20px;
+  font-weight: 550;
+}
+.review-summary p {
+  color: var(--text-secondary);
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.review-list {
+  display: grid;
+  gap: 12px;
+}
+.review-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 24px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+  border-radius: 12px;
+}
+.review-body {
+  flex: 1;
+  min-width: 0;
+}
+.review-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.review-title h3 {
+  font-weight: 550;
+  margin: 0;
+  font-size: 15px;
+}
+.review-body p {
+  margin: 8px 0;
+}
+.review-body > span {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.review-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .section-heading {
+    flex-wrap: wrap;
+  }
+  .section-heading .search-field {
+    width: 100%;
+  }
+  .review-card {
+    padding: 18px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .review-card > .stat-icon {
+    display: none;
+  }
+  .review-action {
+    width: 100%;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 14px;
+  }
+}
+</style>

@@ -7,7 +7,7 @@ import { readFile as readFile3 } from "node:fs/promises";
 import { access as access2, constants as constants2 } from "node:fs/promises";
 
 // connector/worker.ts
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // core/src/hashing.ts
@@ -25,6 +25,10 @@ var sha256 = sha256Hex;
 
 // connector/remote.ts
 var REMOTE_SCHEMA_VERSION = "connector.remote.v1";
+var MAX_EVIDENCE_ENTRY_BYTES = 64 * 1024 * 1024;
+var MAX_EVIDENCE_ENTRIES = 64;
+var MAX_EVIDENCE_TOTAL_BYTES = 128 * 1024 * 1024;
+var MAX_EVIDENCE_PREVIEW_BYTES = 257 * 1024;
 
 // connector/worker.ts
 var terminal = new Set(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
@@ -61,6 +65,7 @@ class WorkerRuntime {
   active = 0;
   leaseExpiresAt;
   jobs = new Map;
+  jobBindings = new Map;
   keys = new Map;
   pending = [];
   constructor(o) {
@@ -80,7 +85,8 @@ class WorkerRuntime {
   async handle(request) {
     if (request.method !== "POST")
       return responseError("METHOD_NOT_ALLOWED", "POST required", 405);
-    if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json")
+    const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (contentType !== "application/json")
       return responseError("UNSUPPORTED_MEDIA_TYPE", "application/json required", 415);
     let e;
     try {
@@ -92,7 +98,7 @@ class WorkerRuntime {
     if (invalid)
       return invalid;
     const fingerprint = sha256(JSON.stringify({ ...e, correlation_id: undefined }));
-    const key = `${e.project_id}:${e.actor.actor_type}:${e.actor.actor_id}:${e.idempotency_key}`;
+    const key = `${e.project_id}:${e.classification}:${e.actor.actor_type}:${e.actor.actor_id}:${e.idempotency_key}`;
     const prior = this.keys.get(key);
     if (prior)
       return prior.fingerprint === fingerprint ? Response.json(prior.body, { status: prior.status }) : responseError("IDEMPOTENCY_CONFLICT", "idempotency key was used with a different request", 409);
@@ -102,7 +108,7 @@ class WorkerRuntime {
       return this.ok(out.body, out.status);
     } catch (cause) {
       const code = cause instanceof Error ? cause.message : "WORKER_ERROR";
-      const status = code === "JOB_NOT_FOUND" || code === "EVIDENCE_NOT_AVAILABLE" || code === "NOT_FOUND" ? 404 : code === "EVIDENCE_CORRUPT" ? 422 : code === "UNSUPPORTED_VIVADO" ? 501 : code === "IDEMPOTENCY_CONFLICT" ? 409 : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
+      const status = code === "JOB_NOT_FOUND" || code === "EVIDENCE_NOT_AVAILABLE" || code === "NOT_FOUND" ? 404 : code === "EVIDENCE_CORRUPT" ? 422 : code === "EVIDENCE_LIMIT_EXCEEDED" ? 413 : code === "UNSUPPORTED_VIVADO" ? 501 : code === "IDEMPOTENCY_CONFLICT" ? 409 : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
       return responseError(code, code, status);
     }
   }
@@ -118,6 +124,10 @@ class WorkerRuntime {
       return responseError("INVALID_ENVELOPE", "actor is invalid", 400);
     if (!classes.includes(e.classification))
       return responseError("INVALID_ENVELOPE", "classification is invalid", 400);
+    if (!this.endpoint.project_scope.includes(e.project_id))
+      return responseError("PROJECT_NOT_ALLOWED", "PROJECT_NOT_ALLOWED", 403);
+    if (!this.endpoint.data_classification_scope.includes(e.classification))
+      return responseError("CLASSIFICATION_NOT_ALLOWED", "CLASSIFICATION_NOT_ALLOWED", 403);
     return;
   }
   async route(path, e) {
@@ -157,7 +167,8 @@ class WorkerRuntime {
     if (!good(jobId))
       throw new Error("INVALID_JOB_ID");
     const job = this.jobs.get(jobId);
-    if (!job)
+    const binding = this.jobBindings.get(jobId);
+    if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification)
       throw new Error("JOB_NOT_FOUND");
     if (path === "/jobs/status")
       return { status: 200, body: this.envelope(e, copy(job)) };
@@ -169,13 +180,14 @@ class WorkerRuntime {
     if (path === "/jobs/evidence") {
       if (!job.evidence)
         throw new Error("EVIDENCE_NOT_AVAILABLE");
+      this.assertEvidenceLimits(job.evidence);
       return { status: 200, body: this.envelope(e, copy(job.evidence)) };
     }
     if (path === "/jobs/evidence/content") {
       const name = p.name;
       if (typeof name !== "string" || !evidenceNameRe.test(name))
         throw new Error("EVIDENCE_NOT_AVAILABLE");
-      return this.evidenceContent(e, job, name);
+      return this.evidenceContent(e, job, name, p.complete === true);
     }
     throw new Error("NOT_FOUND");
   }
@@ -199,12 +211,16 @@ class WorkerRuntime {
     const fingerprint = sha256(JSON.stringify(request));
     const old = this.jobs.get(jobId);
     if (old) {
+      const binding = this.jobBindings.get(jobId);
+      if (!binding || binding.projectId !== e.project_id || binding.classification !== e.classification)
+        throw new Error("JOB_NOT_FOUND");
       if (sha256(JSON.stringify(old.request)) !== fingerprint)
         throw new Error("IDEMPOTENCY_CONFLICT");
       return { status: 200, body: this.envelope(e, copy(old)) };
     }
     const job = { id: jobId, request: { ...request, jobId }, state: "submitted", inputSha256: sha256(request.input) };
     this.jobs.set(jobId, job);
+    this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification });
     this.pending.push(jobId);
     this.pump();
     return { status: 202, body: this.envelope(e, copy(job)) };
@@ -252,24 +268,32 @@ class WorkerRuntime {
         job.errorCode = "WORKER_EXECUTION_ERROR";
     }
   }
-  async evidenceContent(e, job, name) {
+  async evidenceContent(e, job, name, complete = false) {
     if (!job.evidence)
       throw new Error("EVIDENCE_NOT_AVAILABLE");
+    this.assertEvidenceLimits(job.evidence);
     const entry = job.evidence.entries.find((x) => x.name === name);
     if (!entry)
       throw new Error("EVIDENCE_NOT_AVAILABLE");
     const filePath = join(this.root, job.id, "output", name);
     let buf;
     try {
+      const details = await stat(filePath);
+      if (details.size > MAX_EVIDENCE_ENTRY_BYTES)
+        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
+      if (!details.isFile() || details.size !== entry.sizeBytes)
+        throw new Error("EVIDENCE_CORRUPT");
       buf = await readFile(filePath);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === "EVIDENCE_LIMIT_EXCEEDED")
+        throw error;
       throw new Error("EVIDENCE_CORRUPT");
     }
     if (sha256(buf) !== entry.sha256)
       throw new Error("EVIDENCE_CORRUPT");
     let contentBytes = buf;
     let truncated = false;
-    if (buf.byteLength > MAX_CONTENT_BYTES) {
+    if (!complete && buf.byteLength > MAX_CONTENT_BYTES) {
       truncated = true;
       const omitted = buf.byteLength - CONTENT_WINDOW_BYTES * 2;
       contentBytes = Buffer.concat([buf.subarray(0, CONTENT_WINDOW_BYTES), Buffer.from(`
@@ -277,6 +301,18 @@ class WorkerRuntime {
 `, "utf8"), buf.subarray(buf.byteLength - CONTENT_WINDOW_BYTES)]);
     }
     return { status: 200, body: this.envelope(e, { name: entry.name, sha256: entry.sha256, sizeBytes: buf.byteLength, mediaType: entry.mediaType, content_base64: Buffer.from(contentBytes).toString("base64"), truncated }) };
+  }
+  assertEvidenceLimits(manifest) {
+    if (manifest.entries.length > MAX_EVIDENCE_ENTRIES)
+      throw new Error("EVIDENCE_LIMIT_EXCEEDED");
+    let total = 0;
+    for (const entry of manifest.entries) {
+      if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || entry.sizeBytes > MAX_EVIDENCE_ENTRY_BYTES)
+        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
+      total += entry.sizeBytes;
+      if (!Number.isSafeInteger(total) || total > MAX_EVIDENCE_TOTAL_BYTES)
+        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
+    }
   }
   envelope(e, payload) {
     return { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: e.correlation_id, causation_id: e.correlation_id, idempotency_key: e.idempotency_key, actor: e.actor, project_id: e.project_id, classification: e.classification, capability_version: e.capability_version, payload };
@@ -292,7 +328,7 @@ class WorkerRuntime {
 // connector/vivado.ts
 import { createHash as createHash2 } from "node:crypto";
 import { access, constants } from "node:fs/promises";
-import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join as join2, resolve } from "node:path";
 var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
@@ -315,9 +351,32 @@ var hash = (data) => createHash2("sha256").update(data).digest("hex");
 function reject(code) {
   throw new Error(`VIVADO_POLICY_REJECTED:${code}`);
 }
+var WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;
 function safePath(path) {
-  if (!path || path.startsWith("/") || path.startsWith("\\") || path.includes("..") || path.includes("\\") || path.includes("\x00"))
+  if (!path || Buffer.byteLength(path, "utf8") > 512 || path !== path.normalize("NFC") || path.startsWith("/") || path.startsWith("\\") || path.includes("\\") || path.includes("\x00"))
     reject("UNSAFE_PATH");
+  const segments = path.split("/");
+  if (segments.length === 0 || segments.length > 32)
+    reject("UNSAFE_PATH");
+  for (const segment of segments) {
+    if (!segment || segment === "." || segment === ".." || Buffer.byteLength(segment, "utf8") > 255 || /[\u0000-\u001f\u007f:*?"<>|]/u.test(segment) || /[ .]$/.test(segment))
+      reject("UNSAFE_PATH");
+    const deviceName = segment.split(".", 1)[0].replace(/[ .]+$/u, "");
+    if (WINDOWS_RESERVED_NAME.test(deviceName))
+      reject("UNSAFE_PATH");
+  }
+}
+function portablePathKey(path) {
+  return path.normalize("NFC").toLowerCase();
+}
+function assertDistinctPortablePaths(paths) {
+  const seen = new Set;
+  for (const path of paths) {
+    const key = portablePathKey(path);
+    if (seen.has(key))
+      reject("PATH_COLLISION");
+    seen.add(key);
+  }
 }
 function safeToken(value, name) {
   if (!value || value.length > 256 || /[\0\r\n{}\[\]$;]/.test(value))
@@ -399,6 +458,83 @@ function assertSimulateModules(request) {
       reject("AMBIGUOUS_SOURCE_ROLE");
   }
 }
+var XDC_COMMANDS = new Set([
+  "create_clock",
+  "create_generated_clock",
+  "set_case_analysis",
+  "set_clock_groups",
+  "set_clock_latency",
+  "set_clock_transition",
+  "set_clock_uncertainty",
+  "set_disable_timing",
+  "set_false_path",
+  "set_input_delay",
+  "set_input_transition",
+  "set_io",
+  "set_load",
+  "set_location",
+  "set_max_capacitance",
+  "set_max_delay",
+  "set_max_fanout",
+  "set_max_transition",
+  "set_min_delay",
+  "set_multicycle_path",
+  "set_output_delay",
+  "set_property"
+]);
+var XDC_QUERY_COMMANDS = new Set(["current_design", "get_cells", "get_clocks", "get_drc_checks", "get_nets", "get_pins", "get_ports"]);
+function assertXdcLine(line) {
+  if (/\\[ \t]*$/.test(line))
+    reject("XDC_LINE_CONTINUATION");
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#"))
+    return;
+  if (/\bset_property\b/i.test(trimmed) && /\bSEVERITY\b/i.test(trimmed) && /\bget_drc_checks\b/i.test(trimmed) && /\b(?:NSTD-1|UCIO-1)\b/i.test(trimmed))
+    reject("UNSAFE_XDC_DRC_SEVERITY_OVERRIDE");
+  if (trimmed.includes("$") || trimmed.includes(";") || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(trimmed))
+    reject("UNSAFE_XDC_COMMAND");
+  let remainder = "";
+  for (let cursor = 0;cursor < trimmed.length; ) {
+    const open = trimmed.indexOf("[", cursor);
+    const strayClose = trimmed.indexOf("]", cursor);
+    if (strayClose !== -1 && (open === -1 || strayClose < open))
+      reject("UNSAFE_XDC_COMMAND");
+    if (open === -1) {
+      remainder += trimmed.slice(cursor);
+      break;
+    }
+    remainder += trimmed.slice(cursor, open);
+    const close = trimmed.indexOf("]", open + 1);
+    if (close === -1 || trimmed.slice(open + 1, close).includes("[") || trimmed.slice(open + 1, close).includes("]"))
+      reject("UNSAFE_XDC_COMMAND");
+    const query = trimmed.slice(open + 1, close).trim();
+    const command2 = query.match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
+    if (!command2 || !XDC_QUERY_COMMANDS.has(command2))
+      reject("UNSAFE_XDC_QUERY");
+    remainder += " __SYNTHIA_QUERY__ ";
+    cursor = close + 1;
+  }
+  if (remainder.includes("[") || remainder.includes("]"))
+    reject("UNSAFE_XDC_COMMAND");
+  const command = remainder.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
+  if (!command || !XDC_COMMANDS.has(command))
+    reject("UNSAFE_XDC_COMMAND");
+}
+function assertXdcPolicy(content) {
+  let text;
+  try {
+    text = typeof content === "string" ? content : new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    reject("INVALID_CONSTRAINT_ENCODING");
+  }
+  const normalized = text.replace(/\r\n/g, `
+`);
+  if (normalized.includes("\r"))
+    reject("INVALID_CONSTRAINT_ENCODING");
+  for (const line of normalized.split(`
+`))
+    assertXdcLine(line);
+}
 function validateVivadoRequest(request) {
   if (!isPlainObject(request))
     reject("INVALID_REQUEST");
@@ -406,6 +542,12 @@ function validateVivadoRequest(request) {
     reject("INVALID_ID");
   if (request.runClass !== "exploratory" && request.runClass !== "gate_check" && request.runClass !== "formal")
     reject("INVALID_RUN_CLASS");
+  if (request.inputHash !== undefined && (typeof request.inputHash !== "string" || !/^[0-9a-f]{64}$/.test(request.inputHash)))
+    reject("INVALID_INPUT_HASH");
+  if (request.toolchainHash !== undefined && (typeof request.toolchainHash !== "string" || !/^[0-9a-f]{64}$/.test(request.toolchainHash)))
+    reject("INVALID_TOOLCHAIN_HASH");
+  if (request.runClass === "formal" && (!request.inputHash || !request.toolchainHash))
+    reject("FORMAL_BINDING_REQUIRED");
   if (request.timeoutMs !== undefined) {
     const t = request.timeoutMs;
     if (typeof t !== "number" || !Number.isFinite(t) || !Number.isInteger(t) || t <= 0 || t > VIVADO_MAX_TIMEOUT_MS)
@@ -426,6 +568,12 @@ function validateVivadoRequest(request) {
       reject("INVALID_TOOLCHAIN");
     if (request.toolchain.vivadoBinary)
       safeToken(request.toolchain.vivadoBinary, "binary");
+    if (request.toolchain.part)
+      safeToken(request.toolchain.part, "part");
+    if (request.toolchain.profileHash !== undefined && !/^[0-9a-f]{64}$/.test(request.toolchain.profileHash))
+      reject("INVALID_TOOLCHAIN");
+    if (request.runClass === "formal" && request.toolchain.profileHash !== undefined && request.toolchain.profileHash !== request.toolchainHash)
+      reject("FORMAL_TOOLCHAIN_MISMATCH");
   }
   if ("part" in request) {
     if (typeof request.part !== "string")
@@ -436,6 +584,10 @@ function validateVivadoRequest(request) {
     if (typeof request.top !== "string")
       reject("INVALID_TOP");
     safeToken(request.top, "top");
+  }
+  if ("stopBeforeBitstream" in request && request.stopBeforeBitstream !== undefined) {
+    if (request.operation !== "implement" || typeof request.stopBeforeBitstream !== "boolean")
+      reject("INVALID_STOP_BEFORE_BITSTREAM");
   }
   if (request.operation === "simulate") {
     const tb = request.testbench;
@@ -502,8 +654,16 @@ function validateVivadoRequest(request) {
         reject("EMPTY_CONSTRAINT");
       if (size > 4 * 1024 * 1024)
         reject("CONSTRAINT_TOO_LARGE");
+      assertXdcPolicy(constraint.content);
     }
   }
+  const paths = [
+    ..."sources" in request && Array.isArray(request.sources) ? request.sources.map((source) => source.path) : [],
+    ..."constraints" in request && Array.isArray(request.constraints) ? request.constraints.map((constraint) => constraint.path) : []
+  ];
+  assertDistinctPortablePaths(paths);
+  if ("part" in request && request.toolchain?.part !== undefined && request.part !== request.toolchain.part)
+    reject("TOOLCHAIN_PART_MISMATCH");
 }
 function tclQuote(value) {
   return `{${value.replace(/[{}]/g, (c) => `\\${c}`)}}`;
@@ -516,8 +676,8 @@ function readSourceLine(source, inputDir) {
 function scriptFor(request, inputDir, outputDir) {
   const sources = "sources" in request ? request.sources.map((s) => readSourceLine(s, inputDir)).join(`
 `) : "";
-  const top = "top" in request ? `-top ${tclQuote(request.top)}` : "";
-  const part = "part" in request ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
+  const top = "top" in request && typeof request.top === "string" ? `-top ${tclQuote(request.top)}` : "";
+  const part = "part" in request && typeof request.part === "string" ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
   if (request.operation === "discover_toolchain")
     return `puts [version -short]
 puts [join [get_parts *] \\"\\n\\"]`;
@@ -531,7 +691,8 @@ puts SOURCE_VALIDATION_OK`;
     const simPaths = [];
     for (const source of request.sources) {
       const target = tclQuote(join2(inputDir, source.path));
-      (declaredModules(source).includes(request.testbench) ? simPaths : designPaths).push(target);
+      const testSource = declaredModules(source).includes(request.testbench) || /(^|\/)(?:tb|test|tests|testbench)(?:\/|$)/i.test(source.path);
+      (testSource ? simPaths : designPaths).push(target);
     }
     const designFiles = designPaths.join(" ");
     const simFiles = simPaths.join(" ");
@@ -579,7 +740,7 @@ report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
     const constraints = (request.constraints ?? []).map((c) => `read_xdc ${tclQuote(join2(inputDir, c.path))}`).join(`
 `);
     const out = (name) => tclQuote(join2(outputDir, name));
-    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, `write_checkpoint -force ${out("routed.dcp")}`, `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
+    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_methodology -file ${out("methodology.rpt")}`, `report_cdc -details -file ${out("cdc.rpt")}`, `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set timingClocks [get_clocks -quiet]", 'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, request.stopBeforeBitstream ? "puts BITSTREAM_GENERATION_SKIPPED" : `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
 `);
   }
   const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join2(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join2(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
@@ -587,13 +748,69 @@ report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
 synth_design ${part} ${top}
 ${report}`;
 }
-async function evidence(workspace, jobId) {
+function inputMember(source) {
+  const bytes = typeof source.content === "string" ? new TextEncoder().encode(source.content) : source.content;
+  return {
+    path: source.path,
+    sha256: hash(bytes),
+    sizeBytes: bytes.byteLength,
+    mediaType: source.mediaType ?? "application/octet-stream"
+  };
+}
+function evidenceInputManifest(request) {
+  return {
+    schema: "vivado-input-manifest.v1",
+    jobId: request.jobId,
+    projectId: request.projectId,
+    operation: request.operation,
+    runClass: request.runClass,
+    inputHash: request.inputHash ?? null,
+    toolchainHash: request.toolchainHash ?? request.toolchain?.profileHash ?? null,
+    top: "top" in request ? request.top : null,
+    testbench: request.operation === "simulate" ? request.testbench : null,
+    part: "part" in request ? request.part : request.toolchain?.part ?? null,
+    stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
+    sources: "sources" in request ? request.sources.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : [],
+    constraints: "constraints" in request && request.constraints ? request.constraints.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : []
+  };
+}
+var RESULT_FILE_BY_OPERATION = {
+  validate_sources: "validation-result.json",
+  simulate: "simulation-result.json",
+  synthesize: "synthesis-result.json",
+  implement: "implementation-result.json"
+};
+async function writeExecutionEvidence(outputDir, request, result, status, details = {}) {
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  await Promise.all([
+    writeFile2(join2(outputDir, "stdout.log"), stdout, "utf8"),
+    writeFile2(join2(outputDir, "stderr.log"), stderr, "utf8"),
+    writeFile2(join2(outputDir, "tool.log"), `${stdout}${stdout && stderr ? `
+` : ""}${stderr}`, "utf8")
+  ]);
+  const resultName = RESULT_FILE_BY_OPERATION[request.operation];
+  if (resultName) {
+    await writeFile2(join2(outputDir, resultName), JSON.stringify({
+      schema: `${request.operation}-result.v1`,
+      passed: status === "succeeded",
+      status,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut === true,
+      ...details
+    }, null, 2), "utf8");
+  }
+}
+async function evidence(workspace, jobId, omittedNames = new Set) {
   const output = join2(workspace, "output");
   const entries = [];
-  for (const name of await readdir(output)) {
+  for (const name of (await readdir(output)).sort()) {
     safePath(name);
+    if (omittedNames.has(name))
+      continue;
     const bytes = await readFile2(join2(output, name));
-    entries.push({ name, uri: `workspace://${jobId}/output/${name}`, sha256: hash(bytes), sizeBytes: (await stat(join2(output, name))).size, mediaType: name.endsWith(".rpt") ? "text/plain" : "application/octet-stream" });
+    const mediaType = name.endsWith(".json") ? "application/json" : name.endsWith(".rpt") || name.endsWith(".log") || name.endsWith(".tcl") ? "text/plain" : "application/octet-stream";
+    entries.push({ name, uri: `workspace://${jobId}/output/${name}`, sha256: hash(bytes), sizeBytes: (await stat2(join2(output, name))).size, mediaType });
   }
   return { jobId, entries };
 }
@@ -640,15 +857,107 @@ function judgeSimulation(simulatorStdout, phaseExitCode, exitCode) {
     return { status: "succeeded" };
   return { status: "failed", errorCode: "VIVADO_SIMULATION_INCONCLUSIVE" };
 }
+var PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS = ["synth.dcp", "methodology.rpt", "cdc.rpt", "drc.rpt", "sta.rpt", "resources.rpt", "routed.dcp"];
+var FAILED_IMPLEMENTATION_OMISSIONS = new Set(["synthia.bit"]);
+function judgeDrcReport(report) {
+  const finished = report.match(/DRC finished with\s+(\d+)\s+Errors?/i);
+  if (finished)
+    return Number(finished[1]) === 0 ? "passed" : "failed";
+  if (!/\bReport DRC\b/i.test(report))
+    return "inconclusive";
+  const found = report.match(/Violations found:\s*(\d+)/i);
+  const rows = [...report.matchAll(/^\|\s*[^|]+\|\s*(Error|Critical Warning|Warning|Advisory)\s*\|[^|]*\|\s*(\d+)\s*\|\s*$/gim)];
+  if (rows.some((row) => row[1]?.toLowerCase() === "error") || /^\S+#\d+\s+Error\s*$/im.test(report))
+    return "failed";
+  if (!found)
+    return "inconclusive";
+  const violationCount = Number(found[1]);
+  if (violationCount === 0)
+    return "passed";
+  const summarizedCount = rows.reduce((total, row) => total + Number(row[2]), 0);
+  return rows.length > 0 && summarizedCount === violationCount ? "passed" : "inconclusive";
+}
+function judgeStaReport(report) {
+  if (/There are\s+[1-9]\d*\s+register\/latch pins with no clock driven/i.test(report) || /There are no user specified timing constraints\./i.test(report) || /\bno clocks? found\b/i.test(report) || /\bno timing constraints?\b/i.test(report))
+    return "unconstrained";
+  if (/timing constraints are not met/i.test(report) || /Slack\s*\(VIOLATED\)/i.test(report))
+    return "failed";
+  const lines = report.split(/\r?\n/);
+  const summaryHeader = lines.findIndex((line) => /\bWNS\(ns\)/.test(line) && /\bTNS\(ns\)/.test(line));
+  let summary;
+  if (summaryHeader !== -1) {
+    for (const line of lines.slice(summaryHeader + 1, summaryHeader + 8)) {
+      const values = line.trim().split(/\s+/);
+      if (values.length >= 2 && values.every((value) => /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value))) {
+        summary = values.map(Number);
+        break;
+      }
+    }
+  }
+  if (summary) {
+    const slackAndViolationIndexes = summary.length >= 10 ? [0, 1, 4, 5, 8, 9] : [0, 1];
+    if (slackAndViolationIndexes.some((index) => (summary?.[index] ?? 0) < 0))
+      return "failed";
+  }
+  if (!/All user specified timing constraints are met\./i.test(report) || !summary)
+    return "inconclusive";
+  return "passed";
+}
+async function implementationVerdict(outputDir, exitCode, text, stopBeforeBitstream) {
+  let drc;
+  let sta;
+  try {
+    drc = await readFile2(join2(outputDir, "drc.rpt"), "utf8");
+  } catch {}
+  try {
+    sta = await readFile2(join2(outputDir, "sta.rpt"), "utf8");
+  } catch {}
+  if (drc !== undefined && judgeDrcReport(drc) === "failed" || /SYNTHIA_DRC_FAILED/.test(text))
+    return { status: "failed", errorCode: "VIVADO_DRC_FAILED" };
+  if (sta !== undefined && judgeStaReport(sta) === "unconstrained" || /SYNTHIA_TIMING_UNCONSTRAINED/.test(text))
+    return { status: "failed", errorCode: "VIVADO_TIMING_UNCONSTRAINED" };
+  if (sta !== undefined && judgeStaReport(sta) === "failed" || /SYNTHIA_TIMING_FAILED/.test(text))
+    return { status: "failed", errorCode: "VIVADO_TIMING_FAILED" };
+  if (exitCode !== 0)
+    return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_FAILED" };
+  if (drc === undefined || sta === undefined || judgeDrcReport(drc) !== "passed" || judgeStaReport(sta) !== "passed")
+    return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
+  for (const name of [...PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS, ...stopBeforeBitstream ? [] : ["synthia.bit"]]) {
+    try {
+      const details = await stat2(join2(outputDir, name));
+      if (!details.isFile() || details.size === 0)
+        return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
+    } catch {
+      return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
+    }
+  }
+  if (stopBeforeBitstream) {
+    try {
+      await access(join2(outputDir, "synthia.bit"));
+      return { status: "failed", errorCode: "VIVADO_UNEXPECTED_BITSTREAM" };
+    } catch {}
+  }
+  return { status: "succeeded" };
+}
+async function failedImplementationEvidence(workspace, jobId) {
+  try {
+    await unlink(join2(workspace, "output", "synthia.bit"));
+  } catch {}
+  return evidence(workspace, jobId, FAILED_IMPLEMENTATION_OMISSIONS);
+}
 
 class VivadoBatchAdapter {
   run;
   root;
   defaultBinary;
+  configuredPart;
+  configuredProfileHash;
   injected;
   constructor(options) {
     this.root = resolve(options.workspaceRoot);
     this.defaultBinary = options.binary ?? "vivado";
+    this.configuredPart = options.part;
+    this.configuredProfileHash = options.profileHash;
     this.injected = options.commandRunner !== undefined;
     this.run = options.commandRunner ?? defaultRunner;
   }
@@ -657,11 +966,29 @@ class VivadoBatchAdapter {
   }
   async execute(request) {
     validateVivadoRequest(request);
+    if (request.toolchain?.vivadoBinary !== undefined && request.toolchain.vivadoBinary !== this.defaultBinary)
+      reject("TOOLCHAIN_BINARY_MISMATCH");
+    if (this.configuredPart !== undefined && (("part" in request) && request.part !== this.configuredPart || request.toolchain?.part !== undefined && request.toolchain.part !== this.configuredPart))
+      reject("TOOLCHAIN_PART_MISMATCH");
+    if (this.configuredProfileHash !== undefined && (request.toolchainHash !== undefined && request.toolchainHash !== this.configuredProfileHash || request.toolchain?.profileHash !== undefined && request.toolchain.profileHash !== this.configuredProfileHash))
+      reject("TOOLCHAIN_PROFILE_MISMATCH");
+    const effectiveToolchain = {
+      ...request.toolchain ?? {},
+      vivadoBinary: this.defaultBinary,
+      ...this.configuredPart !== undefined ? { part: this.configuredPart } : {},
+      ...this.configuredProfileHash !== undefined ? { profileHash: this.configuredProfileHash } : {}
+    };
+    const effectiveRequest = { ...request, toolchain: effectiveToolchain };
     const workspace = join2(this.root, request.jobId);
     const inputDir = join2(workspace, "input");
     const outputDir = join2(workspace, "output");
     await mkdir2(inputDir, { recursive: true });
     await mkdir2(outputDir, { recursive: true });
+    if (request.operation === "implement" && request.stopBeforeBitstream === true) {
+      try {
+        await unlink(join2(outputDir, "synthia.bit"));
+      } catch {}
+    }
     if ("sources" in request)
       for (const source of request.sources) {
         safePath(source.path);
@@ -676,48 +1003,86 @@ class VivadoBatchAdapter {
         await mkdir2(dirname(target), { recursive: true });
         await writeFile2(target, constraint.content);
       }
-    const inputSha256 = hash(JSON.stringify(request));
-    const binary = request.toolchain?.vivadoBinary ?? this.defaultBinary;
+    const inputSha256 = hash(JSON.stringify(effectiveRequest));
+    const binary = this.defaultBinary;
     const command = [binary, "-mode", "batch", "-nolog", "-nojournal", "-notrace", "-source", join2(workspace, "run.tcl")];
-    const base = { jobId: request.jobId, operation: request.operation, command, inputSha256, workspace, toolchain: { binary, licenseStatus: "unknown", part: "part" in request ? request.part : request.toolchain?.part, profileHash: request.toolchain?.profileHash }, evidence: { jobId: request.jobId, entries: [] } };
+    const base = { jobId: request.jobId, operation: request.operation, command, inputSha256, workspace, toolchain: { binary, licenseStatus: "unknown", part: "part" in request ? request.part : effectiveRequest.toolchain?.part, profileHash: effectiveRequest.toolchain?.profileHash ?? request.toolchainHash }, evidence: { jobId: request.jobId, entries: [] } };
     try {
       if (!this.injected && (binary.includes("/") || binary.includes("\\")))
         await access(binary, constants.X_OK);
     } catch {
       return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE" };
     }
-    await writeFile2(join2(workspace, "run.tcl"), scriptFor(request, inputDir, outputDir), "utf8");
+    const runScript = scriptFor(effectiveRequest, inputDir, outputDir);
+    await Promise.all([
+      writeFile2(join2(workspace, "run.tcl"), runScript, "utf8"),
+      writeFile2(join2(outputDir, "run.tcl"), runScript, "utf8"),
+      writeFile2(join2(outputDir, "input-manifest.json"), JSON.stringify(evidenceInputManifest(effectiveRequest), null, 2), "utf8")
+    ]);
     const effectiveTimeout = request.timeoutMs ?? VIVADO_DEFAULT_TIMEOUT_MS;
     let result;
     try {
       result = await this.run(binary, command.slice(1), workspace, effectiveTimeout);
     } catch (error) {
       const code = error?.code;
-      const ev2 = await evidence(workspace, request.jobId);
+      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
       if (code === "ENOENT" || code === "EACCES")
         return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE", evidence: ev2 };
       return { ...base, status: "lost", evidence: ev2 };
     }
     if (result.timedOut) {
-      const ev2 = await evidence(workspace, request.jobId);
+      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
       return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev2 };
     }
     const text = `${result.stdout}
 ${result.stderr}`;
-    const ev = await evidence(workspace, request.jobId);
     const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
     const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
-    if (licenseFailure)
-      return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev };
-    if (/part.*(not found|does not exist|unknown)/i.test(text))
-      return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev };
+    if (licenseFailure) {
+      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
+      return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev2 };
+    }
+    if (/part.*(not found|does not exist|unknown)/i.test(text)) {
+      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
+      return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev2 };
+    }
     const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" : base.toolchain.licenseStatus };
     if (request.operation === "simulate") {
       const sim = parseSimulatePhases(result.stdout);
       const verdict = judgeSimulation(sim.simulatorStdout, sim.phaseExitCode, result.exitCode);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode };
+      await writeExecutionEvidence(outputDir, request, result, verdict.status, {
+        phase: sim.phase ?? null,
+        phaseExitCode: sim.phaseExitCode ?? null,
+        simulatorVerdict: verdict.errorCode ?? "passed"
+      });
+      const ev2 = await evidence(workspace, request.jobId);
+      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode };
     }
-    return { ...base, status: result.exitCode === 0 ? "succeeded" : "failed", exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
+    if (request.operation === "implement") {
+      const stopBeforeBitstream = request.stopBeforeBitstream === true;
+      const verdict = await implementationVerdict(outputDir, result.exitCode, text, stopBeforeBitstream);
+      let drcVerdict = "inconclusive";
+      let timingVerdict = "inconclusive";
+      try {
+        drcVerdict = judgeDrcReport(await readFile2(join2(outputDir, "drc.rpt"), "utf8"));
+      } catch {}
+      try {
+        timingVerdict = judgeStaReport(await readFile2(join2(outputDir, "sta.rpt"), "utf8"));
+      } catch {}
+      await writeExecutionEvidence(outputDir, request, result, verdict.status, {
+        drcVerdict,
+        timingVerdict,
+        bitstreamGenerated: stopBeforeBitstream ? false : verdict.status === "succeeded",
+        stopBeforeBitstream,
+        errorCode: verdict.errorCode ?? null
+      });
+      const ev2 = verdict.status === "succeeded" ? await evidence(workspace, request.jobId) : await failedImplementationEvidence(workspace, request.jobId);
+      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode };
+    }
+    const status = result.exitCode === 0 ? "succeeded" : "failed";
+    await writeExecutionEvidence(outputDir, request, result, status);
+    const ev = await evidence(workspace, request.jobId);
+    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
   }
 }
 
@@ -726,6 +1091,20 @@ function required(value, name) {
   if (typeof value !== "string" || !value.trim())
     throw new Error(`CONFIG_INVALID:${name}`);
   return value;
+}
+function workerRequestBindingMatches(request, candidate, toolchainProfileHash, configured) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+    return false;
+  const binding = candidate;
+  const identityBinding = binding.jobId === request.jobId && binding.projectId === request.projectId && binding.operation === request.operation && binding.runClass === request.runClass;
+  const inputBinding = request.runClass === "formal" ? binding.inputHash === request.input : binding.inputHash === undefined || binding.inputHash === request.input;
+  const toolchainBinding = request.runClass !== "formal" || binding.toolchainHash === toolchainProfileHash;
+  const nested = binding.toolchain === undefined ? undefined : binding.toolchain && typeof binding.toolchain === "object" && !Array.isArray(binding.toolchain) ? binding.toolchain : null;
+  if (nested === null)
+    return false;
+  const profileBinding = nested?.profileHash === undefined || nested.profileHash === toolchainProfileHash;
+  const configuredBinding = configured === undefined || (nested?.vivadoBinary === undefined || nested.vivadoBinary === configured.vivadoBinary) && (nested?.part === undefined || nested.part === configured.part) && (binding.part === undefined || binding.part === configured.part);
+  return identityBinding && inputBinding && toolchainBinding && profileBinding && configuredBinding;
 }
 async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json") {
   const config = JSON.parse(await readFile3(path, "utf8"));
@@ -738,7 +1117,7 @@ async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthi
   return config;
 }
 function execution(config) {
-  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary });
+  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, part: config.vivado_part, profileHash: config.toolchain_profile_hash });
   return {
     async discover() {
       try {
@@ -752,13 +1131,17 @@ function execution(config) {
       const candidate = request.parameters;
       if (!candidate || typeof candidate !== "object")
         return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
+      if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: config.vivado_part })) {
+        const jobId = request.jobId ?? "worker";
+        return { outcome: "failure", error_code: "FORMAL_BINDING_MISMATCH", output: JSON.stringify({ status: "rejected", jobId, errorCode: "FORMAL_BINDING_MISMATCH" }), evidence: { jobId, entries: [] } };
+      }
       const vivadoRequest = {
         ...candidate,
         toolchain: {
-          ...candidate.toolchain ?? {},
-          vivadoBinary: candidate.toolchain?.vivadoBinary ?? config.vivado_binary,
-          part: candidate.toolchain?.part ?? config.vivado_part,
-          profileHash: candidate.toolchain?.profileHash ?? config.toolchain_profile_hash
+          requiredLicense: candidate.toolchain?.requiredLicense,
+          vivadoBinary: config.vivado_binary,
+          part: config.vivado_part,
+          profileHash: config.toolchain_profile_hash
         }
       };
       let result;
@@ -833,5 +1216,6 @@ if (__require.main == __require.module) {
   });
 }
 export {
+  workerRequestBindingMatches,
   startWorker
 };

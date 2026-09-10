@@ -24,6 +24,7 @@ import {
   type ConnectorJobSnapshot,
   type ConnectorPort,
   type EvidenceContent,
+  type EvidenceContentOptions,
   type EvidenceManifest,
   type SubmitJobParams,
 } from "./connector-port.ts";
@@ -84,6 +85,7 @@ interface RemoteEvidenceManifest {
  *  (POST /jobs/evidence/content response). Does not echo `name` back. */
 interface RemoteEvidenceContent {
   content: string;
+  bytes?: Uint8Array;
   sha256: string;
   truncated: boolean;
   mediaType: string;
@@ -111,7 +113,11 @@ interface RemoteClientLike {
   submit(req: RemoteJobRequest, approval?: RemoteApproval): Promise<RemoteJob>;
   status(id: string): Promise<RemoteJob>;
   evidence(id: string): Promise<RemoteEvidenceManifest>;
-  fetchEvidenceContent(id: string, name: string): Promise<RemoteEvidenceContent>;
+  fetchEvidenceContent(
+    id: string,
+    name: string,
+    options?: { complete?: boolean },
+  ): Promise<RemoteEvidenceContent>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
 }
@@ -152,6 +158,23 @@ function isLeaseExpiredError(err: unknown): boolean {
 }
 
 /**
+ * Client-lifecycle errors that mean the cached client is stale against the
+ * worker's CURRENT state — most commonly the worker process restarted and lost
+ * its in-memory registration/lease (worker state is not durable). Without this
+ * check a NOT_REGISTERED heartbeat error would propagate forever because the
+ * cached client never gets evicted. Re-priming (register → heartbeat →
+ * discover) is the recovery for all of these.
+ */
+function isStaleClientError(err: unknown): boolean {
+  if (isLeaseExpiredError(err)) return true;
+  if (err instanceof Error && "code" in err) {
+    const code = String((err as { code: unknown }).code);
+    return code === "NOT_REGISTERED" || code === "ENDPOINT_NOT_APPROVED" || code === "ENDPOINT_REVOKED";
+  }
+  return false;
+}
+
+/**
  * Build the `parameters` object the Worker's vivado.execute() consumes. The
  * inner object MUST repeat operation/jobId/projectId/runClass (worker server.ts
  * spreads `candidate` to build the VivadoRequest) alongside the source payload.
@@ -166,12 +189,24 @@ function buildRemoteParameters(params: SubmitJobParams): Record<string, unknown>
     jobId: params.jobId,
     projectId: params.projectId,
     runClass: params.runClass,
-    sources: p.sources,
+    inputHash: params.inputHash,
   };
+  // Toolchain/part discovery requests have no HDL payload. Including the
+  // API-level default `sources: []` changes the structural Vivado request into
+  // a source-bearing request, which the Worker correctly rejects as
+  // VIVADO_POLICY_REJECTED:NO_SOURCES. Only source-consuming operations should
+  // carry this member across the Connector boundary.
+  if (params.operation !== "discover_toolchain" && params.operation !== "query_parts") {
+    base.sources = p.sources;
+  }
+  if (params.toolchainProfileHash !== undefined) {
+    base.toolchainHash = params.toolchainProfileHash;
+  }
   if (p.top !== undefined) base.top = p.top;
   if (p.part !== undefined) base.part = p.part;
   if (p.testbench !== undefined) base.testbench = p.testbench;
   if (p.constraints.length > 0) base.constraints = p.constraints;
+  if (p.stopBeforeBitstream !== undefined) base.stopBeforeBitstream = p.stopBeforeBitstream;
   if (p.timeoutMs !== undefined) base.timeoutMs = p.timeoutMs;
   return base;
 }
@@ -292,7 +327,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     try {
       await client.heartbeat();
     } catch (err) {
-      if (isLeaseExpiredError(err)) {
+      if (isStaleClientError(err)) {
         this.clients.delete(projectId);
         this.primed.delete(projectId);
         return this.ensureReady(projectId);
@@ -315,8 +350,8 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     try {
       return await action(client);
     } catch (err) {
-      if (!isLeaseExpiredError(err)) throw toConnectorError(err);
-      // Lease expired mid-call — rebuild and retry once.
+      if (!isStaleClientError(err)) throw toConnectorError(err);
+      // Stale client (lease/registration lost, e.g. worker restart) — rebuild and retry once.
       const rebuilt = this.buildClient(projectId);
       this.clients.set(projectId, rebuilt);
       try {
@@ -337,7 +372,11 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       if (client.hasCapabilityDrift) {
         throw new ConnectorError("CAPABILITY_DRIFT", "capability drift detected during discover", false);
       }
-      return { capabilities: d.capabilities, drift: false };
+      return {
+        capabilities: d.capabilities,
+        drift: false,
+        toolchainProfileHash: d.toolchain_profile_hash,
+      };
     });
   }
 
@@ -349,7 +388,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
         projectId: params.projectId,
         operation: params.operation,
         runClass: params.runClass,
-        input: `manifest:${params.jobId}`,
+        input: params.inputHash,
         correlationId: params.correlationId,
         parameters: buildRemoteParameters(params),
       };
@@ -372,10 +411,24 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     });
   }
 
-  async fetchEvidenceContent(projectId: string, jobId: string, name: string): Promise<EvidenceContent> {
+  async fetchEvidenceContent(
+    projectId: string,
+    jobId: string,
+    name: string,
+    options?: EvidenceContentOptions,
+  ): Promise<EvidenceContent> {
     return this.withClient(projectId, async (client) => {
-      const c = await client.fetchEvidenceContent(jobId, name);
-      return { name, content: c.content, sha256: c.sha256, truncated: c.truncated, mediaType: c.mediaType };
+      const c = await client.fetchEvidenceContent(jobId, name, {
+        complete: options?.requireFull === true,
+      });
+      return {
+        name,
+        content: c.content,
+        ...(c.bytes ? { bytes: c.bytes } : {}),
+        sha256: c.sha256,
+        truncated: c.truncated,
+        mediaType: c.mediaType,
+      };
     });
   }
 }
@@ -399,10 +452,6 @@ export interface ConnectorEnvOptions {
  */
 export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Promise<ConnectorPort | undefined> {
   const env = opts.env ?? process.env;
-  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
-  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
-  if (!cfId || !cfSecret) return undefined;
-
   const configPath = opts.configPath ?? env.SYNTHIA_CONNECTOR_CONFIG ?? "connector/worker-66.config.json";
   const endpointUrl = opts.endpointUrl ?? PRODUCTION_ENDPOINT_URL;
 
@@ -418,6 +467,25 @@ export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Pr
   } catch {
     return undefined;
   }
+
+  // Direct mTLS deployments (for example Core on a workstation reaching the
+  // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
+  // on-disk endpoint origin and let the factory load the client/server
+  // certificate material from the config paths.
+  if (config.transport_mode === "direct_https" && config.auth_mode === "mtls") {
+    const httpModule = (await import("../../../connector/http.ts")) as unknown as {
+      createMtlsDirectRemoteConnector: RemoteFactory;
+    };
+    const directEndpoint = String(config.endpoint_url ?? "");
+    if (!directEndpoint) return undefined;
+    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+  }
+
+  // Cloudflare-tunnel deployments require the Access service-token credentials.
+  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
+  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
+  if (!cfId || !cfSecret) return undefined;
+
   // Override the endpoint origin to the public tunnel; allowlist must include it.
   // The tunnel terminates TLS at Cloudflare Access, so the mTLS material in the
   // on-disk (LAN) config does not apply: point the TLS refs at the Cloudflare

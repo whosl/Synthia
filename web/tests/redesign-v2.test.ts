@@ -7,15 +7,25 @@ import {
 } from "../src/domain/tasks.ts";
 import { auditToParts, type SynthiaPart } from "../src/domain/parts.ts";
 import { BASELINE_NAMES, BASELINE_KINDS } from "../src/domain/gates.ts";
+import { approvalButtonLabel, approvalMilestoneLine } from "../src/domain/unified.ts";
 import {
   ARTIFACT_DOC_NAMES,
   artifactDocName,
   artifactGroupName,
   phaseDocName,
 } from "../src/domain/artifacts.ts";
-import type { TaskAuditEvent, TaskDocRef, TaskRunDetail } from "../src/api/types.ts";
+import type { TaskAuditEvent, TaskDocRef, TaskAgentDetail } from "../src/api/types.ts";
 
 // ─── 测试夹具 ─────────────────────────────────────────────────────────
+
+/** 递归收集目录下的所有 .vue（子目录里的组件同样要受文案守卫约束）。 */
+function vueFilesUnder(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return vueFilesUnder(full);
+    return entry.name.endsWith(".vue") ? [full] : [];
+  });
+}
 
 let seq = 0;
 function audit(partial: Partial<TaskAuditEvent> & Pick<TaskAuditEvent, "category" | "phase" | "action">, ts?: string): TaskAuditEvent {
@@ -23,10 +33,10 @@ function audit(partial: Partial<TaskAuditEvent> & Pick<TaskAuditEvent, "category
   return { ts: ts ?? `2026-08-13T00:00:${String(seq).padStart(2, "0")}Z`, seq, ...partial };
 }
 
-function makeDetail(overrides: Partial<TaskRunDetail>): TaskRunDetail {
+function makeDetail(overrides: Partial<TaskAgentDetail>): TaskAgentDetail {
   seq = 0;
   return {
-    run_id: "run-1",
+    agent_id: "agent-1",
     project_id: "proj-1",
     status: "running",
     current_stage: null,
@@ -94,18 +104,29 @@ describe("「基线」改名「里程碑」（v2 §2）", () => {
   });
 
   test("渲染模板层「基线」出现 0 次", () => {
-    const viewsDir = join(import.meta.dir, "../src/views");
-    const componentsDir = join(import.meta.dir, "../src/components");
-    const files = [
-      ...readdirSync(viewsDir).map((f) => join(viewsDir, f)),
-      ...readdirSync(componentsDir).map((f) => join(componentsDir, f)),
-    ].filter((f) => f.endsWith(".vue"));
+    // 必须递归：早先这里是两次非递归 readdirSync，只扫到 src/views/ 和
+    // src/components/ 根目录，components/chat/ 整个子目录（审批卡、门禁徽章——
+    // 最容易写出「基线」的地方）从来没被检查过。
+    const files = [join(import.meta.dir, "../src/views"), join(import.meta.dir, "../src/components")].flatMap(vueFilesUnder);
     expect(files.length).toBeGreaterThan(0);
+    // 子目录确实被扫到了（防止今后有人把 vueFilesUnder 改回非递归而测试照样绿）
+    expect(files.some((f) => f.includes("/components/chat/"))).toBe(true);
     for (const file of files) {
       const source = readFileSync(file, "utf8");
       const template = /<template>([\s\S]*)<\/template>/.exec(source)?.[1] ?? "";
       expect(template.includes("基线"), `${file} 模板层仍含「基线」`).toBe(false);
     }
+  });
+
+  test("就地审批卡用「里程碑」措辞（正向断言，不只是「没写错」）", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/components/chat/ApprovalCard.vue"), "utf8");
+    // 批准按钮与已批准结论都取自 approvalButtonLabel / approvalMilestoneLine，
+    // 而 BASELINE_NAMES 已全部是「…里程碑」，所以这里断言的是「走的是那条路径」。
+    expect(source).toContain("approvalButtonLabel");
+    expect(source).toContain("approvalMilestoneLine");
+    expect(approvalButtonLabel("G4")).toContain("里程碑");
+    expect(approvalButtonLabel("G4")).not.toContain("基线");
+    expect(approvalMilestoneLine("G4")).toContain("里程碑");
   });
 });
 

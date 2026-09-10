@@ -11,7 +11,21 @@
 
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
-import { sha256Hex } from "../core/src/hashing.ts";
+import { computeManifestHash, sha256Hex } from "../core/src/hashing.ts";
+import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
+import { parseProcessProfile } from "./process-profile.ts";
+import type { P4GateId, ProcessProfileV1 } from "./process-profile.ts";
+import type { EvaluatedGateFlowProgressV1, FormalFlowProgressV1 } from "./formal-flow.ts";
+import type {
+  RuntimeTaskKind,
+  TaskAuthorizationScope,
+} from "./task-workspace-client.ts";
+import {
+  encodeWorkspaceBytes,
+  workspaceInputBytes,
+  workspaceInputHash,
+  type RuntimeWorkspaceFileInput,
+} from "./workspace-content.ts";
 
 /** A generated source / constraint artifact (path + content + optional media type). */
 export interface ArtifactFile {
@@ -82,10 +96,25 @@ export interface RepairGeneration {
   readonly testbench?: ArtifactFile;
 }
 
+/** Any validated model action returned to the deterministic loop. */
+export type LoopAction =
+  | RtlGeneration
+  | TbGeneration
+  | XdcGeneration
+  | DocGeneration
+  | RepairGeneration;
+
 export interface LoopModel {
   generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration>;
   generateTestbench(rtl: readonly ArtifactFile[], topModule: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<TbGeneration>;
-  generateXdc(topModule: string, part: string, systemPrompt: string, allowPinAssignments: boolean, upstream?: UpstreamArtifacts): Promise<XdcGeneration>;
+  generateXdc(
+    topModule: string,
+    part: string,
+    systemPrompt: string,
+    allowPinAssignments: boolean,
+    upstream?: UpstreamArtifacts,
+    topPorts?: readonly string[],
+  ): Promise<XdcGeneration>;
   repair(input: {
     sources: readonly ArtifactFile[];
     testbench?: ArtifactFile;
@@ -129,6 +158,8 @@ export interface VivadoSubmission {
   readonly testbench?: string;
   /** XDC constraints (implement only). */
   readonly constraints?: readonly ArtifactFile[];
+  /** Complete route/reports/checkpoints but never invoke write_bitstream (implement only). */
+  readonly stopBeforeBitstream?: boolean;
   readonly timeoutMs?: number;
 }
 
@@ -157,6 +188,8 @@ export interface EvidenceContent {
  * only issues these versioned capability calls.
  */
 export interface LoopConnector {
+  /** Bind internal polling/retries to the current execution without mutating a shared adapter. */
+  withSignal?(signal: AbortSignal): LoopConnector;
   readonly id: string;
   /** True once capability drift has been detected — the loop fails closed. */
   readonly drift: boolean;
@@ -211,7 +244,9 @@ export interface LoopResult {
   readonly evidence: readonly EvidenceSummary[];
   readonly audit: readonly AuditEvent[];
   readonly endedReason?: string;
-  readonly runId?: string;
+  readonly agentId?: string;
+  /** Present when execution paused for a Core-owned gate approval. */
+  readonly awaitingGate?: GateId;
   /** Structured cause when status is failed/fail_closed (drives resume). */
   readonly terminalCause?: TerminalCause;
 }
@@ -266,8 +301,16 @@ export interface ProjectInfo {
   readonly status: string;
   readonly scope: string;
   readonly dataClassification: string;
-  readonly targetPart: string;
+  readonly targetPart: string | null;
   readonly standardVersion: string;
+  /** Core project_type; currently "free" or "engineering", open for future profiles. */
+  readonly projectType?: string;
+  /** Canonical immutable process-version binding from Core. */
+  readonly processVersionId?: string | null;
+  /** Versioned process profile selected for this project, when Core exposes it. */
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
   /** Process instances on this project (current_gate hints the milestone). */
   readonly processInstances: readonly {
     readonly id: string;
@@ -285,6 +328,39 @@ export interface GateSubmissionSummary {
   readonly processInstanceId: string;
   readonly submittedAt: string | null;
   readonly createdAt: string;
+}
+
+export interface ProcessReadinessV1 {
+  readonly id: string;
+  readonly status: "draft" | "confirmed";
+  readonly ready: boolean;
+  readonly readinessHash: string;
+  readonly targetPart: string;
+  readonly boardRef: string;
+  readonly workspaceReady: boolean;
+  readonly dataScopeRecorded: boolean;
+  readonly sourceMaterialsRecorded: boolean;
+  readonly pinConstraintsComplete: boolean;
+  readonly electricalConstraintsComplete: boolean;
+  readonly clockConstraintsComplete: boolean;
+  readonly constraintsComplete: boolean;
+  readonly toolchainProfileHash: string | null;
+  readonly constraintRevisionIds: readonly string[];
+  readonly generatedBy: { readonly type: string; readonly id: string };
+  readonly confirmedBy: { readonly id: string; readonly at: string } | null;
+}
+
+/** Core-owned projection for the active modern engineering work version. */
+export interface ProcessStateV1 {
+  readonly schema: "process-state.v1";
+  readonly projectId: string;
+  readonly processInstanceId: string;
+  readonly workVersionId: string;
+  readonly profileId: "GJB_REF_V1";
+  readonly profileHash: string;
+  readonly currentGate: P4GateId;
+  readonly completed: boolean;
+  readonly readiness: ProcessReadinessV1 | null;
 }
 
 /** An artifact container row (GET /projects/:projectId/artifacts). */
@@ -315,6 +391,76 @@ export interface ProjectEventSummary {
   readonly occurredAt: string;
 }
 
+/**
+ * A file-level result from Core's approved historical-material search.
+ *
+ * Core's search endpoint is expected to return only confirmed + currently
+ * valid rows.  Ownership, status, validity and searchability are explicit so
+ * Runtime can fail closed when a malformed row slips through an adapter;
+ * optional expiry fields provide a second time-based check. `projectId` is the
+ * owning/target project; `sourceProjectId` identifies the project a material
+ * was copied from, when applicable.
+ */
+export interface ImportedMaterialSummary {
+  readonly snapshotId: string;
+  readonly fileId: string;
+  readonly projectId: string;
+  readonly path: string;
+  readonly content?: string | null;
+  readonly contentHash: string;
+  readonly sourceHash?: string | null;
+  readonly sourceKind?: string | null;
+  readonly sourceName?: string | null;
+  readonly sourceProjectId?: string | null;
+  /** Core's canonical values include pending_confirmation/confirmed/denied/failed/expired. */
+  readonly status: string;
+  /** Derived validity state, when Core exposes a string form. */
+  readonly validity?: string | null;
+  readonly isValid?: boolean | null;
+  /** Core P2 search response's explicit validity/searchability flags. */
+  readonly valid: boolean;
+  readonly searchable: boolean;
+  readonly validUntil?: string | null;
+  readonly expiresAt?: string | null;
+}
+
+/** One file's current bytes in the project workspace (GET workspace/file),
+ *  plus whether those exact bytes are a registered revision. */
+export interface WorkspaceFileContent {
+  readonly path: string;
+  readonly encoding: "utf8" | "base64";
+  readonly content: string | null;
+  readonly contentBase64: string | null;
+  readonly bytes: number;
+  readonly contentHash: string;
+  /** True when these bytes equal the latest registered revision's content_hash. */
+  readonly registered: boolean;
+  /** The revision these bytes are — null when they carry unregistered edits. */
+  readonly revisionId: string | null;
+  readonly version: number | null;
+  /** Commit holding these bytes; null unless `registered`. */
+  readonly commit: string | null;
+}
+
+/** One path's identity in Core after a workspace write. */
+export interface WorkspaceRegisteredFile {
+  readonly path: string;
+  readonly artifactId: string;
+  readonly revisionId: string;
+  readonly version: number;
+  readonly contentHash: string;
+}
+
+/** What a workspace write became in Core (POST workspace/files). */
+export interface WorkspaceWriteResult {
+  /** Commit the write landed in — or current HEAD when the bytes were already there. */
+  readonly commit: string;
+  readonly registered: readonly WorkspaceRegisteredFile[];
+  /** Paths whose bytes already matched the latest registered revision (no new
+   *  version), pointing at that existing revision. */
+  readonly unchanged: readonly WorkspaceRegisteredFile[];
+}
+
 /** A Core API governance client the loop calls to register artifacts and manage gates. */
 export interface GovernanceClient {
   /** Register a candidate ArtifactRevision for the given artifact.
@@ -329,11 +475,29 @@ export interface GovernanceClient {
     changeReason?: string;
     version: number;
   }): Promise<RegisteredRevision>;
+  /**
+   * Write candidate files into the project's real workspace (disk + git) and
+   * register each as the next candidate revision — versions come from Core, so
+   * the same path can be re-registered as v2, v3, … without a client-side
+   * counter.
+   *
+   * Rejects (409 `WORKSPACE_FILE_DIRTY`) when a target file carries unregistered
+   * human edits. That is deliberate: the workspace is shared between the operator
+   * and the agent, and silently overwriting someone's in-flight work is never the
+   * safe default. On that error the agent should read the file and reconcile.
+   */
+  writeWorkspaceFiles(input: {
+    files: readonly RuntimeWorkspaceFileInput[];
+    changeReason?: string;
+    artifactType?: ArtifactType;
+  }): Promise<WorkspaceWriteResult>;
+  /** Read a workspace file's **current** bytes, including unregistered edits. */
+  readWorkspaceFile(path: string): Promise<WorkspaceFileContent>;
   /** Create a ConfigurationSnapshot freezing the given revisions. */
   createSnapshot(input: {
     memberRevisionIds: readonly string[];
     toolModelPolicyHash: string;
-  }): Promise<{ snapshotId: string }>;
+  }): Promise<{ snapshotId: string; manifestHash: string }>;
   /** Create a GateSubmission (state=preparing) and return its id. */
   createGateSubmission(input: {
     processInstanceId: string;
@@ -346,6 +510,14 @@ export interface GovernanceClient {
   getGateSubmissionState(submissionId: string): Promise<{ state: GateSubmissionState }>;
   /** Read-only project overview (meta + process instances). */
   getProjectInfo(projectId: string): Promise<ProjectInfo>;
+  /**
+   * Read the Core-owned modern process definition. Optional only during the
+   * compatibility window for older injected mocks; modern engineering callers
+   * must fail closed when it is absent.
+   */
+  getProcessProfile?(processVersionId: string): Promise<ProcessProfileV1>;
+  /** Read the Core-owned G0-G4 projection and G0 readiness fact. */
+  getProcessState?(projectId: string): Promise<ProcessStateV1>;
   /** List gate submissions for a project; optional state filter. */
   listGateSubmissions(projectId: string, state?: GateSubmissionState): Promise<readonly GateSubmissionSummary[]>;
   /** List artifact containers in a project. */
@@ -354,24 +526,84 @@ export interface GovernanceClient {
   listRevisions(projectId: string, artifactId: string): Promise<readonly ArtifactRevisionSummary[]>;
   /** List recent outbox events for a project (most recent first, bounded by limit). */
   listEvents(projectId: string, limit?: number): Promise<readonly ProjectEventSummary[]>;
+  /**
+   * Search the project's imported historical materials.  Core applies the
+   * confirmed + valid default-search policy server-side; Runtime still applies
+   * ownership/state/expiry checks before injecting any row into context.
+   *
+   * Optional during the P2 compatibility window so older governance clients
+   * and offline fixtures continue to work.  Engineering sessions render a
+   * degraded/unavailable section when the method is absent; free sessions do
+   * not call it at all.
+   */
+  searchImportedMaterials?(projectId: string, query?: {
+    readonly q?: string;
+    readonly limit?: number;
+  }): Promise<readonly ImportedMaterialSummary[]>;
 }
 
 /** A no-op governance client for --no-governance mode (dev/debug only). */
 export class NoGovernanceClient implements GovernanceClient {
   private counter = 0;
+  private readonly revisionHashes = new Map<string, string>();
+  /** In-memory stand-in for the on-disk workspace, so `vivado_run` (which reads
+   *  its sources back by path) still works with governance switched off. */
+  private readonly workspace = new Map<string, { bytes: Uint8Array; commit: string; revisionId: string }>();
   private nextId(prefix: string): string {
     return `${prefix}-nogov-${++this.counter}`;
   }
   async registerCandidateArtifact(input: { content: string; version: number }): Promise<RegisteredRevision> {
+    const revisionId = this.nextId("rev");
+    const contentHash = sha256Hex(input.content);
+    this.revisionHashes.set(revisionId, contentHash);
     return {
-      revisionId: this.nextId("rev"),
+      revisionId,
       artifactId: this.nextId("art"),
       version: input.version,
-      contentHash: sha256Hex(input.content),
+      contentHash,
     };
   }
-  async createSnapshot(): Promise<{ snapshotId: string }> {
-    return { snapshotId: this.nextId("snap") };
+  async writeWorkspaceFiles(input: {
+    files: readonly RuntimeWorkspaceFileInput[];
+  }): Promise<WorkspaceWriteResult> {
+    const commit = this.nextId("commit");
+    const registered = input.files.map((f) => {
+      const bytes = workspaceInputBytes(f);
+      this.workspace.set(f.path, { bytes, commit, revisionId: this.nextId("rev") });
+      this.revisionHashes.set(this.workspace.get(f.path)!.revisionId, sha256Hex(bytes));
+      return {
+        path: f.path,
+        artifactId: this.nextId("art"),
+        revisionId: this.workspace.get(f.path)!.revisionId,
+        version: 1,
+        contentHash: workspaceInputHash(f),
+      };
+    });
+    return { commit, registered, unchanged: [] };
+  }
+  async readWorkspaceFile(path: string): Promise<WorkspaceFileContent> {
+    const file = this.workspace.get(path);
+    if (file === undefined) throw new Error(`WORKSPACE_FILE_NOT_FOUND: ${path}`);
+    const encoded = encodeWorkspaceBytes(file.bytes);
+    return {
+      path,
+      ...encoded,
+      contentHash: sha256Hex(file.bytes),
+      registered: true,
+      revisionId: file.revisionId,
+      version: 1,
+      commit: file.commit,
+    };
+  }
+  async createSnapshot(input: {
+    memberRevisionIds: readonly string[];
+    toolModelPolicyHash: string;
+  }): Promise<{ snapshotId: string; manifestHash: string }> {
+    const members = input.memberRevisionIds.map((id) => ({
+      id,
+      sha256: this.revisionHashes.get(id) ?? sha256Hex(`nogov-missing:${id}`),
+    }));
+    return { snapshotId: this.nextId("snap"), manifestHash: computeManifestHash(members) };
   }
   async createGateSubmission(): Promise<{ submissionId: string }> {
     return { submissionId: this.nextId("sub") };
@@ -389,9 +621,44 @@ export class NoGovernanceClient implements GovernanceClient {
       status: "active",
       scope: "",
       dataClassification: "UNCLASSIFIED",
-      targetPart: "",
+      targetPart: null,
       standardVersion: "",
+      projectType: "free",
       processInstances: [],
+    };
+  }
+  async getProcessProfile(processVersionId: string): Promise<ProcessProfileV1> {
+    return parseProcessProfile(structuredClone(GJB_REF_V1_PROFILE), processVersionId);
+  }
+  async getProcessState(projectId: string): Promise<ProcessStateV1> {
+    return {
+      schema: "process-state.v1",
+      projectId,
+      processInstanceId: `pi-nogov-${projectId}`,
+      workVersionId: `wv-nogov-${projectId}`,
+      profileId: "GJB_REF_V1",
+      profileHash: GJB_REF_V1_PROFILE.profileHash,
+      currentGate: "G0",
+      completed: false,
+      readiness: {
+        id: `readiness-nogov-${projectId}`,
+        status: "confirmed",
+        ready: true,
+        readinessHash: sha256Hex(`readiness-nogov:${projectId}`),
+        targetPart: "offline-unverified",
+        boardRef: "offline-unverified",
+        workspaceReady: true,
+        dataScopeRecorded: true,
+        sourceMaterialsRecorded: true,
+        pinConstraintsComplete: false,
+        electricalConstraintsComplete: false,
+        clockConstraintsComplete: false,
+        constraintsComplete: false,
+        toolchainProfileHash: sha256Hex("toolchain-nogov"),
+        constraintRevisionIds: [],
+        generatedBy: { type: "runtime", id: "no-governance" },
+        confirmedBy: { id: "developer-no-governance", at: "1970-01-01T00:00:00.000Z" },
+      },
     };
   }
   async listGateSubmissions(): Promise<readonly GateSubmissionSummary[]> {
@@ -406,16 +673,43 @@ export class NoGovernanceClient implements GovernanceClient {
   async listEvents(): Promise<readonly ProjectEventSummary[]> {
     return [];
   }
+  async searchImportedMaterials(): Promise<readonly ImportedMaterialSummary[]> {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Run-state persistence.
 // ---------------------------------------------------------------------------
-export interface RunState {
-  readonly runId: string;
+export interface AgentState {
+  readonly agentId: string;
+  /** Core-issued task identity. For P3 tasks taskId === agentId. */
+  readonly taskId?: string;
+  readonly taskKind?: RuntimeTaskKind;
+  /** Durable lifecycle role. Project agents survive individual turns/runs. */
+  readonly agentRole?: "project" | "run" | "side";
+  readonly parentTaskId?: string;
+  readonly workspaceId?: string;
+  readonly authorization?: TaskAuthorizationScope;
+  /** Core input hash when supplied, otherwise the Runtime descriptor hash. */
+  readonly inputHash?: string;
+  /** Hash of the exact dispatch descriptor, used for idempotent conflict checks. */
+  readonly taskDescriptorHash?: string;
+  /** False while any Core-owned task is durably registered but not started. */
+  readonly runtimeStarted?: boolean;
   readonly task: string;
   readonly part: string;
   readonly projectId: string;
+  /** Optional evaluator-owned immutable testbench used after the generated TB. */
+  readonly acceptanceTestbench?: TbGeneration;
+  /** Frozen project execution context copied from Core at task creation. */
+  readonly projectType?: string;
+  readonly processVersionId?: string | null;
+  readonly processProfileId?: string | null;
+  readonly processProfileName?: string | null;
+  readonly processProfileVersion?: string | null;
+  /** Whether this agent is a free conversation or the engineering mainline. */
+  readonly executionMode?: "free" | "engineering";
   /** Process instance id for gate-submission governance (server-injected). */
   readonly processInstanceId?: string;
   readonly createdAt: string;
@@ -424,12 +718,24 @@ export interface RunState {
   readonly currentStage: StageId;
   /** Gate currently awaiting approval (when status is awaiting_approval). */
   readonly awaitingGate?: GateId;
-  /** Loop status: running / paused awaiting approval / terminal. */
-  readonly status: "running" | "awaiting_approval" | "succeeded" | "failed" | "fail_closed";
+  /** Loop/task status: running / paused for user or approval / terminal. */
+  readonly status:
+    | "running"
+    | "awaiting_user"
+    | "awaiting_approval"
+    | "succeeded"
+    | "failed"
+    | "fail_closed";
   /** Registered doc artifacts keyed by stage. */
   readonly docs?: Readonly<Partial<Record<StageId, RegisteredRevision>>>;
+  /** Persisted generated documents so no-governance and interrupted runs remain auditable. */
+  readonly docArtifacts?: readonly DocGeneration[];
   /** Registered RTL revision (rtl_build stage). */
   readonly rtlRevision?: RegisteredRevision;
+  /** Registered testbench revision (tb stage). */
+  readonly tbRevision?: RegisteredRevision;
+  /** Registered XDC constraint revision (xdc stage). */
+  readonly xdcRevision?: RegisteredRevision;
   /** Persisted RTL sources so tool stages can resume without re-calling the model. */
   readonly rtlArtifacts?: { readonly topModule: string; readonly sources: readonly ArtifactFile[] };
   /** Persisted testbench so simulate stage can resume. */
@@ -440,12 +746,16 @@ export interface RunState {
   readonly gateSubmissions?: Readonly<Partial<Record<GateId, string>>>;
   /** Gate decisions: approved / rejected / withdrawn. */
   readonly gateDecisions?: Readonly<Partial<Record<GateId, "approved" | "rejected" | "withdrawn">>>;
+  /** Durable P4 formal-input/job/evidence/evaluation continuation state. */
+  readonly formalFlow?: FormalFlowProgressV1;
+  /** Durable Core-evaluation continuation state for modern G1-G3. */
+  readonly evaluatedGateFlows?: Readonly<Partial<Record<P4GateId, EvaluatedGateFlowProgressV1>>>;
   readonly endedReason?: string;
   /** Structured cause for terminal failure (drives resume eligibility). */
   readonly terminalCause?: TerminalCause;
   /**
    * 自由 Agent 门禁锁定：core_submit_gate 成功后置位，core_check_gate approved
-   * 或 unlockGate 清除。持久化进 run-state，重启后仍锁定（会话恢复时据此置位）。
+   * 或 unlockGate 清除。持久化进 agent-state，重启后仍锁定（会话恢复时据此置位）。
    */
   readonly freeAgentLock?: { readonly gate: GateId; readonly submissionId: string };
 }

@@ -11,6 +11,58 @@ describe("Vivado batch adapter", () => {
     expect(VIVADO_CAPABILITIES.map(capability => capability.operation)).toEqual(["discover_toolchain", "query_parts", "validate_sources", "simulate", "synthesize", "implement", "report_drc", "report_sta", "report_resources"]);
     expect(() => validateVivadoRequest({ ...request(), sources: [{ path: "../escape.v", content: "module x; endmodule" }] })).toThrow("UNSAFE_PATH");
     expect(() => validateVivadoRequest({ ...request(), top: "top; exec rm" })).toThrow("UNSAFE_TOP");
+    for (const path of ["rtl/top.v:payload", "rtl/CON.v", "rtl/COM¹.v", "rtl/NUL .v", "rtl/top.v.", "rtl/top.v ", "rtl/e\u0301.v"]) {
+      expect(() => validateVivadoRequest({ ...request(), sources: [{ path, content: "module top; endmodule\n" }] })).toThrow("UNSAFE_PATH");
+    }
+    expect(() => validateVivadoRequest({
+      ...request(),
+      sources: [
+        { path: "rtl/DUT.v", content: "module dut_a; endmodule\n" },
+        { path: "rtl/dut.v", content: "module dut_b; endmodule\n" },
+      ],
+    })).toThrow("PATH_COLLISION");
+  });
+
+  test("uses only the configured executable, part and profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const configuredBinary = "D:/Xilinx/Vivado/2021.1/bin/vivado.bat";
+      const configuredPart = "xc7k70tfbv676-1";
+      const configuredProfile = "b".repeat(64);
+      let calls = 0;
+      const adapter = new VivadoBatchAdapter({
+        workspaceRoot: root,
+        binary: configuredBinary,
+        part: configuredPart,
+        profileHash: configuredProfile,
+        commandRunner: async (command) => {
+          calls++;
+          expect(command).toBe(configuredBinary);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      const formal = {
+        ...request("configured-toolchain"),
+        runClass: "formal" as const,
+        part: configuredPart,
+        inputHash: "a".repeat(64),
+        toolchainHash: configuredProfile,
+        toolchain: { vivadoBinary: configuredBinary, part: configuredPart, profileHash: configuredProfile },
+      };
+      await adapter.execute(formal);
+      await expect(adapter.execute({
+        ...formal,
+        jobId: "wrong-binary",
+        toolchain: { ...formal.toolchain, vivadoBinary: "D:/unapproved/vivado.bat" },
+      })).rejects.toThrow("TOOLCHAIN_BINARY_MISMATCH");
+      await expect(adapter.execute({
+        ...formal,
+        jobId: "wrong-profile",
+        toolchainHash: "c".repeat(64),
+        toolchain: { ...formal.toolchain, profileHash: "c".repeat(64) },
+      })).rejects.toThrow("TOOLCHAIN_PROFILE_MISMATCH");
+      expect(calls).toBe(1);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   test("uses an injected runner and records SHA-256 evidence references", async () => {
@@ -40,35 +92,194 @@ describe("Vivado batch adapter", () => {
 
 describe("Vivado implement contract", () => {
   const implementRequest = (overrides: Partial<ImplementRequest> = {}): ImplementRequest => ({ operation: "implement", jobId: "impl-1", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }], top: "dut", part: "xc7k70tfbv676-1", ...overrides });
+  const passingDrc = `Report DRC
+Violations found: 1
++----------+----------+-------------+------------+
+| Rule     | Severity | Description | Violations |
++----------+----------+-------------+------------+
+| TEST-1   | Warning  | Test only   | 1          |
++----------+----------+-------------+------------+
+`;
+  const failingDrc = `Report DRC
+Violations found: 1
++----------+----------+-------------+------------+
+| Rule     | Severity | Description | Violations |
++----------+----------+-------------+------------+
+| TEST-1   | Error    | Test only   | 1          |
++----------+----------+-------------+------------+
+TEST-1#1 Error
+`;
+  const passingSta = `Timing Summary Report
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------
+      0.250        0.000                      0                    1        0.100        0.000                      0                    1        0.100        0.000                       0                     1
+All user specified timing constraints are met.
+`;
+  const negativeSlackSta = passingSta.replace("0.250", "-0.250").replace("All user specified timing constraints are met.", "Timing constraints are not met.");
+  const writeImplementationOutputs = async (cwd: string, overrides: { drc?: string | null; sta?: string | null } = {}): Promise<void> => {
+    await writeFile(join(cwd, "output", "synth.dcp"), "synth dcp\n");
+    await writeFile(join(cwd, "output", "resources.rpt"), "resources\n");
+    await writeFile(join(cwd, "output", "methodology.rpt"), "methodology\n");
+    await writeFile(join(cwd, "output", "cdc.rpt"), "cdc\n");
+    await writeFile(join(cwd, "output", "routed.dcp"), "routed dcp\n");
+    await writeFile(join(cwd, "output", "synthia.bit"), "bitstream\n");
+    const drc = overrides.drc === undefined ? passingDrc : overrides.drc;
+    const sta = overrides.sta === undefined ? passingSta : overrides.sta;
+    if (drc !== null) await writeFile(join(cwd, "output", "drc.rpt"), drc);
+    if (sta !== null) await writeFile(join(cwd, "output", "sta.rpt"), sta);
+  };
 
   test("run.tcl runs the full chain in one session: synth -> opt/place/route -> reports -> DCPs -> bitstream", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
-      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeFile(join(cwd, "output", "synthia.bit"), "bitstream\n"); await writeFile(join(cwd, "output", "routed.dcp"), "dcp\n"); return { exitCode: 0, stdout: "Vivado v2021.1\n", stderr: "" }; } });
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd); return { exitCode: 0, stdout: "Vivado v2021.1\n", stderr: "" }; } });
       const result = await adapter.execute(implementRequest());
       expect(result.status).toBe("succeeded");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
-      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "write_bitstream -force"];
+      const order = ["synth_design", "write_checkpoint -force", "opt_design", "place_design", "route_design", "report_methodology -file", "report_cdc -details -file", "report_drc -file", "report_timing_summary -file", "report_utilization -file", "get_drc_violations", "SYNTHIA_DRC_FAILED", "get_clocks -quiet", "SYNTHIA_TIMING_UNCONSTRAINED", "get_timing_paths", "SYNTHIA_TIMING_FAILED", "write_bitstream -force"];
       let cursor = -1;
       for (const step of order) { const index = tcl.indexOf(step); expect(index).toBeGreaterThan(cursor); cursor = index; }
       expect(tcl).toContain("synthia.bit");
       expect(tcl).not.toContain("launch_simulation");
-      expect([...result.evidence.entries.map(entry => entry.name)].sort()).toEqual(["routed.dcp", "synthia.bit"]);
+      expect([...result.evidence.entries.map(entry => entry.name)].sort()).toEqual([
+        "cdc.rpt",
+        "drc.rpt",
+        "implementation-result.json",
+        "input-manifest.json",
+        "log-digest.json",
+        "methodology.rpt",
+        "resources.rpt",
+        "routed.dcp",
+        "run.tcl",
+        "sta.rpt",
+        "stderr.log",
+        "stdout.log",
+        "synth.dcp",
+        "synthia.bit",
+        "tool.log",
+      ]);
+      expect(result.evidence.entries.find(entry => entry.name === "drc.rpt")?.mediaType).toBe("text/plain");
       expect(result.evidence.entries.find(entry => entry.name === "synthia.bit")?.mediaType).toBe("application/octet-stream");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test("writes XDC constraints into the workspace and reads them before synthesis", async () => {
+  test("stopBeforeBitstream completes routed evidence without invoking or emitting bitstream", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
     try {
-      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }) });
-      const result = await adapter.execute(implementRequest({ constraints: [{ path: "xdc/pins.xdc", content: "create_clock -name clk -period 10 [get_ports clk]\n" }] }));
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd);
+        await rm(join(cwd, "output", "synthia.bit"));
+        return { exitCode: 0, stdout: "BITSTREAM_GENERATION_SKIPPED\nIMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ stopBeforeBitstream: true }));
+      expect(result.status).toBe("succeeded");
+      const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
+      expect(tcl).toContain("route_design");
+      expect(tcl).toContain("BITSTREAM_GENERATION_SKIPPED");
+      expect(tcl).not.toContain("write_bitstream");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      const structured = JSON.parse(await readFile(join(result.workspace, "output", "implementation-result.json"), "utf8"));
+      expect(structured.stopBeforeBitstream).toBe(true);
+      expect(structured.bitstreamGenerated).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("stopBeforeBitstream rejects and removes an unexpected bitstream", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd);
+        return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ stopBeforeBitstream: true }));
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_UNEXPECTED_BITSTREAM");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      await expect(readFile(join(result.workspace, "output", "synthia.bit"))).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("writes the fail-closed XDC into the workspace and reads it before synthesis", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const goldenXdc = await readFile(join(import.meta.dir, "../golden/uart/xdc/uart.xdc"), "utf8");
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd); return { exitCode: 0, stdout: "", stderr: "" }; } });
+      const result = await adapter.execute(implementRequest({ constraints: [{ path: "xdc/pins.xdc", content: goldenXdc }] }));
       expect(result.status).toBe("succeeded");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
       expect(tcl.indexOf("read_xdc")).toBeLessThan(tcl.indexOf("synth_design"));
       expect(tcl).toContain("pins.xdc");
       const xdc = await readFile(join(result.workspace, "input", "xdc", "pins.xdc"), "utf8");
       expect(xdc).toContain("create_clock");
+      expect(xdc).toContain("XC7VX690T-2FFG1761C");
+      expect(xdc).not.toContain("set_property SEVERITY WARNING");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("fails closed on a DRC Error even when the runner exits 0 and prewrites a bitstream", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd, { drc: failingDrc }); return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" }; } });
+      const result = await adapter.execute(implementRequest());
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_DRC_FAILED");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      await expect(readFile(join(result.workspace, "output", "synthia.bit"))).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("fails closed on negative timing slack and removes a prewritten bitstream", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd, { sta: negativeSlackSta }); return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" }; } });
+      const result = await adapter.execute(implementRequest());
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_TIMING_FAILED");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+      await expect(readFile(join(result.workspace, "output", "synthia.bit"))).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("treats an explicit timing-not-met report as failure even with nonnegative summary numbers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd, { sta: passingSta.replace("All user specified timing constraints are met.", "Timing constraints are not met.") }); return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" }; } });
+      const result = await adapter.execute(implementRequest());
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_TIMING_FAILED");
+      expect(result.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("fails closed when STA has no effective clock constraints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const unconstrainedSta = `${passingSta}\nThere are 71 register/latch pins with no clock driven by root clock pin: clock (HIGH)\nThere are no user specified timing constraints.\n`;
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => {
+        await writeImplementationOutputs(cwd, { sta: unconstrainedSta });
+        return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" };
+      } });
+      const result = await adapter.execute(implementRequest({ jobId: "impl-unconstrained" }));
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_TIMING_UNCONSTRAINED");
+      expect(result.evidence.entries.some((entry) => entry.name === "synthia.bit")).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("requires both implementation reports and a conclusive pass judgment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-vivado-"));
+    try {
+      const missing = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd, { drc: null }); return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" }; } });
+      const missingResult = await missing.execute(implementRequest({ jobId: "impl-missing" }));
+      expect(missingResult.status).toBe("failed");
+      expect(missingResult.errorCode).toBe("VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE");
+      expect(missingResult.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
+
+      const inconclusive = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_command, _args, cwd) => { await writeImplementationOutputs(cwd, { sta: "Timing Summary Report\nno summary available\n" }); return { exitCode: 0, stdout: "IMPLEMENT_OK\n", stderr: "" }; } });
+      const inconclusiveResult = await inconclusive.execute(implementRequest({ jobId: "impl-inconclusive" }));
+      expect(inconclusiveResult.status).toBe("failed");
+      expect(inconclusiveResult.errorCode).toBe("VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE");
+      expect(inconclusiveResult.evidence.entries.some(entry => entry.name === "synthia.bit")).toBe(false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -81,6 +292,19 @@ describe("Vivado implement contract", () => {
       await expect(adapter.execute(implementRequest({ constraints: [{ path: "xdc/../escape.xdc", content: "set_property x y\n" }] }))).rejects.toThrow("UNSAFE_PATH");
       await expect(adapter.execute(implementRequest({ constraints: [{ path: "xdc/empty.xdc", content: "" }] }))).rejects.toThrow("EMPTY_CONSTRAINT");
       await expect(adapter.execute(implementRequest({ constraints: [{ path: "xdc/pins.xdc", content: 5 as unknown as string }] }))).rejects.toThrow("INVALID_CONSTRAINT_CONTENT");
+      for (const content of [
+        "exec cmd.exe /c whoami\n",
+        "source D:/tmp/evil.tcl\n",
+        "set_property PACKAGE_PIN W5 [exec cmd.exe /c whoami]\n",
+        "set_property PACKAGE_PIN W5 [get_ports clk]; exec cmd.exe /c whoami\n",
+        "set_property PACKAGE_PIN W5 [get_ports $target]\n",
+        "set_property PACKAGE_PIN W5 [get_ports [exec whoami]]\n",
+        "set_property PACKAGE_PIN W5 [get_ports clk] \\\nexec whoami\n",
+        "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\n",
+        "set_property -dict {SEVERITY Warning} [get_drc_checks {UCIO-1}]\n",
+      ]) {
+        await expect(adapter.execute(implementRequest({ constraints: [{ path: "xdc/hostile.xdc", content }] }))).rejects.toThrow("XDC");
+      }
       expect(calls).toBe(0);
     } finally { await rm(root, { recursive: true, force: true }); }
   });

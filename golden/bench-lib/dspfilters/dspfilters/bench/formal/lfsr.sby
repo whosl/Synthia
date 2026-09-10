@@ -1,0 +1,17 @@
+[tasks]
+prf
+
+[options]
+prf: mode prove
+prf: depth 4
+
+[engines]
+smtbmc boolector
+
+[script]
+read -formal lfsr.v
+prep -top lfsr
+# clk2fflogic
+
+[files]
+../../rtl/lfsr.v

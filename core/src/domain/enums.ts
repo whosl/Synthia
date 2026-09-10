@@ -152,6 +152,64 @@ export type ArtifactType =
   | "TASK_HANDOFF"
   | "KNOWLEDGE_ENTRY";
 
+/** Runtime mirror of ArtifactType for fail-closed API/config validation. */
+export const ARTIFACT_TYPE_SET: Readonly<Record<ArtifactType, true>> = Object.freeze({
+  SOURCE_PACKAGE: true,
+  PROJECT_PROFILE: true,
+  TAILORING_RECORD: true,
+  FEASIBILITY_RISK_REPORT: true,
+  DEVELOPMENT_REQUIREMENTS: true,
+  SYSTEM_REQUIREMENTS: true,
+  OPEN_QUESTION_SET: true,
+  PLDS_SRS: true,
+  DERIVED_REQUIREMENT_SET: true,
+  REQUIREMENT_TRACE: true,
+  VERIFICATION_METHOD_MAP: true,
+  ARCHITECTURE_DESIGN: true,
+  DETAILED_DESIGN: true,
+  CONSTRAINT_DESIGN: true,
+  DESIGN_TRACE: true,
+  DESIGN_REVIEW: true,
+  RTL_SOURCE_SET: true,
+  TB_SOURCE_SET: true,
+  XDC_CANDIDATE: true,
+  CODE_TRACE: true,
+  CODE_REVIEW: true,
+  STATIC_REPORT_SET: true,
+  BUILD_MANIFEST: true,
+  TOOLCHAIN_PROFILE: true,
+  TOOL_RUN: true,
+  SYNTH_RESULT: true,
+  IMPLEMENT_RESULT: true,
+  DRC_REPORT: true,
+  STA_REPORT: true,
+  POWER_REPORT: true,
+  CONFIRMATION_TEST_PLAN: true,
+  TEST_SPECIFICATION: true,
+  TEST_RUN: true,
+  COVERAGE_REPORT: true,
+  CONFIRMATION_TEST_REPORT: true,
+  BITSTREAM_PACKAGE: true,
+  HARDWARE_TEST_RECORD: true,
+  CONFIG_AUDIT: true,
+  USER_MANUAL: true,
+  DEVELOPMENT_SUMMARY: true,
+  RELEASE_PACKAGE: true,
+  CONFIGURATION_SNAPSHOT: true,
+  GATE_SUBMISSION: true,
+  APPROVAL_RECORD: true,
+  APPROVED_GATE_RESULT: true,
+  BASELINE: true,
+  WAIVER: true,
+  ISSUE_RISK_DECISION: true,
+  TASK_HANDOFF: true,
+  KNOWLEDGE_ENTRY: true,
+});
+
+export function isArtifactType(value: unknown): value is ArtifactType {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(ARTIFACT_TYPE_SET, value);
+}
+
 // ── Actor types ───────────────────────────────────────────────────────────────
 
 export type ActorType = "human" | "agent" | "connector" | "system" | "service";
@@ -159,3 +217,5 @@ export type ActorType = "human" | "agent" | "connector" | "system" | "service";
 // ── Data classification (Q-006 decision: reserved, formal level TBD) ──────────
 
 export type DataClassification = "D1" | "D2" | "D3" | "D4" | "UNCLASSIFIED";
+
+export type ProjectType = "free" | "engineering";

@@ -16,13 +16,13 @@ export async function createRevision(client: Client, rev: ArtifactRevision): Pro
   await client.query(
     `INSERT INTO artifact_revision
        (id, artifact_id, project_id, version, state, parent_revision_id,
-        content_hash, content_location, content, schema_version, source_ids,
+        content_hash, content_location, content, content_encoding, schema_version, source_ids,
         data_classification, tool_model_provenance, change_reason,
         created_by, created_by_type, review_ids)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
     [rev.id, rev.artifactId, rev.projectId, rev.version, rev.state,
      rev.parentRevisionId, rev.contentHash, rev.contentLocation, rev.content,
-     rev.schemaVersion, rev.sourceIds, rev.dataClassification,
+     rev.contentEncoding ?? "utf8", rev.schemaVersion, rev.sourceIds, rev.dataClassification,
      JSON.stringify(rev.toolModelProvenance),
      rev.changeReason, rev.createdBy, rev.createdByType, rev.reviewIds],
   );
@@ -51,11 +51,12 @@ export async function transitionRevisionState(
 export async function createSnapshot(client: Client, snap: ConfigurationSnapshot): Promise<void> {
   await client.query(
     `INSERT INTO configuration_snapshot
-       (id, project_id, member_revision_ids, trace_relation_ids,
+       (id, project_id, work_version_id, member_revision_ids, trace_relation_ids,
         gate_profile_version, tool_model_policy_hash, manifest_hash, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [snap.id, snap.projectId, snap.memberRevisionIds, snap.traceRelationIds,
-     snap.gateProfileVersion, snap.toolModelPolicyHash, snap.manifestHash, snap.createdBy],
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [snap.id, snap.projectId, snap.workVersionId ?? null,
+     snap.memberRevisionIds, snap.traceRelationIds, snap.gateProfileVersion,
+     snap.toolModelPolicyHash, snap.manifestHash, snap.createdBy],
   );
 }
 
@@ -68,6 +69,7 @@ export async function getSnapshot(client: Client, id: string): Promise<Configura
   const r = rows[0];
   return {
     id: r.id, projectId: r.project_id,
+    workVersionId: r.work_version_id ?? null,
     memberRevisionIds: r.member_revision_ids,
     traceRelationIds: r.trace_relation_ids,
     gateProfileVersion: r.gate_profile_version,
@@ -152,17 +154,17 @@ export async function createToolRun(client: Client, run: ToolRun): Promise<void>
 
 export async function transitionToolRunState(
   client: Client,
-  runId: string,
+  agentId: string,
   to: ToolRun["state"],
 ): Promise<void> {
   const { rows } = await client.query<{ state: ToolRun["state"] }>(
     "SELECT state FROM tool_run WHERE id = $1 FOR UPDATE",
-    [runId],
+    [agentId],
   );
-  if (rows.length === 0) throw new Error(`ToolRun not found: ${runId}`);
+  if (rows.length === 0) throw new Error(`ToolRun not found: ${agentId}`);
   const from = rows[0].state;
   toolRunMachine.assertTransition(from, to);
-  const updated = await client.query("UPDATE tool_run SET state = $1 WHERE id = $2 AND state = $3", [to, runId, from]);
+  const updated = await client.query("UPDATE tool_run SET state = $1 WHERE id = $2 AND state = $3", [to, agentId, from]);
   if ((updated.rowCount ?? 0) !== 1) throw new Error("STATE_TRANSITION_CONFLICT");
 }
 

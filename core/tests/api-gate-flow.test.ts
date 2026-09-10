@@ -132,6 +132,29 @@ describe.skipIf(!DATABASE_URL)("gate flow — real PostgreSQL behavior", () => {
     return { projectId, processInstanceId, snapshotId, submissionId, revisionId };
   }
 
+  /**
+   * Add another gate submission (own process instance, revision and snapshot) to
+   * an existing project — needed to exercise per-project constraints such as the
+   * one-active-baseline-per-kind unique index, which `buildSubmissionGraph`
+   * cannot reach because it always creates a fresh project.
+   */
+  async function addSubmissionToProject(projectId: string, gate: string): Promise<{ snapshotId: string; submissionId: string }> {
+    const processInstanceId = `proc_${randomUUID()}`;
+    await apiCall(baseUrl, `/api/v1/projects/${projectId}/process-instances`, { method: "POST", body: { id: processInstanceId, gate_profile_version: "flow-v1", current_gate: gate }, token: humanToken, headers: { "idempotency-key": `k_pi2_${processInstanceId}` } });
+
+    const aid = `art_${randomUUID()}`;
+    const revisionId = `rev_${randomUUID()}`;
+    await apiCall(baseUrl, `/api/v1/projects/${projectId}/artifacts/${aid}/revisions`, { method: "POST", body: { id: revisionId, version: 1, content_hash: sha256Hex("content-2"), content_location: "mem://g2" }, token: humanToken, headers: { "idempotency-key": `k_rev2_${revisionId}` } });
+
+    const snapshotId = `snap_${randomUUID()}`;
+    await apiCall(baseUrl, `/api/v1/projects/${projectId}/snapshots`, { method: "POST", body: { id: snapshotId, member_revision_ids: [revisionId], tool_model_policy_hash: sha256Hex("policy") }, token: humanToken, headers: { "idempotency-key": `k_snap2_${snapshotId}` } });
+
+    const submissionId = `sub_${randomUUID()}`;
+    await apiCall(baseUrl, `/api/v1/projects/${projectId}/gate-submissions`, { method: "POST", body: { id: submissionId, process_instance_id: processInstanceId, gate, snapshot_id: snapshotId }, token: humanToken, headers: { "idempotency-key": `k_sub2_${submissionId}` } });
+
+    return { snapshotId, submissionId };
+  }
+
   /** Drive a submission all the way through a real G1 approval to state `approved`. */
   async function approveToApproved(graph: { projectId: string; submissionId: string; snapshotId: string }): Promise<void> {
     const agrId = `agr_${randomUUID()}`;
@@ -194,9 +217,10 @@ describe.skipIf(!DATABASE_URL)("gate flow — real PostgreSQL behavior", () => {
       const res = await apiCall(baseUrl, `/api/v1/projects/${g.projectId}/gate-submissions/${g.submissionId}`, { token: humanToken });
       expect(res.status).toBe(200);
       const data = envelopeData(res.json);
-      for (const field of ["id", "project_id", "process_instance_id", "gate", "snapshot_id", "state", "submitter_id", "check_results", "issues", "submitted_at", "created_at"]) {
+      for (const field of ["id", "project_id", "process_instance_id", "work_version_id", "gate", "snapshot_id", "state", "submitter_id", "check_results", "issues", "submitted_at", "created_at"]) {
         expect(field in data).toBe(true);
       }
+      expect(data.work_version_id).toBeNull();
       expect(data.state).toBe("in_review");
       expect(data.gate).toBe("G2");
     });
@@ -312,6 +336,46 @@ describe.skipIf(!DATABASE_URL)("gate flow — real PostgreSQL behavior", () => {
       const res = await withdrawCall(g.projectId, g.submissionId, "k_approved_wd");
       expect(res.status).toBe(409);
       expect(envelopeError(res.json).code).toBe("conflict");
+    });
+
+    /**
+     * Regression: a second milestone approval of the same kind in one project
+     * trips `baseline_unique_active_project_kind` (PG 23505). `approveGateHandler`
+     * catches and runs `mapServiceError` itself, so the raw driver error never
+     * reaches the router's own unique-violation branch — before the fix it fell
+     * through to `internalError` and the client saw a 500 ("service unavailable,
+     * please retry"), inviting an infinite retry of an operation that can never
+     * succeed. It must surface as a 409 naming ACTIVE_BASELINE_CONFLICT.
+     */
+    test("second active baseline of the same kind yields 409 ACTIVE_BASELINE_CONFLICT, not 500", async () => {
+      const first = await buildSubmissionGraph("G1", { seedRole: true });
+      await submitCall(first.projectId, first.submissionId, "k_bl_first_sub");
+      await approveToApproved(first);
+      expect(await submissionState(first.submissionId)).toBe("approved");
+
+      // Second G1 submission in the SAME project → same baseline kind (B0).
+      const second = await addSubmissionToProject(first.projectId, "G1");
+      await submitCall(first.projectId, second.submissionId, "k_bl_second_sub");
+      const res = await apiCall(baseUrl, `/api/v1/projects/${first.projectId}/gate-submissions/${second.submissionId}/approve`, {
+        method: "POST",
+        body: {
+          configuration_snapshot_id: second.snapshotId,
+          approved_gate_result_id: `agr_${randomUUID()}`,
+          baseline_id: `bl_${randomUUID()}`,
+          check_results_hash: sha256Hex("checks"),
+          signed_at: new Date().toISOString(),
+        },
+        token: humanToken,
+        headers: { "idempotency-key": `k_bl_second_approve` },
+      });
+
+      expect(res.status).toBe(409);
+      const envelope = envelopeError(res.json);
+      expect(envelope.code).toBe("conflict");
+      expect(envelope.message).toContain("ACTIVE_BASELINE_CONFLICT");
+      // The losing approval wrote nothing: still exactly one active B0.
+      expect(await countRows("baseline", "project_id = $1 AND state = 'active'", [first.projectId])).toBe(1);
+      expect(await submissionState(second.submissionId)).toBe("in_review");
     });
 
     test("withdrawn → submit yields 409", async () => {

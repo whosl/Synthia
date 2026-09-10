@@ -3,7 +3,7 @@
  *
  *   bun run runtime/cli.ts "<中文任务>" [--part <part>] [--project <id>]
  *        [--via-core] [--fake-connector] [--offline] [--no-governance]
- *        [--resume <runId>]
+ *        [--resume <agentId>] [--acceptance-tb <path> --acceptance-module <module>]
  *
  * Modes:
  *  - default         real model (SYNTHIA_MODEL_*) + real Cloudflare connector
@@ -15,7 +15,7 @@
  *  - --no-governance  skip artifact registration and gate flow (dev/debug only;
  *                    audit records governance_skipped). Requires --offline or
  *                    --fake-connector.
- *  - --resume <runId> resume a paused run; polls the pending gate and continues
+ *  - --resume <agentId> resume a paused agent; polls the pending gate and continues
  *                    if approved, or reports still-waiting / fail-closed.
  *
  * Governance: when --via-core, artifact registration and gate submissions go
@@ -28,22 +28,25 @@
  * reached directly.
  *
  * --via-core env: SYNTHIA_CORE_URL (default http://127.0.0.1:8787) and
- * SYNTHIA_CORE_TOKEN (REQUIRED — Core service token with core:read/core:write).
+ * SYNTHIA_CORE_TOKEN (REQUIRED — ordinary Core service token with read/write;
+ * it must not carry core:task-runtime).
  */
 
-// Bun snapshots proxy env at startup; JS deletion is best-effort.
-const _inheritedProxy = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
-  .some(k => process.env[k]);
-if (_inheritedProxy) process.stderr.write(`[runtime] WARNING: proxy env detected. Bun may use it despite in-process clearing.\n[runtime] Launch with: env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY bun run runtime/cli.ts ...\n`);
-for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) delete process.env[k];
+function clearInheritedProxyEnvironment(): void {
+  // Bun snapshots proxy env at startup; JS deletion is best-effort.
+  const inherited = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
+    .some((key) => process.env[key]);
+  if (inherited) process.stderr.write(`[runtime] WARNING: proxy env detected. Bun may use it despite in-process clearing.\n[runtime] Launch with: env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY bun run runtime/cli.ts ...\n`);
+  for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) delete process.env[key];
+}
 
 import { SkillLoader } from "./skill-loader.ts";
-import { ModelClient, modelConfigFromEnv } from "./model-client.ts";
+import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
 import { LoopExecutor, FakeVivadoConnector, successBehavior, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import { resolveCoreApiConfig } from "./core-api-connector.ts";
 import { CoreGovernanceClient } from "./governance-client.ts";
-import { newRunId, createRunState, loadRunState, saveRunState } from "./run-state.ts";
-import type { GovernanceClient, LoopModel, LoopResult, RunState } from "./types.ts";
+import { newAgentId, createAgentState, loadAgentState, saveAgentState } from "./agent-state.ts";
+import type { GovernanceClient, LoopModel, LoopResult, AgentState } from "./types.ts";
 import { NoGovernanceClient as NoGovClient } from "./types.ts";
 import { CounterScriptedModel, buildRemoteConnector, buildCoreApiConnector } from "./deps.ts";
 
@@ -52,50 +55,76 @@ const DEFAULT_PROJECT = "p1";
 
 interface CliArgs {
   task: string;
-  part: string;
-  project: string;
+  part?: string;
+  project?: string;
   viaCore: boolean;
   fakeConnector: boolean;
   offline: boolean;
   noGovernance: boolean;
-  resumeRunId?: string;
+  resumeAgentId?: string;
+  acceptanceTbPath?: string;
+  acceptanceModule?: string;
 }
 
-function parseArgs(argv: string[]): CliArgs {
+export function parseArgs(argv: string[]): CliArgs {
   const rest = argv.slice(2);
-  if (rest.length === 0 || rest[0] === "--help" || rest[0] === "-h") {
-    console.error('usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--via-core] [--fake-connector] [--offline] [--no-governance] [--resume <runId>]');
-    process.exit(rest.length === 0 ? 1 : 0);
+  const usage = 'usage: bun run runtime/cli.ts "<task>" [--part <part>] [--project <id>] [--via-core] [--fake-connector] [--offline] [--no-governance] [--resume <agentId>] [--acceptance-tb <path> --acceptance-module <module>]';
+  if (rest.length === 0) throw new Error(usage);
+  if (rest[0] === "--help" || rest[0] === "-h") {
+    console.error(usage);
+    process.exit(0);
   }
-  // --resume can appear without a task argument.
-  const resumeIdx = rest.indexOf("--resume");
-  let resumeRunId: string | undefined;
-  let taskArgs = rest;
-  if (resumeIdx >= 0) {
-    resumeRunId = rest[resumeIdx + 1];
-    if (!resumeRunId) {
-      console.error("--resume requires a runId argument");
-      process.exit(1);
-    }
-    taskArgs = rest.filter((_, i) => i !== resumeIdx && i !== resumeIdx + 1);
-  }
-  // Task = first arg that isn't a flag; flags = everything else.
-  // Supports: --resume <id> --via-core (no task text).
-  const task = taskArgs.find(a => !a.startsWith("-")) ?? "";
-  const flags = taskArgs.filter(a => a !== task);
-  const val = (name: string): string | undefined => {
-    const i = flags.indexOf(name);
-    return i >= 0 ? flags[i + 1] : undefined;
+  let task = "";
+  let part: string | undefined;
+  let project: string | undefined;
+  let resumeAgentId: string | undefined;
+  let acceptanceTbPath: string | undefined;
+  let acceptanceModule: string | undefined;
+  let viaCore = false;
+  let fakeConnector = false;
+  let offline = false;
+  let noGovernance = false;
+  const valueAfter = (index: number, flag: string): string => {
+    const value = rest[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value\n${usage}`);
+    return value;
   };
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    switch (arg) {
+      case "--part": part = valueAfter(i, arg); i++; break;
+      case "--project": project = valueAfter(i, arg); i++; break;
+      case "--resume": resumeAgentId = valueAfter(i, arg); i++; break;
+      case "--acceptance-tb": acceptanceTbPath = valueAfter(i, arg); i++; break;
+      case "--acceptance-module": acceptanceModule = valueAfter(i, arg); i++; break;
+      case "--via-core": viaCore = true; break;
+      case "--fake-connector": fakeConnector = true; break;
+      case "--offline": offline = true; break;
+      case "--no-governance": noGovernance = true; break;
+      default:
+        if (arg.startsWith("-")) throw new Error(`unknown option ${arg}\n${usage}`);
+        if (task) throw new Error(`multiple task arguments are not supported\n${usage}`);
+        task = arg;
+    }
+  }
+  if (!task && !resumeAgentId) throw new Error(usage);
+  if ((acceptanceTbPath === undefined) !== (acceptanceModule === undefined)) {
+    throw new Error(`--acceptance-tb and --acceptance-module must be supplied together\n${usage}`);
+  }
+  if (resumeAgentId && acceptanceTbPath) {
+    throw new Error(`external acceptance testbench is immutable across --resume; use the persisted acceptance testbench\n${usage}`);
+  }
   return {
     task,
-    part: val("--part") ?? DEFAULT_PART,
-    project: val("--project") ?? DEFAULT_PROJECT,
-    viaCore: flags.includes("--via-core"),
-    fakeConnector: flags.includes("--fake-connector"),
-    offline: flags.includes("--offline"),
-    noGovernance: flags.includes("--no-governance"),
-    resumeRunId,
+    part,
+    project,
+    viaCore,
+    fakeConnector,
+    offline,
+    noGovernance,
+    resumeAgentId,
+    acceptanceTbPath,
+    acceptanceModule,
   };
 }
 
@@ -107,7 +136,7 @@ function renderReport(result: LoopResult): string {
   lines.push(`=== Synthia Runtime report ===`);
   lines.push(`status: ${result.status}`);
   lines.push(`part: ${result.part}`);
-  if (result.runId) lines.push(`runId: ${result.runId}`);
+  if (result.agentId) lines.push(`agentId: ${result.agentId}`);
   if (result.awaitingGate) lines.push(`awaitingGate: ${result.awaitingGate}`);
   if (result.endedReason) lines.push(`reason: ${result.endedReason}`);
   if (result.docs?.length) lines.push(`docs: ${result.docs.map(d => d.docPath).join(", ")}`);
@@ -127,21 +156,47 @@ function renderReport(result: LoopResult): string {
 // ----- main -----
 
 async function main(): Promise<void> {
+  clearInheritedProxyEnvironment();
   const args = parseArgs(process.argv);
+  let agentState: AgentState | undefined;
+  if (args.resumeAgentId) {
+    agentState = await loadAgentState(args.resumeAgentId);
+    if (args.part && args.part !== agentState.part) throw new Error(`--part ${args.part} does not match persisted agent part ${agentState.part}`);
+    if (args.project && args.project !== agentState.projectId) throw new Error(`--project ${args.project} does not match persisted agent project ${agentState.projectId}`);
+  }
+  const part = agentState?.part ?? args.part ?? DEFAULT_PART;
+  const project = agentState?.projectId ?? args.project ?? DEFAULT_PROJECT;
+  let acceptanceTestbench = agentState?.acceptanceTestbench;
+  if (args.acceptanceTbPath && args.acceptanceModule) {
+    const file = Bun.file(args.acceptanceTbPath);
+    if (!(await file.exists())) throw new Error(`acceptance testbench not found: ${args.acceptanceTbPath}`);
+    if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(args.acceptanceModule)) throw new Error("--acceptance-module must be a Verilog identifier");
+    if (!/\.(?:v|sv)$/i.test(args.acceptanceTbPath)) throw new Error("--acceptance-tb must be a .v or .sv file");
+    acceptanceTestbench = {
+      phase: "generate_testbench",
+      reasoning: "evaluator-owned immutable acceptance testbench",
+      testbenchModule: args.acceptanceModule,
+      testbench: {
+        path: `acceptance/${args.acceptanceTbPath.split(/[\\/]/).pop()!}`,
+        content: await file.text(),
+        mediaType: args.acceptanceTbPath.toLowerCase().endsWith(".sv") ? "text/systemverilog" : "text/x-verilog",
+      },
+    };
+  }
   const skillLoader = new SkillLoader();
   const skillPrompts = await skillLoader.buildPrompts();
 
-  const model: LoopModel = args.offline ? new CounterScriptedModel() : new ModelClient(modelConfigFromEnv());
+  const model: LoopModel = args.offline ? new CounterScriptedModel() : createRuntimeModelFromEnv();
 
   let connector;
   if (args.offline) {
     connector = new FakeVivadoConnector({ behavior: successBehavior() });
   } else if (args.viaCore) {
-    connector = buildCoreApiConnector(args.project);
+    connector = buildCoreApiConnector(project);
   } else if (args.fakeConnector) {
     connector = new FakeVivadoConnector({ behavior: successBehavior() });
   } else {
-    connector = await buildRemoteConnector(args.project);
+    connector = await buildRemoteConnector(project);
   }
 
   // Governance: --no-governance → NoGovernanceClient; --via-core → CoreGovernanceClient.
@@ -153,7 +208,9 @@ async function main(): Promise<void> {
   } else if (args.viaCore) {
     const coreCfg = resolveCoreApiConfig(process.env);
     governance = new CoreGovernanceClient({
-      baseUrl: coreCfg.baseUrl, token: coreCfg.token, projectId: args.project,
+      baseUrl: coreCfg.baseUrl, token: coreCfg.token, projectId: project,
+      taskRuntimeToken: process.env.SYNTHIA_TASK_RUNTIME_TOKEN,
+      taskId: process.env.SYNTHIA_TASK_ID,
       processInstanceId: process.env.SYNTHIA_PROCESS_INSTANCE_ID ?? "pi-default",
     });
     process.stderr.write(`[runtime] governance=core-api (${coreCfg.baseUrl})\n`);
@@ -162,43 +219,53 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  process.stderr.write(`[runtime] model=${args.offline ? "offline-scripted" : "openai-compatible"} connector=${connector.id} part=${args.part} cap=${VIVADO_CAPABILITY_VERSION}\n`);
+  process.stderr.write(`[runtime] model=${args.offline ? "offline-scripted" : "openai-compatible"} connector=${connector.id} part=${part} cap=${VIVADO_CAPABILITY_VERSION}\n`);
 
   // Run-state persistence
-  let runState: RunState | undefined;
-  let runId: string;
+  let agentId: string;
 
-  if (args.resumeRunId) {
-    runState = await loadRunState(args.resumeRunId);
-    runId = runState.runId;
-    process.stderr.write(`[runtime] resuming run ${runId} (status=${runState.status}, stage=${runState.currentStage}${runState.awaitingGate ? `, gate=${runState.awaitingGate}` : ""})\n`);
+  if (args.resumeAgentId) {
+    agentState = agentState!;
+    agentId = agentState.agentId;
+    process.stderr.write(`[runtime] resuming agent ${agentId} (status=${agentState.status}, stage=${agentState.currentStage}${agentState.awaitingGate ? `, gate=${agentState.awaitingGate}` : ""})\n`);
   } else {
-    runId = newRunId();
-    runState = createRunState({ runId, task: args.task, part: args.part, projectId: args.project });
-    process.stderr.write(`[runtime] starting new run ${runId}\n`);
+    agentId = newAgentId();
+    agentState = createAgentState({ agentId, task: args.task, part, projectId: project, acceptanceTestbench });
+    process.stderr.write(`[runtime] starting new agent ${agentId}\n`);
   }
 
   const loop = new LoopExecutor({
     model, connector, governance, skillPrompts,
-    part: args.part, projectId: args.project,
+    part, projectId: project,
     processInstanceId: process.env.SYNTHIA_PROCESS_INSTANCE_ID ?? "pi-default",
     toolModelPolicyHash: process.env.SYNTHIA_TOOL_MODEL_POLICY_HASH ?? "synthia-policy-v1",
     actorId: "synthia-runtime",
+    acceptanceTestbench,
     onEvent: (e) => process.stderr.write(`[runtime] ${e.category}/${e.phase} ${e.action} ${e.result ?? ""}\n`),
-    onStateChange: async (state) => { await saveRunState(state); },
+    onStateChange: async (state) => { await saveAgentState(state); },
     onAwaitingApproval: (gate, submissionId, rid) => {
       process.stderr.write(`\n[runtime] ═══════════════════════════════════════════════════\n`);
       process.stderr.write(`[runtime]  等待 ${gate} 人工批准\n`);
       process.stderr.write(`[runtime]  submission: ${submissionId}\n`);
-      process.stderr.write(`[runtime]  run: ${rid}\n`);
+      process.stderr.write(`[runtime]  agent: ${rid}\n`);
       process.stderr.write(`[runtime]  批准后执行: bun run runtime/cli.ts --resume ${rid}\n`);
       process.stderr.write(`[runtime] ═══════════════════════════════════════════════════\n\n`);
     },
   });
 
-  const result = args.resumeRunId && runState
-    ? await loop.resume(runState)
-    : await loop.run(args.task, { runId, runState });
+  const result = args.resumeAgentId && agentState
+    ? await loop.resume(agentState)
+    : await loop.run(args.task, { agentId, agentState });
+
+  // The loop persists stage boundaries; persist the terminal projection too so
+  // CLI inspection never leaves a completed run looking "running".
+  const persisted = await loadAgentState(agentId);
+  await saveAgentState({
+    ...persisted,
+    status: result.awaitingGate ? "awaiting_approval" : result.status,
+    ...(result.endedReason ? { endedReason: result.endedReason } : {}),
+    ...(result.terminalCause ? { terminalCause: result.terminalCause } : {}),
+  });
 
   process.stdout.write(renderReport(result) + "\n");
   // Exit codes: 0=succeeded, 1=failed, 3=fail_closed, 4=awaiting_approval
@@ -206,4 +273,6 @@ async function main(): Promise<void> {
   process.exit(exitCode);
 }
 
-main().catch((e) => { process.stderr.write(`[runtime] fatal: ${e instanceof Error ? e.message : String(e)}\n`); process.exit(2); });
+if (import.meta.main) {
+  main().catch((e) => { process.stderr.write(`[runtime] fatal: ${e instanceof Error ? e.message : String(e)}\n`); process.exit(2); });
+}

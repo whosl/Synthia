@@ -3,6 +3,7 @@ import { RemoteConnectorError } from "../connector/remote.ts";
 import {
   CoreApiConnector,
   resolveCoreApiConfig,
+  resolveTaskRuntimeApiConfig,
 } from "./core-api-connector.ts";
 import {
   LoopExecutor,
@@ -157,6 +158,71 @@ describe("CoreApiConnector.submit happy path", () => {
     expect(body).not.toHaveProperty("baseline_id");
   });
 
+  test("task-bound connector keeps submit, polling, and evidence on task routes with binding headers", async () => {
+    const taskId = "task-side-1";
+    const workspaceId = "ws-side-1";
+    const { fetchImpl, calls } = mockFetch((url, init) => {
+      const method = (init.method ?? "GET").toUpperCase();
+      if (method === "POST") {
+        return {
+          status: 201,
+          body: { data: { jobId: "job-side", runClass: "exploratory", state: "submitted" } },
+        };
+      }
+      if (url.includes("/evidence/content?")) {
+        return {
+          status: 200,
+          body: { data: { name: "run.log", content: "ok", sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" } },
+        };
+      }
+      if (url.endsWith("/evidence")) {
+        return { status: 200, body: { data: { jobId: "job-side", entries: [] } } };
+      }
+      return { status: 200, body: { data: { jobId: "job-side", state: "succeeded" } } };
+    });
+    const conn = new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId,
+      workspaceId,
+      fetchImpl,
+      pollIntervalMs: 0,
+      retryDelayMs: 0,
+    });
+
+    await conn.submit(validateSubmission());
+    await conn.fetchEvidenceContent("job-side", "run.log");
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side/evidence`,
+      `${BASE}/api/v1/projects/${PROJECT}/tasks/${taskId}/jobs/job-side/evidence/content?name=run.log`,
+    ]);
+    for (const call of calls) {
+      expect(call.headers["Authorization"]).toBe(`Bearer ${TOKEN}`);
+      expect(call.headers["X-Synthia-Task-Id"]).toBe(taskId);
+      expect(call.headers["X-Synthia-Workspace-Id"]).toBe(workspaceId);
+    }
+  });
+
+  test("task binding is fail-closed when incomplete or unsafe", () => {
+    expect(() => new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId: "task-side-1",
+    })).toThrow(/taskId and workspaceId/);
+    expect(() => new CoreApiConnector({
+      baseUrl: BASE,
+      token: TOKEN,
+      projectId: PROJECT,
+      taskId: "task-side-1\nspoofed",
+      workspaceId: "ws-side-1",
+    })).toThrow(/taskId/);
+  });
+
   test("simulate maps testbench (module name) into the body", async () => {
     const { fetchImpl, calls } = mockFetch((url, init) => {
       const method = (init.method ?? "GET").toUpperCase();
@@ -178,9 +244,10 @@ describe("CoreApiConnector.submit happy path", () => {
       return { status: 200, body: { data: { jobId: "job-imp", state: "succeeded" } } };
     });
     const conn = makeConnector({ fetchImpl });
-    await conn.submit(implementSubmission());
+    await conn.submit({ ...implementSubmission(), stopBeforeBitstream: true });
     const body = calls[0]!.body as Record<string, unknown>;
     expect(body["constraints"]).toEqual([{ path: "synthia.xdc", content: "create_clock -period 10 [get_ports clk]\n" }]);
+    expect(body["stop_before_bitstream"]).toBe(true);
   });
 
   test("follows server-returned jobId for status + evidence (not the idempotency key)", async () => {
@@ -386,6 +453,15 @@ describe("resolveCoreApiConfig", () => {
     const cfg = resolveCoreApiConfig({ SYNTHIA_CORE_URL: "http://core.svc:9/", SYNTHIA_CORE_TOKEN: "tok" });
     expect(cfg.baseUrl).toBe("http://core.svc:9");
   });
+  test("task Runtime config requires and selects its separate token", () => {
+    expect(() => resolveTaskRuntimeApiConfig({ SYNTHIA_CORE_TOKEN: "generic" }))
+      .toThrow(/SYNTHIA_TASK_RUNTIME_TOKEN/);
+    expect(resolveTaskRuntimeApiConfig({
+      SYNTHIA_CORE_URL: "http://core.svc:9///",
+      SYNTHIA_CORE_TOKEN: "generic",
+      SYNTHIA_TASK_RUNTIME_TOKEN: "task-runtime",
+    })).toEqual({ baseUrl: "http://core.svc:9", token: "task-runtime" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -394,7 +470,7 @@ describe("resolveCoreApiConfig", () => {
 
 const RTL: ArtifactFile = { path: "counter.v", content: "module counter(input clk,input rst_n,output reg[7:0] c);always@(posedge clk)if(!rst_n)c<=0;else c<=c+1;endmodule\n" };
 const TB: ArtifactFile = { path: "tb_counter.v", content: "module tb_counter;reg clk=0;reg rst_n=0;wire[7:0] c;counter d(.clk(clk),.rst_n(rst_n),.c(c));always #5 clk=~clk;initial begin rst_n=0;#20;rst_n=1;repeat(3)@(posedge clk);$display(\"PASS\");$finish;end endmodule\n" };
-const XDC: ArtifactFile = { path: "synthia.xdc", content: "set_property SEVERITY {Warning} [get_drc_checks NSTD-1]\ncreate_clock -period 10 [get_ports clk]\n" };
+const XDC: ArtifactFile = { path: "synthia.xdc", content: "# Missing board I/O facts remain blocking.\ncreate_clock -period 10 [get_ports clk]\n" };
 
 class ScriptedModel implements LoopModel {
   async generateIntake(): Promise<DocGeneration> { return { phase: "generate_intake", reasoning: "ok", docPath: "doc/intake/summary.md", content: "# Intake\n## Task\n8-bit counter." }; }
@@ -416,8 +492,37 @@ describe("LoopExecutor over CoreApiConnector (via-core integration)", () => {
         const op = (JSON.parse(body) as { operation: string }).operation;
         return { status: 201, body: { data: { jobId: `job-${op}`, runClass: "exploratory", state: "submitted" } } };
       }
+      if (url.includes("/evidence/content?name=sta.rpt")) {
+        return {
+          status: 200,
+          body: {
+            data: {
+              name: "sta.rpt",
+              content: "Timing Summary Report\nWNS(ns) TNS(ns)\n0.250 0.000\nAll user specified timing constraints are met.\n",
+              sha256: "b".repeat(64),
+              truncated: false,
+              mediaType: "text/plain",
+            },
+          },
+        };
+      }
       if (url.endsWith("/evidence")) {
-        return { status: 200, body: { data: { jobId: "job", entries: [{ name: `${url.split("/")[ -3 ]}.log`, sha256: "b".repeat(64), sizeBytes: 7, mediaType: "text/plain" }] } } };
+        const implement = url.includes("/jobs/job-implement/evidence");
+        const names = implement ? ["sta.rpt", "synthia.bit"] : ["run.log"];
+        return {
+          status: 200,
+          body: {
+            data: {
+              jobId: "job",
+              entries: names.map((name) => ({
+                name,
+                sha256: "b".repeat(64),
+                sizeBytes: 7,
+                mediaType: name.endsWith(".bit") ? "application/octet-stream" : "text/plain",
+              })),
+            },
+          },
+        };
       }
       return { status: 200, body: { data: { jobId: "job", state: "succeeded" } } };
     });

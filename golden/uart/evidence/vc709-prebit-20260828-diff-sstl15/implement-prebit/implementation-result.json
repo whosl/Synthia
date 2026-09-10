@@ -1,0 +1,12 @@
+{
+  "schema": "implement-result.v1",
+  "passed": true,
+  "status": "succeeded",
+  "exitCode": 0,
+  "timedOut": false,
+  "drcVerdict": "passed",
+  "timingVerdict": "passed",
+  "bitstreamGenerated": false,
+  "stopBeforeBitstream": true,
+  "errorCode": null
+}

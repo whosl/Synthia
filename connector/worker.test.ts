@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sha256 } from "../core/src/hashing.ts";
-import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint } from "./remote.ts";
+import { MAX_EVIDENCE_ENTRY_BYTES, REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DataClassification } from "./remote.ts";
 import { type WorkerExecution, type WorkerExecutionResult, WorkerRuntime } from "./worker.ts";
 import type { DiscoverySnapshot, JobRequest } from "./index.ts";
 
@@ -15,8 +15,8 @@ interface WorkerReply { readonly status: number; readonly payload: unknown; read
 interface ContentReply { readonly name: string; readonly sha256: string; readonly sizeBytes: number; readonly mediaType: string; readonly content_base64: string; readonly truncated: boolean }
 
 let seq = 0;
-async function post(rt: WorkerRuntime, path: string, payload: unknown, cap = "0"): Promise<WorkerReply> {
-  const envelope = { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: `c-${++seq}`, idempotency_key: `k-${path}-${seq}`, actor: { actor_type: "service", actor_id: "core" }, project_id: "p1", classification: "internal", capability_version: cap, payload };
+async function post(rt: WorkerRuntime, path: string, payload: unknown, cap = "0", scope: { projectId?: string; classification?: DataClassification } = {}): Promise<WorkerReply> {
+  const envelope = { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: `c-${++seq}`, idempotency_key: `k-${path}-${seq}`, actor: { actor_type: "service", actor_id: "core" }, project_id: scope.projectId ?? "p1", classification: scope.classification ?? "internal", capability_version: cap, payload };
   const res = await rt.handle(new Request(`https://worker.test${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope) }));
   const json = await res.json() as Record<string, unknown>;
   return { status: res.status, payload: "payload" in json ? (json as { payload: unknown }).payload : undefined, errorCode: typeof json.error_code === "string" ? json.error_code : undefined };
@@ -44,9 +44,9 @@ async function waitForEvidence(rt: WorkerRuntime, jobId: string): Promise<void> 
   throw new Error(`evidence for ${jobId} was not sealed`);
 }
 
-function runtime(root: string, execute: (request: JobRequest, workspace: string) => Promise<WorkerExecutionResult>): WorkerRuntime {
+function runtime(root: string, execute: (request: JobRequest, workspace: string) => Promise<WorkerExecutionResult>, workerEndpoint: ConnectorEndpoint = endpoint): WorkerRuntime {
   const execution: WorkerExecution = { async discover() { return discovery; }, execute };
-  return new WorkerRuntime({ endpoint, workspaceRoot: root, execution });
+  return new WorkerRuntime({ endpoint: workerEndpoint, workspaceRoot: root, execution });
 }
 
 async function prime(rt: WorkerRuntime): Promise<void> {
@@ -60,6 +60,35 @@ async function submitJob(rt: WorkerRuntime, jobId: string): Promise<void> {
   if (submitted.status !== 202) throw new Error(`submit failed: ${submitted.status} ${submitted.errorCode ?? ""}`);
   await waitForEvidence(rt, jobId);
 }
+
+describe("worker project and classification boundaries", () => {
+  test("rejects envelopes outside the configured endpoint scopes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-"));
+    try {
+      const rt = runtime(root, async () => ({ outcome: "success", output: "{}" }));
+      expect((await post(rt, "/registration", {}, "0", { projectId: "p2" })).status).toBe(403);
+      expect((await post(rt, "/registration", {}, "0", { classification: "restricted" })).status).toBe(403);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("does not disclose or cancel a job through another allowed scope", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-"));
+    try {
+      const scopedEndpoint = { ...endpoint, project_scope: ["p1", "p2"], data_classification_scope: ["internal", "confidential"] as const };
+      const rt = runtime(root, async () => ({ outcome: "success", output: "{}" }), scopedEndpoint);
+      await prime(rt);
+      await submitJob(rt, "job-bound");
+      for (const path of ["/jobs/status", "/jobs/cancel", "/jobs/evidence", "/jobs/evidence/content"]) {
+        const payload = path.endsWith("content")
+          ? { job_id: "job-bound", name: "worker-result.json" }
+          : { job_id: "job-bound" };
+        expect((await post(rt, path, payload, "0", { projectId: "p2" })).status).toBe(404);
+        expect((await post(rt, path, payload, "0", { classification: "confidential" })).status).toBe(404);
+      }
+      expect((await post(rt, "/jobs/status", { job_id: "job-bound" })).status).toBe(200);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
 
 describe("worker evidence content endpoint", () => {
   test("returns base64 content that decodes to the artifact and matches the manifest sha256", async () => {
@@ -133,6 +162,67 @@ describe("worker evidence content endpoint", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  test("returns complete binary-safe bytes when evidence freezing explicitly requests them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-"));
+    try {
+      const content = Buffer.alloc(300000);
+      for (let i = 0; i < content.length; i++) content[i] = i % 251;
+      const rt = runtime(root, async (request, workspace) => {
+        await mkdir(join(workspace, "output"), { recursive: true });
+        await writeFile(join(workspace, "output", "synthia.bit"), content);
+        return {
+          outcome: "success",
+          evidence: {
+            jobId: request.jobId!,
+            entries: [{
+              name: "synthia.bit",
+              sha256: sha256(content),
+              sizeBytes: content.byteLength,
+              mediaType: "application/octet-stream",
+            }],
+          },
+        };
+      });
+      await prime(rt);
+      await submitJob(rt, "job-full-bitstream");
+      const res = await post(rt, "/jobs/evidence/content", {
+        job_id: "job-full-bitstream",
+        name: "synthia.bit",
+        complete: true,
+      });
+      expect(res.status).toBe(200);
+      const payload = res.payload as ContentReply;
+      expect(payload.truncated).toBe(false);
+      const decoded = Buffer.from(payload.content_base64, "base64");
+      expect(decoded.byteLength).toBe(content.byteLength);
+      expect(sha256(decoded)).toBe(payload.sha256);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("rejects evidence entries larger than the complete-transfer cap before reading them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-"));
+    try {
+      const rt = runtime(root, async (request) => ({
+        outcome: "success",
+        evidence: {
+          jobId: request.jobId!,
+          entries: [{ name: "oversized.bit", sha256: "a".repeat(64), sizeBytes: MAX_EVIDENCE_ENTRY_BYTES + 1, mediaType: "application/octet-stream" }],
+        },
+      }));
+      await prime(rt);
+      const request: JobRequest = { jobId: "job-oversized", idempotencyKey: "jk-job-oversized", projectId: "p1", operation: "vivado_synthesize", runClass: "exploratory", input: "manifest-sha", correlationId: "corr-job-oversized" };
+      expect((await post(rt, "/jobs/submit", { request }, "fake-1")).status).toBe(202);
+      let evidence: WorkerReply | undefined;
+      for (let i = 0; i < 1000; i++) {
+        evidence = await post(rt, "/jobs/evidence", { job_id: request.jobId });
+        if (evidence.status === 413) break;
+        await tick();
+      }
+      expect(evidence?.status).toBe(413);
+      expect(evidence?.errorCode).toBe("EVIDENCE_LIMIT_EXCEEDED");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test("422 EVIDENCE_CORRUPT when on-disk content no longer matches the manifest sha256", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-worker-"));
     try {
@@ -168,6 +258,77 @@ describe("worker evidence content endpoint", () => {
       const p = res.payload as ContentReply;
       expect(p.truncated).toBe(false);
       expect(Buffer.from(p.content_base64, "base64").toString("utf8")).toBe(content);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H8: job registry survives worker restarts
+// ---------------------------------------------------------------------------
+
+describe("worker job registry persistence (H8)", () => {
+  test("evidence and status APIs answer across a restart from the snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      const rt1 = runtime(root, async (_req, workspace) => {
+        await mkdir(join(workspace, "output"), { recursive: true });
+        await writeFile(join(workspace, "output", "rpt.txt"), "hello", "utf8");
+        return { outcome: "success", output: JSON.stringify({ status: "ok" }) };
+      });
+      await prime(rt1);
+      await submitJob(rt1, "job-h8-1");
+
+      // New runtime over the same workspace root — the old world lost all
+      // jobs in memory here (evidence APIs 404 until this fix).
+      // Wait until the durable registry carries the terminal state — the
+      // in-memory evidence API can seal a moment before the snapshot write
+      // lands, and a restart in that window is exactly what this test guards.
+      let registrySealed = false;
+      for (let i = 0; i < 1000 && !registrySealed; i++) {
+        await tick();
+        const snapRaw = await readFile(join(root, "jobs-registry.json"), "utf8").catch(() => "");
+        registrySealed = snapRaw.includes('"state":"succeeded"');
+      }
+      expect(registrySealed).toBeTrue();
+      const rt2 = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt2);
+      const status = await post(rt2, "/jobs/status", { job_id: "job-h8-1" });
+      expect(status.status).toBe(200);
+      const payload = status.payload as { state?: string };
+      expect(payload.state).toBe("succeeded");
+      const evidence = await post(rt2, "/jobs/evidence", { job_id: "job-h8-1" });
+      expect(evidence.status).toBe(200);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("a non-terminal job at snapshot time reloads as lost, not as its stale running state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      // Craft a snapshot with a mid-flight job directly (simulating a crash
+      // between the submit and run snapshots).
+      const { writeFile: wf } = await import("node:fs/promises");
+      await wf(join(root, "jobs-registry.json"), JSON.stringify({
+        schema: "synthia-worker-jobs-registry.v1",
+        jobs: [{ id: "job-crash", request: { jobId: "job-crash", idempotencyKey: "k", projectId: "p1", operation: "vivado_synthesize", runClass: "exploratory", input: "x", correlationId: "c" }, state: "running", inputSha256: "x" }],
+        bindings: [["job-crash", { projectId: "p1", classification: "internal" }]],
+      }), "utf8");
+      const rt = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt);
+      const status = await post(rt, "/jobs/status", { job_id: "job-crash" });
+      expect(status.status).toBe(200);
+      expect((status.payload as { state?: string }).state).toBe("lost");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("corrupt snapshot → fresh registry, worker still serves", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h8-"));
+    try {
+      const { writeFile: wf } = await import("node:fs/promises");
+      await wf(join(root, "jobs-registry.json"), "{not json", "utf8");
+      const rt = runtime(root, async () => ({ outcome: "success" }));
+      await prime(rt);
+      const status = await post(rt, "/jobs/status", { job_id: "anything" });
+      expect(status.status).toBe(404);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

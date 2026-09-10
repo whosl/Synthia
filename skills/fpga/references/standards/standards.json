@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "standards": [
+    {
+      "id": "GBT11457-2006",
+      "designation": "GB/T 11457-2006",
+      "title": "信息技术 软件工程术语",
+      "status": "available",
+      "pageCount": 263,
+      "sha256": "7d7af3dfb969bb7639c213396d9338f50fd425b028d26874240f43f094b83f91",
+      "pdfFile": "GBT11457-2006.pdf",
+      "markdownFile": "GBT11457-2006.md",
+      "source": {
+        "kind": "official-full-text",
+        "url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=07E3E9867D23EA5A74EB525A44622E86",
+        "locator": "HCNO 07E3E9867D23EA5A74EB525A44622E86"
+      },
+      "directlyReferences": []
+    },
+    {
+      "id": "GJB2786A-2009",
+      "designation": "GJB 2786A-2009",
+      "title": "军用软件开发通用要求",
+      "status": "available",
+      "pageCount": 42,
+      "sha256": "05e05d4a325292cac939aaf34065db13c79d74d99db1028b811af554e80bc18c",
+      "pdfFile": "GJB2786A-2009.pdf",
+      "markdownFile": "GJB2786A-2009.md",
+      "source": {
+        "kind": "public-preview-reconstruction",
+        "url": "https://www.doc88.com/p-3137857765983.html",
+        "locator": "42 continuous preview pages"
+      },
+      "corroboration": {
+        "kind": "user-supplied-complete-copy",
+        "pageCount": 42,
+        "sha256": "c43dfa87ff36b96d105cd263518d216ae99969f5f372fb1aa10f9c58e0b7c86f",
+        "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
+      },
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB438B-2009"
+      ]
+    },
+    {
+      "id": "GJB438B-2009",
+      "designation": "GJB 438B-2009",
+      "title": "军用软件开发文档通用要求",
+      "status": "available",
+      "pageCount": 98,
+      "sha256": "564413d0dc71b02824942fea469f483bb558539166b5bc35d6429cad1019e010",
+      "pdfFile": "GJB438B-2009.pdf",
+      "markdownFile": "GJB438B-2009.md",
+      "source": {
+        "kind": "user-supplied-scan",
+        "url": null,
+        "locator": "complete local scan supplied by the user"
+      },
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB2786A-2009"
+      ]
+    },
+    {
+      "id": "GJB5235-2004",
+      "designation": "GJB 5235-2004",
+      "title": "军用软件配置管理",
+      "status": "available",
+      "pageCount": 14,
+      "sha256": "7f2f6429643bcae81bc7d669d77a21307f5cb4238576af724e0116abe5392fa5",
+      "pdfFile": "GJB5235-2004.pdf",
+      "markdownFile": "GJB5235-2004.md",
+      "source": {
+        "kind": "public-preview-reconstruction",
+        "url": "https://www.doc88.com/p-5367813168438.html",
+        "locator": "14 continuous preview pages"
+      },
+      "corroboration": {
+        "kind": "user-supplied-complete-copy",
+        "pageCount": 14,
+        "sha256": "7ee5d13d5dea89e603efa3c349178cc9961c6e3939cd5efc0070ca79ad61a273",
+        "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
+      },
+      "directlyReferences": [
+        "GBT8566-2022",
+        "GBT11457-2006"
+      ]
+    },
+    {
+      "id": "GJB9432-2018",
+      "designation": "GJB 9432-2018",
+      "title": "军用可编程逻辑器件软件开发通用要求",
+      "status": "available",
+      "pageCount": 11,
+      "sha256": "1a6a8c4781c39951304a5e9f6611c39cbc4f8bb879dd0e89ab9beb5b632a84c8",
+      "pdfFile": "GJB9432-2018.pdf",
+      "markdownFile": "GJB9432-2018.md",
+      "source": {
+        "kind": "user-supplied-complete-copy",
+        "url": null,
+        "locator": "11-page complete local copy supplied by the user; cover, foreword, clauses, normative Annex A and back cover visually verified"
+      },
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB5235-2004",
+        "GJB9433-2018"
+      ]
+    },
+    {
+      "id": "GJB9433-2018",
+      "designation": "GJB 9433-2018",
+      "title": "军用可编程逻辑器件软件测试要求",
+      "status": "available",
+      "pageCount": 14,
+      "sha256": "d397cf357d394ed0341758a986f11b34afab1e245070cd62a674f7e918e7937b",
+      "pdfFile": "GJB9433-2018.pdf",
+      "markdownFile": "GJB9433-2018.md",
+      "source": {
+        "kind": "public-preview-reconstruction",
+        "url": "https://www.doc88.com/p-7045038418809.html",
+        "locator": "14 continuous preview pages"
+      },
+      "corroboration": {
+        "kind": "user-supplied-complete-copy",
+        "pageCount": 14,
+        "sha256": "60dd9265b95adda950cd8d6160aa837284fcbebe53f55e3a8bd156cbca79996f",
+        "result": "page count, sequence, cover, body and final page match; retained reconstruction has higher resolution"
+      },
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB9432-2018"
+      ]
+    },
+    {
+      "id": "GJB9764-2020",
+      "designation": "GJB 9764-2020",
+      "title": "军用可编程逻辑器件软件文档编制规范",
+      "status": "available",
+      "pageCount": 46,
+      "sha256": "b37a6b48c8e07ff3f1fc0a8ff65208c44117f79b6a876760720a53531b07411b",
+      "pdfFile": "GJB9764-2020.pdf",
+      "markdownFile": "GJB9764-2020.md",
+      "source": {
+        "kind": "user-supplied-scan",
+        "url": null,
+        "locator": "complete local scan supplied by the user"
+      },
+      "directlyReferences": [
+        "GBT11457-2006",
+        "GJB438B-2009",
+        "GJB9432-2018"
+      ]
+    },
+    {
+      "id": "GBT8566-2022",
+      "designation": "GB/T 8566-2022",
+      "title": "系统与软件工程 软件生存周期过程",
+      "status": "available",
+      "source": "scribd_screenshot_reconstruction",
+      "directlyReferences": [],
+      "pageCount": 115,
+      "sha256": "0e5be2cb26ca190279e1cc69fec1a396c5ab4d8d2310b1d8d3d10e4edcbced59",
+      "markdownFile": "GBT8566-2022.md",
+      "pdfFile": "GBT8566-2022.pdf",
+      "notes": "Scribd 在线页逐页截图合成 PDF + tesseract OCR 转写；正式结论以官方版为准"
+    }
+  ]
+}

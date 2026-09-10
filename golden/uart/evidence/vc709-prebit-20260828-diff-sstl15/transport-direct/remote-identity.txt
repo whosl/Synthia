@@ -1,0 +1,9 @@
+verified_at_utc=2026-08-28T03:16:33Z
+hostname=DESKTOP-DVFFB09
+windows_identity=DESKTOP-DVFFB09\admin
+windows_sid=S-1-5-21-2561815994-3878748218-1101284459-1001
+server_host_key_type=ED25519
+server_host_key_fingerprint=SHA256:jZVimVML+3vYKaaMK30EakIxOvOWiilN6FjBW/4uhfY
+server_host_public_key_file_sha256=5a727bd2bedf608dbbd721e73f2ab3b476aeda0332435f7343364a83ba4544bb
+client_observed_host_key_fingerprint=SHA256:jZVimVML+3vYKaaMK30EakIxOvOWiilN6FjBW/4uhfY
+host_key_match=true

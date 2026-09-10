@@ -14,11 +14,9 @@ import {
   findApprovalSubmission,
   jobDurationText,
   jobOperationText,
-  LEGACY_ROUTES,
   memberRevisionIdsFromEvents,
   rejectDisabled,
   resolveSnapshotMembers,
-  unifiedRedirectTarget,
 } from "../src/domain/unified.ts";
 
 // ─── 测试夹具 ─────────────────────────────────────────────────────────
@@ -55,46 +53,6 @@ function fakeClient(routes: ReadonlyArray<readonly [string, (init?: { body?: unk
   }) as unknown as ApiClient;
   return { client, calls };
 }
-
-// ─── 旧路由重定向 ─────────────────────────────────────────────────────
-
-describe("旧四路由重定向到统一项目页", () => {
-  test("路由表覆盖四个旧路径", () => {
-    expect(LEGACY_ROUTES.map((r) => r.path)).toEqual([
-      "/projects/:id/artifacts",
-      "/projects/:id/tasks",
-      "/projects/:id/tasks/:runId",
-      "/projects/:id/runs",
-    ]);
-  });
-
-  test("产物库 → 统一页产物标签", () => {
-    const rule = LEGACY_ROUTES[0]!;
-    expect(unifiedRedirectTarget(rule, { id: "p1" })).toEqual({ path: "/projects/p1", query: { tab: "artifacts" } });
-  });
-
-  test("任务列表 → 统一页（默认流程标签）", () => {
-    const rule = LEGACY_ROUTES[1]!;
-    expect(unifiedRedirectTarget(rule, { id: "p1" })).toEqual({ path: "/projects/p1", query: {} });
-  });
-
-  test("任务工作台 → 统一页并携带 run 查询参数", () => {
-    const rule = LEGACY_ROUTES[2]!;
-    expect(unifiedRedirectTarget(rule, { id: "p1", runId: "run-abc" })).toEqual({
-      path: "/projects/p1",
-      query: { run: "run-abc" },
-    });
-  });
-
-  test("运行记录 → 统一页记录标签，且保留原 run 查询参数", () => {
-    const rule = LEGACY_ROUTES[3]!;
-    expect(unifiedRedirectTarget(rule, { id: "p1" }, { run: "run-xyz" })).toEqual({
-      path: "/projects/p1",
-      query: { tab: "records", run: "run-xyz" },
-    });
-    expect(unifiedRedirectTarget(rule, { id: "p1" })).toEqual({ path: "/projects/p1", query: { tab: "records" } });
-  });
-});
 
 // ─── 审批卡渲染条件 ───────────────────────────────────────────────────
 
