@@ -543,6 +543,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private readonly messages: AgentMessage[] = [];
 
   private _status: FreeAgentStatus = "idle";
+  /** Durable turn id of the in-flight prompt; null outside a turn. */
+  private currentTurnId: string | null = null;
   private abortFlag = false;
   private abortReason: string | undefined;
   private readonly pendingSteer: string[] = [];
@@ -634,6 +636,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     if (this._status === "running") {
       throw new Error("free-agent: a prompt is already in progress");
     }
+
+    // Current durable turn id, used by tools that seal per-turn facts
+    // (skill applications) into Core.
+    this.currentTurnId = opts.turnId ?? null;
 
     // Reset abort for this prompt round.
     this.abortFlag = false;
@@ -1080,6 +1086,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
       ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
       toolCallId: call.toolCallId,
+      turnId: this.currentTurnId,
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
