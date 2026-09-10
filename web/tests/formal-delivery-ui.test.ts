@@ -44,14 +44,14 @@ describe("P4 formal-delivery UI contract", () => {
     expect(packageJson.scripts.dev).not.toContain("VITE_FEATURE_FORMAL_DELIVERY");
     expect(packageJson.scripts.build).not.toContain("VITE_FEATURE_FORMAL_DELIVERY");
     expect(component).toContain("正式能力未就绪");
-    expect(component).toContain("width: 100vw");
-    expect(component).toContain("grid-template-columns: 1fr");
+    expect(component).toContain("max-[720px]:w-screen");
+    expect(component).toContain("max-[720px]:grid-cols-1");
   });
 
   test("narrow formal input and release rows cannot widen the delivery panel", () => {
-    expect(component).toContain(".formal-section {\n  display: grid;\n  gap: var(--space-3);\n  min-width: 0;");
-    expect(component).toContain(".formal-file-row { grid-template-columns: minmax(0, 1fr) auto; }");
-    expect(component).toContain(".formal-file-row .formal-file-path,\n  .formal-file-row .mono { grid-column: 1 / -1; }");
-    expect(component).toContain(".formal-delivery-path { min-width: 0; overflow: hidden; text-overflow: ellipsis;");
+    expect(component).toContain('class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3"');
+    expect(component).toContain("max-[720px]:grid-cols-[minmax(0,1fr)_auto]");
+    expect(component).toContain("max-[720px]:col-span-full");
+    expect(component).toContain('class="min-w-0 truncate"');
   });
 });

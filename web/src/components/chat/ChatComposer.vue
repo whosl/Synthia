@@ -63,13 +63,13 @@ function onKeydown(ev: KeyboardEvent): void {
 </script>
 
 <template>
-  <div class="chat-composer" :class="{ steering: mode === 'steer', sending }">
-    <p v-if="mode === 'steer'" class="chat-composer-hint">插一句不保证按顺序生效，将在当前步骤结束后注入</p>
+  <div class="chat-composer flex flex-col gap-1 border-t border-line bg-panel px-3 pb-3 pt-2" :class="{ steering: mode === 'steer', sending }">
+    <p v-if="mode === 'steer'" class="m-0 text-[11px] text-warn">插一句不保证按顺序生效，将在当前步骤结束后注入</p>
 
-    <div class="chat-composer-row">
+    <div class="flex items-end gap-2">
       <textarea
         ref="textareaEl"
-        class="chat-composer-input"
+        class="chat-composer-input max-h-[160px] min-h-[30px] min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-line bg-base p-2 text-fg transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] placeholder:text-fg-muted focus-visible:border-brand disabled:cursor-not-allowed disabled:bg-hover disabled:opacity-55"
         :value="modelValue"
         :placeholder="placeholder"
         aria-label="发送给 Agent 的消息"
@@ -78,7 +78,7 @@ function onKeydown(ev: KeyboardEvent): void {
         @input="onInput"
         @keydown="onKeydown"
       />
-      <div class="chat-composer-actions">
+      <div class="flex flex-none gap-1">
         <Button v-if="canAbort" variant="danger" size="sm" :disabled="sending" title="打断当前回复" @click="emit('abort')">
           ⏹ 打断
         </Button>
@@ -89,66 +89,18 @@ function onKeydown(ev: KeyboardEvent): void {
 </template>
 
 <style scoped>
-.chat-composer {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3) var(--space-3);
-  background: var(--surface-panel);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.chat-composer-hint {
-  margin: 0;
-  color: var(--state-warn);
-  font-size: 11px;
-}
-
-.chat-composer-row {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--space-2);
-}
-
+/* 未分层全局 reset 的 textarea { font: inherit } 与 :focus-visible 描边优先级高于
+   Tailwind utilities 层，行高/去描边/steering 边框色留在 scoped。
+   （.chat-composer-input 同时是 ProjectView 聚焦用的 querySelector 钩子，类名勿动。） */
 .chat-composer-input {
-  flex: 1;
-  min-width: 0;
-  min-height: 30px;
-  max-height: 160px;
-  padding: var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-  background: var(--surface-base);
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
   line-height: var(--line-height-chat);
-  resize: none;
-  overflow-y: auto;
-  transition: border-color var(--duration) var(--ease-out);
 }
 
 .chat-composer-input:focus-visible {
-  border-color: var(--accent);
   outline: none;
-}
-
-.chat-composer-input::placeholder {
-  color: var(--text-muted);
-}
-
-.chat-composer-input:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  background: var(--surface-hover);
 }
 
 .chat-composer.steering .chat-composer-input {
   border-color: color-mix(in srgb, var(--state-warn) 45%, var(--border-subtle));
-}
-
-.chat-composer-actions {
-  display: flex;
-  flex: none;
-  gap: var(--space-1);
 }
 </style>

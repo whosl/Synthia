@@ -12,16 +12,14 @@
  *   「查看改动」走 `open-diff`，同样交给中栏 Monaco，流内不渲染行级 diff。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { Sparkles, X } from "lucide-vue-next";
 import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
 import type { GatePartState } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
-import Icon from "../ui/Icon.vue";
 import { TASK_STATUS_TEXT } from "../../domain/tasks.ts";
 import Button from "../ui/AppButton.vue";
 import Badge from "../ui/AppBadge.vue";
 import AgentToolItem from "./AgentToolItem.vue";
-import ContextRing from "./ContextRing.vue";
-import PermissionCard from "./PermissionCard.vue";
 import ApprovalCard from "./ApprovalCard.vue";
 import ChatComposer from "./ChatComposer.vue";
 import CodeCard from "./CodeCard.vue";
@@ -120,27 +118,27 @@ onMounted(() => void nextTick(scrollToBottom));
 </script>
 
 <template>
-  <div class="chat-feed">
-    <div class="chat-feed-heading"><span><Icon name="spark" :size="16" />主 Agent</span><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><ContextRing v-if="contextUsage" :prompt-tokens="contextUsage.promptTokens" :context-window="contextUsage.contextWindow" /><Button variant="ghost" size="sm" :title="permissionSkipAll ? '权限卡已全局跳过（红线操作仍受治理拦截）' : '点击后本会话不再弹出权限卡'" @click="emit('toggle-skip-permissions', !permissionSkipAll)">🛡{{ permissionSkipAll ? "跳过权限·开" : "跳过权限·关" }}</Button><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><Icon name="close" :size="16" /></Button></div>
-    <div v-if="streamPhase === 'degraded'" class="chat-feed-banner tone-warn">实时连接中断，已切换定时刷新</div>
-    <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="chat-feed-banner tone-muted">正在连接实时更新…</div>
+  <div class="chat-feed flex h-full min-h-0 flex-col bg-panel">
+    <div class="flex min-h-10 items-center justify-between gap-3 border-b border-line px-4 py-2"><span class="flex items-center gap-2 text-xs font-[550]"><Sparkles :size="16" class="text-brand" aria-hidden="true" />主 Agent</span><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><X :size="16" /></Button></div>
+    <div v-if="streamPhase === 'degraded'" class="flex-none bg-warn/14 px-3 py-1 text-center text-xs text-warn">实时连接中断，已切换定时刷新</div>
+    <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="flex-none bg-hover px-3 py-1 text-center text-xs text-fg-muted">正在连接实时更新…</div>
 
-    <div ref="scrollEl" class="chat-feed-scroll" @scroll="onScroll">
-      <div v-if="renderItems.length === 0" class="chat-feed-empty">
+    <div ref="scrollEl" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3" @scroll="onScroll">
+      <div v-if="renderItems.length === 0" class="my-auto flex flex-col items-center gap-2 px-4 py-6 text-center">
         <template v-if="composerMode === 'new-task'">
-          <p class="chat-feed-empty-title">开始你的第一个任务</p>
-          <p class="chat-feed-empty-hint">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
-          <div class="chat-feed-examples">
-            <button v-for="task in exampleTasks" :key="task" type="button" class="chat-feed-example" @click="fillExample(task)">
+          <p class="m-0 text-[13px] font-semibold text-fg">开始你的第一个任务</p>
+          <p class="m-0 max-w-[280px] text-xs leading-[1.4] text-fg-muted">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
+          <div class="mt-2 flex w-full flex-col gap-2">
+            <button v-for="task in exampleTasks" :key="task" type="button" class="chat-feed-example cursor-pointer rounded-md border-none bg-hover px-3 py-2 text-left transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle" @click="fillExample(task)">
               {{ task }}
             </button>
           </div>
         </template>
         <template v-else-if="agentStatus === null">
-          <p class="chat-feed-empty-title">正在加载对话…</p>
+          <p class="m-0 text-[13px] font-semibold text-fg">正在加载对话…</p>
         </template>
         <template v-else>
-          <p class="chat-feed-empty-title">暂无对话记录</p>
+          <p class="m-0 text-[13px] font-semibold text-fg">暂无对话记录</p>
         </template>
       </div>
 
@@ -153,15 +151,10 @@ onMounted(() => void nextTick(scrollToBottom));
           <ReasoningItem v-else-if="item.part.kind === 'reasoning'" :part="item.part" />
 
           <AgentToolItem v-else-if="item.part.kind === 'agent_tool'" :part="item.part" />
-          <PermissionCard
-            v-else-if="item.part.kind === 'permission'"
-            :part="item.part"
-            @resolve="(callId, allow) => emit('resolve-permission', callId, allow)"
-          />
 
-          <div v-else-if="item.part.kind === 'gate'" class="chat-feed-gate">
-            <span class="chat-feed-gate-glyph" aria-hidden="true">◆</span>
-            <span class="chat-feed-gate-title">{{ item.part.review }}</span>
+          <div v-else-if="item.part.kind === 'gate'" class="flex items-center gap-2 rounded-md bg-hover px-3 py-2">
+            <span class="flex-none text-brand" aria-hidden="true">◆</span>
+            <span class="min-w-0 flex-1 text-xs text-fg">{{ item.part.review }}</span>
             <Badge :tone="GATE_STATE_TONE[item.part.state]" size="sm">{{ GATE_STATE_TEXT[item.part.state] }}</Badge>
           </div>
 
@@ -178,40 +171,40 @@ onMounted(() => void nextTick(scrollToBottom));
           <button
             v-else-if="item.part.kind === 'evidence'"
             type="button"
-            class="chat-feed-line chat-feed-evidence muted"
+            class="chat-feed-evidence block w-full cursor-pointer rounded-sm border-none bg-transparent px-2 py-1 text-left transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle"
             @click="emit('open-records', null)"
           >
             📎 生成了 {{ item.part.count }} 项证据 · 查看
           </button>
 
-          <div v-else-if="item.part.kind === 'governance'" class="chat-feed-line muted">{{ item.part.text }}</div>
+          <div v-else-if="item.part.kind === 'governance'" class="px-2 py-1 text-xs leading-[1.4] text-fg-muted">{{ item.part.text }}</div>
 
-          <div v-else-if="item.part.kind === 'lifecycle'" class="chat-feed-lifecycle" :class="item.part.state">
-            <span class="chat-feed-lifecycle-glyph" aria-hidden="true">{{ item.part.state === "succeeded" ? "🎉" : "⚠️" }}</span>
-            <div class="chat-feed-lifecycle-body">
-              <p class="chat-feed-lifecycle-text">{{ item.part.text }}</p>
-              <p v-if="item.part.bitstream" class="chat-feed-lifecycle-detail mono">
+          <div v-else-if="item.part.kind === 'lifecycle'" class="flex gap-2 rounded-md p-3" :class="item.part.state === 'succeeded' ? 'bg-ok/12' : 'bg-danger/10'">
+            <span class="flex-none text-[15px]" aria-hidden="true">{{ item.part.state === "succeeded" ? "🎉" : "⚠️" }}</span>
+            <div class="flex min-w-0 flex-col gap-1">
+              <p class="m-0 text-[13px] font-semibold text-fg">{{ item.part.text }}</p>
+              <p v-if="item.part.bitstream" class="chat-feed-lifecycle-detail mono m-0 text-fg-secondary">
                 {{ item.part.bitstream.name }} · sha256:{{ shortHash(item.part.bitstream.sha256) }}
               </p>
-              <p v-if="item.part.evidenceCount > 0" class="chat-feed-lifecycle-detail">证据链 {{ item.part.evidenceCount }} 项</p>
+              <p v-if="item.part.evidenceCount > 0" class="m-0 text-xs text-fg-secondary">证据链 {{ item.part.evidenceCount }} 项</p>
             </div>
           </div>
 
-          <div v-else-if="item.part.kind === 'note'" class="chat-feed-note" :class="`tone-${item.part.tone}`">{{ item.part.text }}</div>
+          <div v-else-if="item.part.kind === 'note'" class="rounded-sm bg-hover px-2 py-1 text-xs leading-[1.4]" :class="item.part.tone === 'warn' ? 'text-warn' : item.part.tone === 'error' ? 'text-danger' : 'text-fg-secondary'">{{ item.part.text }}</div>
 
-          <div v-else-if="item.part.kind === 'interrupt'" class="chat-feed-line interrupt">⏹ {{ item.part.text }}</div>
+          <div v-else-if="item.part.kind === 'interrupt'" class="px-2 py-1 text-xs leading-[1.4] text-warn">⏹ {{ item.part.text }}</div>
         </template>
       </template>
     </div>
 
     <Transition name="chat-feed-jump-fade">
-      <div v-if="!stickToBottom && renderItems.length > 0" class="chat-feed-jump-bar">
-        <button type="button" class="chat-feed-jump" @click="scrollToBottom">回到最新 ↓</button>
+      <div v-if="!stickToBottom && renderItems.length > 0" class="flex flex-none justify-center pb-2">
+        <button type="button" class="chat-feed-jump cursor-pointer rounded-full border border-line-strong bg-raised px-3 py-1 shadow-[0_4px_12px_var(--shadow-color)] hover:bg-hover" @click="scrollToBottom">回到最新 ↓</button>
       </div>
     </Transition>
 
     <!--
-      就地审批卡刻意放在 .chat-feed-scroll **外面**：等待批准是当前唯一的阻塞点，
+      就地审批卡刻意放在滚动容器 **外面**：等待批准是当前唯一的阻塞点，
       放进滚动区的话往上翻历史就把它翻走了，用户得先滚回底部才能批。
     -->
     <ApprovalCard
@@ -222,234 +215,49 @@ onMounted(() => void nextTick(scrollToBottom));
       @open-doc="onOpenApprovalDoc"
     />
 
-    <div v-if="sendError" class="chat-feed-error">{{ sendError }}</div>
+    <div v-if="sendError" class="flex-none bg-danger/10 px-3 py-2 text-xs text-danger">{{ sendError }}</div>
 
     <ChatComposer v-model="draft" :mode="composerMode" :can-abort="canAbort" :sending="sending" @send="onComposerSend" @abort="emit('abort')" />
   </div>
 </template>
 
 <style scoped>
-.chat-feed {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--surface-panel);
-}
-
-.chat-feed-banner {
-  flex: none;
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--font-size-sm);
-  text-align: center;
-}
-
-.chat-feed-banner.tone-warn {
-  background: color-mix(in srgb, var(--state-warn) 14%, transparent);
-  color: var(--state-warn);
-}
-
-.chat-feed-banner.tone-muted {
-  background: var(--surface-hover);
-  color: var(--text-muted);
-}
-
-.chat-feed-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
-}
-
-.chat-feed-empty {
-  margin: auto 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-6) var(--space-4);
-  text-align: center;
-}
-
-.chat-feed-empty-title {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  font-weight: 600;
-}
-
-.chat-feed-empty-hint {
-  margin: 0;
-  max-width: 280px;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.chat-feed-examples {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  width: 100%;
-  margin-top: var(--space-2);
-}
-
+/* 裸按钮的 font/color 被未分层全局 reset（button{font:inherit;color:inherit}）接管，
+   优先级高于 Tailwind utilities 层；这几枚按钮的字号/文字色/hover 文字色留在
+   scoped（hover 底色无冲突，在模板走 Tailwind 类）。 */
 .chat-feed-example {
-  padding: var(--space-2) var(--space-3);
-  border: none;
-  border-radius: var(--radius);
-  background: var(--surface-hover);
-  color: var(--text-secondary);
   font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--duration) var(--ease-out), color var(--duration) var(--ease-out);
+  color: var(--text-secondary);
 }
 
 .chat-feed-example:hover {
-  background: var(--accent-subtle);
   color: var(--text-primary);
-}
-
-.chat-feed-gate {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius);
-  background: var(--surface-hover);
-}
-
-.chat-feed-gate-glyph {
-  flex: none;
-  color: var(--accent);
-}
-
-.chat-feed-gate-title {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-}
-
-.chat-feed-line {
-  padding: var(--space-1) var(--space-2);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.chat-feed-line.muted {
-  color: var(--text-muted);
 }
 
 .chat-feed-evidence {
-  display: block;
-  width: 100%;
-  border: none;
-  background: transparent;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background-color var(--duration) var(--ease-out), color var(--duration) var(--ease-out);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
 }
 
 .chat-feed-evidence:hover {
-  background: var(--accent-subtle);
   color: var(--text-primary);
-}
-
-.chat-feed-line.interrupt {
-  color: var(--state-warn);
-}
-
-.chat-feed-lifecycle {
-  display: flex;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius);
-}
-
-.chat-feed-lifecycle.succeeded {
-  background: color-mix(in srgb, var(--state-ok) 12%, transparent);
-}
-
-.chat-feed-lifecycle.failed {
-  background: color-mix(in srgb, var(--state-danger) 10%, transparent);
-}
-
-.chat-feed-lifecycle-glyph {
-  flex: none;
-  font-size: var(--font-size-lg);
-}
-
-.chat-feed-lifecycle-body {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.chat-feed-lifecycle-text {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  font-weight: 600;
-}
-
-.chat-feed-lifecycle-detail {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-}
-
-.chat-feed-note {
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-  background: var(--surface-hover);
-}
-
-.chat-feed-note.tone-info {
-  color: var(--text-secondary);
-}
-
-.chat-feed-note.tone-warn {
-  color: var(--state-warn);
-}
-
-.chat-feed-note.tone-error {
-  color: var(--state-danger);
-}
-
-.chat-feed-jump-bar {
-  flex: none;
-  display: flex;
-  justify-content: center;
-  padding: 0 0 var(--space-2);
 }
 
 .chat-feed-jump {
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
-  background: var(--surface-raised);
-  color: var(--text-secondary);
   font-size: var(--font-size-sm);
-  cursor: pointer;
-  box-shadow: 0 4px 12px var(--shadow-color);
+  color: var(--text-secondary);
 }
 
 .chat-feed-jump:hover {
   color: var(--text-primary);
-  background: var(--surface-hover);
 }
 
+/* .mono（未分层全局原子类，12.5px）会压过 utilities 层字号，这里补回 12px。 */
+.chat-feed-lifecycle-detail {
+  font-size: var(--font-size-sm);
+}
+
+/* 「回到最新」条的淡入淡出（Vue Transition 运行时生成的类名，Tailwind 扫描不到）。 */
 .chat-feed-jump-fade-enter-active,
 .chat-feed-jump-fade-leave-active {
   transition: opacity var(--duration) var(--ease-out);
@@ -459,15 +267,4 @@ onMounted(() => void nextTick(scrollToBottom));
 .chat-feed-jump-fade-leave-to {
   opacity: 0;
 }
-
-.chat-feed-error {
-  flex: none;
-  padding: var(--space-2) var(--space-3);
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-  background: color-mix(in srgb, var(--state-danger) 10%, transparent);
-}
-.chat-feed-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); }
-.chat-feed-heading > span { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 550; }
-.chat-feed-heading svg { color: var(--accent); }
 </style>

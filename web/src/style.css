@@ -179,21 +179,26 @@ body {
   background-clip: content-box;
 }
 
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
+/* 基础元素规则放进 @layer base：main.ts 先引入本文件再引入 tailwind.css，
+ * 故层叠顺序 base < theme < utilities——Tailwind 工具类（如链接上的 text-fg、
+ * 输入框上的 text-xs、outline-none）得以覆盖这些默认值，而裸元素行为不变。 */
+@layer base {
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
 
-a:hover {
-  color: var(--accent-hover);
-}
+  a:hover {
+    color: var(--accent-hover);
+  }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-  color: inherit;
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
 }
 
 code,
@@ -209,11 +214,14 @@ kbd {
   color: var(--text-primary);
 }
 
-/* 统一焦点态：不用默认蓝色轮廓，走强调色，键盘可达性保留 */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-  border-radius: var(--radius-sm);
+/* 统一焦点态：不用默认蓝色轮廓，走强调色，键盘可达性保留。
+ * 同在 base 层：组件可用 outline-none 等工具类显式收回（如搜索框由容器描边代替）。 */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: var(--radius-sm);
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────

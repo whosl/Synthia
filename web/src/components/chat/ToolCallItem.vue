@@ -47,112 +47,37 @@ function onOpenRecords(): void {
 </script>
 
 <template>
-  <div class="tool-call-item" :class="[`status-${part.status}`, { expandable, expanded }]">
+  <div class="rounded-sm bg-hover" :class="part.status === 'completed' ? 'opacity-72' : ''">
     <div
-      class="tool-call-header"
-      :class="{ 'no-toggle': !expandable }"
+      class="flex w-full items-center gap-1 px-2 py-1 text-left text-xs text-fg-secondary"
+      :class="expandable ? 'cursor-pointer' : 'cursor-default'"
       role="button"
       tabindex="0"
       @click="toggle"
       @keydown.enter="toggle"
       @keydown.space.prevent="toggle"
     >
-      <span class="tool-call-chevron" aria-hidden="true">{{ expandable ? (expanded ? "▾" : "▸") : "·" }}</span>
-      <span class="tool-call-glyph" aria-hidden="true">{{ STATUS_GLYPH[part.status] }}</span>
-      <span class="tool-call-title">{{ part.title }}</span>
+      <span class="w-[10px] flex-none text-fg-muted" aria-hidden="true">{{ expandable ? (expanded ? "▾" : "▸") : "·" }}</span>
+      <span
+        class="flex-none"
+        :class="part.status === 'running' ? 'inline-block text-brand [animation:tool-call-spin_1.1s_linear_infinite]' : part.status === 'error' ? 'text-danger' : ''"
+        aria-hidden="true"
+      >{{ STATUS_GLYPH[part.status] }}</span>
+      <span class="min-w-0 flex-1 truncate" :class="part.status === 'error' ? 'text-danger' : 'text-fg'">{{ part.title }}</span>
       <Badge :tone="STATUS_TONE[part.status]" variant="dot" size="sm">{{ TOOL_STATUS_TEXT[part.status] }}</Badge>
-      <span v-if="durationText" class="tool-call-duration">{{ durationText }}</span>
-      <button v-if="part.jobId" type="button" class="tool-call-records" @click.stop="onOpenRecords">运行记录</button>
+      <span v-if="durationText" class="flex-none font-mono text-[11px] text-fg-muted">{{ durationText }}</span>
+      <button v-if="part.jobId" type="button" class="tool-call-records flex-none cursor-pointer border-none bg-transparent p-0" @click.stop="onOpenRecords">运行记录</button>
     </div>
-    <div v-if="expandable && expanded" class="tool-call-detail">{{ part.errorText }}</div>
+    <div v-if="expandable && expanded" class="px-2 pb-2 pl-[26px] text-xs leading-[1.4] text-danger">{{ part.errorText }}</div>
   </div>
 </template>
 
 <style scoped>
-.tool-call-item {
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.status-completed {
-  opacity: 0.72;
-}
-
-.tool-call-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-1) var(--space-2);
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.tool-call-header.no-toggle {
-  cursor: default;
-}
-
-.tool-call-chevron {
-  flex: none;
-  width: 10px;
-  color: var(--text-muted);
-}
-
-.tool-call-glyph {
-  flex: none;
-}
-
-.status-running .tool-call-glyph {
-  color: var(--accent);
-  animation: tool-call-spin 1.1s linear infinite;
-  display: inline-block;
-}
-
-.status-error .tool-call-glyph {
-  color: var(--state-danger);
-}
-
-.tool-call-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.status-error .tool-call-title {
-  color: var(--state-danger);
-}
-
-.tool-call-duration {
-  flex: none;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.tool-call-detail {
-  padding: 0 var(--space-2) var(--space-2) calc(var(--space-2) + 18px);
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
+/* 未分层全局 reset 的 button { font: inherit; color: inherit } 优先级高于 Tailwind
+   utilities 层，裸按钮自身的字号/文字色只能留在 scoped。 */
 .tool-call-records {
-  flex: none;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
   font-size: 11px;
-  cursor: pointer;
-  padding: 0;
+  color: var(--text-muted);
 }
 
 .tool-call-records:hover {

@@ -47,111 +47,41 @@ function onClick(): void {
 </script>
 
 <template>
-  <div class="code-card" :class="{ openable }">
-    <div class="code-card-row">
-      <button type="button" class="code-card-header" @click="onClick">
-        <span class="code-card-icon" aria-hidden="true">📄</span>
-        <span class="code-card-title">{{ title }}</span>
-        <span v-if="segment" class="code-card-meta">{{ segment.lineCount }} 行</span>
-        <span v-if="openable" class="code-card-action">在编辑器中打开 ↗</span>
-        <span v-else-if="segment?.collapsible" class="code-card-action">{{ expanded ? "收起 ▴" : "展开 ▾" }}</span>
+  <div class="overflow-hidden rounded-md bg-hover" :class="openable ? 'group hover:bg-brand-subtle' : ''">
+    <div class="flex items-stretch">
+      <button
+        type="button"
+        class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 border-none bg-transparent px-2 py-1 text-left"
+        @click="onClick"
+      >
+        <span class="flex-none text-xs" aria-hidden="true">📄</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-fg">{{ title }}</span>
+        <span v-if="segment" class="flex-none text-[11px] text-fg-muted">{{ segment.lineCount }} 行</span>
+        <span v-if="openable" class="flex-none text-[11px] text-fg-secondary group-hover:text-brand">在编辑器中打开 ↗</span>
+        <span v-else-if="segment?.collapsible" class="flex-none text-[11px] text-fg-secondary">{{ expanded ? "收起 ▴" : "展开 ▾" }}</span>
       </button>
       <button
         v-if="diffable && artifactId"
         type="button"
-        class="code-card-diff"
+        class="code-card-diff flex-none cursor-pointer border-none bg-transparent px-2 py-1 whitespace-nowrap"
         @click="emit('open-diff', artifactId)"
       >
         查看改动 ⇄
       </button>
     </div>
-    <pre v-if="segment && (expanded || !segment.collapsible)" class="code-card-body mono"><code>{{ segment.code }}</code></pre>
+    <pre v-if="segment && (expanded || !segment.collapsible)" class="mono m-0 overflow-x-auto whitespace-pre bg-panel p-2 pt-0 text-fg"><code>{{ segment.code }}</code></pre>
   </div>
 </template>
 
 <style scoped>
-.code-card {
-  border-radius: var(--radius);
-  background: var(--surface-hover);
-  overflow: hidden;
-}
-
-.code-card-row {
-  display: flex;
-  align-items: stretch;
-}
-
-.code-card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-1) var(--space-2);
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
+/* 未分层全局 reset 的 button { font: inherit; color: inherit } 优先级高于 Tailwind
+   utilities 层，裸按钮自身的字号/文字色只能留在 scoped。 */
 .code-card-diff {
-  flex: none;
-  padding: var(--space-1) var(--space-2);
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
   font-size: 11px;
-  white-space: nowrap;
-  cursor: pointer;
+  color: var(--text-secondary);
 }
 
 .code-card-diff:hover {
   color: var(--accent);
-}
-
-.code-card-icon {
-  flex: none;
-}
-
-.code-card-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.code-card-meta {
-  flex: none;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.code-card-action {
-  flex: none;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.code-card.openable:hover {
-  background: var(--accent-subtle);
-}
-
-.code-card.openable:hover .code-card-action {
-  color: var(--accent);
-}
-
-.code-card-body {
-  margin: 0;
-  padding: var(--space-2);
-  padding-top: 0;
-  overflow-x: auto;
-  white-space: pre;
-  color: var(--text-primary);
-  background: var(--surface-panel);
 }
 </style>

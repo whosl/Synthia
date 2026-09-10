@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { X } from "lucide-vue-next";
 import type {
   BitstreamResultV1,
   ChangeRequestV1,
@@ -24,6 +25,9 @@ import {
   shouldPrepareReadiness,
 } from "../../domain/formal-delivery.ts";
 import { PROCESS_GATE_STATUS_TEXT, type ProcessGateView } from "../../domain/process-profile.ts";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
+import { Skeleton } from "../ui/skeleton";
 
 const props = defineProps<{
   readonly open: boolean;
@@ -233,750 +237,484 @@ function withdrawChange(): void {
 </script>
 
 <template>
-  <aside v-if="open" class="formal-panel" aria-label="正式流程与交付">
-    <header class="formal-panel-header">
+  <aside
+    v-if="open"
+    class="flex h-full w-[min(720px,94vw)] flex-col bg-panel text-fg shadow-[-12px_0_32px_var(--shadow-color)] max-[720px]:w-screen"
+    aria-label="正式流程与交付"
+  >
+    <header class="flex items-center justify-between gap-3 border-b border-line p-4">
       <div>
-        <p class="formal-panel-eyebrow">P4 · 正式工程闭环</p>
-        <h2>流程、证据与交付</h2>
+        <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">P4 · 正式工程闭环</p>
+        <h2 class="m-0">流程、证据与交付</h2>
       </div>
-      <button type="button" class="formal-panel-close" aria-label="关闭正式流程面板" @click="emit('close')">×</button>
+      <Button variant="ghost" size="sm" class="h-8 w-8 px-0" aria-label="关闭正式流程面板" @click="emit('close')">
+        <X :size="20" aria-hidden="true" />
+      </Button>
     </header>
 
-    <div class="formal-panel-toolbar">
-      <span v-if="state?.completed" class="formal-pill tone-ok">G4 已完成</span>
-      <span v-else-if="state" class="formal-pill tone-info">当前 {{ state.currentGate }}</span>
-      <span v-else class="formal-pill">状态不可用</span>
-      <button type="button" class="formal-link" :disabled="loading" @click="emit('refresh')">刷新事实</button>
+    <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-2">
+      <Badge v-if="state?.completed" tone="ok" size="sm" class="font-bold">G4 已完成</Badge>
+      <Badge v-else-if="state" tone="accent" size="sm" class="font-bold">当前 {{ state.currentGate }}</Badge>
+      <Badge v-else size="sm" class="font-bold">状态不可用</Badge>
+      <Button variant="ghost" size="sm" class="text-brand hover:text-brand-hover" :disabled="loading" @click="emit('refresh')">刷新事实</Button>
     </div>
 
-    <div v-if="notice" class="formal-notice" role="status">{{ notice }}</div>
-    <div v-if="error" class="formal-error" role="alert">
+    <div v-if="notice" class="mx-4 mt-3 rounded-md bg-brand-subtle p-3 text-xs" role="status">{{ notice }}</div>
+    <div v-if="error" class="mx-4 mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 rounded-md bg-danger/12 p-3 text-xs text-danger" role="alert">
       <strong>正式能力未就绪</strong>
-      <span>{{ error }}</span>
-      <button type="button" @click="emit('refresh')">重试</button>
+      <span class="col-start-1">{{ error }}</span>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="col-start-2 row-span-2 row-start-1 self-center text-brand hover:text-brand-hover"
+        @click="emit('refresh')"
+      >
+        重试
+      </Button>
     </div>
 
-    <div v-if="loading" class="formal-loading" aria-live="polite">
-      <span v-for="n in 4" :key="n" />
-      <p>正在读取 Core 正式事实…</p>
+    <div v-if="loading" class="grid gap-3 p-5" aria-live="polite">
+      <Skeleton v-for="n in 4" :key="n" class="h-20 rounded-md" />
+      <p class="text-center text-fg-muted">正在读取 Core 正式事实…</p>
     </div>
 
-    <div v-else class="formal-panel-scroll">
-      <section class="formal-section">
-        <div class="formal-section-title">
+    <div v-else class="grid gap-3 overflow-auto p-4 max-[720px]:p-2">
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
           <div>
-            <p>G0–G4</p>
-            <h3>{{ profile?.name ?? "工程流程" }}</h3>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">G0–G4</p>
+            <h3 class="m-0">{{ profile?.name ?? "工程流程" }}</h3>
           </div>
-          <small v-if="workVersion">工作版本 v{{ workVersion.version }} · {{ workVersion.state === 'released' ? '已发布' : '工作中' }}</small>
+          <small v-if="workVersion" class="text-fg-muted">工作版本 v{{ workVersion.version }} · {{ workVersion.state === 'released' ? '已发布' : '工作中' }}</small>
         </div>
-        <ol v-if="gateChain" class="formal-gates">
-          <li v-for="entry in gateChain" :key="entry.node.id" :class="`state-${entry.status}`">
-            <span class="formal-gate-code">{{ entry.node.id }}</span>
-            <span class="formal-gate-copy">
+        <ol v-if="gateChain" class="m-0 grid list-none grid-cols-5 gap-2 p-0 max-[720px]:grid-cols-1">
+          <li
+            v-for="entry in gateChain"
+            :key="entry.node.id"
+            class="grid min-w-0 gap-[5px] rounded-md border p-2 max-[720px]:grid-cols-[36px_minmax(0,1fr)_auto] max-[720px]:items-center"
+            :class="entry.status === 'current' || entry.status === 'gated' ? 'border-brand' : entry.status === 'failed' ? 'border-danger' : 'border-line'"
+          >
+            <span class="text-[10px] font-bold text-fg-muted">{{ entry.node.id }}</span>
+            <span class="grid gap-[3px]">
               <strong>{{ entry.node.name }}</strong>
-              <small>{{ entry.node.goal }}</small>
+              <small class="line-clamp-3 text-[11px] leading-[1.35] text-fg-muted">{{ entry.node.goal }}</small>
             </span>
-            <span class="formal-gate-status">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
+            <span class="text-[10px] font-bold text-fg-muted">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
           </li>
         </ol>
-        <p v-else class="formal-empty">Core 尚未返回可验证的 G0–G4 状态，正式操作保持锁定。</p>
+        <p v-else class="m-0 p-4 text-center text-fg-muted">Core 尚未返回可验证的 G0–G4 状态，正式操作保持锁定。</p>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title">
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
           <div>
-            <p>G0</p>
-            <h3>项目准备</h3>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">G0</p>
+            <h3 class="m-0">项目准备</h3>
           </div>
-          <span class="formal-pill" :class="currentReadiness?.ready ? 'tone-ok' : 'tone-warn'">
+          <Badge size="sm" class="font-bold" :tone="currentReadiness?.ready ? 'ok' : 'warn'">
             {{ currentReadiness?.ready ? "已确认" : latestReadiness?.state === "ready" ? "待人工确认" : latestReadiness ? "被阻断" : "尚未评估" }}
-          </span>
+          </Badge>
         </div>
         <template v-if="currentReadiness">
-          <dl class="formal-facts">
-            <div><dt>器件</dt><dd>{{ currentReadiness.targetPart }}</dd></div>
-            <div><dt>板卡</dt><dd>{{ currentReadiness.boardRef }}</dd></div>
-            <div><dt>确认人</dt><dd>{{ currentReadiness.confirmedBy?.id ?? "待确认" }}</dd></div>
-            <div><dt>准备记录</dt><dd>{{ readinessRows.length }} 版</dd></div>
+          <dl class="m-0 grid grid-cols-2 gap-2 max-[720px]:grid-cols-1">
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">器件</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ currentReadiness.targetPart }}</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">板卡</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ currentReadiness.boardRef }}</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">确认人</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ currentReadiness.confirmedBy?.id ?? "待确认" }}</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">准备记录</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ readinessRows.length }} 版</dd>
+            </div>
           </dl>
-          <ul class="formal-check-grid">
-            <li v-for="check in readinessChecks" :key="check.label" :class="check.passed ? 'passed' : 'failed'">
+          <ul class="m-0 grid list-none grid-cols-2 gap-[5px] p-0 max-[720px]:grid-cols-1">
+            <li
+              v-for="check in readinessChecks"
+              :key="check.label"
+              class="flex items-center gap-2 rounded-sm bg-hover px-2 py-[7px] text-xs"
+              :class="check.passed ? 'text-ok' : 'text-danger'"
+            >
               <span aria-hidden="true">{{ check.passed ? "✓" : "!" }}</span>{{ check.label }}
             </li>
           </ul>
-          <p v-if="currentReadiness.ready && !currentReadiness.constraintsComplete" class="formal-warning">
+          <p v-if="currentReadiness.ready && !currentReadiness.constraintsComplete" class="my-[1em] rounded-sm bg-warn/12 p-3 text-xs text-warn">
             G0 已如实记录，但约束不完整：只能生成试验码流，不能确认正式输入。
           </p>
         </template>
-        <p v-else-if="!latestReadiness" class="formal-empty">尚无 G0 readiness。先如实记录工程配置、来源与工作区。</p>
+        <p v-else-if="!latestReadiness" class="m-0 p-4 text-center text-fg-muted">尚无 G0 readiness。先如实记录工程配置、来源与工作区。</p>
 
-        <ul v-if="readinessCoreChecks.length" class="formal-hard-checks">
-          <li v-for="check in readinessCoreChecks" :key="check.code" :class="check.passed ? 'state-passed' : 'state-failed'">
+        <ul v-if="readinessCoreChecks.length" class="m-0 grid list-none grid-cols-2 gap-[5px] p-0 max-[720px]:grid-cols-1">
+          <li
+            v-for="check in readinessCoreChecks"
+            :key="check.code"
+            class="flex items-center gap-2 rounded-sm bg-hover px-2 py-[7px] text-xs"
+            :class="check.passed ? 'text-ok' : 'text-danger'"
+          >
             <span aria-hidden="true">{{ check.passed ? "✓" : "×" }}</span>
-            <strong>{{ check.code }}</strong>
-            <small>{{ check.passed ? "通过" : "阻断" }}</small>
+            <strong class="flex-1 font-semibold text-fg">{{ check.code }}</strong>
+            <small class="text-fg-muted">{{ check.passed ? "通过" : "阻断" }}</small>
           </li>
         </ul>
 
-        <form v-if="shouldPrepareReadiness(state)" class="formal-readiness-form" @submit.prevent="prepareReadiness">
-          <h4>准备新的 G0 清单</h4>
-          <p v-if="currentReadiness?.ready" class="formal-warning">
+        <form v-if="shouldPrepareReadiness(state)" class="grid gap-3 rounded-md border border-line bg-panel p-3" @submit.prevent="prepareReadiness">
+          <h4 class="m-0">准备新的 G0 清单</h4>
+          <p v-if="currentReadiness?.ready" class="my-[1em] rounded-sm bg-warn/12 p-3 text-xs text-warn">
             当前 G0 已完成，但工程约束仍不完整。请形成并确认一版完整 readiness 后再进入正式输入。
           </p>
-          <div class="formal-form-grid">
-            <label>目标器件状态<select v-model="targetPartState"><option value="identified">已识别</option><option value="missing">尚缺失</option></select></label>
-            <label>目标器件<input v-model="targetPart" :disabled="targetPartState === 'missing'" placeholder="xc7k70tfbv676-1" /></label>
-            <label>板卡状态<select v-model="boardState"><option value="identified">已识别</option><option value="missing">尚缺失</option></select></label>
-            <label>板卡标识<input v-model="boardRef" :disabled="boardState === 'missing'" placeholder="board-kc705-v1" /></label>
-          </div>
-          <div class="formal-constraint-grid">
-            <label>引脚约束<select v-model="pinState"><option value="complete">完整</option><option value="partial">部分</option><option value="missing">缺失</option></select>
-              <select v-model="pinRevisionIds" multiple :disabled="pinState === 'missing'"><option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option></select>
+          <div class="grid grid-cols-2 gap-2 max-[720px]:grid-cols-1">
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              目标器件状态
+              <select v-model="targetPartState" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option value="identified">已识别</option>
+                <option value="missing">尚缺失</option>
+              </select>
             </label>
-            <label>电气约束<select v-model="electricalState"><option value="complete">完整</option><option value="partial">部分</option><option value="missing">缺失</option></select>
-              <select v-model="electricalRevisionIds" multiple :disabled="electricalState === 'missing'"><option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option></select>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              目标器件
+              <input v-model="targetPart" :disabled="targetPartState === 'missing'" placeholder="xc7k70tfbv676-1" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]" />
             </label>
-            <label>时钟约束<select v-model="clockState"><option value="complete">完整</option><option value="partial">部分</option><option value="missing">缺失</option></select>
-              <select v-model="clockRevisionIds" multiple :disabled="clockState === 'missing'"><option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option></select>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              板卡状态
+              <select v-model="boardState" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option value="identified">已识别</option>
+                <option value="missing">尚缺失</option>
+              </select>
+            </label>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              板卡标识
+              <input v-model="boardRef" :disabled="boardState === 'missing'" placeholder="board-kc705-v1" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]" />
             </label>
           </div>
-          <label>已确认来源资料<select v-model="selectedSourceIds" multiple><option v-for="row in sourceSnapshotOptions" :key="row.id" :value="row.id">{{ row.label }}</option></select></label>
-          <div class="formal-form-grid">
-            <label>数据分类<select v-model="dataClassification"><option v-for="value in allowedClassifications" :key="value" :value="value">{{ value }}</option></select></label>
-            <label>准备理由<input v-model="readinessReason" /></label>
+          <div class="grid grid-cols-3 gap-2 max-[720px]:grid-cols-1">
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              引脚约束
+              <select v-model="pinState" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option value="complete">完整</option>
+                <option value="partial">部分</option>
+                <option value="missing">缺失</option>
+              </select>
+              <select v-model="pinRevisionIds" multiple :disabled="pinState === 'missing'" class="min-h-[76px] w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option>
+              </select>
+            </label>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              电气约束
+              <select v-model="electricalState" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option value="complete">完整</option>
+                <option value="partial">部分</option>
+                <option value="missing">缺失</option>
+              </select>
+              <select v-model="electricalRevisionIds" multiple :disabled="electricalState === 'missing'" class="min-h-[76px] w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option>
+              </select>
+            </label>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              时钟约束
+              <select v-model="clockState" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option value="complete">完整</option>
+                <option value="partial">部分</option>
+                <option value="missing">缺失</option>
+              </select>
+              <select v-model="clockRevisionIds" multiple :disabled="clockState === 'missing'" class="min-h-[76px] w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option v-for="row in constraintRevisionOptions" :key="row.id" :value="row.id">{{ row.label }}</option>
+              </select>
+            </label>
           </div>
-          <label>数据范围<textarea v-model="dataScopeDescription" rows="2" /></label>
-          <p v-if="!workspaceReadyForReadiness" class="formal-warning">Core 尚未返回已登记的 commit 与同源 manifest，不能准备 G0。</p>
-          <button type="submit" class="formal-primary" :disabled="!canPrepareReadiness">
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            已确认来源资料
+            <select v-model="selectedSourceIds" multiple class="min-h-[76px] w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+              <option v-for="row in sourceSnapshotOptions" :key="row.id" :value="row.id">{{ row.label }}</option>
+            </select>
+          </label>
+          <div class="grid grid-cols-2 gap-2 max-[720px]:grid-cols-1">
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              数据分类
+              <select v-model="dataClassification" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]">
+                <option v-for="value in allowedClassifications" :key="value" :value="value">{{ value }}</option>
+              </select>
+            </label>
+            <label class="grid gap-[5px] text-xs text-fg-secondary">
+              准备理由
+              <input v-model="readinessReason" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]" />
+            </label>
+          </div>
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            数据范围
+            <textarea v-model="dataScopeDescription" rows="2" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]" />
+          </label>
+          <p v-if="!workspaceReadyForReadiness" class="my-[1em] rounded-sm bg-warn/12 p-3 text-xs text-warn">Core 尚未返回已登记的 commit 与同源 manifest，不能准备 G0。</p>
+          <Button type="submit" variant="primary" class="h-9 w-full font-bold" :disabled="!canPrepareReadiness">
             {{ operating ? "准备中…" : "生成 G0 准备清单" }}
-          </button>
+          </Button>
         </form>
 
-        <div v-if="canConfirmReadiness" class="formal-confirm-readiness">
-          <label>确认说明<input v-model="confirmReadinessReason" /></label>
-          <button type="button" class="formal-primary" :disabled="!confirmReadinessReason.trim()" @click="emit('confirm-readiness', confirmReadinessReason.trim())">人工确认这份 G0 清单</button>
+        <div v-if="canConfirmReadiness" class="grid gap-3 rounded-md border border-line bg-panel p-3">
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            确认说明
+            <input v-model="confirmReadinessReason" class="w-full min-w-0 rounded-sm border border-line-strong bg-base p-[7px] text-fg [font:inherit]" />
+          </label>
+          <Button variant="primary" class="h-9 w-full font-bold" :disabled="!confirmReadinessReason.trim()" @click="emit('confirm-readiness', confirmReadinessReason.trim())">人工确认这份 G0 清单</Button>
         </div>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title">
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
           <div>
-            <p>正式输入</p>
-            <h3>预览并人工确认</h3>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">正式输入</p>
+            <h3 class="m-0">预览并人工确认</h3>
           </div>
-          <span v-if="approval" class="formal-pill tone-ok">已确认</span>
-          <span v-else-if="preview" class="formal-pill tone-warn">等待确认</span>
+          <Badge v-if="approval" tone="ok" size="sm" class="font-bold">已确认</Badge>
+          <Badge v-else-if="preview" tone="warn" size="sm" class="font-bold">等待确认</Badge>
         </div>
 
-        <ul v-if="formalInputBlockers.length" class="formal-blockers">
+        <ul v-if="formalInputBlockers.length" class="m-0 grid list-disc gap-1 rounded-sm bg-warn/12 p-3 pl-[30px] text-xs text-warn">
           <li v-for="blocker in formalInputBlockers" :key="blocker">{{ blocker }}</li>
         </ul>
 
-        <button
+        <Button
           v-if="!preview && !approval"
-          type="button"
-          class="formal-primary"
+          variant="primary"
+          class="h-9 w-full font-bold"
           :disabled="!canPreview"
           @click="emit('preview-formal')"
         >
           {{ operating ? "正在生成预览…" : "预览正式输入" }}
-        </button>
+        </Button>
 
         <template v-if="preview || approval">
-          <dl class="formal-facts">
-            <div><dt>用途</dt><dd>G4 正式交付</dd></div>
-            <div><dt>器件</dt><dd>{{ (approval ?? preview)?.target_part }}</dd></div>
-            <div><dt>输入摘要</dt><dd class="mono">{{ shortHash((approval ?? preview)?.input_hash) }}</dd></div>
-            <div><dt>前提里程碑</dt><dd>{{ (approval ?? preview)?.prerequisite_baseline_id }}</dd></div>
+          <dl class="m-0 grid grid-cols-2 gap-2 max-[720px]:grid-cols-1">
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">用途</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">G4 正式交付</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">器件</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ (approval ?? preview)?.target_part }}</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">输入摘要</dt>
+              <dd class="m-0 overflow-hidden font-mono text-[11px] text-ellipsis">{{ shortHash((approval ?? preview)?.input_hash) }}</dd>
+            </div>
+            <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+              <dt class="text-[11px] text-fg-muted">前提里程碑</dt>
+              <dd class="m-0 overflow-hidden text-ellipsis">{{ (approval ?? preview)?.prerequisite_baseline_id }}</dd>
+            </div>
           </dl>
-          <div class="formal-file-table" role="table" aria-label="正式输入文件">
-            <div v-for="file in (approval ?? preview)?.files" :key="file.revision_id" class="formal-file-row" role="row">
-              <span class="formal-file-path">{{ file.path }}</span>
+          <div class="grid min-w-0 overflow-auto rounded-md border border-line" role="table" aria-label="正式输入文件">
+            <div
+              v-for="file in (approval ?? preview)?.files"
+              :key="file.revision_id"
+              class="grid grid-cols-[minmax(180px,1fr)_100px_72px_130px] gap-2 border-b border-line px-2 py-[7px] text-xs last:border-b-0 max-[720px]:grid-cols-[minmax(0,1fr)_auto]"
+              role="row"
+            >
+              <span class="truncate max-[720px]:col-span-full">{{ file.path }}</span>
               <span>{{ file.role }}</span>
               <span>{{ formatBytes(file.size_bytes) }}</span>
-              <span class="mono">{{ shortHash(file.sha256) }}</span>
+              <span class="font-mono text-[11px] max-[720px]:col-span-full max-[720px]:wrap-anywhere">{{ shortHash(file.sha256) }}</span>
             </div>
           </div>
         </template>
 
         <template v-if="preview && !approval">
-          <label class="formal-ack">
+          <label class="flex items-start gap-2 text-xs leading-[1.45] text-fg-secondary">
             <input v-model="acknowledged" type="checkbox" />
             我已核对上述文件、器件、约束和运行用途；确认后任何事实变化都需要重新预览。
           </label>
-          <button type="button" class="formal-primary" :disabled="!acknowledged || operating" @click="emit('confirm-formal')">
+          <Button variant="primary" class="h-9 w-full font-bold" :disabled="!acknowledged || operating" @click="emit('confirm-formal')">
             {{ operating ? "确认中…" : "确认这份正式输入" }}
-          </button>
+          </Button>
         </template>
 
-        <div v-if="approval" class="formal-operations">
-          <p>确认人 {{ approval.confirmed_by }} · {{ formatTime(approval.confirmed_at) }}</p>
-          <p>
+        <div v-if="approval" class="grid gap-2 rounded-md bg-brand-subtle p-3">
+          <p class="m-0 text-xs text-fg-secondary">确认人 {{ approval.confirmed_by }} · {{ formatTime(approval.confirmed_at) }}</p>
+          <p class="m-0 text-xs text-fg-secondary">
             {{ state?.completed ? "正式交付已密封" : formalProgress ? formalProgressText[formalProgress.status] : "等待 Runtime 读取确认事实" }}。
             四项正式运行由绑定的主 Runtime 自动编排，避免人工重复提交。
           </p>
-          <ol class="formal-operation-progress" aria-label="正式运行进度">
-            <li v-for="operation in formalOperations" :key="operation.id">
+          <ol class="m-0 grid list-none gap-1 p-0" aria-label="正式运行进度">
+            <li
+              v-for="operation in formalOperations"
+              :key="operation.id"
+              class="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-sm border border-line bg-panel px-[9px] py-[7px] text-xs max-[720px]:grid-cols-[minmax(0,1fr)_auto]"
+            >
               <span>{{ operation.label }}</span>
-              <strong>{{ formalJobState(operation.id) }}</strong>
-              <code v-if="formalProgress?.jobs?.[operation.id]?.job_id">{{ shortHash(formalProgress.jobs[operation.id]?.job_id) }}</code>
+              <strong class="text-[11px] text-fg-secondary">{{ formalJobState(operation.id) }}</strong>
+              <code v-if="formalProgress?.jobs?.[operation.id]?.job_id" class="text-[10px] text-fg-muted max-[720px]:hidden">{{ shortHash(formalProgress.jobs[operation.id]?.job_id) }}</code>
             </li>
           </ol>
         </div>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title">
-          <div><p>G4</p><h3>Hard checks</h3></div>
-          <span class="formal-pill" :class="g4Checks.length && g4Checks.every((check) => check.status === 'passed') ? 'tone-ok' : 'tone-warn'">
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">G4</p>
+            <h3 class="m-0">Hard checks</h3>
+          </div>
+          <Badge size="sm" class="font-bold" :tone="g4Checks.length && g4Checks.every((check) => check.status === 'passed') ? 'ok' : 'warn'">
             {{ g4Checks.filter((check) => check.status === 'passed').length }}/{{ g4Checks.length }} 通过
-          </span>
+          </Badge>
         </div>
-        <ul v-if="g4Checks.length" class="formal-hard-checks">
-          <li v-for="check in g4Checks" :key="check.code" :class="`state-${check.status}`">
+        <ul v-if="g4Checks.length" class="m-0 grid list-none grid-cols-2 gap-[5px] p-0 max-[720px]:grid-cols-1">
+          <li
+            v-for="check in g4Checks"
+            :key="check.code"
+            class="flex items-center gap-2 rounded-sm bg-hover px-2 py-[7px] text-xs"
+            :class="check.status === 'passed' ? 'text-ok' : check.status === 'failed' ? 'text-danger' : ''"
+          >
             <span aria-hidden="true">{{ check.status === "passed" ? "✓" : check.status === "failed" ? "×" : "·" }}</span>
-            <strong>{{ check.label }}</strong>
-            <small>{{ check.severity === "hard" ? "阻断项" : "提示项" }}</small>
+            <strong class="flex-1 font-semibold text-fg">{{ check.label }}</strong>
+            <small class="text-fg-muted">{{ check.severity === "hard" ? "阻断项" : "提示项" }}</small>
           </li>
         </ul>
-        <p v-else class="formal-empty">尚无 G4 evaluation；任何缺失项都不会被当作通过。</p>
+        <p v-else class="m-0 p-4 text-center text-fg-muted">尚无 G4 evaluation；任何缺失项都不会被当作通过。</p>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title"><div><p>结果</p><h3>码流分类</h3></div></div>
-        <div v-if="bitstreams.length" class="formal-result-list">
-          <article v-for="bitstream in bitstreams" :key="bitstream.id">
-            <span class="formal-pill" :class="bitstream.class === 'formal' ? 'tone-ok' : 'tone-warn'">
-              {{ bitstreamClassText(bitstream.class) }}
-            </span>
-            <div><strong>{{ bitstream.target_part }}</strong><small>{{ formatTime(bitstream.generated_at) }}</small></div>
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">结果</p>
+            <h3 class="m-0">码流分类</h3>
+          </div>
+        </div>
+        <div v-if="bitstreams.length" class="grid gap-2">
+          <article v-for="bitstream in bitstreams" :key="bitstream.id" class="flex items-center gap-3 rounded-md border border-line p-2">
+            <Badge size="sm" class="font-bold" :tone="bitstream.class === 'formal' ? 'ok' : 'warn'">{{ bitstreamClassText(bitstream.class) }}</Badge>
+            <div class="grid min-w-0 flex-1 gap-[2px]">
+              <strong>{{ bitstream.target_part }}</strong>
+              <small class="text-fg-muted">{{ formatTime(bitstream.generated_at) }}</small>
+            </div>
             <span>{{ formatBytes(bitstream.size_bytes) }}</span>
-            <code>{{ shortHash(bitstream.sha256) }}</code>
+            <code class="text-[10px] text-fg-muted">{{ shortHash(bitstream.sha256) }}</code>
           </article>
         </div>
-        <p v-else class="formal-empty">尚无码流。试验结果不会被升级或混入正式交付。</p>
+        <p v-else class="m-0 p-4 text-center text-fg-muted">尚无码流。试验结果不会被升级或混入正式交付。</p>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title"><div><p>交付</p><h3>已密封版本与 manifest</h3></div></div>
-        <div v-if="releases.length" class="formal-release-layout">
-          <nav class="formal-release-list" aria-label="交付版本">
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">交付</p>
+            <h3 class="m-0">已密封版本与 manifest</h3>
+          </div>
+        </div>
+        <div v-if="releases.length" class="grid grid-cols-[160px_minmax(0,1fr)] gap-3 max-[720px]:grid-cols-1">
+          <nav class="grid content-start gap-2 max-[720px]:grid-cols-[repeat(auto-fit,minmax(110px,1fr))]" aria-label="交付版本">
             <button
               v-for="(release, index) in releases"
               :key="release.id"
               type="button"
-              :class="{ selected: release.id === selectedReleaseId }"
+              class="grid gap-[3px] rounded-md border bg-transparent p-2 text-left text-fg"
+              :class="release.id === selectedReleaseId ? 'border-brand bg-brand-subtle' : 'border-line'"
               @click="emit('select-release', release.id)"
             >
               <strong>v{{ release.version }}</strong>
-              <span>{{ index === 0 ? "当前密封版" : "历史密封版" }}</span>
-              <small>{{ release.item_count }} 项</small>
+              <span class="text-[11px] text-fg-muted">{{ index === 0 ? "当前密封版" : "历史密封版" }}</span>
+              <small class="text-[11px] text-fg-muted">{{ release.item_count }} 项</small>
             </button>
           </nav>
-          <div v-if="selectedRelease" class="formal-release-detail">
-            <button v-if="manifest" type="button" class="formal-secondary" :disabled="operating" @click="emit('download-manifest')">
+          <div v-if="selectedRelease" class="grid min-w-0 gap-3">
+            <Button
+              v-if="manifest"
+              variant="ghost"
+              class="w-max rounded-sm border border-brand px-2 text-brand hover:bg-brand-subtle hover:text-brand"
+              :disabled="operating"
+              @click="emit('download-manifest')"
+            >
               下载 delivery-manifest.v1
-            </button>
-            <dl class="formal-facts">
-              <div><dt>清单摘要</dt><dd class="mono">{{ shortHash(selectedRelease.manifest_hash) }}</dd></div>
-              <div><dt>确认人</dt><dd>{{ selectedRelease.confirmed_by ?? "待确认" }}</dd></div>
-              <div><dt>发布时间</dt><dd>{{ formatTime(selectedRelease.released_at) }}</dd></div>
-              <div><dt>清单版本</dt><dd>{{ manifest?.schema ?? "—" }}</dd></div>
+            </Button>
+            <dl class="m-0 grid grid-cols-2 gap-2 max-[720px]:grid-cols-1">
+              <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+                <dt class="text-[11px] text-fg-muted">清单摘要</dt>
+                <dd class="m-0 overflow-hidden font-mono text-[11px] text-ellipsis">{{ shortHash(selectedRelease.manifest_hash) }}</dd>
+              </div>
+              <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+                <dt class="text-[11px] text-fg-muted">确认人</dt>
+                <dd class="m-0 overflow-hidden text-ellipsis">{{ selectedRelease.confirmed_by ?? "待确认" }}</dd>
+              </div>
+              <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+                <dt class="text-[11px] text-fg-muted">发布时间</dt>
+                <dd class="m-0 overflow-hidden text-ellipsis">{{ formatTime(selectedRelease.released_at) }}</dd>
+              </div>
+              <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
+                <dt class="text-[11px] text-fg-muted">清单版本</dt>
+                <dd class="m-0 overflow-hidden text-ellipsis">{{ manifest?.schema ?? "—" }}</dd>
+              </div>
             </dl>
-            <ul class="formal-delivery-items">
-              <li v-for="item in selectedRelease.items" :key="item.id">
-                <span class="formal-pill">{{ DELIVERY_CATEGORY_TEXT[item.category] ?? "工程文件" }}</span>
-                <span class="formal-delivery-path">{{ item.path }}</span>
-                <span>{{ formatBytes(item.size_bytes) }}</span>
-                <button type="button" :disabled="operating" @click="emit('download-item', item.path)">下载</button>
+            <ul class="m-0 grid list-none gap-1 p-0">
+              <li
+                v-for="item in selectedRelease.items"
+                :key="item.id"
+                class="grid grid-cols-[80px_minmax(0,1fr)_70px_auto] items-center gap-2 border-b border-line py-1.5 text-xs max-[720px]:grid-cols-[74px_minmax(0,1fr)_auto]"
+              >
+                <Badge size="sm" class="font-bold">{{ DELIVERY_CATEGORY_TEXT[item.category] ?? "工程文件" }}</Badge>
+                <span class="min-w-0 truncate">{{ item.path }}</span>
+                <span class="max-[720px]:hidden">{{ formatBytes(item.size_bytes) }}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-auto px-1 text-brand hover:text-brand-hover"
+                  :disabled="operating"
+                  @click="emit('download-item', item.path)"
+                >
+                  下载
+                </Button>
               </li>
             </ul>
           </div>
         </div>
-        <p v-else class="formal-empty">尚无正式交付版本。只有通过 G4 的正式码流和冻结证据才能进入这里。</p>
+        <p v-else class="m-0 p-4 text-center text-fg-muted">尚无正式交付版本。只有通过 G4 的正式码流和冻结证据才能进入这里。</p>
       </section>
 
-      <section class="formal-section">
-        <div class="formal-section-title"><div><p>发布后修改</p><h3>变更请求与新工作版本</h3></div></div>
-        <ul v-if="changeRequests.length" class="formal-change-list">
-          <li v-for="change in changeRequests" :key="change.id">
-            <span class="formal-pill" :class="change.state === 'open' ? 'tone-warn' : 'tone-ok'">{{ change.state === "open" ? "进行中" : change.state === "released" ? "已发布" : "已撤回" }}</span>
-            <div><strong>{{ change.reason }}</strong><small>从 {{ change.impact_gate }} 重跑 · {{ change.affected_paths.length }} 个路径</small></div>
+      <section class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="m-0 text-[11px] font-bold tracking-[0.08em] text-fg-muted uppercase">发布后修改</p>
+            <h3 class="m-0">变更请求与新工作版本</h3>
+          </div>
+        </div>
+        <ul v-if="changeRequests.length" class="m-0 grid list-none gap-2 p-0">
+          <li v-for="change in changeRequests" :key="change.id" class="flex items-center gap-3 rounded-md border border-line p-2">
+            <Badge size="sm" class="font-bold" :tone="change.state === 'open' ? 'warn' : 'ok'">{{ change.state === "open" ? "进行中" : change.state === "released" ? "已发布" : "已撤回" }}</Badge>
+            <div class="grid min-w-0 flex-1 gap-[2px]">
+              <strong>{{ change.reason }}</strong>
+              <small class="text-fg-muted">从 {{ change.impact_gate }} 重跑 · {{ change.affected_paths.length }} 个路径</small>
+            </div>
           </li>
         </ul>
-        <form v-if="openChangeRequest" class="formal-change-form" @submit.prevent="withdrawChange">
-          <label>撤回原因<textarea v-model="withdrawReason" rows="2" placeholder="说明为什么终止本次变更" /></label>
-          <button type="submit" class="formal-secondary" :disabled="operating || !withdrawReason.trim()">撤回变更并恢复已发布版本</button>
+        <form v-if="openChangeRequest" class="grid gap-3" @submit.prevent="withdrawChange">
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            撤回原因
+            <textarea v-model="withdrawReason" rows="2" placeholder="说明为什么终止本次变更" class="w-full resize-y rounded-sm border border-line-strong bg-panel p-[7px] text-fg [font:inherit]" />
+          </label>
+          <Button type="submit" variant="ghost" class="w-max rounded-sm border border-brand px-2 text-brand hover:bg-brand-subtle hover:text-brand" :disabled="operating || !withdrawReason.trim()">撤回变更并恢复已发布版本</Button>
         </form>
-        <form v-else-if="currentRelease" class="formal-change-form" @submit.prevent="submitChangeRequest">
-          <label>变更原因<textarea v-model="changeReason" rows="2" placeholder="说明为什么要修改已发布结果" /></label>
-          <label>影响路径<textarea v-model="affectedPaths" rows="3" placeholder="每行一个相对路径" /></label>
-          <label>最早重跑阶段<select v-model="impactGate"><option v-for="gate in changeImpactGateOptions()" :key="gate" :value="gate">{{ gate }}</option></select></label>
-          <button type="submit" class="formal-primary" :disabled="operating || !changeReason.trim() || !affectedPaths.trim()">发起变更并创建新工作版本</button>
+        <form v-else-if="currentRelease" class="grid gap-3" @submit.prevent="submitChangeRequest">
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            变更原因
+            <textarea v-model="changeReason" rows="2" placeholder="说明为什么要修改已发布结果" class="w-full resize-y rounded-sm border border-line-strong bg-panel p-[7px] text-fg [font:inherit]" />
+          </label>
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            影响路径
+            <textarea v-model="affectedPaths" rows="3" placeholder="每行一个相对路径" class="w-full resize-y rounded-sm border border-line-strong bg-panel p-[7px] text-fg [font:inherit]" />
+          </label>
+          <label class="grid gap-[5px] text-xs text-fg-secondary">
+            最早重跑阶段
+            <select v-model="impactGate" class="w-full resize-y rounded-sm border border-line-strong bg-panel p-[7px] text-fg [font:inherit]">
+              <option v-for="gate in changeImpactGateOptions()" :key="gate" :value="gate">{{ gate }}</option>
+            </select>
+          </label>
+          <Button type="submit" variant="primary" class="h-9 w-full font-bold" :disabled="operating || !changeReason.trim() || !affectedPaths.trim()">发起变更并创建新工作版本</Button>
         </form>
-        <p v-else-if="!currentRelease && changeRequests.length === 0" class="formal-empty">首个正式版本发布后，所有修改都必须从这里发起。</p>
+        <p v-else-if="!currentRelease && changeRequests.length === 0" class="m-0 p-4 text-center text-fg-muted">首个正式版本发布后，所有修改都必须从这里发起。</p>
       </section>
     </div>
   </aside>
 </template>
-
-<style scoped>
-.formal-panel {
-  display: flex;
-  flex-direction: column;
-  width: min(720px, 94vw);
-  height: 100%;
-  background: var(--surface-panel);
-  color: var(--text-primary);
-  box-shadow: -12px 0 32px var(--shadow-color);
-}
-
-.formal-panel-header,
-.formal-panel-toolbar,
-.formal-section-title,
-.formal-result-list article,
-.formal-change-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.formal-panel-header {
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.formal-panel-header h2,
-.formal-section-title h3,
-.formal-section-title p,
-.formal-panel-eyebrow {
-  margin: 0;
-}
-
-.formal-panel-eyebrow,
-.formal-section-title p {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.formal-panel-close {
-  width: 32px;
-  height: 32px;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 24px;
-}
-
-.formal-panel-toolbar {
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.formal-link,
-.formal-error button,
-.formal-delivery-items button {
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.formal-notice,
-.formal-error {
-  margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-}
-
-.formal-notice {
-  background: var(--accent-subtle);
-  color: var(--text-primary);
-}
-
-.formal-error {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px var(--space-3);
-  background: color-mix(in srgb, var(--state-danger) 12%, transparent);
-  color: var(--state-danger);
-}
-
-.formal-error span {
-  grid-column: 1;
-}
-
-.formal-error button {
-  grid-column: 2;
-  grid-row: 1 / 3;
-}
-
-.formal-loading {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-5);
-}
-
-.formal-loading span {
-  height: 80px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(90deg, var(--surface-hover), var(--surface-raised), var(--surface-hover));
-  background-size: 200% 100%;
-  animation: formal-shimmer 1.4s infinite;
-}
-
-.formal-loading p {
-  color: var(--text-muted);
-  text-align: center;
-}
-
-@keyframes formal-shimmer { to { background-position: -200% 0; } }
-
-.formal-panel-scroll {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  overflow: auto;
-}
-
-.formal-section {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--surface-base);
-}
-
-.formal-section-title {
-  align-items: flex-start;
-}
-
-.formal-section-title small {
-  color: var(--text-muted);
-}
-
-.formal-pill {
-  display: inline-flex;
-  align-items: center;
-  width: max-content;
-  padding: 2px 7px;
-  border-radius: var(--radius-full);
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.formal-pill.tone-ok { background: color-mix(in srgb, var(--state-success) 14%, transparent); color: var(--state-success); }
-.formal-pill.tone-warn { background: color-mix(in srgb, var(--state-warning) 14%, transparent); color: var(--state-warning); }
-.formal-pill.tone-info { background: var(--accent-subtle); color: var(--accent); }
-
-.formal-gates,
-.formal-hard-checks,
-.formal-delivery-items,
-.formal-blockers,
-.formal-change-list,
-.formal-result-list,
-.formal-check-grid {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.formal-gates {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.formal-gates li {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-}
-
-.formal-gates li.state-current,
-.formal-gates li.state-gated { border-color: var(--accent); }
-.formal-gates li.state-failed { border-color: var(--state-danger); }
-
-.formal-gate-code,
-.formal-gate-status {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.formal-gate-copy {
-  display: grid;
-  gap: 3px;
-}
-
-.formal-gate-copy small {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.35;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.formal-facts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-  margin: 0;
-}
-
-.formal-facts div {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.formal-facts dt { color: var(--text-muted); font-size: 11px; }
-.formal-facts dd { margin: 0; overflow: hidden; text-overflow: ellipsis; }
-
-.formal-check-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-}
-
-.formal-check-grid li,
-.formal-hard-checks li {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-  font-size: var(--font-size-sm);
-}
-
-.formal-check-grid .passed,
-.formal-hard-checks .state-passed { color: var(--state-success); }
-.formal-check-grid .failed,
-.formal-hard-checks .state-failed { color: var(--state-danger); }
-
-.formal-warning,
-.formal-blockers {
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--state-warning) 12%, transparent);
-  color: var(--state-warning);
-  font-size: var(--font-size-sm);
-}
-
-.formal-blockers { display: grid; gap: 4px; padding-left: 30px; list-style: disc; }
-
-.formal-primary {
-  min-height: 36px;
-  padding: 7px var(--space-3);
-  border: 0;
-  border-radius: var(--radius-md);
-  background: var(--accent);
-  color: var(--text-on-accent);
-  cursor: pointer;
-  font-weight: 700;
-}
-
-.formal-primary:disabled,
-.formal-operations button:disabled { opacity: .45; cursor: not-allowed; }
-
-.formal-secondary {
-  width: max-content;
-  padding: 6px var(--space-2);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.formal-secondary:disabled { opacity: .45; cursor: not-allowed; }
-
-.formal-readiness-form,
-.formal-confirm-readiness {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-panel);
-}
-
-.formal-readiness-form h4 { margin: 0; }
-
-.formal-form-grid,
-.formal-constraint-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.formal-constraint-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-
-.formal-readiness-form label,
-.formal-confirm-readiness label {
-  display: grid;
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-}
-
-.formal-readiness-form input,
-.formal-readiness-form textarea,
-.formal-readiness-form select,
-.formal-confirm-readiness input {
-  width: 100%;
-  min-width: 0;
-  padding: 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-base);
-  color: var(--text-primary);
-  font: inherit;
-}
-
-.formal-readiness-form select[multiple] { min-height: 76px; }
-
-.formal-file-table {
-  display: grid;
-  min-width: 0;
-  overflow: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-}
-
-.formal-file-row {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) 100px 72px 130px;
-  gap: var(--space-2);
-  padding: 7px var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
-}
-
-.formal-file-row:last-child { border-bottom: 0; }
-.formal-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mono { font-family: var(--font-mono); font-size: 11px; }
-
-.formal-ack {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: 1.45;
-}
-
-.formal-operations {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--accent-subtle);
-}
-
-.formal-operations p { margin: 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
-.formal-operation-progress {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.formal-operation-progress li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-panel);
-  font-size: var(--font-size-sm);
-}
-.formal-operation-progress strong { color: var(--text-secondary); font-size: 11px; }
-.formal-operation-progress code { color: var(--text-muted); font-size: 10px; }
-
-.formal-hard-checks {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-}
-
-.formal-hard-checks li strong { flex: 1; color: var(--text-primary); font-weight: 600; }
-.formal-hard-checks li small { color: var(--text-muted); }
-
-.formal-result-list,
-.formal-change-list { display: grid; gap: var(--space-2); }
-.formal-result-list article,
-.formal-change-list li { justify-content: flex-start; padding: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
-.formal-result-list article div,
-.formal-change-list li div { display: grid; flex: 1; gap: 2px; min-width: 0; }
-.formal-result-list article small,
-.formal-change-list li small { color: var(--text-muted); }
-.formal-result-list article code { color: var(--text-muted); font-size: 10px; }
-
-.formal-release-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: var(--space-3); }
-.formal-release-list { display: grid; align-content: start; gap: var(--space-2); }
-.formal-release-list button { display: grid; gap: 3px; padding: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: transparent; color: var(--text-primary); text-align: left; }
-.formal-release-list button.selected { border-color: var(--accent); background: var(--accent-subtle); }
-.formal-release-list span,
-.formal-release-list small { color: var(--text-muted); font-size: 11px; }
-.formal-release-detail { display: grid; gap: var(--space-3); min-width: 0; }
-.formal-delivery-items { display: grid; gap: 4px; }
-.formal-delivery-items li { display: grid; grid-template-columns: 80px minmax(0, 1fr) 70px auto; align-items: center; gap: var(--space-2); padding: 6px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12px; }
-.formal-delivery-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.formal-delivery-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.formal-change-form { display: grid; gap: var(--space-3); }
-.formal-change-form label { display: grid; gap: 5px; color: var(--text-secondary); font-size: var(--font-size-sm); }
-.formal-change-form textarea,
-.formal-change-form select { width: 100%; padding: 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-panel); color: var(--text-primary); font: inherit; resize: vertical; }
-
-.formal-empty { margin: 0; padding: var(--space-4); color: var(--text-muted); text-align: center; }
-
-@media (max-width: 720px) {
-  .formal-panel { width: 100vw; }
-  .formal-panel-scroll { padding: var(--space-2); }
-  .formal-section { padding: var(--space-3); }
-  .formal-gates { grid-template-columns: 1fr; }
-  .formal-gates li { grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; }
-  .formal-gate-code { grid-column: 1; }
-  .formal-gate-copy { grid-column: 2; }
-  .formal-gate-status { grid-column: 3; }
-  .formal-facts,
-  .formal-check-grid,
-  .formal-hard-checks,
-  .formal-form-grid,
-  .formal-constraint-grid { grid-template-columns: 1fr; }
-  .formal-release-layout { grid-template-columns: 1fr; }
-  .formal-release-list { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
-  .formal-file-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .formal-file-row .formal-file-path,
-  .formal-file-row .mono { grid-column: 1 / -1; }
-  .formal-file-row .mono { overflow-wrap: anywhere; }
-  .formal-delivery-items li { grid-template-columns: 74px minmax(0, 1fr) auto; }
-  .formal-delivery-items li > :nth-child(3) { display: none; }
-  .formal-operation-progress li { grid-template-columns: minmax(0, 1fr) auto; }
-  .formal-operation-progress code { display: none; }
-}
-</style>

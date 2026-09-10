@@ -75,110 +75,42 @@ const displayName = computed(() => {
 </script>
 
 <template>
-  <div class="agent-tool-item" :class="[`state-${part.state}`, { expanded }]">
+  <div class="rounded-sm bg-hover" :class="part.state === 'done' ? 'opacity-72' : ''">
     <div
-      class="agent-tool-header"
+      class="flex w-full cursor-pointer items-center gap-1 px-2 py-1 text-left text-xs text-fg-secondary"
       role="button"
       tabindex="0"
       @click="toggle"
       @keydown.enter="toggle"
       @keydown.space.prevent="toggle"
     >
-      <span class="agent-tool-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
-      <span class="agent-tool-glyph" aria-hidden="true">{{ STATE_GLYPH[part.state] }}</span>
-      <span class="agent-tool-name">{{ displayName }}</span>
+      <span class="w-[10px] flex-none text-fg-muted" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
+      <span
+        class="flex-none"
+        :class="part.state === 'running' ? 'inline-block text-brand [animation:agent-tool-spin_1.1s_linear_infinite]' : part.state === 'error' ? 'text-danger' : ''"
+        aria-hidden="true"
+      >{{ STATE_GLYPH[part.state] }}</span>
+      <span class="min-w-0 flex-1 truncate font-mono text-[12.5px]" :class="part.state === 'error' ? 'text-danger' : 'text-fg'">{{ displayName }}</span>
       <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
     </div>
-    <div v-if="expanded" class="agent-tool-detail">
+    <div v-if="expanded" class="px-2 pb-2 pl-[22px]">
       <template v-if="argsText">
-        <div class="agent-tool-label">入参</div>
-        <pre class="agent-tool-code">{{ argsText }}</pre>
+        <div class="mb-[2px] text-[11px] text-fg-muted">入参</div>
+        <pre class="agent-tool-code m-0 mb-1 max-h-[240px] overflow-auto whitespace-pre-wrap break-words text-fg-secondary">{{ argsText }}</pre>
       </template>
       <template v-if="resultText">
-        <div class="agent-tool-label">结果</div>
-        <pre class="agent-tool-code">{{ resultText }}</pre>
+        <div class="mb-[2px] text-[11px] text-fg-muted">结果</div>
+        <pre class="agent-tool-code m-0 mb-1 max-h-[240px] overflow-auto whitespace-pre-wrap break-words text-fg-secondary">{{ resultText }}</pre>
       </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-.agent-tool-item {
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.state-done {
-  opacity: 0.72;
-}
-
-.agent-tool-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.agent-tool-chevron {
-  flex: none;
-  width: 10px;
-  color: var(--text-muted);
-}
-
-.agent-tool-glyph {
-  flex: none;
-}
-
-.state-running .agent-tool-glyph {
-  color: var(--accent);
-  display: inline-block;
-  animation: agent-tool-spin 1.1s linear infinite;
-}
-
-.state-error .agent-tool-glyph {
-  color: var(--state-danger);
-}
-
-.agent-tool-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-}
-
-.state-error .agent-tool-name {
-  color: var(--state-danger);
-}
-
-.agent-tool-detail {
-  padding: 0 var(--space-2) var(--space-2) calc(var(--space-2) + 14px);
-}
-
-.agent-tool-label {
-  color: var(--text-muted);
-  font-size: 11px;
-  margin-bottom: 2px;
-}
-
+/* 未分层全局 pre 规则（font/line-height）优先级高于 Tailwind utilities 层，
+   工具负载的 1.4 行高留在 scoped。 */
 .agent-tool-code {
-  margin: 0 0 var(--space-1);
-  max-height: 240px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
   line-height: var(--line-height-list);
-  color: var(--text-secondary);
 }
 
 @keyframes agent-tool-spin {

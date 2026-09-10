@@ -81,10 +81,10 @@ describe("P3 side-task UI contract", () => {
   });
 
   test("has a narrow-screen one-column layout", () => {
-    expect(component).toContain("@media (max-width: 720px)");
-    expect(component).toContain("grid-template-columns: 1fr");
-    expect(component).toContain("width: 100vw");
-    expect(component).toContain(".side-tasks-panel.is-embedded");
+    expect(component).toContain("max-[720px]:w-screen");
+    expect(component).toContain("max-[720px]:grid-cols-1");
+    expect(component).toContain("max-[720px]:max-h-[190px]");
+    expect(component).toContain("embedded ? 'w-full min-w-0 shadow-none'");
   });
 
   test("mock explicitly enables the slice while normal dev/build stay default-off", () => {
