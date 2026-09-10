@@ -162,7 +162,7 @@ export function segmentAgentReply(source: string): ReplySegment[] {
       id: `seg-${segments.length}`,
       text,
       lineCount,
-      collapsible: lineCount > CODE_CARD_LINE_THRESHOLD,
+      collapsible: false,
     });
   };
 
@@ -192,7 +192,7 @@ export function segmentAgentReply(source: string): ReplySegment[] {
 /** 构造单个文本段（工具条展开区长文本复用同一折叠组件）。 */
 export function makeTextSegment(id: string, text: string): ReplyTextSegment {
   const lineCount = countLines(text);
-  return { kind: "text", id, text, lineCount, collapsible: lineCount > CODE_CARD_LINE_THRESHOLD };
+  return { kind: "text", id, text, lineCount, collapsible: false };
 }
 
 /**

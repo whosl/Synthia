@@ -549,6 +549,7 @@ export interface SideTaskSummary {
 export type SideTaskConversationEventKind =
   | "user_message"
   | "assistant_message"
+  | "assistant_thinking"
   | "tool_call"
   | "tool_result"
   | "status";

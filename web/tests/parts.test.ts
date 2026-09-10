@@ -95,6 +95,16 @@ describe("conversationEventsToParts：Project Agent 持久化对话", () => {
     });
   });
 
+  test("assistant_thinking 重放为已定稿思维链 part，且位于回复正文之前", () => {
+    const parts = conversationEventsToParts([
+      conversationEvent(1, "user_message", { text: "连通性测试" }),
+      conversationEvent(2, "assistant_thinking", { text: "用户想验证链路，直接回答。" }),
+      conversationEvent(3, "assistant_message", { text: "OK" }),
+    ]);
+    expect(parts.map((part) => part.kind)).toEqual(["text", "reasoning", "text"]);
+    expect(parts[1]).toMatchObject({ kind: "reasoning", state: "done", text: "用户想验证链路，直接回答。" });
+  });
+
   test("持久化取消状态恢复为打断卡", () => {
     expect(conversationEventsToParts([
       conversationEvent(1, "status", { status: "cancelled" }),
@@ -572,6 +582,27 @@ describe("bitstreamFromEvidence", () => {
 });
 
 // ─── free_agent_tool：工具调用落 audit（刷新后可回看） ────────────────
+
+describe("auditToParts：free_agent_thinking", () => {
+  test("重放为已定稿 reasoning part；空 detail 丢弃", () => {
+    const parts = auditToParts(
+      makeDetail({
+        audit: [
+          audit({ category: "model", phase: "loop", action: "user_message", detail: "连通性测试" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_thinking", detail: "用户想验证链路。" }),
+          audit({ category: "model", phase: "loop", action: "free_agent_reply", detail: "OK" }),
+        ],
+      }),
+    );
+    expect(parts.map((part) => part.kind)).toEqual(["text", "reasoning", "text"]);
+    expect(parts[1]).toMatchObject({ kind: "reasoning", state: "done", text: "用户想验证链路。" });
+
+    const empty = auditToParts(
+      makeDetail({ audit: [audit({ category: "model", phase: "loop", action: "free_agent_thinking", detail: "  " })] }),
+    );
+    expect(empty).toHaveLength(0);
+  });
+});
 
 describe("auditToParts：free_agent_tool", () => {
   const toolEvent = (detail: unknown, result: "ok" | "failed" = "ok") =>

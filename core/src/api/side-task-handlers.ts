@@ -67,7 +67,7 @@ const MAX_AUTHORIZED_WRITE_PATHS = 32;
 const MAX_SIDE_TASK_PATH_BYTES = 512;
 const MAX_SIDE_TASK_PATH_SEGMENTS = 32;
 const MAX_FILE_BYTES = 1024 * 1024;
-const EVENT_KINDS = new Set(["user_message", "assistant_message", "tool_call", "tool_result", "status"]);
+const EVENT_KINDS = new Set(["user_message", "assistant_message", "assistant_thinking", "tool_call", "tool_result", "status"]);
 const TASK_JOB_OPERATIONS = new Set(["validate_sources", "simulate", "synthesize", "implement"]);
 
 interface SideAuthorizationScope {

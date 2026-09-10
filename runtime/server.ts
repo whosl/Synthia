@@ -883,6 +883,12 @@ const IDEMPOTENCY_IN_PROGRESS_MESSAGE =
 const AUDIT_TOOL_ARGS_MAX = 400;
 const AUDIT_TOOL_RESULT_MAX = 800;
 
+/**
+ * 思维链 audit 的截断上限。思维链是「过程可见」的记录，体量远大于工具预览，
+ * 给到 32KB；超出部分标注总字数（完整流式内容只在实时会话里有）。
+ */
+const AUDIT_THINKING_MAX = 32_000;
+
 /** 超长截断并标注，`…（共 N 字）` 让前端知道这是预览而非全部。 */
 function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}…（共 ${s.length} 字）`;
@@ -1851,6 +1857,22 @@ export class RuntimeServer {
         this.recordConversationAudit(agentId, "free_agent_reply", reply);
         opts.finalize();
         this.syncHandleFromSession(agentId, session);
+        // 思维链先于回复正文入库，保持会话时序。best-effort：core 同步失败不吞
+        // 回复（audit 里仍有完整副本，UI 兜底展示）。
+        for (let i = 0; i < opts.reasoningTexts().length; i++) {
+          try {
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${i}`).slice(0, 40)}`,
+              "assistant_thinking",
+              { text: opts.reasoningTexts()[i]! },
+            );
+          } catch (error) {
+            process.stderr.write(
+              `[runtime-server] assistant_thinking sync failed for ${agentId}#${i}: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
+        }
         await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0assistant`).slice(0, 40)}`,
@@ -2135,10 +2157,13 @@ export class RuntimeServer {
   ): PromptStreamOptions & {
     finalize: () => void;
     sideTaskCompletionRequested: () => boolean;
+    reasoningTexts: () => readonly string[];
   } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
     const parts = new Map<string, { kind: "text" | "reasoning"; text: string }>();
+    /** 本轮思维链全文（finalize 时收集，供同步 core assistant_thinking 事件）。 */
+    const reasoningTexts: string[] = [];
     /**
      * callId → 工具名/入参。onToolEnd 只带 callId（定稿事件整体替换前一条，
      * 前端沿用已有 part 的 name/args），但落 audit 要写一条自足的记录，
@@ -2220,18 +2245,25 @@ export class RuntimeServer {
         const ts = new Date().toISOString();
         for (const [id, cell] of parts) {
           hub.emit({ type: "part", part: { kind: cell.kind, id, state: "done", text: cell.text, ts } });
+          // 思维链落 audit（free_agent_thinking），刷新页面后由 auditToParts 重放。
+          // 全文另入 reasoningTexts，供同步 core assistant_thinking 事件。
+          if (cell.kind === "reasoning" && cell.text.trim()) {
+            reasoningTexts.push(cell.text);
+            this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
+          }
         }
         parts.clear();
         toolCalls.clear();
       },
       sideTaskCompletionRequested: () => sideTaskCompletionRequested,
+      reasoningTexts: () => reasoningTexts,
     };
   }
 
   private appendCoreTaskEvent(
     agentId: string,
     eventId: string,
-    type: "assistant_message" | "tool_call" | "tool_result" | "status",
+    type: "assistant_message" | "assistant_thinking" | "tool_call" | "tool_result" | "status",
     payload: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const handle = this.registry.get(agentId);

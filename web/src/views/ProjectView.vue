@@ -1575,16 +1575,36 @@ const parts = computed<readonly SynthiaPart[]>(() => {
     if (twinId) settled[i] = { ...p, id: twinId };
   }
 
+  // 思维链 twin：audit 重放的 reasoning part（r<seq>/core-<id>）与 SSE 实时卡同文本
+  // 时认领流 id（复用 DOM），避免同一段思考渲染两遍。
+  const reasoningTwinIds = new Map<string, string[]>();
+  for (const s of streamFeed.value) {
+    if (s.kind !== "reasoning" || !s.text.trim()) continue;
+    const key = s.text.trim();
+    const ids = reasoningTwinIds.get(key);
+    if (ids) ids.push(s.id);
+    else reasoningTwinIds.set(key, [s.id]);
+  }
+  for (let i = settled.length - 1; i >= 0; i--) {
+    const p = settled[i]!;
+    if (p.kind !== "reasoning") continue;
+    const twinId = reasoningTwinIds.get(p.text.trim())?.pop();
+    if (twinId) settled[i] = { ...p, id: twinId };
+  }
+
   // 过程卡按流内顺序攒堆，遇到已定稿文本就锚定在它之前。
-  // 工具卡两边都有（audit 一条预览 + SSE 一张实时卡，同一个 callId）：位置以 audit
-  // 为准（它带真实 seq，不必靠锚点猜），内容以 SSE 为准（audit 那份是截断预览）。
+  // 工具卡与思维卡两边都有（audit 一条记录 + SSE 一张实时卡；工具同 callId、思维
+  // 在上方按文本指纹认领了同 id）：位置以 audit 为准（它带真实 seq，不必靠锚点
+  // 猜），内容以 SSE 为准（audit 那份是截断预览）。
   const settledIds = new Set(settled.map((p) => p.id));
   const anchored = new Map<string, SynthiaPart[]>();
   let pending: SynthiaPart[] = [];
   for (const p of streamFeed.value) {
     const processPart = toProcessPart(p);
     if (processPart) {
-      const at = processPart.kind === "agent_tool" ? settled.findIndex((s) => s.id === processPart.id) : -1;
+      const at = processPart.kind === "agent_tool" || processPart.kind === "reasoning"
+        ? settled.findIndex((s) => s.id === processPart.id)
+        : -1;
       if (at >= 0) settled[at] = processPart; // audit 已收录 → 原地换成更全的那份，不再入流
       else pending.push(processPart);
     } else if (p.state === "done" && pending.length > 0) {

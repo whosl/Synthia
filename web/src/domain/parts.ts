@@ -246,6 +246,13 @@ export function conversationEventsToParts(
       });
       continue;
     }
+    if (event.event_kind === "assistant_thinking") {
+      // 思维链（runtime 在轮次 finalize 时同步，0020 迁移起 core 持久化）。
+      const text = conversationPayloadText(event.payload.text).trim();
+      if (!text) continue;
+      parts.push({ kind: "reasoning", id: `core-${event.id}`, state: "done", text });
+      continue;
+    }
     if (event.event_kind === "tool_call") {
       const callId = typeof event.payload.tool_call_id === "string"
         ? event.payload.tool_call_id
@@ -527,6 +534,13 @@ export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
           // text fingerprint instead of id, or the reply renders twice
           // (once streamed, once from audit).
           appendAgentText(event.seq, event.detail ?? "");
+          break;
+        }
+        if (event.action === "free_agent_thinking") {
+          // 思维链（runtime finalize 时落 audit）。重放为已定稿 reasoning part；
+          // 与 SSE 实时卡的文本指纹去重在 ProjectView 的 parts 合成里做。
+          const text = event.detail?.trim();
+          if (text) push({ kind: "reasoning", id: `r${event.seq}`, state: "done", text });
           break;
         }
         if (event.action === "free_agent_steer") {
