@@ -1803,7 +1803,16 @@ export async function closeSkillApplicationHandler(ctx: RequestContext): Promise
       if (expectedTurnId !== null && endPayload.turn_id !== expectedTurnId) {
         throw conflictApiError("APPLICATION_CLOSE_EVENT_MISMATCH");
       }
-      const closeArgs = asObject(endPayload.args, "application close event args");
+      // Same string-args tolerance as the apply check above.
+      let closeArgsRaw: unknown = endPayload.args;
+      if (typeof closeArgsRaw === "string") {
+        try {
+          closeArgsRaw = JSON.parse(closeArgsRaw);
+        } catch {
+          closeArgsRaw = null;
+        }
+      }
+      const closeArgs = asObject(closeArgsRaw, "application close event args");
       if (canonicalRequestHash(closeArgs) !== canonicalRequestHash({
         application_id: applicationId,
         outcome_claim: outcomeClaim,
