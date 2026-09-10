@@ -16,8 +16,37 @@
  * never loads this module, keeping the Core test graph Connector-free.
  */
 
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
+import { isAbsolute } from "node:path";
 import type { RunClass, ToolRunState } from "../domain/enums.ts";
+import {
+  EVOLUTION_EVAL_LIMITS,
+  canonicalEvolutionEvalSealedInputProjection,
+  evolutionEvalCanonicalHash,
+} from "../domain/evolution-eval.ts";
+import {
+  validateEvolutionEvalLedgerObservation,
+} from "../services/evolution-eval-dispatcher.ts";
+import type {
+  CoreIssuedEvalBinding,
+  EvalCancelReason,
+  EvalEvidenceAckRequestV1,
+  EvalEvidenceCleanupRequestV1,
+  EvalEvidenceConnectorManifestV1,
+  EvalEvidenceCorruptAckRequestV1,
+  EvalLedgerQuery,
+  EvalPreflight,
+  EvalRetentionResult,
+  EvolutionEvalConnectorPort,
+  SealedEvalInput,
+} from "../services/evolution-eval-connector-port.ts";
 import {
   ConnectorError,
   type ConnectorDiscovery,
@@ -31,6 +60,12 @@ import {
 
 /** Fixed production tunnel endpoint — the public Cloudflare origin for worker 66. */
 const PRODUCTION_ENDPOINT_URL = "https://connect.wenzhuolin.xyz";
+const M4F_DIRECT_MTLS_ENDPOINT_URL = "https://100.96.223.49:18443";
+const M4F_DIRECT_MTLS_AUTHORIZATION = "I_AUTHORIZE_M4F_18443_DIRECT_MTLS";
+const M4F_DIRECT_MTLS_TRUST_REF = "cert://m4f-direct/trust";
+const M4F_DIRECT_MTLS_CLIENT_REF = "cert://m4f-direct/client";
+const SHA256 = /^[0-9a-f]{64}$/;
+const MAX_TLS_MATERIAL_BYTES = 1024 * 1024;
 
 // ─── structural shapes of the Connector client we depend on ───────────────────
 // Locally declared (not imported) so this module does not pull Connector types
@@ -99,7 +134,53 @@ interface RemoteCapability {
 
 interface RemoteDiscovery {
   capabilities: readonly RemoteCapability[];
+  connector_protocol_version?: string;
   toolchain_profile_hash?: string;
+  sdk_worker_build_hash?: string;
+  active_config_sha256?: string;
+  worker_process_instance_id?: string;
+  vivado_toolchain_attestation_sha256?: string;
+  live_mapping_health?: "healthy" | "unavailable";
+}
+
+interface RemoteEvolutionEvalAttestation {
+  readonly active_config_sha256: string;
+  readonly worker_process_instance_id: string;
+  readonly vivado_toolchain_attestation_sha256: string;
+}
+
+interface RemoteEvolutionEvalPreflight {
+  schema: "evolution-eval-preflight-result.v1";
+  eligible: boolean;
+  operation: string;
+  capability_version: string | null;
+  license_available: boolean;
+  unacked_spool_bytes: number;
+  hard_cap_bytes: 2_147_483_648;
+  error_code: string | null;
+  active_config_sha256: string;
+  worker_process_instance_id: string;
+  vivado_toolchain_attestation_sha256: string;
+  live_mapping_health: "healthy";
+}
+
+interface RemoteEvolutionEvalSpool {
+  schema: "evolution-eval-spool-result.v1";
+  binding: CoreIssuedEvalBinding;
+  unacked_bytes: number;
+  hard_cap_bytes: 2_147_483_648;
+}
+
+interface RemoteEvolutionEvalSealedInput {
+  schema: "evolution-eval-sealed-input.v1";
+  manifest: SealedEvalInput["manifest"];
+  files: readonly {
+    path: string;
+    sha256: string;
+    size_bytes: number;
+    media_type: string;
+    content_base64: string;
+  }[];
 }
 
 interface RemoteRegistration {
@@ -118,6 +199,30 @@ interface RemoteClientLike {
     name: string,
     options?: { complete?: boolean },
   ): Promise<RemoteEvidenceContent>;
+  evolutionEvalPreflight(binding: CoreIssuedEvalBinding): Promise<RemoteEvolutionEvalPreflight>;
+  evolutionEvalQuery(binding: CoreIssuedEvalBinding): Promise<unknown>;
+  evolutionEvalReserve(
+    binding: CoreIssuedEvalBinding,
+    attestation: RemoteEvolutionEvalAttestation,
+  ): Promise<unknown>;
+  evolutionEvalSubmit(
+    binding: CoreIssuedEvalBinding,
+    input: RemoteEvolutionEvalSealedInput,
+    attestation: RemoteEvolutionEvalAttestation,
+  ): Promise<unknown>;
+  evolutionEvalCancel(binding: CoreIssuedEvalBinding, reason: EvalCancelReason): Promise<unknown>;
+  evolutionEvalQuerySpool(binding: CoreIssuedEvalBinding): Promise<RemoteEvolutionEvalSpool>;
+  evolutionEvalEvidenceManifest(
+    binding: CoreIssuedEvalBinding,
+  ): Promise<EvalEvidenceConnectorManifestV1>;
+  evolutionEvalEvidenceEntryStream(
+    binding: CoreIssuedEvalBinding,
+    name: string,
+  ): Promise<AsyncIterable<Uint8Array>>;
+  evolutionEvalQueryRetention(binding: CoreIssuedEvalBinding): Promise<unknown>;
+  evolutionEvalAcknowledgeEvidence(request: EvalEvidenceAckRequestV1): Promise<unknown>;
+  evolutionEvalAcknowledgeCorrupt(request: EvalEvidenceCorruptAckRequestV1): Promise<unknown>;
+  evolutionEvalCleanupEvidence(request: EvalEvidenceCleanupRequestV1): Promise<unknown>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
 }
@@ -134,6 +239,119 @@ interface RemoteFactoryOptions {
 }
 
 type RemoteFactory = (options: RemoteFactoryOptions) => RemoteClientLike;
+
+interface DirectMtlsRemoteFactoryOptions extends RemoteFactoryOptions {
+  readonly ca: string;
+  readonly cert: string;
+  readonly key: string;
+}
+
+type DirectMtlsRemoteFactory =
+  (options: DirectMtlsRemoteFactoryOptions) => RemoteClientLike;
+
+export interface M4fDirectMtlsMaterial {
+  readonly ca: string;
+  readonly cert: string;
+  readonly key: string;
+  readonly caSha256: string;
+  readonly certSha256: string;
+  readonly keySha256: string;
+}
+
+function requiredM4fEnvironment(
+  env: Record<string, string | undefined>,
+  name: string,
+): string {
+  const value = env[name];
+  if (!value) throw new Error(`${name} is required for direct M4-F mTLS`);
+  return value;
+}
+
+function readBoundM4fPem(
+  path: string,
+  expectedSha256: string,
+  kind: "ca" | "cert" | "key",
+): string {
+  if (!isAbsolute(path) || path.length > 1024 || /[\r\n\0]/.test(path)
+    || !SHA256.test(expectedSha256)) {
+    throw new Error(`direct M4-F ${kind} binding is invalid`);
+  }
+  let fd: number | null = null;
+  try {
+    const pathBefore = lstatSync(path);
+    fd = openSync(path, "r");
+    const before = fstatSync(fd);
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !before.isFile() || before.nlink !== 1
+      || before.uid !== process.getuid?.() || (before.mode & 0o777) !== 0o600
+      || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || after.dev !== pathAfter.dev || after.ino !== pathAfter.ino
+      || bytes.length < 1 || bytes.length > MAX_TLS_MATERIAL_BYTES
+      || createHash("sha256").update(bytes).digest("hex") !== expectedSha256) {
+      throw new Error(`direct M4-F ${kind} binding is untrusted`);
+    }
+    const pem = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const marker = kind === "key"
+      ? /-----BEGIN (?:EC |RSA )?PRIVATE KEY-----/
+      : /-----BEGIN CERTIFICATE-----/;
+    if (!marker.test(pem) || /\0/.test(pem)) {
+      throw new Error(`direct M4-F ${kind} PEM is invalid`);
+    }
+    return pem;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("direct M4-F")) throw error;
+    throw new Error(`direct M4-F ${kind} binding is unavailable`);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+export function loadM4fDirectMtlsMaterial(
+  env: Record<string, string | undefined>,
+): M4fDirectMtlsMaterial {
+  if (env.SYNTHIA_M4F_DIRECT_MTLS_AUTHORIZATION !== M4F_DIRECT_MTLS_AUTHORIZATION) {
+    throw new Error("SYNTHIA_M4F_DIRECT_MTLS_AUTHORIZATION is required");
+  }
+  const caPath = requiredM4fEnvironment(env, "SYNTHIA_M4F_DIRECT_MTLS_CA_PATH");
+  const certPath = requiredM4fEnvironment(env, "SYNTHIA_M4F_DIRECT_MTLS_CLIENT_CERT_PATH");
+  const keyPath = requiredM4fEnvironment(env, "SYNTHIA_M4F_DIRECT_MTLS_CLIENT_KEY_PATH");
+  if (new Set([caPath, certPath, keyPath]).size !== 3) {
+    throw new Error("direct M4-F mTLS paths must be distinct");
+  }
+  const caSha256 = requiredM4fEnvironment(env, "SYNTHIA_M4F_DIRECT_MTLS_CA_SHA256");
+  const certSha256 = requiredM4fEnvironment(
+    env,
+    "SYNTHIA_M4F_DIRECT_MTLS_CLIENT_CERT_SHA256",
+  );
+  const keySha256 = requiredM4fEnvironment(
+    env,
+    "SYNTHIA_M4F_DIRECT_MTLS_CLIENT_KEY_SHA256",
+  );
+  return {
+    ca: readBoundM4fPem(caPath, caSha256, "ca"),
+    cert: readBoundM4fPem(certPath, certSha256, "cert"),
+    key: readBoundM4fPem(keyPath, keySha256, "key"),
+    caSha256,
+    certSha256,
+    keySha256,
+  };
+}
+
+export interface EvolutionEvalCertifiedRemoteIdentity {
+  readonly sdkWorkerBuildHash: string;
+  readonly activeConfigSha256: string;
+  readonly workerProcessInstanceId: string;
+  readonly ledgerEpoch: string;
+  readonly vivadoToolchainAttestationSha256: string;
+  readonly toolchainProfileHash: string;
+}
+
+export type EvolutionEvalCertificationProvider =
+  () => Promise<EvolutionEvalCertifiedRemoteIdentity>;
 
 // ─── error translation ───────────────────────────────────────────────────────
 
@@ -155,6 +373,17 @@ function isLeaseExpiredError(err: unknown): boolean {
     return err.code === "LEASE_EXPIRED";
   }
   return false;
+}
+
+function isExactEvolutionEvalBinding(
+  actual: unknown,
+  expected: CoreIssuedEvalBinding,
+): boolean {
+  try {
+    return evolutionEvalCanonicalHash(actual) === evolutionEvalCanonicalHash(expected);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -229,6 +458,165 @@ function buildRemoteApproval(params: SubmitJobParams): RemoteApproval | undefine
   };
 }
 
+async function encodeEvolutionEvalSealedInput(
+  input: SealedEvalInput,
+): Promise<RemoteEvolutionEvalSealedInput> {
+  const manifestFiles = input.manifest.files;
+  if (manifestFiles.length > EVOLUTION_EVAL_LIMITS.workspace.files) {
+    throw new ConnectorError(
+      "EVOLUTION_EVAL_RESOURCE_LIMIT",
+      "sealed workspace has too many files",
+      false,
+    );
+  }
+  const layerTotals = {
+    source: { files: 0, bytes: 0 },
+    skill: { files: 0, bytes: 0 },
+    overlay: { files: 0, bytes: 0 },
+  };
+  let manifestBytes = 0;
+  let previousPortableKey: string | null = null;
+  for (const file of manifestFiles) {
+    const portableKey = file.path.replace(/[A-Z]/g, (character) => character.toLowerCase());
+    if (previousPortableKey !== null && portableKey <= previousPortableKey) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_BINDING_CONFLICT",
+        "sealed manifest paths are not in canonical portable order",
+        false,
+      );
+    }
+    previousPortableKey = portableKey;
+    if ((file.layer === "overlay") === file.read_only) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_BINDING_CONFLICT",
+        "sealed manifest layer is not bound to its read-only policy",
+        false,
+      );
+    }
+    const limit = EVOLUTION_EVAL_LIMITS[file.layer];
+    if (
+      !Number.isSafeInteger(file.size_bytes)
+      || file.size_bytes < 0
+      || file.size_bytes > limit.fileBytes
+    ) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_RESOURCE_LIMIT",
+        "sealed manifest file exceeds its layer budget",
+        false,
+      );
+    }
+    layerTotals[file.layer].files += 1;
+    layerTotals[file.layer].bytes += file.size_bytes;
+    manifestBytes += file.size_bytes;
+  }
+  for (const layer of ["source", "skill", "overlay"] as const) {
+    const total = layerTotals[layer];
+    const limit = EVOLUTION_EVAL_LIMITS[layer];
+    if (total.files > limit.files || total.bytes > limit.bytes) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_RESOURCE_LIMIT",
+        `sealed ${layer} layer exceeds its budget`,
+        false,
+      );
+    }
+  }
+  if (manifestBytes > EVOLUTION_EVAL_LIMITS.workspace.bytes) {
+    throw new ConnectorError(
+      "EVOLUTION_EVAL_RESOURCE_LIMIT",
+      "sealed workspace exceeds its total byte budget",
+      false,
+    );
+  }
+
+  // Skill files remain part of Core's immutable workspace/input binding and
+  // budget accounting, but Appendix B.2 forbids transmitting even read-only
+  // Skill assets to Connector. The remote execution projection is therefore
+  // exactly the source+overlay subset; Connector rejects any Skill-layer wire
+  // entry and still binds the request to Core's full workspace hash carried by
+  // `binding.dispatch.workspace_manifest_hash`.
+  const remoteManifestFiles = manifestFiles.filter((file) => file.layer !== "skill");
+  const remoteManifestBytes = remoteManifestFiles.reduce(
+    (sum, file) => sum + file.size_bytes,
+    0,
+  );
+
+  const encoded: RemoteEvolutionEvalSealedInput["files"][number][] = [];
+  let index = 0;
+  let streamedBytes = 0;
+  for await (const file of input.files) {
+    const expected = remoteManifestFiles[index];
+    if (
+      !expected
+      || file.path !== expected.path
+      || file.sha256 !== expected.sha256
+      || file.size_bytes !== expected.size_bytes
+      || file.media_type !== expected.media_type
+    ) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_BINDING_CONFLICT",
+        "sealed file stream differs from the canonical manifest",
+        false,
+      );
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const hash = createHash("sha256");
+    for await (const chunk of file.content) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new ConnectorError(
+          "EVOLUTION_EVAL_BINDING_CONFLICT",
+          "sealed file stream contains a non-byte chunk",
+          false,
+        );
+      }
+      size += chunk.byteLength;
+      streamedBytes += chunk.byteLength;
+      if (
+        size > expected.size_bytes
+        || streamedBytes > EVOLUTION_EVAL_LIMITS.workspace.bytes
+      ) {
+        throw new ConnectorError(
+          "EVOLUTION_EVAL_RESOURCE_LIMIT",
+          "sealed file stream exceeds the durable manifest budget",
+          false,
+        );
+      }
+      hash.update(chunk);
+      chunks.push(Buffer.from(chunk));
+    }
+    if (size !== expected.size_bytes || hash.digest("hex") !== expected.sha256) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_BINDING_CONFLICT",
+        "sealed file stream size or hash differs from the durable manifest",
+        false,
+      );
+    }
+    encoded.push({
+      path: expected.path,
+      sha256: expected.sha256,
+      size_bytes: expected.size_bytes,
+      media_type: expected.media_type,
+      content_base64: Buffer.concat(chunks, size).toString("base64"),
+    });
+    index += 1;
+  }
+  if (index !== remoteManifestFiles.length || streamedBytes !== remoteManifestBytes) {
+    throw new ConnectorError(
+      "EVOLUTION_EVAL_BINDING_CONFLICT",
+      "sealed file stream is incomplete",
+      false,
+    );
+  }
+  return {
+    schema: "evolution-eval-sealed-input.v1",
+    manifest: {
+      ...input.manifest,
+      files: remoteManifestFiles,
+    },
+    files: encoded,
+  };
+}
+
 // ─── adapter ─────────────────────────────────────────────────────────────────
 
 /**
@@ -245,28 +633,73 @@ function buildRemoteApproval(params: SubmitJobParams): RemoteApproval | undefine
  *  3. After any discover, capability drift is fail-closed (CAPABILITY_DRIFT →
  *     503, no retry).
  */
-export class RemoteConnectorAdapter implements ConnectorPort {
+export class RemoteConnectorAdapter implements ConnectorPort, EvolutionEvalConnectorPort {
   private readonly clients = new Map<string, RemoteClientLike>();
   private readonly primed = new Set<string>();
+  private readonly evolutionEvalClients = new Map<string, RemoteClientLike>();
+  private readonly evolutionEvalPrimed = new Set<string>();
   private readonly factory: RemoteFactory;
   private readonly endpointConfig: Record<string, unknown>;
   private readonly allowlist: readonly string[];
   private readonly env: Record<string, string | undefined>;
+  private readonly certifiedEvolutionEvalIdentity?: EvolutionEvalCertifiedRemoteIdentity;
+  private readonly currentEvolutionEvalCertification?: EvolutionEvalCertificationProvider;
 
   constructor(
     factory: RemoteFactory,
     endpointConfig: Record<string, unknown>,
     allowlist: readonly string[],
     env: Record<string, string | undefined>,
+    certification?: {
+      readonly identity: EvolutionEvalCertifiedRemoteIdentity;
+      readonly current: EvolutionEvalCertificationProvider;
+    },
   ) {
     this.factory = factory;
     this.endpointConfig = endpointConfig;
     this.allowlist = allowlist;
     this.env = env;
+    this.certifiedEvolutionEvalIdentity = certification?.identity;
+    this.currentEvolutionEvalCertification = certification?.current;
   }
 
   get connectorId(): string {
     return String(this.endpointConfig.connector_id ?? "remote-connector");
+  }
+
+  /** Startup proof that the live remote still equals the frozen B identity. */
+  async revalidateEvolutionEvalCertification(
+    binding: CoreIssuedEvalBinding,
+    requireFresh = true,
+  ): Promise<void> {
+    const certification = requireFresh
+      ? await this.requireCurrentEvolutionEvalCertification()
+      : this.certifiedEvolutionEvalIdentity;
+    if (!certification) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+        "evolution-eval certification is not configured",
+        false,
+      );
+    }
+    const client = await this.ensureEvolutionEvalReady(binding.project_id);
+    const discovery = await client.discover();
+    if (requireFresh) {
+      if (client.hasCapabilityDrift) {
+        throw new ConnectorError(
+          "CAPABILITY_DRIFT",
+          "evolution-eval connector capability drift detected during certification",
+          false,
+        );
+      }
+      this.assertCertifiedDiscovery(discovery, certification);
+      this.assertCertifiedLedgerEpoch(validateEvolutionEvalLedgerObservation(
+        binding,
+        await client.evolutionEvalQuery(binding),
+      ));
+    } else {
+      this.assertEvolutionEvalProtocol(discovery);
+    }
   }
 
   private buildClient(projectId: string): RemoteClientLike {
@@ -279,6 +712,28 @@ export class RemoteConnectorAdapter implements ConnectorPort {
         projectId,
         env: this.env,
         secretNames: { clientId: "SYNTHIA_CF_ACCESS_CLIENT_ID", clientSecret: "SYNTHIA_CF_ACCESS_CLIENT_SECRET" },
+      });
+    } catch (err) {
+      throw toConnectorError(err);
+    }
+  }
+
+  private buildEvolutionEvalClient(projectId: string): RemoteClientLike {
+    try {
+      return this.factory({
+        endpoint: this.endpointConfig,
+        allowlist: this.allowlist,
+        actor: {
+          actor_type: "service",
+          actor_id: "synthia-core-evolution-eval-dispatcher",
+        },
+        classification: "internal",
+        projectId,
+        env: this.env,
+        secretNames: {
+          clientId: "SYNTHIA_CF_ACCESS_CLIENT_ID",
+          clientSecret: "SYNTHIA_CF_ACCESS_CLIENT_SECRET",
+        },
       });
     } catch (err) {
       throw toConnectorError(err);
@@ -341,6 +796,51 @@ export class RemoteConnectorAdapter implements ConnectorPort {
   }
 
   /**
+   * Evolution-eval uses an actor- and project-isolated client pool. Keeping it
+   * separate from generic Job clients prevents either authority from reusing
+   * the other's envelope identity, and avoids a mutable last-project context.
+   */
+  private async ensureEvolutionEvalReady(projectId: string): Promise<RemoteClientLike> {
+    if (!this.evolutionEvalPrimed.has(projectId)) {
+      const client = this.buildEvolutionEvalClient(projectId);
+      this.evolutionEvalClients.set(projectId, client);
+      try {
+        await client.register();
+        await client.heartbeat();
+        this.assertEvolutionEvalProtocol(await client.discover());
+        if (client.state !== "ready") {
+          throw new ConnectorError(
+            "ENDPOINT_NOT_APPROVED",
+            `connector not ready (state=${client.state})`,
+            true,
+          );
+        }
+      } catch (err) {
+        this.evolutionEvalClients.delete(projectId);
+        throw toConnectorError(err);
+      }
+      this.evolutionEvalPrimed.add(projectId);
+      return client;
+    }
+    const client = this.evolutionEvalClients.get(projectId);
+    if (!client) {
+      this.evolutionEvalPrimed.delete(projectId);
+      return this.ensureEvolutionEvalReady(projectId);
+    }
+    try {
+      await client.heartbeat();
+    } catch (err) {
+      if (isLeaseExpiredError(err)) {
+        this.evolutionEvalClients.delete(projectId);
+        this.evolutionEvalPrimed.delete(projectId);
+        return this.ensureEvolutionEvalReady(projectId);
+      }
+      throw toConnectorError(err);
+    }
+    return client;
+  }
+
+  /**
    * Run `action` against a ready client. If the action throws LEASE_EXPIRED,
    * evict the stale client, rebuild (register → heartbeat → discover → drift),
    * and retry the action exactly once. Drift and all other errors propagate.
@@ -364,6 +864,125 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       this.primed.add(projectId);
       return await action(rebuilt);
     }
+  }
+
+  private async withEvolutionEvalClient<T>(
+    binding: CoreIssuedEvalBinding,
+    action: (client: RemoteClientLike) => Promise<T>,
+  ): Promise<T> {
+    const projectId = binding.project_id;
+    const client = await this.ensureEvolutionEvalReady(projectId);
+    try {
+      return await action(client);
+    } catch (err) {
+      if (!isLeaseExpiredError(err)) throw toConnectorError(err);
+      const rebuilt = this.buildEvolutionEvalClient(projectId);
+      this.evolutionEvalClients.set(projectId, rebuilt);
+      try {
+        await rebuilt.register();
+        await rebuilt.heartbeat();
+        this.assertEvolutionEvalProtocol(await rebuilt.discover());
+        if (rebuilt.state !== "ready") {
+          throw new ConnectorError(
+            "ENDPOINT_NOT_APPROVED",
+            `connector not ready (state=${rebuilt.state})`,
+            true,
+          );
+        }
+      } catch (onlineErr) {
+        this.evolutionEvalClients.delete(projectId);
+        this.evolutionEvalPrimed.delete(projectId);
+        throw toConnectorError(onlineErr);
+      }
+      this.evolutionEvalPrimed.add(projectId);
+      return await action(rebuilt);
+    }
+  }
+
+  private async requireCurrentEvolutionEvalCertification(): Promise<EvolutionEvalCertifiedRemoteIdentity | undefined> {
+    if (!this.currentEvolutionEvalCertification) return undefined;
+    try {
+      const current = await this.currentEvolutionEvalCertification();
+      const startup = this.certifiedEvolutionEvalIdentity;
+      if (
+        !startup
+        || current.sdkWorkerBuildHash !== startup.sdkWorkerBuildHash
+        || current.activeConfigSha256 !== startup.activeConfigSha256
+        || current.workerProcessInstanceId !== startup.workerProcessInstanceId
+        || current.ledgerEpoch !== startup.ledgerEpoch
+        || current.vivadoToolchainAttestationSha256
+          !== startup.vivadoToolchainAttestationSha256
+        || current.toolchainProfileHash !== startup.toolchainProfileHash
+      ) {
+        throw new Error("certification identity changed after startup");
+      }
+      return current;
+    } catch (error) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+        error instanceof Error ? error.message : "evolution-eval certification invalid",
+        false,
+      );
+    }
+  }
+
+  private assertCertifiedDiscovery(
+    discovery: RemoteDiscovery,
+    certification: EvolutionEvalCertifiedRemoteIdentity,
+  ): void {
+    this.assertEvolutionEvalProtocol(discovery);
+    if (
+      discovery.sdk_worker_build_hash !== certification.sdkWorkerBuildHash
+      || discovery.active_config_sha256 !== certification.activeConfigSha256
+      || discovery.worker_process_instance_id !== certification.workerProcessInstanceId
+      || discovery.vivado_toolchain_attestation_sha256
+        !== certification.vivadoToolchainAttestationSha256
+      || discovery.toolchain_profile_hash !== certification.toolchainProfileHash
+      || discovery.live_mapping_health !== "healthy"
+    ) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+        "remote build, config, process instance, or toolchain attestation differs from certification",
+        false,
+      );
+    }
+  }
+
+  private assertEvolutionEvalProtocol(discovery: RemoteDiscovery): void {
+    if (discovery.connector_protocol_version !== "connector.remote.v1") {
+      throw new ConnectorError(
+        "COMPATIBILITY_REJECTED",
+        "remote evolution-eval protocol is incompatible",
+        false,
+      );
+    }
+  }
+
+  private async assertCurrentCertifiedDiscovery(
+    client: RemoteClientLike,
+    certification: EvolutionEvalCertifiedRemoteIdentity,
+  ): Promise<void> {
+    const discovery = await client.discover();
+    if (client.hasCapabilityDrift) {
+      throw new ConnectorError(
+        "CAPABILITY_DRIFT",
+        "evolution-eval connector capability drift detected before a new effect",
+        false,
+      );
+    }
+    this.assertCertifiedDiscovery(discovery, certification);
+  }
+
+  private assertCertifiedLedgerEpoch(observation: EvalLedgerQuery): EvalLedgerQuery {
+    const expected = this.certifiedEvolutionEvalIdentity?.ledgerEpoch;
+    if (expected !== undefined && observation.ledger_epoch !== expected) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_LEDGER_EPOCH_MISMATCH",
+        "remote ledger epoch differs from certification",
+        false,
+      );
+    }
+    return observation;
   }
 
   async discover(projectId: string): Promise<ConnectorDiscovery> {
@@ -431,6 +1050,217 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       };
     });
   }
+
+  async preflight(binding: CoreIssuedEvalBinding): Promise<EvalPreflight> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      const certification = await this.requireCurrentEvolutionEvalCertification();
+      if (!certification) {
+        throw new ConnectorError(
+          "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+          "new-effect preflight requires a current certification",
+          false,
+        );
+      }
+      await this.assertCurrentCertifiedDiscovery(client, certification);
+      const result = await client.evolutionEvalPreflight(binding);
+      if (
+        result.schema !== "evolution-eval-preflight-result.v1"
+        || result.operation !== binding.dispatch.operation
+        || typeof result.eligible !== "boolean"
+        || typeof result.license_available !== "boolean"
+        || (result.capability_version !== null && typeof result.capability_version !== "string")
+        || !Number.isSafeInteger(result.unacked_spool_bytes)
+        || result.unacked_spool_bytes < 0
+        || result.hard_cap_bytes !== EVOLUTION_EVAL_LIMITS.connectorUnackedSpoolBytes
+        || (result.error_code !== null && typeof result.error_code !== "string")
+        || result.active_config_sha256 !== certification.activeConfigSha256
+        || result.worker_process_instance_id !== certification.workerProcessInstanceId
+        || result.vivado_toolchain_attestation_sha256
+          !== certification.vivadoToolchainAttestationSha256
+        || result.live_mapping_health !== "healthy"
+      ) {
+        throw new ConnectorError(
+          "COMPATIBILITY_REJECTED",
+          "evolution-eval preflight response is not bound to the Core request",
+          false,
+        );
+      }
+      return {
+        eligible: result.eligible,
+        operation: binding.dispatch.operation,
+        capability_version: result.capability_version,
+        license_available: result.license_available,
+        unacked_spool_bytes: result.unacked_spool_bytes,
+        hard_cap_bytes: 2_147_483_648,
+        error_code: result.error_code,
+      };
+    });
+  }
+
+  async query(binding: CoreIssuedEvalBinding): Promise<EvalLedgerQuery> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      return validateEvolutionEvalLedgerObservation(
+        binding,
+        await client.evolutionEvalQuery(binding),
+      );
+    });
+  }
+
+  async queryOrReserve(binding: CoreIssuedEvalBinding): Promise<EvalLedgerQuery> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      const certification = await this.requireCurrentEvolutionEvalCertification();
+      if (!certification) {
+        throw new ConnectorError(
+          "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+          "new-effect reservation requires a current certification",
+          false,
+        );
+      }
+      await this.assertCurrentCertifiedDiscovery(client, certification);
+      const attestation = {
+        active_config_sha256: certification.activeConfigSha256,
+        worker_process_instance_id: certification.workerProcessInstanceId,
+        vivado_toolchain_attestation_sha256:
+          certification.vivadoToolchainAttestationSha256,
+      };
+      return this.assertCertifiedLedgerEpoch(validateEvolutionEvalLedgerObservation(
+        binding,
+        await client.evolutionEvalReserve(binding, attestation),
+      ));
+    });
+  }
+
+  async submit(
+    binding: CoreIssuedEvalBinding,
+    input: SealedEvalInput,
+  ): Promise<EvalLedgerQuery> {
+    // Encode before acquiring/refreshing the remote client lease. A maximum
+    // workspace can take time to buffer, while the actual RPC must start from
+    // a freshly validated project/actor context.
+    const transportInput = await encodeEvolutionEvalSealedInput(input);
+    const projectionHash = canonicalEvolutionEvalSealedInputProjection(
+      transportInput.manifest,
+    ).sha256;
+    if (projectionHash !== binding.dispatch.sealed_input_projection_hash) {
+      throw new ConnectorError(
+        "EVOLUTION_EVAL_BINDING_CONFLICT",
+        "sealed Connector projection differs from the Core dispatch binding",
+        false,
+      );
+    }
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      const certification = await this.requireCurrentEvolutionEvalCertification();
+      if (!certification) {
+        throw new ConnectorError(
+          "EVOLUTION_EVAL_CERTIFICATION_INVALID",
+          "new-effect submission requires a current certification",
+          false,
+        );
+      }
+      await this.assertCurrentCertifiedDiscovery(client, certification);
+      const attestation = {
+        active_config_sha256: certification.activeConfigSha256,
+        worker_process_instance_id: certification.workerProcessInstanceId,
+        vivado_toolchain_attestation_sha256:
+          certification.vivadoToolchainAttestationSha256,
+      };
+      return this.assertCertifiedLedgerEpoch(validateEvolutionEvalLedgerObservation(
+        binding,
+        await client.evolutionEvalSubmit(binding, transportInput, attestation),
+      ));
+    });
+  }
+
+  async cancel(
+    binding: CoreIssuedEvalBinding,
+    reason: EvalCancelReason,
+  ): Promise<EvalLedgerQuery> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      return validateEvolutionEvalLedgerObservation(
+        binding,
+        await client.evolutionEvalCancel(binding, reason),
+      );
+    });
+  }
+
+  async querySpool(
+    binding: CoreIssuedEvalBinding,
+  ): Promise<{
+    readonly schema: "evolution-eval-spool-result.v1";
+    readonly binding: CoreIssuedEvalBinding;
+    readonly unackedBytes: number;
+    readonly hardCapBytes: 2_147_483_648;
+  }> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      const result = await client.evolutionEvalQuerySpool(binding);
+      if (
+        result.schema !== "evolution-eval-spool-result.v1"
+        || !isExactEvolutionEvalBinding(result.binding, binding)
+        || !Number.isSafeInteger(result.unacked_bytes)
+        || result.unacked_bytes < 0
+        || result.hard_cap_bytes !== EVOLUTION_EVAL_LIMITS.connectorUnackedSpoolBytes
+      ) {
+        throw new ConnectorError(
+          "COMPATIBILITY_REJECTED",
+          "evolution-eval spool response is invalid",
+          false,
+        );
+      }
+      return {
+        schema: "evolution-eval-spool-result.v1",
+        binding: structuredClone(binding),
+        unackedBytes: result.unacked_bytes,
+        hardCapBytes: 2_147_483_648,
+      };
+    });
+  }
+
+  async fetchEvidenceManifest(
+    binding: CoreIssuedEvalBinding,
+  ): Promise<EvalEvidenceConnectorManifestV1> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      return client.evolutionEvalEvidenceManifest(binding);
+    });
+  }
+
+  async fetchEvidenceEntry(
+    binding: CoreIssuedEvalBinding,
+    name: string,
+  ): Promise<AsyncIterable<Uint8Array>> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      return client.evolutionEvalEvidenceEntryStream(binding, name);
+    });
+  }
+
+  async queryRetention(binding: CoreIssuedEvalBinding): Promise<EvalRetentionResult> {
+    return this.withEvolutionEvalClient(binding, async (client) => {
+      return await client.evolutionEvalQueryRetention(binding) as EvalRetentionResult;
+    });
+  }
+
+  async acknowledgeEvidence(
+    request: EvalEvidenceAckRequestV1,
+  ): Promise<EvalRetentionResult> {
+    return this.withEvolutionEvalClient(request.binding, async (client) => {
+      return await client.evolutionEvalAcknowledgeEvidence(request) as EvalRetentionResult;
+    });
+  }
+
+  async acknowledgeCorrupt(
+    request: EvalEvidenceCorruptAckRequestV1,
+  ): Promise<EvalRetentionResult> {
+    return this.withEvolutionEvalClient(request.binding, async (client) => {
+      return await client.evolutionEvalAcknowledgeCorrupt(request) as EvalRetentionResult;
+    });
+  }
+
+  async cleanupEvidence(
+    request: EvalEvidenceCleanupRequestV1,
+  ): Promise<EvalRetentionResult> {
+    return this.withEvolutionEvalClient(request.binding, async (client) => {
+      return await client.evolutionEvalCleanupEvidence(request) as EvalRetentionResult;
+    });
+  }
 }
 
 // ─── env-driven bootstrap ────────────────────────────────────────────────────
@@ -442,18 +1272,31 @@ export interface ConnectorEnvOptions {
   env?: Record<string, string | undefined>;
   /** Override the endpoint_url (always the production tunnel in real deployments). */
   endpointUrl?: string;
+  /** Frozen startup identity plus a per-effect raw-B/freshness reloader. */
+  evolutionEvalCertification?: {
+    readonly identity: EvolutionEvalCertifiedRemoteIdentity;
+    readonly current: EvolutionEvalCertificationProvider;
+  };
 }
 
 /**
  * Build a production {@link ConnectorPort} from environment, or return undefined
- * when the Connector cannot be configured (no CF Access credentials). Returns
- * undefined — never throws — so a misconfigured server still boots and surfaces
- * 503 on Job endpoints rather than failing to start.
+ * when the ordinary Cloudflare Connector is not configured. The isolated M4-F
+ * 18443 mode is deliberately stricter: an incomplete authorization or TLS
+ * binding throws so a dispatcher host cannot silently fall back to 8443.
  */
-export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Promise<ConnectorPort | undefined> {
+export async function createConnectorFromEnv(
+  opts: ConnectorEnvOptions = {},
+): Promise<RemoteConnectorAdapter | undefined> {
   const env = opts.env ?? process.env;
-  const configPath = opts.configPath ?? env.SYNTHIA_CONNECTOR_CONFIG ?? "connector/worker-66.config.json";
   const endpointUrl = opts.endpointUrl ?? PRODUCTION_ENDPOINT_URL;
+  const directM4fMtls = endpointUrl === M4F_DIRECT_MTLS_ENDPOINT_URL;
+  if (!directM4fMtls && env.SYNTHIA_M4F_DIRECT_MTLS_AUTHORIZATION !== undefined) {
+    throw new Error("direct M4-F mTLS mode cannot target a non-18443 endpoint");
+  }
+  const directMaterial = directM4fMtls ? loadM4fDirectMtlsMaterial(env) : null;
+
+  const configPath = opts.configPath ?? env.SYNTHIA_CONNECTOR_CONFIG ?? "connector/worker-66.config.json";
 
   let raw: string;
   try {
@@ -467,35 +1310,40 @@ export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Pr
   } catch {
     return undefined;
   }
-
-  // Direct mTLS deployments (for example Core on a workstation reaching the
-  // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
-  // on-disk endpoint origin and let the factory load the client/server
-  // certificate material from the config paths.
-  if (config.transport_mode === "direct_https" && config.auth_mode === "mtls") {
+  if (directM4fMtls) {
+    if (config.tls_trust_ref !== M4F_DIRECT_MTLS_TRUST_REF
+      || config.tls_client_cert_ref !== M4F_DIRECT_MTLS_CLIENT_REF) {
+      throw new Error("direct M4-F Connector config has unexpected TLS references");
+    }
+    config = { ...config, endpoint_url: endpointUrl };
+  } else if (config.transport_mode === "direct_https" && config.auth_mode === "mtls") {
+    // Direct mTLS deployments (for example Core on a workstation reaching the
+    // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
+    // on-disk endpoint origin and let the factory load the client/server
+    // certificate material from the config paths.
     const httpModule = (await import("../../../connector/http.ts")) as unknown as {
       createMtlsDirectRemoteConnector: RemoteFactory;
     };
     const directEndpoint = String(config.endpoint_url ?? "");
     if (!directEndpoint) return undefined;
     return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+  } else {
+    // Cloudflare-tunnel deployments require the Access service-token credentials.
+    const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
+    const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
+    if (!cfId || !cfSecret) return undefined;
+
+    // Override the endpoint origin to the public tunnel; allowlist must include it.
+    // The tunnel terminates TLS at Cloudflare Access, so the mTLS material in the
+    // on-disk (LAN) config does not apply: point the TLS refs at the Cloudflare
+    // secret references the environment factory resolves into Access credentials.
+    config = {
+      ...config,
+      endpoint_url: endpointUrl,
+      tls_trust_ref: "secret://trust/cloudflare-edge",
+      tls_client_cert_ref: "secret://cert/cloudflare-origin",
+    };
   }
-
-  // Cloudflare-tunnel deployments require the Access service-token credentials.
-  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
-  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
-  if (!cfId || !cfSecret) return undefined;
-
-  // Override the endpoint origin to the public tunnel; allowlist must include it.
-  // The tunnel terminates TLS at Cloudflare Access, so the mTLS material in the
-  // on-disk (LAN) config does not apply: point the TLS refs at the Cloudflare
-  // secret references the environment factory resolves into Access credentials.
-  config = {
-    ...config,
-    endpoint_url: endpointUrl,
-    tls_trust_ref: "secret://trust/cloudflare-edge",
-    tls_client_cert_ref: "secret://cert/cloudflare-origin",
-  };
   const allowlist = [new URL(endpointUrl).hostname];
 
   // Dynamic import: the Connector package lives outside Core's compilation unit
@@ -504,8 +1352,24 @@ export async function createConnectorFromEnv(opts: ConnectorEnvOptions = {}): Pr
   // (vivado.ts, worker.ts) into Core's type-check graph and create a core↔connector
   // dependency cycle. Loading it lazily here keeps Core self-contained and lets the
   // test path skip the Connector module entirely (fake is injected instead).
-  const httpModule = (await import("../../../connector/http.ts")) as unknown as {
+  const connectorHttpModulePath: string = "../../../connector/http.ts";
+  const httpModule = (await import(connectorHttpModulePath)) as unknown as {
     createEnvironmentCloudflareRemoteConnector: RemoteFactory;
+    createDirectMtlsRemoteConnector: DirectMtlsRemoteFactory;
   };
-  return new RemoteConnectorAdapter(httpModule.createEnvironmentCloudflareRemoteConnector, config, allowlist, env);
+  const factory: RemoteFactory = directMaterial === null
+    ? httpModule.createEnvironmentCloudflareRemoteConnector
+    : (options) => httpModule.createDirectMtlsRemoteConnector({
+        ...options,
+        ca: directMaterial.ca,
+        cert: directMaterial.cert,
+        key: directMaterial.key,
+      });
+  return new RemoteConnectorAdapter(
+    factory,
+    config,
+    allowlist,
+    env,
+    opts.evolutionEvalCertification,
+  );
 }

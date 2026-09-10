@@ -940,6 +940,8 @@ export interface BitstreamResultV1 {
   readonly target_part: string;
   readonly sha256: string;
   readonly size_bytes: number;
+  readonly artifact_classification: "tool_run_evidence";
+  readonly usage_classification: "run_class_governed";
   readonly generated_at: string;
 }
 

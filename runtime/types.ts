@@ -11,6 +11,7 @@
 
 // Re-exported connector primitives so runtime modules depend on a single source.
 import type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
+export type { ConnectorCapability, EvidenceManifest } from "../connector/index.ts";
 import { computeManifestHash, sha256Hex } from "../core/src/hashing.ts";
 import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 import { parseProcessProfile } from "./process-profile.ts";

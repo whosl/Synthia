@@ -17,6 +17,10 @@ export const FORMAL_DELIVERY_FEATURE_ENABLED = parseExplicitFeatureFlag(
   import.meta.env.VITE_FEATURE_FORMAL_DELIVERY,
 );
 
+export const SELF_EVOLUTION_FEATURE_ENABLED = parseExplicitFeatureFlag(
+  import.meta.env.VITE_FEATURE_SELF_EVOLUTION,
+);
+
 /** 历史资料库同时受发布开关和工程项目类型约束。 */
 export function shouldShowHistoricalMaterials(
   featureEnabled: boolean,

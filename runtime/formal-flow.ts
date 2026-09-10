@@ -107,6 +107,8 @@ export interface FrozenEvidenceEntryV1 {
   readonly sizeBytes: number;
   readonly mediaType: string;
   readonly storageUri: string;
+  readonly artifactClassification: "tool_run_evidence";
+  readonly usageClassification: "run_class_governed";
   readonly completeness: "full" | "partial";
   readonly corrupt: boolean;
   readonly verdict: unknown;
@@ -184,6 +186,8 @@ export interface BitstreamResultV1 {
   readonly constraintHash: string;
   readonly sha256: string;
   readonly sizeBytes: number;
+  readonly artifactClassification: "tool_run_evidence";
+  readonly usageClassification: "run_class_governed";
   readonly storageUri: string;
   readonly generatedByType: string;
   readonly generatedBy: string;
@@ -552,8 +556,17 @@ export function parseFrozenEvidenceManifest(value: unknown, expectedProjectId: s
   if (!Array.isArray(row.entries) || row.entries.length === 0) shape("evidence manifest entries must be non-empty");
   const entries = row.entries.map((value, index): FrozenEvidenceEntryV1 => {
     const entry = record(value, `evidenceManifest.entries[${index}]`);
-    exact(entry, ["name", "role", "sha256", "sizeBytes", "mediaType", "storageUri", "completeness", "corrupt", "verdict"], [], `evidenceManifest.entries[${index}]`);
+    exact(entry, [
+      "name", "role", "sha256", "sizeBytes", "mediaType", "storageUri",
+      "artifactClassification", "usageClassification", "completeness", "corrupt", "verdict",
+    ], [], `evidenceManifest.entries[${index}]`);
     if (entry.completeness !== "full" && entry.completeness !== "partial") shape(`evidenceManifest.entries[${index}].completeness is invalid`);
+    if (
+      entry.artifactClassification !== "tool_run_evidence"
+      || entry.usageClassification !== "run_class_governed"
+    ) {
+      shape(`evidenceManifest.entries[${index}] carries non-governed evidence authority`);
+    }
     return {
       name: safePath(entry.name, `evidenceManifest.entries[${index}].name`),
       role: text(entry.role, `evidenceManifest.entries[${index}].role`, true),
@@ -561,6 +574,8 @@ export function parseFrozenEvidenceManifest(value: unknown, expectedProjectId: s
       sizeBytes: integer(entry.sizeBytes, `evidenceManifest.entries[${index}].sizeBytes`),
       mediaType: text(entry.mediaType, `evidenceManifest.entries[${index}].mediaType`),
       storageUri: text(entry.storageUri, `evidenceManifest.entries[${index}].storageUri`),
+      artifactClassification: entry.artifactClassification,
+      usageClassification: entry.usageClassification,
       completeness: entry.completeness,
       corrupt: bool(entry.corrupt, `evidenceManifest.entries[${index}].corrupt`),
       verdict: entry.verdict,
@@ -682,7 +697,8 @@ export function parseBitstreamResult(value: unknown, expectedProjectId: string):
     "evidence_manifest_hash", "evidence_entry_name", "class", "formal_input_approval_id",
     "snapshot_id", "readiness_id", "input_hash", "engineering_config_hash",
     "prerequisite_baseline_id", "target_part", "toolchain_profile_hash", "constraint_hash",
-    "sha256", "size_bytes", "storage_uri", "generated_by_type", "generated_by",
+    "sha256", "size_bytes", "artifact_classification", "usage_classification",
+    "storage_uri", "generated_by_type", "generated_by",
     "generated_at", "created_at",
   ], [], "bitstream");
   const projectId = text(row.project_id, "bitstream.project_id", true);
@@ -692,6 +708,12 @@ export function parseBitstreamResult(value: unknown, expectedProjectId: string):
   const snapshotId = nullableText(row.snapshot_id, "bitstream.snapshot_id");
   const readinessId = nullableText(row.readiness_id, "bitstream.readiness_id");
   const prerequisiteBaselineId = nullableText(row.prerequisite_baseline_id, "bitstream.prerequisite_baseline_id");
+  if (
+    row.artifact_classification !== "tool_run_evidence"
+    || row.usage_classification !== "run_class_governed"
+  ) {
+    shape("bitstream carries non-governed evidence authority");
+  }
   if (row.class === "formal" && [formalInputApprovalId, snapshotId, readinessId, prerequisiteBaselineId].some((field) => field === null)) {
     shape("formal bitstream is missing formal provenance");
   }
@@ -715,6 +737,8 @@ export function parseBitstreamResult(value: unknown, expectedProjectId: string):
     constraintHash: hash(row.constraint_hash, "bitstream.constraint_hash"),
     sha256: hash(row.sha256, "bitstream.sha256"),
     sizeBytes: integer(row.size_bytes, "bitstream.size_bytes"),
+    artifactClassification: row.artifact_classification,
+    usageClassification: row.usage_classification,
     storageUri: text(row.storage_uri, "bitstream.storage_uri"),
     generatedByType: text(row.generated_by_type, "bitstream.generated_by_type", true),
     generatedBy: text(row.generated_by, "bitstream.generated_by", true),
