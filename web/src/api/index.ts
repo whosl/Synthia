@@ -31,6 +31,7 @@ import type {
   HistoricalMaterialSearchResponse,
   HistoricalMaterialSnapshot,
   JobEvidenceContent,
+  ToolSummary,
   JobEvidenceManifest,
   JobRunSummary,
   OutboxEvent,
@@ -658,3 +659,9 @@ export function getJobEvidenceContent(
     `${V1}/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/evidence/content?name=${encodeURIComponent(name)}`,
   );
 }
+
+/** GET /projects/:id/tool-summary — 阶段进度 + 码流 + 时序摘要（一次拉齐）。 */
+export function getToolSummary(client: ApiClient, projectId: string): Promise<ToolSummary> {
+  return client<ToolSummary>(`${V1}/projects/${encodeURIComponent(projectId)}/tool-summary`);
+}
+export type { ToolSummary, ToolSummaryStage, ToolSummaryTiming } from "./types.ts";

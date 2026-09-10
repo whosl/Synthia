@@ -6,6 +6,7 @@ import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
 import Button from "../components/ui/Button.vue";
 import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
+import ImplProgressCard from "../components/impl/ImplProgressCard.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
@@ -29,6 +30,7 @@ import {
   getFormalInputApproval,
   getImportSnapshot,
   getJobEvidenceContent,
+  getToolSummary,
   getProject,
   getProcessProfile,
   getProcessState,
@@ -58,7 +60,8 @@ import {
   withdrawChangeRequest,
 } from "../api/index.ts";
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
-import type { ApproveRequest } from "../api/index.ts";
+import type {
+  ToolSummary, ApproveRequest } from "../api/index.ts";
 import type {
   AdoptSideTaskRequest,
   Artifact,
@@ -1417,6 +1420,7 @@ async function initializeProject(): Promise<void> {
     project.value = value;
     await refresh();
     if (disposed) return;
+    void refreshToolSummary();
     if (sideTasksEnabled.value) await loadSideTasks();
     // 深链要在 refresh 之后：它需要 agents 已就绪才能找到在等这道门的那个 agent。
     const subId = route.query.sub;
@@ -1862,6 +1866,26 @@ const projectTypeLabel = computed(() => (project.value ? projectTypeText(project
 const projectProfileLabel = computed(() =>
   project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : "—",
 );
+const toolSummary = ref<ToolSummary | null>(null);
+
+const staReportLoader = computed(() => {
+  const timing = toolSummary.value?.timing;
+  return timing ? () => loadStaReportText(timing.sourceJobId) : undefined;
+});
+
+async function refreshToolSummary(): Promise<void> {
+  try {
+    toolSummary.value = await getToolSummary(api, projectId);
+  } catch {
+    toolSummary.value = null; // 端点不可达（旧 Core / mock）时静默隐藏卡片
+  }
+}
+
+async function loadStaReportText(jobId: string): Promise<string> {
+  const evidence = await getJobEvidenceContent(api, projectId, jobId, "sta.rpt");
+  return evidence.content;
+}
+
 const viewMode = ref<FileTreeViewMode>("path");
 const focusStageId = ref<string | null>(null);
 
@@ -2458,6 +2482,12 @@ function onToggleChatOverlay(): void {
           :show-browse="leftCollapsed"
           @start="focusConversation"
           @browse="treeDrawerOpen = true"
+        />
+        <ImplProgressCard
+          v-if="!openArtifactId && toolSummary"
+          class="project-view-impl-card"
+          :summary="toolSummary"
+          :load-sta-report="staReportLoader"
         />
         <CodeEditor v-else
           v-bind="codeEditorProps"

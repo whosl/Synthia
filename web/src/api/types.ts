@@ -1064,3 +1064,32 @@ export interface JobEvidenceContent {
   readonly truncated: boolean;
   readonly mediaType: string;
 }
+
+/** GET /projects/:id/tool-summary — 物理实现进度与时序指标（工程/自由项目通用）。 */
+export interface ToolSummaryStage {
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement";
+  readonly state: string;
+  readonly lastJobId: string | null;
+  readonly lastAt: string | null;
+  readonly succeeded: number;
+  readonly failed: number;
+}
+
+export interface ToolSummaryTiming {
+  readonly wns: number | null;
+  readonly tns: number | null;
+  readonly whs: number | null;
+  readonly status: "met" | "failed" | "unconstrained" | "unknown";
+  readonly clocks: readonly string[];
+  readonly sourceJobId: string;
+  readonly parsedAt: string;
+}
+
+export interface ToolSummary {
+  readonly projectId: string;
+  readonly generatedAt: string;
+  readonly stages: readonly ToolSummaryStage[];
+  readonly bitstream: { readonly generated: boolean; readonly jobId: string | null; readonly at: string | null };
+  readonly timing: ToolSummaryTiming | null;
+  readonly timingError?: string;
+}
