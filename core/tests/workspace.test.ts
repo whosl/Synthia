@@ -27,6 +27,7 @@ import {
   git,
   gitRaw,
   headSha,
+  isRepo,
   listTree,
   statusMap,
 } from "../src/workspace/git.ts";
@@ -430,6 +431,75 @@ describe("人手改动与一键登记", () => {
     expect((await gitRaw(dir, ["rev-parse", "--verify", "--quiet", "refs/synthia/workspace-publish"])).exitCode)
       .not.toBe(0);
     await ensureWorkspace("p1"); // recovery marker 已清理，再次 ensure 仍幂等。
+  });
+
+  test("工作区嵌套在别的 git 仓库内时，必须建自己的独立仓库而不是认领父仓库", async () => {
+    // root 本身先成为一个「外层仓库」（模拟工作区目录嵌在外层仓库树内）。
+    await git(root, ["init", "--quiet"]);
+    await writeFile(join(root, "OUTER.md"), "outer\n", "utf8");
+    await git(root, ["add", "--", "OUTER.md"]);
+    await git(root, ["-c", "user.name=o", "-c", "user.email=o@x", "commit", "--no-verify", "--quiet", "-m", "outer initial"]);
+    const outerHead = await headSha(root);
+
+    await ensureWorkspace("p1");
+    const dir = projectWorkspaceDir("p1");
+    // 工作区有自己的 .git，HEAD 是自己的初始化提交，不是外层仓库的。
+    expect(await isRepo(dir)).toBe(true);
+    const innerHead = await headSha(dir);
+    expect(innerHead).not.toBe(outerHead);
+    // 外层仓库完全未被触碰（工作区目录只是未跟踪的新目录，跟踪状态零变化）。
+    expect(await headSha(root)).toBe(outerHead);
+    expect(await git(root, ["status", "--porcelain", "--untracked-files=no"])).toBe("");
+    // 外层看不到工作区内容（独立对象库）。
+    await expect(git(root, ["cat-file", "-t", innerHead!])).rejects.toThrow();
+  });
+
+  test("发布批次含删除路径时，硬中断恢复把删除幂等落地而不是报错", async () => {
+    await writeAndCommit("p1", [
+      { path: "rtl/keep.v", content: "keep-v1\n" },
+      { path: "rtl/gone.v", content: "gone-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+
+    // 用 plumbing 构造「HEAD 已 CAS 到删除提交、checkout 未重放」的硬中断现场。
+    await rm(join(dir, "rtl/gone.v"));
+    await git(dir, ["add", "--", "rtl/gone.v"]);
+    await git(dir, ["-c", `user.name=${AUTHOR.name}`, "-c", `user.email=${AUTHOR.email}`, "commit", "--no-verify", "--quiet", "-m", "delete gone"]);
+    const marker = (await headSha(dir))!;
+    // index/worktree 退回 parent 版（= 崩溃发生在删除落地之前），并留下 marker。
+    await git(dir, ["reset", "--quiet", `${marker}^`, "--", "rtl/gone.v"]);
+    await git(dir, ["--literal-pathspecs", "checkout", "--quiet", `${marker}^`, "--", "rtl/gone.v"]);
+    await git(dir, ["update-ref", "refs/synthia/workspace-publish", marker]);
+    expect(await readWorkingFile("p1", "rtl/gone.v")).toBe("gone-v1\n");
+
+    // 恢复：删除路径落地（index/worktree 均为删除态），marker 清理。
+    await ensureWorkspace("p1");
+    expect((await gitRaw(dir, ["rev-parse", "--verify", "--quiet", "refs/synthia/workspace-publish"])).exitCode)
+      .not.toBe(0);
+    await expect(readWorkingFile("p1", "rtl/gone.v")).rejects.toThrow("工作区没有这个文件");
+    expect(await statusMap(dir)).toEqual(new Map());
+    await ensureWorkspace("p1"); // 幂等：marker 清理后再次 ensure 正常。
+  });
+
+  test("删除路径在恢复窗口被人工改脏时，恢复拒绝删除并保留 marker", async () => {
+    await writeAndCommit("p1", [
+      { path: "rtl/gone.v", content: "gone-v1\n" },
+    ], "initial", AUTHOR);
+    const dir = projectWorkspaceDir("p1");
+
+    await rm(join(dir, "rtl/gone.v"));
+    await git(dir, ["add", "--", "rtl/gone.v"]);
+    await git(dir, ["-c", `user.name=${AUTHOR.name}`, "-c", `user.email=${AUTHOR.email}`, "commit", "--no-verify", "--quiet", "-m", "delete gone"]);
+    const marker = (await headSha(dir))!;
+    await git(dir, ["reset", "--quiet", `${marker}^`, "--", "rtl/gone.v"]);
+    await git(dir, ["update-ref", "refs/synthia/workspace-publish", marker]);
+    // 崩溃窗口里人工写回了第三个版本并暂存 → 恢复必须 fail closed。
+    await writeWorkingFile("p1", "rtl/gone.v", "人工新写的第三版\n");
+    await git(dir, ["add", "--", "rtl/gone.v"]);
+
+    await expect(ensureWorkspace("p1")).rejects.toThrow("拒绝删除");
+    expect(await readWorkingFile("p1", "rtl/gone.v")).toBe("人工新写的第三版\n");
+    expect(await git(dir, ["rev-parse", "--verify", "refs/synthia/workspace-publish"])).toBe(`${marker}\n`);
   });
 
   test("HEAD CAS 后的普通 checkout 故障在同一调用内恢复，不误报写入失败", async () => {
