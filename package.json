@@ -4,6 +4,12 @@
   "type": "module",
   "scripts": {
     "test": "bun test core/tests connector runtime",
+    "db:migrate": "bun run core/src/db/client.ts",
+    "bootstrap:self-evolution:gate": "bun run core/scripts/bootstrap-self-evolution-gate.ts",
+    "bootstrap:self-evolution:m4f-canary": "bun run core/scripts/bootstrap-evolution-eval-canary-m4f.ts",
+    "runtime:evolution": "bun run runtime/evolution-service.ts",
+    "runtime:self-evolution:m4f": "bun run runtime/m4f-e2e-service.ts",
+    "gate:self-evolution:m4f": "bun run core/scripts/run-self-evolution-m4f-e2e.ts",
     "check:names": "bash scripts/check-undefined-names.sh",
     "check:gjb-docs": "bun scripts/check-gjb9764-docs.ts",
     "check": "bun run check:names && bun run check:gjb-docs && tsc --noEmit -p core/tsconfig.json"

@@ -32,6 +32,7 @@
  *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
  *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
  *   SYNTHIA_FEATURE_HISTORICAL_MATERIALS 1|true 显式开启历史资料上下文 (default off)
+ *   SYNTHIA_FEATURE_SELF_EVOLUTION 1|true 显式开启 Learned Skill 闭环 (default off)
  *   SYNTHIA_CORE_TOKEN / URL        (ordinary Core governance/main connector)
  *   SYNTHIA_TASK_RUNTIME_TOKEN      (singleton-scope task callbacks/side capability)
  *
@@ -69,6 +70,7 @@ import {
   buildCoreApiConnector,
   buildCoreGovernanceClient,
   buildCoreTaskClient,
+  buildCoreTaskEvolutionClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
 import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
@@ -90,6 +92,8 @@ import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
 import { assembleWordDocumentTool } from "./word-document-tool.ts";
+import { assembleLearnedSkillTools } from "./learned-skill-tools.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
@@ -109,6 +113,7 @@ import {
   type RuntimeTaskKind,
   type TaskAuthorizationScope,
   type TaskConversationClient,
+  type TaskConversationEventResult,
   type TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
 
@@ -162,6 +167,7 @@ export interface AgentHandle {
   /** Append-only Core callback for every Core-owned main or side task. */
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
   readonly skillPrompts: SkillPrompts;
   readonly toolModelPolicyHash: string;
   // latest persisted state (mirrors disk; updated via onStateChange)
@@ -174,6 +180,7 @@ export interface AgentDeps {
   readonly governance: GovernanceClient;
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
 }
 
 export type DepsFactory = (opts: {
@@ -198,6 +205,8 @@ export interface ServerConfig {
   readonly port: number;
   /** Default-off rollout gate. Only literal true enables historical context. */
   readonly historicalMaterialsEnabled?: boolean;
+  /** Default-off Learned Skill rollout gate. */
+  readonly selfEvolutionEnabled?: boolean;
 }
 
 export type ConversationalModelFactory = () => ConversationalModel;
@@ -996,7 +1005,7 @@ export class RuntimeServer {
   private readonly taskEventChains = new Map<string, Promise<void>>();
   /** Any missing event makes the current Core-owned task ineligible to succeed. */
   private readonly taskEventFailures = new Map<string, unknown>();
-  private server?: Server;
+  private server?: Server<undefined>;
   private monitorTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -1434,6 +1443,7 @@ export class RuntimeServer {
         taskEvents: deps.taskEvents ?? deps.taskWorkspace,
       } : {}),
       ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+      ...(deps.evolution ? { evolution: deps.evolution } : {}),
       skillPrompts: this.config.skillPrompts,
       toolModelPolicyHash: this.config.toolModelPolicyHash,
       currentState: agentState,
@@ -1475,6 +1485,10 @@ export class RuntimeServer {
       workspace_id: h.workspaceId ?? null,
       input_hash: h.inputHash ?? null,
       status: h.status,
+      // A conversational turn may still expose its preceding durable status
+      // (for example awaiting_user) while prompt/tool execution is in flight.
+      // The evolution scheduler needs this live fact to prove continuous idle.
+      busy: h.busy || this.activeMessageTurns.has(h.agentId),
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
       formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
@@ -1939,7 +1953,7 @@ export class RuntimeServer {
         agentId,
         `te-${sha256Hex(`${agentId}\0${turnId}\0status-running`).slice(0, 40)}`,
         "status",
-        { status: "running" },
+        { turn_id: turnId, status: "running" },
       );
     } catch (error) {
       const reason = `Core task event sync failed before model execution: ${error instanceof Error ? error.message : String(error)}`;
@@ -1976,11 +1990,14 @@ export class RuntimeServer {
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0assistant`).slice(0, 40)}`,
           "assistant_message",
-          { text: reply },
+          { turn_id: turnId, text: reply },
         );
 
         const handle = this.registry.get(agentId);
-        let status: string = session.status();
+        let status: string = handle?.agentRole === "project"
+          ? handle.status
+          : session.status();
+        let settlingEvent: TaskConversationEventResult | undefined;
         if (handle?.taskKind === "side" && handle.taskWorkspace) {
           try {
             // Tool callbacks and the assistant message are awaited individually;
@@ -2002,11 +2019,11 @@ export class RuntimeServer {
                 handle.currentState = terminal;
               }
             } else {
-              await this.appendCoreTaskEvent(
+              settlingEvent = await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user`).slice(0, 40)}`,
                 "status",
-                { status: "awaiting_user" },
+                { turn_id: turnId, status: "awaiting_user" },
               );
               await this.flushCoreTaskEvents(agentId);
               handle.status = "awaiting_user";
@@ -2027,13 +2044,24 @@ export class RuntimeServer {
             await this.failClosedCoreTask(agentId, `result finalization failed: ${reason}`);
           }
         } else {
-          await this.appendCoreTaskEvent(
+          settlingEvent = await this.appendCoreTaskEvent(
             agentId,
             `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
             "status",
-            { status },
+            { turn_id: turnId, status },
           );
           await this.flushCoreTaskEvents(agentId);
+        }
+        if (handle?.agentRole === "project" && settlingEvent) {
+          await this.sealProjectLearningEpisode(
+            handle,
+            turnId,
+            text,
+            reply,
+            status,
+            settlingEvent.sequence,
+            opts.toolEventRange(),
+          );
         }
         hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -2050,6 +2078,7 @@ export class RuntimeServer {
         const mustFailClosed = !cancelled && !recoverableProjectTurn
           && !!(handle?.taskEvents ?? handle?.taskWorkspace);
         let status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
+        let projectSettlingEvent: TaskConversationEventResult | undefined;
         if (recoverableProjectTurn) {
           // A Project Agent is a durable conversation, not a bounded Run. A
           // model/network failure ends only this turn: persist the visible error
@@ -2061,13 +2090,13 @@ export class RuntimeServer {
               agentId,
               `te-${sha256Hex(`${agentId}\0${turnId}\0assistant-error`).slice(0, 40)}`,
               "assistant_message",
-              { text: `[error] ${reason}` },
+              { turn_id: turnId, text: `[error] ${reason}` },
             );
-            await this.appendCoreTaskEvent(
+            projectSettlingEvent = await this.appendCoreTaskEvent(
               agentId,
               `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user-error`).slice(0, 40)}`,
               "status",
-              { status: "awaiting_user", reason },
+              { turn_id: turnId, status: "awaiting_user", reason },
             );
             await this.flushCoreTaskEvents(agentId);
             if (handle) {
@@ -2090,6 +2119,17 @@ export class RuntimeServer {
               }
             }
             status = "awaiting_user";
+            if (handle && projectSettlingEvent) {
+              await this.sealProjectLearningEpisode(
+                handle,
+                turnId,
+                text,
+                `[error] ${reason}`,
+                status,
+                projectSettlingEvent.sequence,
+                opts.toolEventRange(),
+              );
+            }
           } catch (error) {
             status = "fail_closed";
             await this.failClosedCoreTask(
@@ -2132,6 +2172,12 @@ export class RuntimeServer {
             `模型/传输层错误打断了上一轮（${reason.slice(0, 200)}）。已恢复为待命状态；已完成的工具调用与登记产物有效，请从中断处继续任务。`,
             `turn-error-${turnId}`,
           ).catch(() => undefined);
+          await this.appendCoreTaskEvent(
+            agentId,
+            `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
+            "status",
+            { turn_id: turnId, status, reason },
+          ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));
         }
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -2143,6 +2189,52 @@ export class RuntimeServer {
       });
     this.syncHandleFromSession(agentId, session);
     return json({ accepted: true, status: session.status() });
+  }
+
+  /**
+   * Project Agents have no task terminal. The committed awaiting_user event is
+   * their immutable LearningEpisode boundary. Learning is a recoverable side
+   * effect: failure is logged for idempotent replay and never rewrites the
+   * already-settled primary conversation outcome.
+   */
+  private async sealProjectLearningEpisode(
+    handle: AgentHandle,
+    turnId: string,
+    userText: string,
+    assistantText: string,
+    status: string,
+    endEventSequence: number,
+    toolRange: { readonly start: number | null; readonly end: number | null },
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId || status !== "awaiting_user") return;
+    const observationKey = `turn:${turnId}`;
+    const episodeKey = `${observationKey}:${endEventSequence}`;
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "project-turn-episode.v1",
+      taskId: handle.taskId,
+      turnId,
+      endEventSequence,
+      userText,
+      assistantText,
+      status,
+      toolRange,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: assistantText.slice(0, 2_000),
+        toolEventStartSequence: toolRange.start,
+        toolEventEndSequence: toolRange.end,
+        evidenceRefs: [],
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal project LearningEpisode", error);
+    }
   }
 
   /** Core-owned task terminals are immutable even if a free-agent session remains recoverable. */
@@ -2258,6 +2350,7 @@ export class RuntimeServer {
     sideTaskCompletionRequested: () => boolean;
     reasoningTexts: () => readonly string[];
     nextThinkingSeq: () => number;
+    toolEventRange: () => { readonly start: number | null; readonly end: number | null };
   } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
@@ -2292,14 +2385,14 @@ export class RuntimeServer {
           const index = thinkingSeq;
           thinkingSeq += 1;
           chain = chain
-            .then(() =>
-              this.appendCoreTaskEvent(
+            .then(async () => {
+              await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
                 "assistant_thinking",
                 { text },
-              ),
-            )
+              );
+            })
             .catch((error: unknown) => {
               process.stderr.write(
                 `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -2312,14 +2405,14 @@ export class RuntimeServer {
           const index = narrationSeq;
           narrationSeq += 1;
           chain = chain
-            .then(() =>
-              this.appendCoreTaskEvent(
+            .then(async () => {
+              await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0narration\0${index}`).slice(0, 40)}`,
                 "assistant_message",
                 { text },
-              ),
-            )
+              );
+            })
             .catch((error: unknown) => {
               process.stderr.write(
                 `[runtime-server] assistant narration sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -2354,6 +2447,8 @@ export class RuntimeServer {
       }
       openPartId = null;
     };
+    let firstToolEventSequence: number | null = null;
+    let lastToolEventSequence: number | null = null;
     const openText = (partId: string, kind: "text" | "reasoning"): void => {
       closeOpenPart();
       parts.set(partId, { kind, text: "" });
@@ -2369,6 +2464,7 @@ export class RuntimeServer {
       hub.emit({ type: "delta", partId, text });
     };
     return {
+      turnId,
       onTextStart: (partId) => openText(partId, "text"),
       onDelta: appendText,
       onReasoningStart: (partId) => openText(partId, "reasoning"),
@@ -2384,12 +2480,17 @@ export class RuntimeServer {
         // 先落本轮已完结的思维链与叙述，再落 tool_call：三者共用 appendCoreTaskEvent
         // 的串行链，sequence 即发生序（think/narration → tool，而不是 tool 全部先落）。
         await flushPendingCells();
-        await this.appendCoreTaskEvent(
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
           "tool_call",
-          { tool_call_id: callId, name, args: fullArgs ?? args },
+          { turn_id: turnId, tool_call_id: callId, name, args: fullArgs ?? args },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
+        return event?.sequence;
       },
       onToolEnd: async (callId, ok, result, fullResult) => {
         hub.emit({
@@ -2424,12 +2525,16 @@ export class RuntimeServer {
           }),
           ok ? "ok" : "failed",
         );
-        await this.appendCoreTaskEvent(
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-result\0${callId}`).slice(0, 40)}`,
           "tool_result",
-          { tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
+          { turn_id: turnId, tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
       },
       finalize: () => {
         const ts = new Date().toISOString();
@@ -2456,22 +2561,24 @@ export class RuntimeServer {
         thinkingSeq += 1;
         return next;
       },
+      toolEventRange: () => ({ start: firstToolEventSequence, end: lastToolEventSequence }),
     };
   }
 
-  private appendCoreTaskEvent(
+  private async appendCoreTaskEvent(
     agentId: string,
     eventId: string,
     type: "assistant_message" | "assistant_thinking" | "tool_call" | "tool_result" | "status" | "permission_request" | "permission_decision",
     payload: Readonly<Record<string, unknown>>,
-  ): Promise<void> {
+  ): Promise<TaskConversationEventResult | undefined> {
     const handle = this.registry.get(agentId);
     const client = handle?.taskEvents ?? handle?.taskWorkspace;
-    if (!client) return Promise.resolve();
+    if (!client) return undefined;
     const previous = this.taskEventChains.get(agentId) ?? Promise.resolve();
+    let result: TaskConversationEventResult | undefined;
     const next = previous
       .catch(() => {})
-      .then(async () => { await client.appendEvent({ eventId, type, payload }); })
+      .then(async () => { result = await client.appendEvent({ eventId, type, payload }); })
       .catch((error) => {
         if (!this.taskEventFailures.has(agentId)) this.taskEventFailures.set(agentId, error);
         throw error;
@@ -2480,7 +2587,8 @@ export class RuntimeServer {
     void next.finally(() => {
       if (this.taskEventChains.get(agentId) === next) this.taskEventChains.delete(agentId);
     }).catch(() => {});
-    return next;
+    await next;
+    return result;
   }
 
   /** Wait until every event queued before result sealing is durably in Core. */
@@ -2508,12 +2616,18 @@ export class RuntimeServer {
     await this.persistTerminal(handle, "fail_closed", reason, cause).catch((error) => {
       this.logTaskSyncFailure(agentId, "persist local fail-closed state", error);
     });
-    await this.appendCoreTaskEvent(
+    const settlingEvent = await this.appendCoreTaskEvent(
       agentId,
       `te-${sha256Hex(`${agentId}\0status-fail-closed\0${reason}`).slice(0, 40)}`,
       "status",
       { status: "fail_closed", reason },
-    ).catch((error) => this.logTaskSyncFailure(agentId, "fail-closed status", error));
+    ).catch((error) => {
+      this.logTaskSyncFailure(agentId, "fail-closed status", error);
+      return undefined;
+    });
+    if (settlingEvent && handle.agentRole !== "project") {
+      await this.sealBoundedLearningEpisode(handle, settlingEvent.sequence);
+    }
   }
 
   private logTaskSyncFailure(agentId: string, action: string, error: unknown): void {
@@ -2903,6 +3017,9 @@ export class RuntimeServer {
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
         assembleVivadoTool(),
         assembleSkillDocTool(),
+        ...(this.config.selfEvolutionEnabled === true && handle?.evolution
+          ? assembleLearnedSkillTools()
+          : []),
         ...(taskKind === "side" ? [assembleSideTaskCompletionTool()] : []),
       ],
       systemPrompt,
@@ -2921,6 +3038,7 @@ export class RuntimeServer {
       ...(workspaceId ? { workspaceId } : {}),
       ...(authorization ? { authorization } : {}),
       ...(taskWorkspace ? { workspace: taskWorkspace } : {}),
+      ...(handle?.evolution ? { evolution: handle.evolution } : {}),
       ...(inputHash ? { inputHash } : {}),
       ...(taskDescriptorHash ? { taskDescriptorHash } : {}),
       ...(initialState ? { initialState } : {}),
@@ -3130,6 +3248,7 @@ export class RuntimeServer {
   }
 
   private async applyResult(h: AgentHandle, result: LoopResult): Promise<void> {
+    let settlingEvent: TaskConversationEventResult | undefined;
     if (result.awaitingGate) {
       h.status = "awaiting_approval";
       h.awaitingGate = result.awaitingGate;
@@ -3140,7 +3259,7 @@ export class RuntimeServer {
       h.awaitingGate = undefined;
       // Persist terminal state — the loop's finish() doesn't call onStateChange.
       await this.persistTerminal(h, result.status, result.endedReason, result.terminalCause);
-      if (h.currentState) await this.appendAgentStateEvent(h, h.currentState);
+      if (h.currentState) settlingEvent = await this.appendAgentStateEvent(h, h.currentState);
     }
 
     // Merge evidence (deduped by jobId) — evidence is per-executor-instance.
@@ -3149,21 +3268,63 @@ export class RuntimeServer {
         h.evidence.push(ev);
       }
     }
+    if (settlingEvent && h.agentRole === "run") {
+      await this.sealBoundedLearningEpisode(h, settlingEvent.sequence);
+    }
   }
 
-  private async appendAgentStateEvent(h: AgentHandle, state: AgentState): Promise<void> {
+  private async appendAgentStateEvent(
+    h: AgentHandle,
+    state: AgentState,
+  ): Promise<TaskConversationEventResult | undefined> {
     const payload = {
       status: state.status,
       current_stage: state.currentStage,
       ...(state.awaitingGate ? { awaiting_gate: state.awaitingGate } : {}),
       ...(state.endedReason ? { reason: state.endedReason } : {}),
     };
-    await this.appendCoreTaskEvent(
+    return await this.appendCoreTaskEvent(
       h.agentId,
       `te-${sha256Hex(`${h.agentId}\0agent-state\0${state.updatedAt}\0${JSON.stringify(payload)}`).slice(0, 40)}`,
       "status",
       payload,
     );
+  }
+
+  private async sealBoundedLearningEpisode(
+    handle: AgentHandle,
+    endEventSequence: number,
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId) return;
+    const terminalStatus = handle.status;
+    if (terminalStatus !== "succeeded" && terminalStatus !== "failed" && terminalStatus !== "fail_closed") return;
+    const observationKey = `task:${handle.taskId}`;
+    const episodeKey = `terminal:${endEventSequence}`;
+    const evidenceRefs = handle.evidence.map(item => item.jobId);
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "bounded-task-episode.v1",
+      taskId: handle.taskId,
+      endEventSequence,
+      status: terminalStatus,
+      reason: handle.endedReason ?? null,
+      evidenceRefs,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId: null,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: handle.endedReason ?? terminalStatus,
+        toolEventStartSequence: null,
+        toolEventEndSequence: null,
+        evidenceRefs,
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal bounded LearningEpisode", error);
+    }
   }
 
   private async persistTerminal(
@@ -3358,6 +3519,7 @@ export class RuntimeServer {
             taskEvents: deps.taskEvents ?? deps.taskWorkspace,
           } : {}),
           ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+          ...(deps.evolution ? { evolution: deps.evolution } : {}),
           skillPrompts: this.config.skillPrompts,
           toolModelPolicyHash: this.config.toolModelPolicyHash,
           currentState: state,
@@ -3473,11 +3635,22 @@ function parseHistoricalMaterialsFeatureFlag(value: string | undefined): boolean
   );
 }
 
+function parseSelfEvolutionFeatureFlag(value: string | undefined): boolean {
+  if (value === undefined || value === "0" || value === "false") return false;
+  if (value === "1" || value === "true") return true;
+  throw new Error(
+    "SYNTHIA_FEATURE_SELF_EVOLUTION must be exactly one of: 0, 1, false, true",
+  );
+}
+
 export async function createServerConfig(
   env: Record<string, string | undefined> = process.env,
 ): Promise<ServerConfig> {
   const historicalMaterialsEnabled = parseHistoricalMaterialsFeatureFlag(
     env.SYNTHIA_FEATURE_HISTORICAL_MATERIALS,
+  );
+  const selfEvolutionEnabled = parseSelfEvolutionFeatureFlag(
+    env.SYNTHIA_FEATURE_SELF_EVOLUTION,
   );
   const loader = new SkillLoader();
   const skillPrompts = await loader.buildPrompts();
@@ -3489,6 +3662,7 @@ export async function createServerConfig(
     gatePollMs: Number(env.SYNTHIA_GATE_POLL_MS ?? 8000),
     port: Number(env.SYNTHIA_RUNTIME_PORT ?? 8790),
     historicalMaterialsEnabled,
+    selfEvolutionEnabled,
   };
 }
 
@@ -3569,6 +3743,9 @@ export function createEnvDepsFactory(
     const taskEvents = taskId
       ? taskWorkspace ?? buildCoreTaskClient(projectId, taskId, env)
       : undefined;
+    const evolution = taskId
+      ? buildCoreTaskEvolutionClient(projectId, taskId, env)
+      : undefined;
 
     return {
       model,
@@ -3576,6 +3753,7 @@ export function createEnvDepsFactory(
       governance,
       ...(taskEvents ? { taskEvents } : {}),
       ...(taskWorkspace ? { taskWorkspace } : {}),
+      ...(evolution ? { evolution } : {}),
     };
   };
 }

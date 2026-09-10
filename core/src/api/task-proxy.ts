@@ -35,6 +35,7 @@ import {
   type TransactionClient,
 } from "../db/repository.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
+import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
 import { headSha } from "../workspace/git.ts";
 import { ensureWorkspace, readTreeAt } from "../workspace/store.ts";
 import {
@@ -1014,7 +1015,7 @@ async function appendConversationEventRecord(
   eventId: string,
   eventKind: string,
   payload: unknown,
-): Promise<void> {
+): Promise<number> {
   const payloadHash = canonicalRequestHash(payload);
   const inserted = await client.query(
     `WITH locked AS (
@@ -1027,7 +1028,7 @@ async function appendConversationEventRecord(
      INSERT INTO task_conversation_event
        (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id)
      SELECT $3,$2,$1,value,$4,$5::jsonb,$6,$7,$8 FROM next_sequence
-     RETURNING id`,
+     RETURNING sequence`,
     [
       taskId,
       projectId,
@@ -1040,6 +1041,7 @@ async function appendConversationEventRecord(
     ],
   );
   if (inserted.rows.length === 0) throw notFoundError(`task not found: ${taskId}`);
+  return Number((inserted.rows[0] as { sequence: number | string }).sequence);
 }
 
 type RuntimeCreateTaskBody = Parameters<RuntimeClient["createTask"]>[0];
@@ -1709,7 +1711,7 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
           [current.id, projectId],
         );
         if (cancelled.rows.length > 0) {
-          await appendConversationEventRecord(
+          const terminalSequence = await appendConversationEventRecord(
             tx,
             ctx,
             projectId,
@@ -1718,6 +1720,13 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
             "status",
             { status: "cancelled" },
           );
+          await sealLearningEpisodeAtStatus(tx, {
+            task: current,
+            sequence: terminalSequence,
+            payload: { status: "cancelled" },
+            actorType: ctx.identity.actorType,
+            actorId: ctx.identity.actorId,
+          });
         }
         return { response };
       },

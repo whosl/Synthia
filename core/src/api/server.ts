@@ -8,18 +8,27 @@
 
 import type { Pool } from "pg";
 import type { ConnectorPort } from "./connector-port.ts";
+import type { EvolutionEvalConnectorPort } from "../services/evolution-eval-connector-port.ts";
+import {
+  startEvolutionEvalDispatcherHost,
+  type EvolutionEvalDispatcherHostOptions,
+  validateEvolutionEvalDispatcherHostOptions,
+} from "../services/evolution-eval-dispatcher-host.ts";
 import { createRuntimeClientFromEnv, type RuntimeClient } from "./task-proxy.ts";
 import {
   resolveCoreFeatureFlags,
   type CoreFeatureFlags,
 } from "./feature-flags.ts";
 import { routeApi } from "./router.ts";
+import type { EvolutionEvalDeploymentReadiness } from "./handlers.ts";
 
 export interface SynthiaServer {
   readonly port: number;
   readonly hostname: string;
   /** Stop the server, aborting in-flight connections. */
   readonly stop: () => void;
+  /** Stop accepting work and await the current bounded dispatcher tick. */
+  readonly stopAsync: () => Promise<void>;
 }
 
 export interface SynthiaServerOptions {
@@ -36,6 +45,8 @@ export interface SynthiaServerOptions {
    * endpoint works unchanged. Tests inject a fake ConnectorPort directly.
    */
   readonly connector?: ConnectorPort;
+  /** Dedicated eval execution/recovery port, isolated from generic Job routes. */
+  readonly evolutionEvalConnector?: EvolutionEvalConnectorPort;
   /**
    * Runtime client for the task-workbench slice. When omitted the server builds
    * one from env (SYNTHIA_RUNTIME_URL, default http://127.0.0.1:8790); set
@@ -49,14 +60,29 @@ export interface SynthiaServerOptions {
    */
   readonly runtimeActorId?: string;
   /**
-   * Explicit Core feature overrides. P2/P3/P4 writes default off; when omitted,
-   * SYNTHIA_FEATURE_HISTORICAL_MATERIALS, SYNTHIA_FEATURE_SIDE_TASKS, and
-   * SYNTHIA_FEATURE_FORMAL_DELIVERY are parsed strictly.
+   * Explicit Core feature overrides. P2/P3/P4/self-evolution writes default off; when omitted,
+   * SYNTHIA_FEATURE_HISTORICAL_MATERIALS, SYNTHIA_FEATURE_SIDE_TASKS,
+   * SYNTHIA_FEATURE_FORMAL_DELIVERY, and SYNTHIA_FEATURE_SELF_EVOLUTION are
+   * parsed strictly.
    */
   readonly features?: Readonly<Partial<CoreFeatureFlags>>;
+  /**
+   * Optional in-process evolution-eval dispatcher. It is absent/default-off in
+   * production until the typed Connector adapter is explicitly configured.
+   * Tests and later deployment wiring inject the bounded tick here; no bearer
+   * credential or HTTP consumer surface is created.
+   */
+  readonly evolutionEvalDispatcher?: EvolutionEvalDispatcherHostOptions;
+  /** Authenticated read-only M4-F startup identity; never an authorization. */
+  readonly evolutionEvalReadiness?: EvolutionEvalDeploymentReadiness;
+  /** Fresh remote certification/mapping/ledger proof for the M4-F runner. */
+  readonly evolutionEvalLiveCertificationProbe?: () => Promise<void>;
 }
 
 export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}): SynthiaServer {
+  if (opts.evolutionEvalDispatcher) {
+    validateEvolutionEvalDispatcherHostOptions(opts.evolutionEvalDispatcher);
+  }
   const runtimeClient = opts.runtimeClient ?? createRuntimeClientFromEnv();
   const runtimeActorId = resolveRuntimeActorId(
     opts.runtimeActorId ?? process.env.SYNTHIA_RUNTIME_ACTOR_ID,
@@ -76,12 +102,30 @@ export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}):
       runtimeClient,
       featureFlags,
       runtimeActorId,
+      opts.evolutionEvalConnector,
+      opts.evolutionEvalReadiness,
+      opts.evolutionEvalLiveCertificationProbe,
     ),
   });
+  const evolutionEvalDispatcher = opts.evolutionEvalDispatcher
+    ? startEvolutionEvalDispatcherHost(opts.evolutionEvalDispatcher)
+    : undefined;
+  let stopPromise: Promise<void> | null = null;
+  const stopDispatcher = (): Promise<void> => {
+    stopPromise ??= evolutionEvalDispatcher?.stop() ?? Promise.resolve();
+    return stopPromise;
+  };
   return {
     port: server.port ?? (opts.port ?? 0),
     hostname: server.hostname ?? (opts.hostname ?? "127.0.0.1"),
-    stop: () => server.stop(true),
+    stop: () => {
+      void stopDispatcher();
+      server.stop(true);
+    },
+    stopAsync: async () => {
+      server.stop(true);
+      await stopDispatcher();
+    },
   };
 }
 

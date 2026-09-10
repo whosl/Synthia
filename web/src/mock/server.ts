@@ -67,6 +67,7 @@ import {
   mockP4WorkspaceManifestHash,
   routeMockP4,
 } from "./p4.ts";
+import { routeMockEvolution } from "./evolution.ts";
 
 /** 假装有网络：让 loading 态真的能被看见，而不是同步瞬间填满。 */
 const LATENCY_MS = 80;
@@ -1097,6 +1098,9 @@ async function route(
   headers: Headers,
 ): Promise<Response | null> {
   const seg = pathname.replace(/^\/api\/v1\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+
+  const evolutionResponse = routeMockEvolution({ segments: seg, method, body, headers, searchParams });
+  if (evolutionResponse) return evolutionResponse;
 
   if (seg.length === 1 && seg[0] === "process-versions" && method === "GET") {
     if (processVersionsMode() === "error") {

@@ -45,6 +45,9 @@ export interface RemoteVivadoOptions {
 
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_MAX_POLL_MS = 30 * 60 * 1000;
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class RemoteVivadoConnector implements LoopConnector {
   readonly id: string;

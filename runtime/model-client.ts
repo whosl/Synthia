@@ -90,7 +90,7 @@ export interface ChatMessage {
 
 /** Low-level poster abstraction (tests inject a canned responder). */
 export interface ChatPoster {
-  (input: { url: string; headers: Record<string, string>; body: string; timeoutMs: number }): Promise<ChatCompletionResponse>;
+  (input: { url: string; headers: Record<string, string>; body: string; timeoutMs: number; signal?: AbortSignal }): Promise<ChatCompletionResponse>;
 }
 
 export interface ChatCompletionResponse {
@@ -402,8 +402,11 @@ export async function consumeChatSSE(
 // default poster: native fetch, no proxy, abortable timeout
 // ---------------------------------------------------------------------------
 
-const defaultPost: ChatPoster = async ({ url, headers, body, timeoutMs }) => {
+const defaultPost: ChatPoster = async ({ url, headers, body, timeoutMs, signal }) => {
   const ctrl = new AbortController();
+  const onAbort = (): void => ctrl.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { method: "POST", headers, body, signal: ctrl.signal });
@@ -413,8 +416,16 @@ const defaultPost: ChatPoster = async ({ url, headers, body, timeoutMs }) => {
     return { status: res.status, json, text };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 };
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("model request aborted", "AbortError");
+}
 
 function extractArguments(json: unknown, protocol: ActionProtocol): { ok: true; value: unknown } | { ok: false; reason: string } {
   interface ToolCallFn { function?: { arguments?: unknown } }
@@ -663,19 +674,31 @@ export class ModelClient implements LoopModel, ConversationalModel {
    * Network/timeout errors are retried with the same backoff as emitAction;
    * non-retryable 4xx surface immediately.
    */
-  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
+  async chat(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    signal?: AbortSignal,
+  ): Promise<ChatTurn> {
     const maxNetwork = Math.max(0, this.cfg.networkRetries ?? 2);
     const { url, headers, body } = this.buildChatRequest(messages, tools);
-    const req = { url, headers, body, timeoutMs: this.cfg.timeoutMs ?? 120_000 };
+    const req = {
+      url,
+      headers,
+      body,
+      timeoutMs: this.cfg.timeoutMs ?? 120_000,
+      ...(signal === undefined ? {} : { signal }),
+    };
 
     let netAttempt = 0;
     let response: ChatCompletionResponse;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       try {
+        throwIfAborted(signal);
         response = await this.post(req);
         break;
       } catch (e) {
+        throwIfAborted(signal);
         netAttempt++;
         if (netAttempt > maxNetwork) throw e;
         await sleep(backoffMs(netAttempt));

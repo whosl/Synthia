@@ -208,6 +208,7 @@ export interface ApiHarnessOptions {
   readonly features?: SynthiaServerOptions["features"];
   readonly runtimeClient?: SynthiaServerOptions["runtimeClient"];
   readonly connector?: SynthiaServerOptions["connector"];
+  readonly evolutionEvalConnector?: SynthiaServerOptions["evolutionEvalConnector"];
   readonly runtimeActorId?: string;
 }
 
@@ -236,6 +237,7 @@ export async function setupApiHarness(
     runtimeClient: options.runtimeClient,
     runtimeActorId: options.runtimeActorId ?? ids.serviceUid,
     connector: options.connector,
+    evolutionEvalConnector: options.evolutionEvalConnector,
   });
   const baseUrl = `http://${server.hostname}:${server.port}`;
 
