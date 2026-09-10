@@ -1079,6 +1079,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.authorization ? { authorization: this.deps.authorization } : {}),
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
       ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
+      toolCallId: call.toolCallId,
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
