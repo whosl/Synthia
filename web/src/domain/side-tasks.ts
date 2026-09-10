@@ -305,6 +305,8 @@ const SIDE_TASK_EVENT_KINDS = new Set<SideTaskConversationEventKind>([
   "tool_call",
   "tool_result",
   "status",
+  "permission_request",
+  "permission_decision",
 ]);
 
 /** Strictly parse the Core-owned event page used to resume awaiting_user tasks. */

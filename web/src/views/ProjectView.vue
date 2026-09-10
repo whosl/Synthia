@@ -10,6 +10,7 @@ import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
   abortAgent,
+  resolveTaskPermission,
   adoptSideTask,
   approveGateSubmission,
   confirmImportSnapshot,
@@ -2493,7 +2494,41 @@ const chatFeedProps = computed<ChatFeedProps>(() => ({
   sendError: sendError.value,
   exampleTasks: EXAMPLE_TASKS,
   approval: approvalCardProps.value,
+  contextUsage: detail.value?.context_usage
+    ? { promptTokens: detail.value.context_usage.prompt_tokens, contextWindow: detail.value.context_usage.context_window }
+    : null,
+  permissionSkipAll: detail.value?.permission?.skip_all ?? false,
 }));
+
+// ── 权限交互：流内卡片裁决 + 「跳过所有权限」开关 ─────────────────────────────
+
+const permissionOperating = ref(false);
+
+async function onResolvePermission(callId: string, allow: boolean): Promise<void> {
+  if (!currentAgentId.value || permissionOperating.value) return;
+  permissionOperating.value = true;
+  try {
+    await resolveTaskPermission(api, projectId, currentAgentId.value, { callId, allow });
+    await refresh();
+  } catch (err) {
+    sendError.value = humanizeDecisionError(err, "权限裁决").text;
+  } finally {
+    permissionOperating.value = false;
+  }
+}
+
+async function onToggleSkipPermissions(skip: boolean): Promise<void> {
+  if (!currentAgentId.value || permissionOperating.value) return;
+  permissionOperating.value = true;
+  try {
+    await resolveTaskPermission(api, projectId, currentAgentId.value, { skipAll: skip });
+    await refresh();
+  } catch (err) {
+    sendError.value = humanizeDecisionError(err, "权限开关").text;
+  } finally {
+    permissionOperating.value = false;
+  }
+}
 
 const recordsPanelProps = computed<RecordsPanelProps>(() => ({
   open: recordsOpen.value,
@@ -2694,6 +2729,8 @@ function onToggleChatOverlay(): void {
             @close="chatOverlayOpen = false"
             @send="onSend"
             @abort="onAbort"
+            @resolve-permission="onResolvePermission"
+            @toggle-skip-permissions="onToggleSkipPermissions"
             @open-doc="onOpenDoc"
             @open-diff="onOpenDiff"
             @open-records="onOpenRecords"
@@ -2770,6 +2807,8 @@ function onToggleChatOverlay(): void {
               @close="chatOverlayOpen = false"
               @send="onSend"
               @abort="onAbort"
+            @resolve-permission="onResolvePermission"
+            @toggle-skip-permissions="onToggleSkipPermissions"
               @open-doc="onOpenDoc"
               @open-diff="onOpenDiff"
               @open-records="onOpenRecords"

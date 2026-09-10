@@ -229,6 +229,31 @@ export interface FreeAgentSession {
   prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
   /** 运行中纠偏；返回的 Promise 完成后已持久化，在模型或完整工具批次边界注入。 */
   steer(text: string): void | Promise<void>;
+  /** 权限交互快照（UI 渲染卡片与「跳过所有权限」开关）。 */
+  permissionState(): {
+    pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+    skipAll: boolean;
+  };
+  /** 用户对挂起权限请求的裁决；无匹配挂起时返回 false。 */
+  resolvePermission(callId: string, allow: boolean): boolean;
+  /** 「跳过所有权限」开关（会话级，内存态）。 */
+  setPermissionSkipAll(skip: boolean): void;
+  /**
+   * 权限/上下文事件监听（server 注入：写 Core 事件 + SSE 上流）。
+   * request 在工具调用挂起时发一次；decision 含 allow 与原因（用户/超时）。
+   */
+  setPermissionListener(
+    listener: (event: {
+      kind: "request" | "decision";
+      callId: string;
+      tool: string;
+      argsPreview: string;
+      allow?: boolean;
+      reason?: string;
+    }) => void,
+  ): void;
+  /** 上下文水位（UI 环形指示）：promptTokens 为最近实测输入规模，null=未回报。 */
+  contextUsage(): { promptTokens: number | null; contextWindow: number };
   /** 立即终止。 */
   abort(reason?: string): void;
 }

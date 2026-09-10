@@ -430,6 +430,10 @@ export interface ChatFeedProps {
    * approve/reject 冒泡上去，自己不解读其中任何字段。
    */
   readonly approval: ApprovalCardProps | null;
+  /** 上下文水位（环形指示）；runtime 未回报或旧会话为 null。 */
+  readonly contextUsage: { readonly promptTokens: number | null; readonly contextWindow: number } | null;
+  /** 「跳过所有权限」开关当前态（红线操作不受它影响）。 */
+  readonly permissionSkipAll: boolean;
 }
 
 export interface ChatFeedEmits {
@@ -443,6 +447,10 @@ export interface ChatFeedEmits {
   send: [text: string];
   /** 点击「⏹ 打断」（`POST .../tasks/:agentId/abort`）；仅 canAbort=true 时应可点击。 */
   abort: [];
+  /** 流内权限卡裁决（允许/拒绝一次挂起的工具调用）。 */
+  "resolve-permission": [callId: string, allow: boolean];
+  /** 「跳过所有权限」开关切换。 */
+  "toggle-skip-permissions": [skip: boolean];
   /**
    * 点击产物卡关联的文档 → 中栏编辑器打开（不再弹抽屉，这是三栏相对 v3 的主要收益）。
    *

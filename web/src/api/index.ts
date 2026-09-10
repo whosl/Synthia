@@ -613,6 +613,19 @@ export function sendMessage(
   );
 }
 
+/** POST /tasks/:agentId/permission — 权限卡片裁决或「跳过所有权限」开关。 */
+export function resolveTaskPermission(
+  client: ApiClient,
+  projectId: string,
+  agentId: string,
+  body: { callId?: string; allow?: boolean; skipAll?: boolean },
+): Promise<unknown> {
+  return client<unknown>(
+    `${V1}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/permission`,
+    { method: "POST", body },
+  );
+}
+
 /** POST /tasks/:agentId/abort — 终止自由 Agent 会话。 */
 export function abortAgent(
   client: ApiClient,

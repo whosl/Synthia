@@ -20,6 +20,8 @@ import { TASK_STATUS_TEXT } from "../../domain/tasks.ts";
 import Button from "../ui/AppButton.vue";
 import Badge from "../ui/AppBadge.vue";
 import AgentToolItem from "./AgentToolItem.vue";
+import ContextRing from "./ContextRing.vue";
+import PermissionCard from "./PermissionCard.vue";
 import ApprovalCard from "./ApprovalCard.vue";
 import ChatComposer from "./ChatComposer.vue";
 import CodeCard from "./CodeCard.vue";
@@ -119,7 +121,7 @@ onMounted(() => void nextTick(scrollToBottom));
 
 <template>
   <div class="chat-feed">
-    <div class="chat-feed-heading"><span><Icon name="spark" :size="16" />主 Agent</span><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><Icon name="close" :size="16" /></Button></div>
+    <div class="chat-feed-heading"><span><Icon name="spark" :size="16" />主 Agent</span><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><ContextRing v-if="contextUsage" :prompt-tokens="contextUsage.promptTokens" :context-window="contextUsage.contextWindow" /><Button variant="ghost" size="sm" :title="permissionSkipAll ? '权限卡已全局跳过（红线操作仍受治理拦截）' : '点击后本会话不再弹出权限卡'" @click="emit('toggle-skip-permissions', !permissionSkipAll)">🛡{{ permissionSkipAll ? "跳过权限·开" : "跳过权限·关" }}</Button><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><Icon name="close" :size="16" /></Button></div>
     <div v-if="streamPhase === 'degraded'" class="chat-feed-banner tone-warn">实时连接中断，已切换定时刷新</div>
     <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="chat-feed-banner tone-muted">正在连接实时更新…</div>
 
@@ -151,6 +153,11 @@ onMounted(() => void nextTick(scrollToBottom));
           <ReasoningItem v-else-if="item.part.kind === 'reasoning'" :part="item.part" />
 
           <AgentToolItem v-else-if="item.part.kind === 'agent_tool'" :part="item.part" />
+          <PermissionCard
+            v-else-if="item.part.kind === 'permission'"
+            :part="item.part"
+            @resolve="(callId, allow) => emit('resolve-permission', callId, allow)"
+          />
 
           <div v-else-if="item.part.kind === 'gate'" class="chat-feed-gate">
             <span class="chat-feed-gate-glyph" aria-hidden="true">◆</span>

@@ -67,6 +67,7 @@ import {
 import { getProjectToolSummaryHandler } from "./tool-summary.ts";
 import {
   abortTaskHandler,
+  permissionTaskHandler,
   createTaskHandler,
   getTaskHandler,
   listTasksHandler,
@@ -628,6 +629,9 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
     }
     if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "abort" && method === "POST") {
       return { handler: abortTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:write" };
+    }
+    if (segments.length === 5 && segments[2] === "tasks" && segments[4] === "permission" && method === "POST") {
+      return { handler: permissionTaskHandler, params: { projectId, agentId: segments[3]! }, requiredScope: "core:write" };
     }
 
     // GET /projects/:projectId/tasks/:agentId/stream — SSE pass-through (raw Response)

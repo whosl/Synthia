@@ -236,6 +236,10 @@ export interface FreeAgentDeps {
   agentsDir?: string;
   /** 上下文水位与压缩策略；缺省 = 不压缩（保持既有行为）。 */
   contextPolicy?: ContextPolicy;
+  /** 需要用户裁决的工具名单（红线工具不在此列——那些由 beforeToolCall 硬拦）。 */
+  permissionTools?: readonly string[];
+  /** 挂起权限请求的裁决等待上限（毫秒）；超时按拒绝处理。默认 600_000。 */
+  permissionTimeoutMs?: number;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -513,6 +517,25 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * 重启后丢失，下次水位触发会重建（代价一次摘要调用，正确性不受影响）。
    */
   private compactionSummary: { text: string; coveredUpTo: number } | null = null;
+  /** 「跳过所有权限」开关（会话级内存态；红线工具不受它影响，仍硬拦）。 */
+  private permissionSkipAll = false;
+  /** 挂起中的权限请求（同一时刻至多一个——工具顺序执行）。 */
+  private pendingPermission: {
+    readonly callId: string;
+    readonly tool: string;
+    readonly argsPreview: string;
+    resolve: (allow: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  /** server 注入的事件监听（Core 事件 + SSE）。 */
+  private permissionListener: ((event: {
+    kind: "request" | "decision";
+    callId: string;
+    tool: string;
+    argsPreview: string;
+    allow?: boolean;
+    reason?: string;
+  }) => void) | null = null;
   private readonly toolMap: ReadonlyMap<string, AgentTool>;
   private readonly messages: AgentMessage[] = [];
 
@@ -652,8 +675,90 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   }
 
   abort(reason?: string): void {
+    // 挂起中的权限请求随轮次一起终止（否则要等到超时才放行循环退出）。
+    if (this.pendingPermission) this.settlePermission(false, reason ? `aborted: ${reason}` : "aborted");
     this.abortFlag = true;
     this.abortReason = reason ?? "aborted by caller";
+  }
+
+  // ----- permission interaction (UI 卡片裁决) -----
+
+  private async askPermission(call: AgentToolCall): Promise<boolean> {
+    // 工具顺序执行，理论上不会叠挂；万一有，先按拒绝清场。
+    if (this.pendingPermission) this.settlePermission(false, "superseded");
+    const argsPreview = clipText(JSON.stringify(call.args ?? {}), 800);
+    return await new Promise<boolean>((resolve) => {
+      const timeoutMs = this.deps.permissionTimeoutMs ?? 600_000;
+      const timer = setTimeout(() => {
+        if (this.pendingPermission?.callId === call.toolCallId) {
+          this.settlePermission(false, `timeout after ${timeoutMs}ms`);
+        } else {
+          resolve(false);
+        }
+      }, timeoutMs);
+      this.pendingPermission = { callId: call.toolCallId, tool: call.name, argsPreview, resolve, timer };
+      this.permissionListener?.({ kind: "request", callId: call.toolCallId, tool: call.name, argsPreview });
+    });
+  }
+
+  private settlePermission(allow: boolean, reason?: string): void {
+    const pending = this.pendingPermission;
+    if (!pending) return;
+    this.pendingPermission = null;
+    clearTimeout(pending.timer);
+    this.permissionListener?.({
+      kind: "decision",
+      callId: pending.callId,
+      tool: pending.tool,
+      argsPreview: pending.argsPreview,
+      allow,
+      ...(reason ? { reason } : {}),
+    });
+    pending.resolve(allow);
+  }
+
+  permissionState(): {
+    pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+    skipAll: boolean;
+  } {
+    return {
+      pending: this.pendingPermission
+        ? { callId: this.pendingPermission.callId, tool: this.pendingPermission.tool, argsPreview: this.pendingPermission.argsPreview }
+        : null,
+      skipAll: this.permissionSkipAll,
+    };
+  }
+
+  resolvePermission(callId: string, allow: boolean): boolean {
+    if (this.pendingPermission?.callId !== callId) return false;
+    this.settlePermission(allow, allow ? "user" : "user denied");
+    return true;
+  }
+
+  setPermissionSkipAll(skip: boolean): void {
+    this.permissionSkipAll = skip;
+    // 已挂起的请求按新开关立即裁决：跳过 = 放行。
+    if (skip && this.pendingPermission) this.settlePermission(true, "skip-all enabled");
+  }
+
+  setPermissionListener(
+    listener: (event: {
+      kind: "request" | "decision";
+      callId: string;
+      tool: string;
+      argsPreview: string;
+      allow?: boolean;
+      reason?: string;
+    }) => void,
+  ): void {
+    this.permissionListener = listener;
+  }
+
+  contextUsage(): { promptTokens: number | null; contextWindow: number } {
+    return {
+      promptTokens: this.lastPromptTokens,
+      contextWindow: this.deps.contextPolicy?.contextWindow ?? 0,
+    };
   }
 
   // ----- core loop -----
@@ -1000,6 +1105,18 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     const block = this.beforeToolCallHook(call, ctx);
     if (block?.block) {
       return { content: JSON.stringify({ error: "blocked", reason: block.reason }), isError: true };
+    }
+
+    // 权限门：可请求名单内的操作挂起等待用户在 UI 卡片上裁决。
+    // 「跳过所有权限」开着时直接放行；红线工具永远到不了这里（上方硬拦）。
+    if (!this.permissionSkipAll && (this.deps.permissionTools ?? []).includes(call.name)) {
+      const allowed = await this.askPermission(call);
+      if (!allowed) {
+        return {
+          content: JSON.stringify({ error: "permission_denied", reason: "用户拒绝了本次工具调用。" }),
+          isError: true,
+        };
+      }
     }
 
     // Resolve the tool.

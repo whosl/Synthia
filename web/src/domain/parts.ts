@@ -194,6 +194,17 @@ export interface SynthiaAgentToolPart {
   readonly result: string | null;
 }
 
+/** 权限请求/裁决卡（可请求名单内的工具调用由用户在流内裁决）。 */
+export interface SynthiaPermissionPart {
+  readonly kind: "permission";
+  readonly id: string;
+  readonly callId: string;
+  readonly tool: string;
+  readonly argsPreview: string;
+  readonly state: "pending" | "allowed" | "denied";
+  readonly reason: string | null;
+}
+
 export type SynthiaPart =
   | SynthiaToolPart
   | SynthiaTextPart
@@ -205,7 +216,8 @@ export type SynthiaPart =
   | SynthiaNotePart
   | SynthiaInterruptPart
   | SynthiaReasoningPart
-  | SynthiaAgentToolPart;
+  | SynthiaAgentToolPart
+  | SynthiaPermissionPart;
 
 // ─── 工具条状态文案（四态，主页面中文）────────────────────────────────
 
@@ -267,6 +279,25 @@ export function conversationEventsToParts(
       };
       tools.set(callId, parts.length);
       parts.push(part);
+      continue;
+    }
+    if (event.event_kind === "permission_request" || event.event_kind === "permission_decision") {
+      const callId = typeof event.payload.tool_call_id === "string" ? event.payload.tool_call_id : event.id;
+      const tool = typeof event.payload.tool === "string" ? event.payload.tool : "tool";
+      const argsPreview = conversationPayloadText(event.payload.args_preview, 2_000);
+      const decided = event.event_kind === "permission_decision";
+      const at = parts.findIndex((p) => p.kind === "permission" && p.callId === callId);
+      const part: SynthiaPermissionPart = {
+        kind: "permission",
+        id: `perm-${callId}`,
+        callId,
+        tool,
+        argsPreview,
+        state: decided ? (event.payload.allow === true ? "allowed" : "denied") : "pending",
+        reason: decided && typeof event.payload.reason === "string" ? event.payload.reason : null,
+      };
+      if (at === -1) parts.push(part);
+      else parts[at] = part;
       continue;
     }
     if (event.event_kind === "tool_result") {

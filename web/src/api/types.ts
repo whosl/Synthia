@@ -451,7 +451,21 @@ export interface TaskEvidenceSummary {
 }
 
 /** GET /projects/:id/tasks/:agentId 响应 data。 */
+/** 权限交互快照（runtime 注入；旧会话/旧 runtime 无此字段）。 */
+export interface TaskPermissionState {
+  readonly pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+  readonly skip_all: boolean;
+}
+
+/** 上下文水位（runtime 注入；context_window=0 表示策略未配置）。 */
+export interface TaskContextUsage {
+  readonly prompt_tokens: number | null;
+  readonly context_window: number;
+}
+
 export interface TaskAgentDetail extends TaskAgentSummary {
+  readonly permission?: TaskPermissionState | null;
+  readonly context_usage?: TaskContextUsage | null;
   /** 任务指令（Runtime 透传 agent-state.task）。 */
   readonly task?: string;
   readonly docs: readonly TaskDocRef[];
@@ -552,7 +566,9 @@ export type SideTaskConversationEventKind =
   | "assistant_thinking"
   | "tool_call"
   | "tool_result"
-  | "status";
+  | "status"
+  | "permission_request"
+  | "permission_decision";
 
 /** Core-owned append-only conversation fact for a main or side task. */
 export interface SideTaskConversationEvent {

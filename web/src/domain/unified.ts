@@ -302,7 +302,7 @@ export const EXAMPLE_TASKS: readonly string[] = [
 ];
 
 /** 批准/驳回/发送/资料操作等写动作失败 → 人话。 */
-export type DecisionAction = "批准" | "驳回" | "发送" | "资料操作";
+export type DecisionAction = "批准" | "驳回" | "发送" | "资料操作" | "权限裁决" | "权限开关";
 
 export interface DecisionFailure {
   /** 人话原因（主页面展示，不含英文错误码/关联号）。 */

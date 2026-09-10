@@ -850,6 +850,25 @@ function contextPolicyFromEnv(
   };
 }
 
+/**
+ * 环境变量 → 权限交互配置。SYNTHIA_AGENT_PERMISSION_TOOLS 逗号分隔；
+ * 未配置时默认只把 vivado_run 列为可请求（占用共享 Vivado 资源的操作）。
+ * 红线工具不在此机制内——beforeToolCall 永远硬拦。
+ */
+function permissionDepsFromEnv(
+  env: Record<string, string | undefined>,
+): { permissionTools: readonly string[]; permissionTimeoutMs: number } {
+  const raw = env.SYNTHIA_AGENT_PERMISSION_TOOLS;
+  const tools = raw === undefined
+    ? ["vivado_run"]
+    : raw.split(",").map((t) => t.trim()).filter(Boolean);
+  const timeout = Number(env.SYNTHIA_AGENT_PERMISSION_TIMEOUT_MS);
+  return {
+    permissionTools: tools,
+    permissionTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 600_000,
+  };
+}
+
 function depsFactoryInput(projectId: string, runtime: {
   readonly processInstanceId: string;
   readonly projectType?: string;
@@ -1066,6 +1085,10 @@ export class RuntimeServer {
       const abortMatch = path.match(/^\/tasks\/([^/]+)\/abort$/);
       if (method === "POST" && abortMatch)
         return await this.handleAbort(abortMatch[1]!, req);
+
+      const permissionMatch = path.match(/^\/tasks\/([^/]+)\/permission$/);
+      if (method === "POST" && permissionMatch)
+        return await this.handlePermission(permissionMatch[1]!, req);
 
       const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
       if (method === "GET" && taskMatch)
@@ -1500,7 +1523,47 @@ export class RuntimeServer {
       evidence: h.evidence,
       ...(h.endedReason ? { reason: h.endedReason } : {}),
       ...(h.terminalCause ? { terminal_cause: h.terminalCause } : {}),
+      // 权限交互快照 + 上下文水位（UI 卡片与环形指示）。
+      permission: this.permissionSnapshot(agentId),
+      context_usage: (() => {
+        const session = this.sessions.get(agentId);
+        if (!session?.contextUsage) return null;
+        const usage = session.contextUsage();
+        return { prompt_tokens: usage.promptTokens, context_window: usage.contextWindow };
+      })(),
     });
+  }
+
+  private permissionSnapshot(agentId: string): { pending: unknown; skip_all: boolean } | null {
+    const session = this.sessions.get(agentId);
+    if (!session?.permissionState) return null;
+    const state = session.permissionState();
+    return { pending: state.pending, skip_all: state.skipAll };
+  }
+
+  /** POST /tasks/:agentId/permission — {callId, allow} 裁决，或 {skipAll} 开关。 */
+  private async handlePermission(agentId: string, req: Request): Promise<Response> {
+    const session = this.sessions.get(agentId);
+    if (!session?.permissionState) return errorResponse(404, "not_found", `agent ${agentId} not found`);
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return errorResponse(400, "invalid_json", "request body must be a JSON object");
+    }
+    if (typeof body.skipAll === "boolean") {
+      session.setPermissionSkipAll(body.skipAll);
+      this.recordConversationAudit(agentId, "free_agent_permission_skip", body.skipAll ? "on" : "off");
+      const snap = session.permissionState();
+      return json({ ok: true, permission: { pending: snap.pending, skip_all: snap.skipAll } });
+    }
+    const callId = typeof body.callId === "string" ? body.callId : null;
+    const allow = body.allow === true;
+    if (!callId) return errorResponse(400, "invalid_request", "callId (string) or skipAll (boolean) required");
+    const resolved = session.resolvePermission(callId, allow);
+    if (!resolved) return errorResponse(409, "permission_not_pending", `no pending permission request for ${callId}`);
+    const snap = session.permissionState();
+    return json({ ok: true, permission: { pending: snap.pending, skip_all: snap.skipAll } });
   }
 
   // POST /tasks/:agentId/resume
@@ -2392,7 +2455,7 @@ export class RuntimeServer {
   private appendCoreTaskEvent(
     agentId: string,
     eventId: string,
-    type: "assistant_message" | "assistant_thinking" | "tool_call" | "tool_result" | "status",
+    type: "assistant_message" | "assistant_thinking" | "tool_call" | "tool_result" | "status" | "permission_request" | "permission_decision",
     payload: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const handle = this.registry.get(agentId);
@@ -2861,10 +2924,29 @@ export class RuntimeServer {
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
       ...(agentsDir ? { agentsDir } : {}),
+      ...permissionDepsFromEnv(process.env),
       ...contextPolicyFromEnv(process.env),
     };
 
     const session = createFreeAgentSession(agentId, deps);
+    // 权限事件 → Core 会话事件（UI 轮询渲染卡片/裁决留痕）。
+    session.setPermissionListener?.((event) => {
+      const id = `te-${sha256Hex(`${agentId}\0permission\0${event.kind}\0${event.callId}`).slice(0, 40)}`;
+      void this.appendCoreTaskEvent(
+        agentId,
+        id,
+        event.kind === "request" ? "permission_request" : "permission_decision",
+        {
+          tool_call_id: event.callId,
+          tool: event.tool,
+          args_preview: event.argsPreview,
+          ...(event.allow === undefined ? {} : { allow: event.allow }),
+          ...(event.reason ? { reason: event.reason } : {}),
+        },
+      ).catch(() => {
+        // 权限事件落库失败不阻塞裁决本身；挂起状态仍可通过 getTask 轮询。
+      });
+    });
     this.sessions.set(agentId, session);
     return session;
   }

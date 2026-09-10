@@ -178,6 +178,10 @@ export interface RuntimeClient {
   sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown>;
   /** POST /tasks/:agentId/abort — abort the free-agent session. */
   abortTask(agentId: string, idempotencyKey?: string): Promise<unknown>;
+  resolveTaskPermission(
+    agentId: string,
+    body: { callId?: string; allow?: boolean; skipAll?: boolean },
+  ): Promise<unknown>;
   /**
    * GET /tasks/:agentId/stream — open the SSE event stream and return the raw
    * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
@@ -358,6 +362,14 @@ export class HttpRuntimeClient implements RuntimeClient {
       undefined,
       idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : undefined,
     );
+  }
+
+  /** POST /tasks/:agentId/permission — 裁决挂起的权限请求或切换 skip-all。 */
+  async resolveTaskPermission(
+    agentId: string,
+    body: { callId?: string; allow?: boolean; skipAll?: boolean },
+  ): Promise<unknown> {
+    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/permission`, body);
   }
 
   async streamTask(
@@ -1591,6 +1603,36 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
   try {
     const reply = await runtime.sendMessage(agentId, text);
     return { status: 200, data: reply };
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+}
+
+/** POST /projects/:projectId/tasks/:agentId/permission — 权限卡片裁决 / skip-all 开关。 */
+export async function permissionTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const agentId = ctx.params.agentId!;
+  const runtime = requireRuntime(ctx);
+  const body = asObject(ctx.body);
+  const payload: { callId?: string; allow?: boolean; skipAll?: boolean } = {};
+  if (typeof body.skipAll === "boolean") {
+    payload.skipAll = body.skipAll;
+  } else {
+    if (typeof body.callId !== "string" || !body.callId) {
+      throw validationError("body must contain callId (string) + allow (boolean), or skipAll (boolean)");
+    }
+    payload.callId = body.callId;
+    payload.allow = body.allow === true;
+  }
+
+  // Core-owned 任务用绑定的 runtime agent id；legacy 自由会话直接用 agentId。
+  let runtimeAgentId = agentId;
+  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId).catch(() => null);
+  if (coreTask?.runtime_agent_id) runtimeAgentId = coreTask.runtime_agent_id;
+
+  try {
+    const response = await runtime.resolveTaskPermission(runtimeAgentId, payload);
+    return { status: 200, data: response };
   } catch (err) {
     throw mapRuntimeError(err);
   }

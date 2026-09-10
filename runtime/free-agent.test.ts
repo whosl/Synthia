@@ -1422,3 +1422,134 @@ describe("free-agent: LLM summary compaction", () => {
     expect(summaryView.content).toContain("第二版合并摘要");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Permission interaction (UI 卡片裁决)
+// ---------------------------------------------------------------------------
+
+describe("free-agent: permission interaction", () => {
+  const permPolicy = { permissionTools: ["fpga-intake"], permissionTimeoutMs: 60_000 };
+
+  test("allow: pending request surfaces, user allows, tool executes", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/one.md" }),
+      txt("已登记。"),
+    ]);
+    // makeSession 不透传 permissionTools——直接用 createFreeAgentSession 验证协议。
+    const { session: s2 } = (() => {
+      const agentId = `agent-perm-${++idCounter}`;
+      const governance = new MockGovernanceClient();
+      const sess = createFreeAgentSession(agentId, {
+        model,
+        tools: [...assembleSkillTools()],
+        systemPrompt: "sys",
+        projectId: "proj-test",
+        part: "xc7a100tcsg324-1",
+        classification: "internal",
+        governance,
+        connector: null,
+        agentsDir,
+        ...permPolicy,
+      });
+      return { session: sess };
+    })();
+
+    const promptPromise = s2.prompt("登记文档");
+    await new Promise((r) => setTimeout(r, 50));
+    const state = s2.permissionState();
+    expect(state.skipAll).toBeFalse();
+    expect(state.pending?.tool).toBe("fpga-intake");
+    expect(state.pending?.argsPreview).toContain("doc/intake/one.md");
+
+    expect(s2.resolvePermission(state.pending!.callId, true)).toBeTrue();
+    const reply = await promptPromise;
+    expect(reply).toBe("已登记。");
+    expect(s2.permissionState().pending).toBeNull();
+  });
+
+  test("deny: tool gets permission_denied error, model continues", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/x.md" }),
+      txt("好的，跳过登记。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      ...permPolicy,
+    });
+
+    const promptPromise = session.prompt("登记");
+    await new Promise((r) => setTimeout(r, 50));
+    const pending = session.permissionState().pending!;
+    expect(session.resolvePermission(pending.callId, false)).toBeTrue();
+    const reply = await promptPromise;
+    expect(reply).toBe("好的，跳过登记。");
+    // 模型看到了 permission_denied 工具结果。
+    const toolResults = model.calls[1]!.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolResults[0]!.content).toContain("permission_denied");
+  });
+
+  test("skip-all: no pending request, tools run directly; enabling mid-pending allows it", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/y.md" }),
+      txt("完成。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      ...permPolicy,
+    });
+
+    const promptPromise = session.prompt("登记");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(session.permissionState().pending).not.toBeNull();
+    // 打开「跳过所有权限」：挂起请求立即放行。
+    session.setPermissionSkipAll(true);
+    const reply = await promptPromise;
+    expect(reply).toBe("完成。");
+    expect(session.permissionState().skipAll).toBeTrue();
+  });
+
+  test("timeout denies; abort settles pending as denied", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/z.md" }),
+      txt("跳过。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      permissionTools: ["fpga-intake"],
+      permissionTimeoutMs: 40,
+    });
+
+    const promptPromise = session.prompt("登记");
+    const reply = await promptPromise; // 40ms 超时 → 拒绝 → 模型继续
+    expect(reply).toBe("跳过。");
+    expect(session.permissionState().pending).toBeNull();
+  });
+});
