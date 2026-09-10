@@ -2943,8 +2943,11 @@ export class RuntimeServer {
           ...(event.allow === undefined ? {} : { allow: event.allow }),
           ...(event.reason ? { reason: event.reason } : {}),
         },
-      ).catch(() => {
+      ).catch((error: unknown) => {
         // 权限事件落库失败不阻塞裁决本身；挂起状态仍可通过 getTask 轮询。
+        process.stderr.write(
+          `[runtime-server] permission event sync failed for ${agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
       });
     });
     this.sessions.set(agentId, session);
