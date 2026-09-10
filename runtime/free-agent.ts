@@ -23,6 +23,7 @@ import { join, dirname } from "node:path";
 
 import { saveAgentState, createAgentState, agentStatePath } from "./agent-state.ts";
 import type { AgentState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import type {
   RuntimeTaskKind,
   TaskAuthorizationScope,
@@ -216,6 +217,8 @@ export interface FreeAgentDeps {
   workspaceId?: string;
   authorization?: TaskAuthorizationScope;
   workspace?: TaskWorkspaceClient;
+  /** Task-bound Learned Skill facts; injected for Core-owned tasks only. */
+  evolution?: TaskEvolutionClient;
   inputHash?: string;
   taskDescriptorHash?: string;
   /**

@@ -1277,18 +1277,28 @@ export async function taskSearchLearnedSkillsHandler(ctx: RequestContext): Promi
   await requireAgentDiscoveryEnabled(ctx, ctx.pool);
   const q = (ctx.url.searchParams.get("q") ?? "").trim();
   const limit = pageLimit(ctx.url);
+  // Agent callers send natural-language queries ("UART baud_gen 编译前检查…").
+  // A whole-phrase ILIKE matches nothing for them, so match on whitespace-split
+  // terms instead: a skill is a hit when ANY term matches ANY text column.
+  const terms = [...new Set(q.split(/\s+/u).map((t) => t.trim()).filter((t) => t.length >= 2))].slice(0, 8);
+  const clauses: string[] = [];
+  const params: string[] = [];
+  for (const term of terms) {
+    const ph = `$${params.length + 1}`;
+    params.push(term);
+    clauses.push(`(s.name ILIKE '%' || ${ph} || '%' OR s.summary ILIKE '%' || ${ph} || '%' OR s.applicability_summary ILIKE '%' || ${ph} || '%')`);
+  }
+  params.push(String(limit));
+  const termFilter = clauses.length > 0 ? ` AND (${clauses.join(" OR ")})` : "";
   const result = await ctx.pool.query(
     `SELECT s.id,s.active_version_id,vs.quality_state
        FROM learned_skill s
        JOIN learned_skill_version_status vs ON vs.version_id=s.active_version_id
       WHERE s.enabled=true AND s.availability_state='available'
-        AND vs.quality_state <> 'quarantined'
-        AND ($1='' OR s.name ILIKE '%' || $1 || '%'
-          OR s.summary ILIKE '%' || $1 || '%'
-          OR s.applicability_summary ILIKE '%' || $1 || '%')
-      ORDER BY CASE WHEN s.name ILIKE '%' || $1 || '%' THEN 0 ELSE 1 END,s.id
-      LIMIT $2`,
-    [q, limit],
+        AND vs.quality_state <> 'quarantined'${termFilter}
+      ORDER BY CASE WHEN s.name ILIKE '%' || ${terms.length > 0 ? `$1` : `''`} || '%' THEN 0 ELSE 1 END,s.id
+      LIMIT $${params.length}`,
+    params,
   );
   const items: Record<string, unknown>[] = [];
   for (const row of result.rows as Row[]) {
