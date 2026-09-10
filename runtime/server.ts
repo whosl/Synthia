@@ -2477,7 +2477,7 @@ export class RuntimeServer {
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
           "tool_call",
-          { turn_id: turnId, tool_call_id: callId, name, args: fullArgs ?? args },
+          { turn_id: turnId, tool_call_id: callId, name, args: fullArgs !== undefined ? JSON.parse(fullArgs) : args },
         );
         if (event) {
           firstToolEventSequence ??= event.sequence;
