@@ -31,6 +31,7 @@ import {
   validationError,
 } from "./errors.ts";
 import type { HandlerResult, RequestContext } from "./handlers.ts";
+import { getProjectToolSummaryHandler } from "./tool-summary.ts";
 import { WorkspaceError } from "../workspace/paths.ts";
 import {
   approveGateHandler,
@@ -63,6 +64,7 @@ import {
   submitJobHandler,
   withdrawGateSubmissionHandler,
 } from "./handlers.ts";
+import { getProjectToolSummaryHandler } from "./tool-summary.ts";
 import {
   abortTaskHandler,
   createTaskHandler,
@@ -421,6 +423,9 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
           break;
         case "artifacts":
           if (method === "GET") return { handler: getArtifacts, params, requiredScope: "core:read" };
+          break;
+        case "tool-summary":
+          if (method === "GET") return { handler: getProjectToolSummaryHandler, params, requiredScope: "core:read" };
           break;
         case "jobs":
           if (method === "POST") {

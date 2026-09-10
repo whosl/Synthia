@@ -16,6 +16,8 @@ export {
   capabilityUnavailableError,
   internalError,
 } from "./errors.ts";
+export { getProjectToolSummaryHandler, parseStaSummary } from "./tool-summary.ts";
+export type { ToolSummary, ToolSummaryStage, ToolSummaryTiming } from "./tool-summary.ts";
 export { routeApi } from "./router.ts";
 export { startSynthiaServer } from "./server.ts";
 export {
