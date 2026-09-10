@@ -2,8 +2,8 @@
  * GET /projects/:projectId/tool-summary — 物理实现进度与时序指标聚合。
  *
  * 面向前端"物理实现进度卡"：一次拉齐 validate → simulate → synthesize →
- * implement（→ 码流）五个阶段的最新状态、码流有无，以及最近一次成功
- * implement 的时序摘要（WNS/TNS/WHS/时序状态/覆盖时钟）。
+ * implement（→ 码流）+ report_sta 各阶段最新状态、码流有无，以及最近一次
+ * 成功 implement / report_sta 的时序摘要（WNS/TNS/WHS/时序状态/覆盖时钟）。
  *
  * 时序摘要的解析结果落库缓存（tool_timing_metrics，迁移 0014）：每条
  * sta.rpt 只解析一次，之后纯 DB 供给；首次遇到无缓存的作业时经
@@ -17,7 +17,7 @@ import type { HandlerResult, RequestContext } from "./handlers.ts";
 import { notFoundError } from "./errors.ts";
 
 export interface ToolSummaryStage {
-  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement";
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
   /** 最新一次作业的状态；从未运行过为 "never"。 */
   readonly state: string;
   readonly lastJobId: string | null;
@@ -86,7 +86,7 @@ export function parseStaSummary(text: string): { wns: number | null; tns: number
   return { wns, tns, whs, status, clocks };
 }
 
-const OPERATIONS: readonly ToolSummaryStage["operation"][] = ["validate_sources", "simulate", "synthesize", "implement"];
+const OPERATIONS: readonly ToolSummaryStage["operation"][] = ["validate_sources", "simulate", "synthesize", "implement", "report_sta"];
 
 async function requireProjectReadable(ctx: RequestContext, projectId: string): Promise<void> {
   const project = await ctx.pool.query("SELECT id FROM project WHERE id=$1", [projectId]);
@@ -157,7 +157,7 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
   let timingError: string | undefined;
   const timingSource = await ctx.pool.query(
     `SELECT id AS job_id FROM tool_run
-      WHERE project_id = $1 AND operation = 'implement' AND state = 'succeeded'
+      WHERE project_id = $1 AND operation IN ('implement','report_sta') AND state = 'succeeded'
         AND evidence::jsonb->'entries' @> '[{"name":"sta.rpt"}]'::jsonb
       ORDER BY created_at DESC LIMIT 1`,
     [projectId],

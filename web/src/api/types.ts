@@ -1066,9 +1066,35 @@ export interface JobEvidenceContent {
   readonly mediaType: string;
 }
 
+/** POST /projects/:id/jobs 的单个内联源文件（路径 + 全文；Core 侧契约同 SourceInput）。 */
+export interface JobSourceInput {
+  readonly path: string;
+  readonly content: string;
+  readonly mediaType?: string;
+}
+
+/** POST /projects/:id/jobs 请求体（探索流；gate_check/formal 走 P4 专用入口）。 */
+export interface SubmitJobRequest {
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
+  readonly sources: readonly JobSourceInput[];
+  readonly constraints?: readonly JobSourceInput[];
+  readonly top?: string | null;
+  readonly testbench?: string | null;
+  readonly part?: string | null;
+  /** 仅 implement 有效；缺省 undefined = 连接器默认（探索流只到路由后检查点）。 */
+  readonly stop_before_bitstream?: boolean;
+}
+
+/** POST /projects/:id/jobs 响应 data（作业已入队）。 */
+export interface SubmitJobResult {
+  readonly jobId: string;
+  readonly runClass: string;
+  readonly state: string;
+}
+
 /** GET /projects/:id/tool-summary — 物理实现进度与时序指标（工程/自由项目通用）。 */
 export interface ToolSummaryStage {
-  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement";
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
   readonly state: string;
   readonly lastJobId: string | null;
   readonly lastAt: string | null;

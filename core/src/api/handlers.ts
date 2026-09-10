@@ -1854,6 +1854,9 @@ const JOB_OPERATION_VALUES: Record<string, true> = {
   simulate: true,
   synthesize: true,
   implement: true,
+  // 顶栏「运行 STA」按钮：从源码现场重综合后出 report_timing_summary
+  //（connector 语义是每跑从零开始，无跨作业产物传递，见 vivado.ts scriptFor）。
+  report_sta: true,
 };
 const RUN_CLASS_INTENT_VALUES: Record<string, true> = {
   exploratory: true,

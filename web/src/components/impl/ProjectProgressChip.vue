@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /**
- * 项目进度摘要 chip（顶栏样式 D）：一行显示「done/total · 当前门 + 状态」，
- * 悬停/点击展开 G0–G4 完整门列。自由/兼容项目（无门链）退化为 muted 占位文案。
+ * 项目概览 chip（顶栏样式 D）：pill 收入「项目类型 · 器件 · 进度摘要」，
+ * 点击展开完整项目信息（类型/流程/器件）+ G0–G4 门链进度。自由/兼容项目
+ * 没有门链时进度区退化为 muted 占位文案，项目信息区照常展示。
  *
- * 受控组件：stageChain 由父级从 Core 流程投影推导传入；点击门行emit
- * select-stage 联动左栏阶段视图。
+ * 受控组件：stageChain/projectInfo 由父级传入；点击门行 emit select-stage
+ * 联动左栏阶段视图。
  */
 import { computed } from "vue";
 import type { ProcessGateView } from "../../domain/process-profile.ts";
@@ -12,6 +13,10 @@ import { currentProcessGate, processProgress, PROCESS_GATE_STATUS_TEXT } from ".
 import { useChipPopover } from "../../composables/use-chip-popover.ts";
 
 const props = defineProps<{
+  /** 项目信息区（类型/流程/器件），来自项目详情。 */
+  readonly typeLabel: string;
+  readonly profileLabel: string | null;
+  readonly targetPart: string | null;
   /** G0–G4 门链投影；null 表示当前项目没有正式阶段链。 */
   readonly stageChain: readonly ProcessGateView[] | null;
   /** 没有阶段链时的准确占位文案。 */
@@ -20,14 +25,18 @@ const props = defineProps<{
 
 const emit = defineEmits<{ "select-stage": [stageId: string] }>();
 
-const { root, open, onEnter, onLeave, toggle, close } = useChipPopover(() => props.stageChain === null);
+const { root, open, onEnter, onLeave, toggle, close } = useChipPopover();
 
 const progress = computed(() => (props.stageChain ? processProgress(props.stageChain) : null));
 const current = computed(() => currentProcessGate(props.stageChain));
+const partText = computed(() => props.targetPart || "未设器件");
 const chipText = computed(() => {
-  if (!progress.value) return props.emptyText;
-  const base = `${progress.value.done}/${progress.value.total}`;
-  return current.value ? `${base} · ${current.value.node.id} ${PROCESS_GATE_STATUS_TEXT[current.value.status]}` : base;
+  const base = `${props.typeLabel || "…"} · ${partText.value}`;
+  if (!progress.value) return base;
+  const suffix = current.value
+    ? `${progress.value.done}/${progress.value.total} · ${current.value.node.id} ${PROCESS_GATE_STATUS_TEXT[current.value.status]}`
+    : `${progress.value.done}/${progress.value.total}`;
+  return `${base} · ${suffix}`;
 });
 
 function select(stageId: string): void {
@@ -38,21 +47,22 @@ function select(stageId: string): void {
 
 <template>
   <div ref="root" class="gchip" @mouseenter="onEnter" @mouseleave="onLeave">
-    <button
-      type="button"
-      class="gchip-pill"
-      :class="{ muted: !stageChain }"
-      :aria-expanded="open"
-      @click="toggle"
-    >
-      <span class="gchip-title">项目进度</span>
+    <button type="button" class="gchip-pill" :aria-expanded="open" @click="toggle">
+      <span class="gchip-title">项目概览</span>
       <span class="gchip-text">{{ chipText }}</span>
-      <span v-if="stageChain" class="gchip-caret" aria-hidden="true">▾</span>
+      <span class="gchip-caret" aria-hidden="true">▾</span>
     </button>
 
-    <div v-if="open && stageChain" class="gchip-pop" role="menu">
-      <h4>G0–G4 正式流程</h4>
-      <div class="gchip-gates">
+    <div v-if="open" class="gchip-pop" role="menu">
+      <h4>项目信息</h4>
+      <dl class="gchip-info">
+        <div class="gchip-info-row"><dt>类型</dt><dd>{{ typeLabel }}</dd></div>
+        <div v-if="profileLabel" class="gchip-info-row"><dt>流程</dt><dd>{{ profileLabel }}</dd></div>
+        <div class="gchip-info-row"><dt>器件</dt><dd>{{ partText }}</dd></div>
+      </dl>
+
+      <h4 class="gchip-progress-title">项目进度</h4>
+      <div v-if="stageChain" class="gchip-gates">
         <button
           v-for="entry in stageChain"
           :key="entry.node.id"
@@ -66,6 +76,7 @@ function select(stageId: string): void {
           <span class="gchip-gate-status">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
         </button>
       </div>
+      <p v-else class="gchip-empty">{{ emptyText }}</p>
     </div>
   </div>
 </template>
@@ -77,7 +88,7 @@ function select(stageId: string): void {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 340px;
+  max-width: 380px;
   padding: 3px 11px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -88,12 +99,9 @@ function select(stageId: string): void {
   cursor: pointer;
 }
 .gchip-pill:hover { border-color: var(--accent); background: var(--accent-subtle); }
-.gchip-pill.muted { color: var(--text-muted); cursor: default; }
-.gchip-pill.muted:hover { border-color: var(--border-strong); background: transparent; }
 
 .gchip-title { font-weight: 600; }
 .gchip-text { overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
-.gchip-pill.muted .gchip-text { color: var(--text-muted); }
 .gchip-caret { font-size: 9px; color: var(--text-muted); }
 
 .gchip-pop {
@@ -114,6 +122,14 @@ function select(stageId: string): void {
   font-weight: 600;
   color: var(--text-muted);
 }
+.gchip-progress-title { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle); }
+
+.gchip-info { margin: 0; display: flex; flex-direction: column; gap: 5px; }
+.gchip-info-row { display: flex; gap: 12px; font-size: 12px; }
+.gchip-info-row dt { flex: none; width: 30px; color: var(--text-muted); }
+.gchip-info-row dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+
+.gchip-empty { margin: 0; font-size: 12px; color: var(--text-muted); }
 
 .gchip-gates { display: flex; flex-direction: column; gap: 4px; }
 .gchip-gate {

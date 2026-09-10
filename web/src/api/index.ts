@@ -34,6 +34,8 @@ import type {
   ToolSummary,
   JobEvidenceManifest,
   JobRunSummary,
+  SubmitJobRequest,
+  SubmitJobResult,
   OutboxEvent,
   Project,
   ProjectDetail,
@@ -639,6 +641,15 @@ export function getProject(client: ApiClient, projectId: string): Promise<Projec
 export function listJobs(client: ApiClient, projectId: string, limit?: number): Promise<JobRunSummary[]> {
   const query = limit !== undefined ? `?limit=${encodeURIComponent(String(limit))}` : "";
   return client<JobRunSummary[]>(`${V1}/projects/${encodeURIComponent(projectId)}/jobs${query}`);
+}
+
+/** POST /projects/:id/jobs — 提交探索流工具作业（顶栏「运行校验/仿真/…」按钮）。 */
+export function submitJob(client: ApiClient, projectId: string, body: SubmitJobRequest, idempotencyKey: string): Promise<SubmitJobResult> {
+  return client<SubmitJobResult>(`${V1}/projects/${encodeURIComponent(projectId)}/jobs`, {
+    method: "POST",
+    body,
+    headers: { "idempotency-key": idempotencyKey },
+  });
 }
 
 /** GET /projects/:id/jobs/:jobId/evidence — 终态任务的冻结证据清单（非终态 404）。 */

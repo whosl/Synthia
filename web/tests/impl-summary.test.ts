@@ -13,18 +13,18 @@ function summary(partial: Partial<ToolSummary> = {}): ToolSummary {
   };
 }
 
-function stage(operation: "validate_sources" | "simulate" | "synthesize" | "implement", state: string, ok = 0, fail = 0) {
+function stage(operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta", state: string, ok = 0, fail = 0) {
   return { operation, state, lastJobId: null, lastAt: null, succeeded: ok, failed: fail };
 }
 
 describe("implCells", () => {
-  test("五格齐全：四阶段 + 码流；未开始时全部 never", () => {
+  test("六行齐全：四阶段 + 码流 + STA；未开始时全部 never", () => {
     const cells = implCells(summary());
-    expect(cells.map(c => c.key)).toEqual(["validate", "simulate", "synthesize", "implement", "bitstream"]);
+    expect(cells.map(c => c.key)).toEqual(["validate", "simulate", "synthesize", "implement", "bitstream", "sta"]);
     expect(cells.every(c => c.state === "never")).toBeTrue();
   });
 
-  test("真实形态（p15）：四阶段 succeeded、码流因探索流未生成", () => {
+  test("真实形态（p15）：四阶段 succeeded、码流未生成按 never 展示", () => {
     const cells = implCells(summary({
       stages: [
         stage("validate_sources", "succeeded", 2, 0),
@@ -33,21 +33,34 @@ describe("implCells", () => {
         stage("implement", "succeeded", 3, 1),
       ],
     }));
-    expect(cells.filter(c => c.key !== "bitstream").every(c => c.state === "succeeded")).toBeTrue();
-    expect(cells[4]!.state).toBe("failed"); // 有实现但无码流 → failed 态（探索流语义）
+    expect(cells.filter(c => c.key !== "bitstream" && c.key !== "sta").every(c => c.state === "succeeded")).toBeTrue();
+    expect(cells[4]!.state).toBe("never"); // 探索流没要码流：不是失败，是未生成
     expect(cells[1]!.detail).toBe("1✓/5✗");
   });
 
-  test("formal 码流生成后 bitstream 为 succeeded", () => {
-    const cells = implCells(summary({ bitstream: { generated: true, jobId: "j1", at: "x" } }));
+  test("码流生成后 bitstream 为 succeeded；STA 行跟随 report_sta 计数", () => {
+    const cells = implCells(summary({
+      bitstream: { generated: true, jobId: "j1", at: "x" },
+      stages: [stage("report_sta", "failed", 0, 2)],
+    }));
     expect(cells[4]!.state).toBe("succeeded");
+    expect(cells[5]!.state).toBe("failed");
+    expect(cells[5]!.detail).toBe("0✓/2✗");
+  });
+
+  test("旧 Core 没有 report_sta 阶段时 STA 行回退 never（向前兼容）", () => {
+    const cells = implCells(summary({
+      stages: [stage("validate_sources", "succeeded", 1, 0)],
+    }));
+    expect(cells[5]!.key).toBe("sta");
+    expect(cells[5]!.state).toBe("never");
   });
 });
 
 describe("implProgressText", () => {
   test("未开始 / 推进到某格 / 全通过", () => {
     expect(implProgressText(summary())).toBe("尚未开始物理实现");
-    expect(implProgressText(summary({ stages: [stage("validate_sources", "succeeded", 1, 0)] }))).toBe("推进到：源校验");
+    expect(implProgressText(summary({ stages: [stage("validate_sources", "succeeded", 1, 0)] }))).toBe("推进到：代码校验");
     const full = summary({
       stages: [
         stage("validate_sources", "succeeded"),
@@ -59,6 +72,10 @@ describe("implProgressText", () => {
     });
     expect(implProgressText(full)).toBe("全流程通过（含码流）");
   });
+
+  test("STA 不参与管线归纳：只跑了 STA 也不算推进", () => {
+    expect(implProgressText(summary({ stages: [stage("report_sta", "succeeded", 1, 0)] }))).toBe("尚未开始物理实现");
+  });
 });
 
 describe("implChipText", () => {
@@ -68,7 +85,7 @@ describe("implChipText", () => {
     expect(implChipText(summary({ stages: [stage("simulate", "failed", 0, 4)] }))).toBe("仿真 4✗");
   });
 
-  test("最深到达格优先；未产出码流不算到达（探索流）", () => {
+  test("最深到达格优先；未产出码流不算到达（探索流）；STA 不参与最深归纳", () => {
     const p4 = summary({
       stages: [
         stage("validate_sources", "succeeded", 6, 0),
@@ -78,6 +95,7 @@ describe("implChipText", () => {
       ],
     });
     expect(implChipText(p4)).toBe("布局布线 4✓");
+    expect(implChipText(summary({ stages: [stage("report_sta", "succeeded", 2, 0)] }))).toBe("未开始");
   });
 
   test("formal 码流生成后 chip 显示码流 ✓；运行中显示运行中", () => {

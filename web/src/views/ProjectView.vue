@@ -39,6 +39,7 @@ import {
   getSideTaskEvents,
   getSideTaskResult,
   getTask,
+  getWorkspaceFile,
   getWorkspaceTree,
   listArtifacts,
   listBitstreams,
@@ -56,8 +57,10 @@ import {
   rejectGateSubmission,
   searchHistoricalMaterials,
   sendMessage,
+  submitJob,
   withdrawChangeRequest,
 } from "../api/index.ts";
+import { deriveJobInputs, operationNeeds, type ImplRunAction } from "../domain/impl-run.ts";
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
 import type {
   ToolSummary, ApproveRequest } from "../api/index.ts";
@@ -1447,6 +1450,8 @@ onBeforeUnmount(() => {
   disposed = true;
   poller?.stop();
   poller = null;
+  implSummaryPoller?.stop();
+  implSummaryPoller = null;
   streamHandle?.close();
   streamHandle = null;
   if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
@@ -1928,7 +1933,7 @@ const stageEmptyText = computed(() => {
 });
 const projectTypeLabel = computed(() => (project.value ? projectTypeText(projectType(project.value)) : ""));
 const projectProfileLabel = computed(() =>
-  project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : "—",
+  project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : null,
 );
 const toolSummary = ref<ToolSummary | null>(null);
 
@@ -1948,6 +1953,67 @@ async function refreshToolSummary(): Promise<void> {
 async function loadStaReportText(jobId: string): Promise<string> {
   const evidence = await getJobEvidenceContent(api, projectId, jobId, "sta.rpt");
   return evidence.content;
+}
+
+// ─── 顶栏「运行校验/仿真/…」按钮：工作区推导 → 提交 → 轮询摘要 ──────────
+
+/** 提交中/已提交未被摘要确认的行 key（按钮禁用转圈）。 */
+const implRunPending = ref<Set<string>>(new Set());
+const implRunError = ref<string | null>(null);
+let implSummaryPoller: Poller | null = null;
+
+function setImplRunPending(key: string, pending: boolean): void {
+  const next = new Set(implRunPending.value);
+  if (pending) next.add(key);
+  else next.delete(key);
+  implRunPending.value = next;
+}
+
+/** 有未到终态的工具作业时拉快摘要；全部落定后自停。 */
+function startImplSummaryPolling(): void {
+  implSummaryPoller?.stop();
+  implSummaryPoller = createPoller(() => {
+    void refreshToolSummary().then(() => {
+      const active = toolSummary.value?.stages.some(stage => stage.state === "running" || stage.state === "submitted");
+      if (!active) {
+        implSummaryPoller?.stop();
+        implSummaryPoller = null;
+      }
+    });
+  }, 4000);
+}
+
+async function onRunImplAction(action: ImplRunAction): Promise<void> {
+  if (implRunPending.value.has(action.key)) return;
+  implRunError.value = null;
+  setImplRunPending(action.key, true);
+  try {
+    const needs = operationNeeds(action.operation);
+    const tree = await getWorkspaceTree(api, projectId);
+    const derived = await deriveJobInputs(
+      tree.files,
+      (path) => getWorkspaceFile(api, projectId, path).then(file => file.content),
+      { deriveTop: needs.top, deriveTb: needs.tb },
+    );
+    if (!derived.ok) throw new Error(derived.reason);
+    await submitJob(api, projectId, {
+      operation: action.operation,
+      sources: derived.sources,
+      constraints: derived.constraints,
+      top: derived.top,
+      testbench: derived.testbench,
+      part: project.value?.target_part ?? null,
+      ...(action.operation === "implement" && action.stopBeforeBitstream !== undefined
+        ? { stop_before_bitstream: action.stopBeforeBitstream }
+        : {}),
+    }, `ui-run-${projectId}-${action.key}-${crypto.randomUUID()}`);
+    void refreshToolSummary();
+    startImplSummaryPolling();
+  } catch (err) {
+    implRunError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    setImplRunPending(action.key, false);
+  }
 }
 
 const viewMode = ref<FileTreeViewMode>("path");
@@ -2487,6 +2553,9 @@ function onToggleChatOverlay(): void {
       >
         <template #progress>
           <ProjectProgressChip
+            :type-label="projectTypeLabel"
+            :profile-label="projectProfileLabel"
+            :target-part="project?.target_part ?? null"
             :stage-chain="stageChain"
             :empty-text="stageEmptyText"
             @select-stage="onSelectStage"
@@ -2495,16 +2564,18 @@ function onToggleChatOverlay(): void {
             v-if="toolSummary"
             :summary="toolSummary"
             :load-sta-report="staReportLoader"
+            :pending-keys="[...implRunPending]"
+            :run-error="implRunError"
+            @run-action="onRunImplAction"
           />
         </template>
       </TopBar>
     </header>
-    <div v-if="project" class="project-view-meta" aria-label="项目类型与流程版本">
+    <!-- 项目类型/流程/器件信息已收入顶栏「项目概览」chip；本行只剩工程项目
+         的正式流程/历史资料入口（自由项目整行不渲染）。 -->
+    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="project-view-meta" aria-label="项目辅助入口">
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
-      <span>{{ projectTypeLabel }}</span>
-      <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
-      <span v-if="project.target_part">器件：{{ project.target_part }}</span>
-      <div v-if="formalDeliveryEnabled || sideTasksEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
+      <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
         <button
           v-if="formalDeliveryEnabled"
           type="button"
