@@ -1238,6 +1238,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.agentState = {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
+      contextPromptTokens: this.lastPromptTokens,
       status,
       ...(endedReason ? { endedReason } : {}),
       ...(locked

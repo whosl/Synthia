@@ -1527,9 +1527,16 @@ export class RuntimeServer {
       permission: this.permissionSnapshot(agentId),
       context_usage: (() => {
         const session = this.sessions.get(agentId);
-        if (!session?.contextUsage) return null;
-        const usage = session.contextUsage();
-        return { prompt_tokens: usage.promptTokens, context_window: usage.contextWindow };
+        if (session?.contextUsage) {
+          const usage = session.contextUsage();
+          return { prompt_tokens: usage.promptTokens, context_window: usage.contextWindow };
+        }
+        // 重启后、下一条消息前会话尚未重建：回退到持久化的水位（可能从未
+        // 采样过 = null，UI 显示灰环），窗口用部署配置——环不因重启消失。
+        return {
+          prompt_tokens: h.currentState?.contextPromptTokens ?? null,
+          context_window: contextPolicyFromEnv(process.env).contextPolicy.contextWindow,
+        };
       })(),
     });
   }

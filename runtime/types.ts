@@ -718,6 +718,8 @@ export interface AgentState {
   readonly currentStage: StageId;
   /** Gate currently awaiting approval (when status is awaiting_approval). */
   readonly awaitingGate?: GateId;
+  /** 最近一次模型调用实测的输入 token 数（上下文水位；runtime 重启后 UI 环仍可显示）。 */
+  readonly contextPromptTokens?: number | null;
   /** Loop/task status: running / paused for user or approval / terminal. */
   readonly status:
     | "running"
