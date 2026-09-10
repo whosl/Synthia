@@ -174,7 +174,7 @@ function releaseValue(): Record<string, unknown> {
     },
     runtime: {
       kind: "bun" as const,
-      version: "1.3.14" as const,
+      version: "1.4.1" as const,
       executable_name: "bun.exe" as const,
       sha256: HASHES.runtime,
     },

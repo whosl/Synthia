@@ -17,6 +17,7 @@ Leader：主 Agent
 - 尚未在真实远端 Windows 主机上部署 Gate Worker 或启动 Vivado，尚未生成真实 Windows Gate A/B、canary、chaos、四 operation、试验 `.bit` 或真实 2h cutoff 证据。因此不得把上述本地结果表述为真实 F0/F1 或最终 Gate F PASS。
 - 真实 Connector 目标是 `DESKTOP-DVFFB09`（局域网 `192.168.31.66`），而不是本机 Parallels VM。2026-08-27 只读勘察显示其 C 盘可用约 11.27 GiB、D 盘可用约 293.32 GiB，已满足本计划 10 GiB 入场门槛；正式 staging 前仍须就目标目录所在卷重新采证。
 - Windows x64 Bun 1.3.14 已按官方 `SHASUMS256.txt` 验证：ZIP SHA-256 `0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922`，`bun.exe` SHA-256 `0187f68d843f825a72ada4a7eca60db896ed753759a7f8252edcd31ac1bf1b9c`。Windows PowerShell 5.1 原生 ACL 测试在修复续行语法后真实 `10/10` PASS；Windows release 双构建得到与本地一致的 bundle SHA，但因本节后述 toolchain attestation 尚未落地，该 A 只证明构建链可用，不能用于打开 new effects，最终 A 必须重建。
+- 2026-09-10 版本仲裁：提交 `9c0d699`/`8bc1591` 起生产代码（release builder、F0 certifier、launcher、Windows certifier、Connector server）实际 pin Bun `1.4.1`，与本计划原记 `1.3.14` 漂移；仲裁以代码为准固定 `1.4.1`，8 个测试文件与本计划两处条目同步更新，Linux 开发机换装官方 1.4.1（`bun-linux-x64.zip` SHA-256 `74c1c3bee7cd998500c8f969cd8972355ac6a07207e94a39eece1999b56ffabf`，与官方 `SHASUMS256.txt` 一致）。Windows x64 Bun 1.4.1 亦已按官方 `SHASUMS256.txt` 验证：ZIP SHA-256 `52b1f3028b01f43d37fefdf669d034a1ee2e0d96c56bb13c393bdaf169b1af84`，解包后 `bun.exe`（86,169,176 字节）SHA-256 `696a6a0713c7d11c1fba1b1c97b626da9ffcc79f6dc9277021104891f1ac4f2e`。上一条 1.3.14 记录保留为历史事实；1.4.1 的 PowerShell ACL、Windows 双构建与远端 staging 内 executable SHA 验证尚未在真实 Windows 主机重做，不得沿用 1.3.14 时代的 Windows 侧结论。
 - 真实安装 `D:\Xilinx\Vivado\2021.1` 从 D 盘继承 `Authenticated Users: Modify`，不满足 Gate 的祖先替换防护，且现有 Worker discovery 只检查 binary 可访问后回显配置声明，不能证明真实版本、patch、part 或 license。因此禁止直接用该路径签署 F0；必须先完成本计划新增的只读 toolchain image 与 attestation 链。
 - 对真实主机的只读 vendor material 盘点找到 `D:\Xilinx\.xinstall\Vivado_2021.1`、2,086,152-byte `xinstall.log` 以及 Authenticode 有效的 Xilinx `xsetup.exe`/`xuninstall.exe`；`D:\Xilinx\Downloads` 未保留安装 archive，目前也未发现能对安装全树逐文件验证的 vendor checksum manifest。这些材料能补强安装来源证据，但不能单独关闭 provenance；Reviewer 已显式签署接受该受限 known-current installation snapshot，仅用于本专用、非生产 M4-F Gate，不代表 vendor-pristine，不得用于生产 release、正式 FPGA 证据或硬件下载。
 
@@ -33,7 +34,7 @@ M4-F 不扩张 M4-E 的权限，只认证已经冻结的 `evolution_eval` 执行
 ## 2. 入场项现状
 
 1. **本地已清除，Windows 待证：** `connector/server.bundle.mjs` 已更新并通过本地双构建/hash foundation；仍须在固定 Windows Bun 上重新双构建、核部署后 hash 并实际启动入口，才能清除 F0。
-2. **本地已清除，Windows 待证：** launcher 已固定 Bun 1.3.14 绝对路径并移除 Node/`PATH` fallback；仍须在真实远端 Windows 主机内验证 executable SHA、launcher fail-closed 与入口 smoke。
+2. **本地已清除，Windows 待证：** launcher 已固定 Bun 1.4.1 绝对路径并移除 Node/`PATH` fallback；仍须在真实远端 Windows 主机内验证 executable SHA、launcher fail-closed 与入口 smoke。
 3. **本地已清除，Windows 待证：** config 已加入 `evolution_eval`、ledger initialize/reopen、epoch、spool 与 staging 边界；仍须在 exact staging 中完成 initialize→reopen、跨进程 query-first canary。
 4. 当前集成工作树包含用户与多 Agent 的未提交修改。M4-F 不能伪称来自 clean commit；首轮认证以 Git 状态快照、冻结文件 SHA-256、bundle manifest 与部署后 hash 为可复现边界。正式发布仍另行要求 clean commit。
 5. 真实主机现有 `D:\synthia-worker` Worker 正在 8443 提供服务，使用 Node 24.14.1 启动旧 bundle；该 bundle 不含 `evolution_eval`/ledger v2/process-instance attestation，配置声明 hash 与实际 bundle hash 也不一致，因此不能作为 Gate release。它必须在隔离 staging 全部预检通过前保持运行且不得被覆盖。
@@ -45,7 +46,7 @@ M4-F 不扩张 M4-E 的权限，只认证已经冻结的 `evolution_eval` 执行
 
 - PostgreSQL：专用 `synthia-selfevo-gate-0a50` 容器/数据库，不复用生产数据。
 - Windows：`DESKTOP-DVFFB09` / Windows 11 专业版，先使用 `C:\Windows\Temp\synthia-m4f-<gate-id>` staging，不覆盖 `D:\synthia-worker` 或其他既有 Worker 目录。
-- Runtime：在 staging 内安装官方 Windows x64 Bun 1.3.14，使用固定绝对路径并记录 version/SHA-256；不得复用现有 Node 入口，也不得依赖 `PATH`。
+- Runtime：在 staging 内安装官方 Windows x64 Bun 1.4.1，使用固定绝对路径并记录 version/SHA-256；不得复用现有 Node 入口，也不得依赖 `PATH`。
 - Vivado source：`D:\Xilinx\Vivado\2021.1` 仅作为待认证复制源，不直接进入 Gate trust boundary。Gate Worker只执行只读挂载的版本化 toolchain image；只接受真实探测到的 2021.1 / SW build 3247384 / IP build 3246043、part `xc7k70tfbv676-1`、license probe 与冻结 toolchain profile，漂移即阻断。
 - Connector 公网路径：`https://connect.wenzhuolin.xyz` → Cloudflare Access → NAS origin proxy/mTLS → `DESKTOP-DVFFB09:8443`。Core 保持该 endpoint，不因远端管理拓扑修改 Connector 协议。
 - Gate 产物：日志、release manifest、ledger/spool 备份和 Vivado 证据写入仓库外的专用 artifact 目录，秘密不得进入仓库或报告。

@@ -36,7 +36,7 @@ const TARGET_ACL_PATHS = [
   "D:\\Xilinx\\Vivado\\2021.1",
 ] as const;
 const TARGET_VIVADO = "D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat";
-const TARGET_BUN = "D:\\synthia-worker\\runtime\\bun-1.3.14\\bun.exe";
+const TARGET_BUN = "D:\\synthia-worker\\runtime\\bun-1.4.1\\bun.exe";
 const HASH = /^[0-9a-f]{64}$/u;
 const SID = /^S-1-(?:[0-9]+-){1,14}[0-9]+$/u;
 const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
@@ -315,7 +315,7 @@ export function buildAdmissionV2Script(admission: M4fDirectAdmissionConfig): str
     "$a=@(@(\"C:\\Windows\\Temp\",\"D:\\synthia-worker\",\"D:\\Xilinx\\Vivado\\2021.1\")|% -Process {SAcl $_})",
     "$l=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue|? -FilterScript {$_.LocalPort-eq 8443-or$_.LocalPort-eq 18443}|sort -Property LocalPort,OwningProcess|% -Process {[ordered]@{a=$_.LocalAddress;p=[int]$_.LocalPort;i=[int]$_.OwningProcess}})",
     "$m=@(\"bun.exe\",\"node.exe\",\"vivado.exe\",\"vivado_lab.exe\",\"hw_server.exe\");$q=@(Get-CimInstance -ClassName Win32_Process|? -FilterScript {$m-ccontains$_.Name}|sort -Property ProcessId|% -Process {[ordered]@{i=[int]$_.ProcessId;p=[int]$_.ParentProcessId;n=$_.Name;x=$_.ExecutablePath;c=if($_.CreationDate){$_.CreationDate.ToUniversalTime().ToString(\"o\")}}})",
-    "$x=[ordered]@{s=\"s2\";t=[DateTime]::UtcNow.ToString(\"o\");i=[ordered]@{c=$env:COMPUTERNAME;d=$env:USERDOMAIN;u=$env:USERNAME;n=$wn;s=$ws};v=$d;a=$a;l=$l;p=$q;x=SFile \"D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat\";b=SFile \"D:\\synthia-worker\\runtime\\bun-1.3.14\\bun.exe\";h=$false;k=$false};$x|ConvertTo-Json -Compress -Depth 12",
+    "$x=[ordered]@{s=\"s2\";t=[DateTime]::UtcNow.ToString(\"o\");i=[ordered]@{c=$env:COMPUTERNAME;d=$env:USERDOMAIN;u=$env:USERNAME;n=$wn;s=$ws};v=$d;a=$a;l=$l;p=$q;x=SFile \"D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat\";b=SFile \"D:\\synthia-worker\\runtime\\bun-1.4.1\\bun.exe\";h=$false;k=$false};$x|ConvertTo-Json -Compress -Depth 12",
     "",
   ].join("\n");
 }

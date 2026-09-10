@@ -268,7 +268,7 @@ function fixture(): Scenario {
         "D:\\Xilinx\\Vivado\\2021.1",
       ],
       vivado_executable: "D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat",
-      bun_executable: "D:\\synthia-worker\\runtime\\bun-1.3.14\\bun.exe",
+      bun_executable: "D:\\synthia-worker\\runtime\\bun-1.4.1\\bun.exe",
     },
   };
   const effective = effectiveConfig(admission);

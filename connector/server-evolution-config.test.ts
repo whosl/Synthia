@@ -168,7 +168,7 @@ describe("M4-F evolution-eval Worker configuration ceremony", () => {
       source_state: "dirty",
       git_status_sha256: "b".repeat(64),
       bundle: { path: "server.bundle.mjs", size_bytes: 1, sha256: "c".repeat(64) },
-      runtime: { kind: "bun", version: "1.3.14", executable_name: "bun.exe", sha256: "d".repeat(64) },
+      runtime: { kind: "bun", version: "1.4.1", executable_name: "bun.exe", sha256: "d".repeat(64) },
       release_files: {
         config_template_sha256: "e".repeat(64),
         launcher_sha256: "f".repeat(64),

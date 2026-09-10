@@ -530,7 +530,7 @@ function fixture(): Scenario {
       expected_effective_config_sha256: null,
       acl_paths: ["C:\\Windows\\Temp", "D:\\synthia-worker", "D:\\Xilinx\\Vivado\\2021.1"],
       vivado_executable: "D:\\Xilinx\\Vivado\\2021.1\\bin\\vivado.bat",
-      bun_executable: "D:\\synthia-worker\\runtime\\bun-1.3.14\\bun.exe",
+      bun_executable: "D:\\synthia-worker\\runtime\\bun-1.4.1\\bun.exe",
     },
   };
   const scenario: Scenario = {
@@ -622,7 +622,7 @@ function snapshot(config: M4fDirectAdmissionConfig): Record<string, unknown> {
     listeners: [{ address: "0.0.0.0", port: 8443, pid: 123 }],
     relevant_processes: [{ pid: 123, parent_pid: 1, name: "node.exe", executable_path: "D:\\synthia-worker\\node.exe", creation_date: "2026-08-28T00:00:00Z" }],
     vivado: { path: config.target.vivado_executable, exists: true, length: 100, sha256: "a".repeat(64), file_version: "2021.1" },
-    bun: { path: config.target.bun_executable, exists: true, length: 100, sha256: "b".repeat(64), file_version: "1.3.14" },
+    bun: { path: config.target.bun_executable, exists: true, length: 100, sha256: "b".repeat(64), file_version: "1.4.1" },
     stage_elapsed_ms: {
       identity_ms: 10,
       volumes_ms: 20,

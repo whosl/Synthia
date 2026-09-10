@@ -1113,7 +1113,7 @@ function fixtureV2(): ScenarioV2 {
     "D:\\Xilinx\\Vivado\\2021.1",
   ];
   scenario.admissionConfig.target.bun_executable =
-    "D:\\synthia-worker\\runtime\\bun-1.3.14\\bun.exe";
+    "D:\\synthia-worker\\runtime\\bun-1.4.1\\bun.exe";
   scenario.effective = effectiveConfig(scenario.admissionConfig);
   scenario.admissionConfig.target.expected_effective_config_sha256 = sha256(scenario.effective);
   const baseAdmissionConfigPath = scenario.config.admission_config_path;

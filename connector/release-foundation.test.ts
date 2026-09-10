@@ -48,7 +48,7 @@ describe("M4-F Worker release foundation", () => {
   test("launcher is pinned to Bun and completes preflight before reading the secret", async () => {
     const launcher = await text("start-worker-66.cmd");
     expect(launcher).toContain('SYNTHIA_WORKER_ROOT=D:\\synthia-worker');
-    expect(launcher).toContain('SYNTHIA_WORKER_BUN=%SYNTHIA_WORKER_ROOT%\\runtime\\bun-1.3.14\\bun.exe');
+    expect(launcher).toContain('SYNTHIA_WORKER_BUN=%SYNTHIA_WORKER_ROOT%\\runtime\\bun-1.4.1\\bun.exe');
     expect(launcher.toLowerCase()).not.toContain("node.exe");
     expect(launcher).toContain("SYNTHIA_WORKER_VERIFY_BUNDLE=1");
     expect(launcher).toContain("SYNTHIA_WORKER_CONFIG_SHA256");
@@ -81,7 +81,7 @@ describe("M4-F Worker release foundation", () => {
     expect(certifier).toContain(String.raw`Vivado\bin\unwrapped\win64.o\vivado.exe`);
     expect(certifier).toContain(String.raw`Vivado\lib\win64.o\librdi_common.dll`);
     expect(certifier).not.toContain('Filter "*rdi*common*.dll"');
-    expect(certifier).toContain("179b24f2214c528c2749f777fc3a7baf7c1578f1a47726ad441052f3a6afcd2aa");
+    expect(certifier).toContain("179b24f2214c528c2749f77fc3a7baf7c1578f1a47726ad441052f3a6afcd2aa");
     expect(certifier).toContain("933ee02cd71c652e1f4d7c055822684f0416da7028c064a4a7c5c7ecb668f21e");
     expect(certifier).toContain('Status -cne "NotSigned"');
     expect(certifier).toContain('$rootItem = Get-Item -LiteralPath $Root -Force');
@@ -236,7 +236,7 @@ describe("M4-F Worker release foundation", () => {
     expect(launchPreflight).toContain('else { "synthia-generic-worker-launch-preflight.v1" }');
     expect(certifier).not.toMatch(/(?:Start-Process|server\.bundle\.mjs\s+--initialize)/);
     expect(certifier).not.toContain('Protect-NewTrustedObject $directoryPath ("ledger_" + $directory)');
-    expect(server).toContain('const handle = await open(ackPath, "r+")');
+    expect(server).toContain('handle = await open(ackPath, "r+")');
     expect(server).toContain("await handle.truncate(0)");
     expect(server).toContain("await handle.sync()");
     expect(server).not.toContain("rename(temporary, ackPath)");
@@ -449,7 +449,7 @@ describe("M4-F Worker release foundation", () => {
     expect(builder).toContain("RELEASE_OUTPUT_ALREADY_EXISTS");
     expect(builder).toContain("RELEASE_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY");
     expect(builder).toContain("canonicalEvolutionEvalHash(body)");
-    expect(builder).toContain('version: "1.3.14"');
+    expect(builder).toContain('version: "1.4.1"');
     expect(builder).toContain('"--porcelain=v1", "-z", "--untracked-files=all"');
     expect(builder).toContain("RELEASE_SOURCE_CHANGED_DURING_SNAPSHOT");
     expect(builder).toContain("RELEASE_METAFILE_INPUT_DRIFT");
