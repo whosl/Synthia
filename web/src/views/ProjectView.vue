@@ -2474,6 +2474,12 @@ function onToggleChatOverlay(): void {
         />
       </template>
       <template #center>
+        <ImplProgressCard
+          v-if="!openArtifactId && toolSummary"
+          class="project-view-impl-card"
+          :summary="toolSummary"
+          :load-sta-report="staReportLoader"
+        />
         <WorkspaceWelcome
           v-if="!openArtifactId"
           :project-name="project.name"
@@ -2483,13 +2489,7 @@ function onToggleChatOverlay(): void {
           @start="focusConversation"
           @browse="treeDrawerOpen = true"
         />
-        <ImplProgressCard
-          v-if="!openArtifactId && toolSummary"
-          class="project-view-impl-card"
-          :summary="toolSummary"
-          :load-sta-report="staReportLoader"
-        />
-        <CodeEditor v-else
+        <CodeEditor v-if="openArtifactId"
           v-bind="codeEditorProps"
           @select-revision="onSelectRevision"
           @compare-revisions="onCompareRevisions"
