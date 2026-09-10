@@ -25,7 +25,7 @@ import type {
 } from "./evolution-worker-client.ts";
 
 export const EVOLUTION_WORKER_SCHEMA_VERSION = "evolution-worker.v1";
-export const DISTILLER_PROMPT_VERSION = "distiller-prompt.v2";
+export const DISTILLER_PROMPT_VERSION = "distiller-prompt.v3";
 export const CURATOR_PROMPT_VERSION = "curator-prompt.v1";
 export const EVOLUTION_MODEL_OUTPUT_MAX_BYTES = 1_500_000;
 export const EVOLUTION_LEASE_MIN_SECONDS = 30;
@@ -49,7 +49,7 @@ export const DISTILLER_SYSTEM_PROMPT = [
   "Actions: {action:'no_op'}, {action:'create',skill:{...}}, or {action:'patch',skill:{skill_id,...}}.",
   "skill fields are exactly: slug, name, summary, description, applicability, outcome_contract, files.",
   "skill.slug is kebab-case; applicability and outcome_contract are JSON objects describing when to apply the skill and its guaranteed result contract.",
-  'skill.files items are exactly {path, content} with plain-text content; exactly one file must have path "SKILL.md".',
+  'skill.files items are exactly {path, kind, language, content}: for "SKILL.md" use kind "skill_md" and language null; references/ files use kind "reference" and language null; templates/ use "template" and null; scripts/*.tcl|*.py|*.ts use kind "script" and language "tcl"|"python"|"typescript" respectively. Exactly one file must have path "SKILL.md".',
   "For patch, select an existing skill_id and repeat every skill field plus skill_id. The worker derives expected parent/revision; never invent CAS fields.",
 ].join("\n");
 
