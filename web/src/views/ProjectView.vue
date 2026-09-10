@@ -192,6 +192,7 @@ import type {
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
 import Splitter from "../components/ui/Splitter.vue";
 import TopBar from "../components/layout/TopBar.vue";
+import ProjectProgressCard from "../components/impl/ProjectProgressCard.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
@@ -2300,8 +2301,6 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
 
 const topBarProps = computed<TopBarProps>(() => ({
   projectName: project.value?.name ?? "",
-  stageChain: stageChain.value,
-  stageEmptyText: stageEmptyText.value,
   theme: theme.value,
   treeDrawerOpen: treeDrawerOpen.value,
   chatOverlayOpen: chatOverlayOpen.value,
@@ -2418,7 +2417,6 @@ function onToggleChatOverlay(): void {
     <header class="project-view-topbar">
       <TopBar
         v-bind="topBarProps"
-        @select-stage="onSelectStage"
         @toggle-theme="onToggleTheme"
         @toggle-tree-drawer="onToggleTreeDrawer"
         @toggle-chat-overlay="onToggleChatOverlay"
@@ -2454,6 +2452,20 @@ function onToggleChatOverlay(): void {
       </div>
     </div>
 
+    <div v-if="project" class="project-view-progress" aria-label="项目进度总览">
+      <ProjectProgressCard
+        :stage-chain="stageChain"
+        :empty-text="stageEmptyText"
+        @select-stage="onSelectStage"
+      />
+      <ImplProgressCard
+        v-if="toolSummary"
+        class="project-view-impl-card"
+        :summary="toolSummary"
+        :load-sta-report="staReportLoader"
+      />
+    </div>
+
     <div v-if="loadErrorText" class="project-view-error" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
     <div v-if="loading" class="project-loading" role="status">正在准备项目工作区…</div>
 
@@ -2474,12 +2486,6 @@ function onToggleChatOverlay(): void {
         />
       </template>
       <template #center>
-        <ImplProgressCard
-          v-if="!openArtifactId && toolSummary"
-          class="project-view-impl-card"
-          :summary="toolSummary"
-          :load-sta-report="staReportLoader"
-        />
         <WorkspaceWelcome
           v-if="!openArtifactId"
           :project-name="project.name"
@@ -2737,6 +2743,22 @@ function onToggleChatOverlay(): void {
   align-items: center;
   gap: var(--space-2);
   margin-left: auto;
+}
+
+.project-view-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: stretch;
+  flex: none;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.project-view-progress .project-view-impl-card {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .project-view-materials-button,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * 顶栏（spec §3.1）：返回按钮 + 项目名 + 阶段进度条 + 主题切换 + 用户区。
+ * 顶栏（spec §3.1）：返回按钮 + 项目名 + 主题切换 + 用户区。
+ * G0–G4 阶段条已上移到页面顶部进度带（ProjectProgressCard），不再占顶栏。
  *
  * 受控组件：只吃 TopBarProps，只吐 TopBarEmits（views/project-view-contract.ts）。
  * 返回项目列表是纯本地导航，不跨栏耦合数据，因此不走 emit，直接用 router 完成。
@@ -8,7 +9,6 @@
 import { useRouter } from "vue-router";
 import type { TopBarEmits, TopBarProps } from "../../views/project-view-contract.ts";
 import Icon from "../ui/Icon.vue";
-import StageRail from "./StageRail.vue";
 import Button from "../ui/Button.vue";
 import Tooltip from "../ui/Tooltip.vue";
 
@@ -39,14 +39,6 @@ function onBack(): void {
       >
         ☰
       </button>
-    </div>
-
-    <div class="topbar-center">
-      <StageRail
-        :stage-chain="props.stageChain"
-        :empty-text="props.stageEmptyText"
-        @select-stage="(id) => emit('select-stage', id)"
-      />
     </div>
 
     <div class="topbar-right">
@@ -100,16 +92,9 @@ function onBack(): void {
   font-size: var(--font-size-base);
 }
 
-.topbar-center {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-}
-
 .topbar-right {
-  flex: none;
+  flex: 1 1 auto;
+  justify-content: flex-end;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -156,7 +141,6 @@ function onBack(): void {
   .topbar-left { flex: 1; gap: 3px; }
   .topbar-project-name { max-width: 110px; font-size: 12px; }
   .topbar-right { gap: 2px; }
-  .topbar-center { order: 3; flex: 1 1 100%; height: 24px; padding-left: 8px; }
   .topbar-right :deep(.task-switcher-trigger) { max-width: 85px; }
 }
 </style>

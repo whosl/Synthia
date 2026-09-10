@@ -19,7 +19,6 @@
 import type { ArtifactRevision, JobEvidenceContent, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
-import type { ProcessGateView } from "../domain/process-profile.ts";
 import type { StreamPhase } from "../domain/task-stream.ts";
 import type { Theme } from "../domain/theme.ts";
 import type { ApprovalCardState, ApprovalMember, DecisionFailure } from "../domain/unified.ts";
@@ -184,16 +183,12 @@ export const ARTIFACT_DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" 
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// TopBar（顶栏：项目名 + 阶段条 + 主题 + 用户）
+// TopBar（顶栏：项目名 + 主题 + 用户；G0-G4 阶段条已上移到顶部进度带）
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface TopBarProps {
   /** 项目名称，来自 `GET /projects/:id`.name。 */
   readonly projectName: string;
-  /** Core process-profile.v1 + process-state.v1 的 G0-G4 投影；绝不从任务阶段推导。 */
-  readonly stageChain: readonly ProcessGateView[] | null;
-  /** 项目没有新版工程阶段链时的准确占位文案。 */
-  readonly stageEmptyText: string;
   /** 当前生效主题，驱动 ☀/☾ 图标显示哪一个。 */
   readonly theme: Theme;
   /** <1024px 时文件树抽屉是否已展开（驱动汉堡按钮的开合态）。见 spec R3。 */
@@ -203,11 +198,6 @@ export interface TopBarProps {
 }
 
 export interface TopBarEmits {
-  /**
-   * 点击阶段/门节点：左栏应联动切换到「阶段」视图并定位到该阶段的产物分组
-   * （spec §3.1 末条）。stageId 对齐 `STAGE_CHAIN` 的 node.id（含门节点 G1/G3/G4）。
-   */
-  "select-stage": [stageId: string];
   /** 点击主题切换按钮（☀/☾）。 */
   "toggle-theme": [];
   /** <1024px 汉堡按钮：开合文件树抽屉。 */
