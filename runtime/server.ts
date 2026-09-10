@@ -2168,42 +2168,67 @@ export class RuntimeServer {
     /** 本轮思维链全文（finalize 时收集未同步的尾部，供同步 core assistant_thinking 事件）。 */
     const reasoningTexts: string[] = [];
     /**
-     * 已同步到 Core 的思维链 part id。思维链事件在工具调用边界增量落库（见
-     * flushPendingThinking），finalize 只补未同步的尾部，避免整轮思维链集中
-     * 写在所有工具事件之后——那会让 Core 日志的 sequence 丢失轮内时序，
-     * 刷新回放变成「先工具后思考」。
+     * 已同步到 Core 的流 cell part id（思维链与叙述）。这两类事件在工具调用
+     * 边界增量落库（见 flushPendingCells），finalize 只补未同步的尾部，避免
+     * 整轮集中写在所有工具事件之后——那会让 Core 日志的 sequence 丢失轮内
+     * 时序，刷新回放变成「先工具后思考/丢中间叙述」。
      */
-    const flushedThinking = new Set<string>();
-    /** 思维链事件的轮内序号（event id 后缀）。调用边界一致则重放确定。 */
+    const flushedCells = new Set<string>();
+    /** 思维链/叙述事件的轮内序号（event id 后缀）。调用边界一致则重放确定。 */
     let thinkingSeq = 0;
+    let narrationSeq = 0;
     /**
-     * 把已完结、未同步的思维链按流内顺序同步到 Core。模型发起工具调用时，
-     * 本轮思考已经完结（块序保证 reasoning 先于 tool_use），此时落库 sequence
-     * 恰好等于发生序。best-effort：单条失败记日志继续，不吞掉调用方的工具事件。
+     * 把已完结、未同步的流 cell（思维链 + 叙述）按流内顺序同步到 Core。模型
+     * 发起工具调用时，本轮思考和叙述都已完结（块序保证 reasoning/text 先于
+     * tool_use），此时落库 sequence 恰好等于发生序。叙述作为 assistant_message
+     * 落库（最终回复仍由收尾的 assistant 事件单独落，id 不冲突）。best-effort：
+     * 单条失败记日志继续，不吞掉调用方的工具事件。
      */
-    const flushPendingThinking = (): Promise<void> => {
+    const flushPendingCells = (): Promise<void> => {
       let chain = Promise.resolve();
       for (const [id, cell] of parts) {
-        if (cell.kind !== "reasoning" || !cell.text.trim() || flushedThinking.has(id)) continue;
-        flushedThinking.add(id);
-        this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
-        const index = thinkingSeq;
-        thinkingSeq += 1;
+        if (!cell.text.trim() || flushedCells.has(id)) continue;
+        flushedCells.add(id);
         const text = cell.text;
-        chain = chain
-          .then(() =>
-            this.appendCoreTaskEvent(
-              agentId,
-              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
-              "assistant_thinking",
-              { text },
-            ),
-          )
-          .catch((error: unknown) => {
-            process.stderr.write(
-              `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          });
+        if (cell.kind === "reasoning") {
+          this.recordConversationAudit(agentId, "free_agent_thinking", clip(text, AUDIT_THINKING_MAX));
+          const index = thinkingSeq;
+          thinkingSeq += 1;
+          chain = chain
+            .then(() =>
+              this.appendCoreTaskEvent(
+                agentId,
+                `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
+                "assistant_thinking",
+                { text },
+              ),
+            )
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+        } else {
+          // 轮内叙述：audit 与 Core 双落（legacy 自由 agent 的回放只有 audit 一路；
+          // 与最终回复一致，audit 不截断）。
+          this.recordConversationAudit(agentId, "free_agent_reply", text);
+          const index = narrationSeq;
+          narrationSeq += 1;
+          chain = chain
+            .then(() =>
+              this.appendCoreTaskEvent(
+                agentId,
+                `te-${sha256Hex(`${agentId}\0${turnId}\0narration\0${index}`).slice(0, 40)}`,
+                "assistant_message",
+                { text },
+              ),
+            )
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `[runtime-server] assistant narration sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+        }
       }
       return chain;
     };
@@ -2237,9 +2262,9 @@ export class RuntimeServer {
           type: "part",
           part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
         });
-        // 先落本轮已完结的思维链，再落 tool_call：两者共用 appendCoreTaskEvent
-        // 的串行链，sequence 即发生序（think → tool，而不是 tool 全部先落）。
-        await flushPendingThinking();
+        // 先落本轮已完结的思维链与叙述，再落 tool_call：三者共用 appendCoreTaskEvent
+        // 的串行链，sequence 即发生序（think/narration → tool，而不是 tool 全部先落）。
+        await flushPendingCells();
         await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
@@ -2293,8 +2318,9 @@ export class RuntimeServer {
           hub.emit({ type: "part", part: { kind: cell.kind, id, state: "done", text: cell.text, ts } });
           // 思维链落 audit（free_agent_thinking），刷新页面后由 auditToParts 重放。
           // 已在工具边界同步过的只剩 hub 定稿；未同步的尾部（回复前的最后一段
-          // 思考）进 reasoningTexts，由收尾循环按延续序号落库。
-          if (cell.kind === "reasoning" && cell.text.trim() && !flushedThinking.has(id)) {
+          // 思考）进 reasoningTexts，由收尾循环按延续序号落库。叙述文本不在此处
+          // 处理：中间叙述已在工具边界落库，最终回复由收尾的 assistant 事件落。
+          if (cell.kind === "reasoning" && cell.text.trim() && !flushedCells.has(id)) {
             reasoningTexts.push(cell.text);
             this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
           }

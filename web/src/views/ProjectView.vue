@@ -110,7 +110,6 @@ import {
   conversationEventsToParts,
   type SynthiaPart,
   type SynthiaReasoningPart,
-  type SynthiaTextPart,
 } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
 import {
@@ -1530,13 +1529,6 @@ const auditParts = computed<readonly SynthiaPart[]>(() => {
   ];
 });
 
-/** SSE 打开的流式文本 part（尚未定稿的部分渲染于流尾，见下方 parts 合成）。 */
-const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
-  streamFeed.value
-    .filter((p): p is Extract<StreamFeedPart, { kind: "text" }> => p.kind === "text")
-    .map((p) => ({ kind: "text" as const, id: p.id, role: "agent" as const, state: p.state, text: p.text, segments: null })),
-);
-
 /**
  * 一条 SSE 过程 part（思考/工具调用）→ SynthiaPart。
  *
@@ -1577,7 +1569,6 @@ const parts = computed<readonly SynthiaPart[]>(() => {
     if (ids) ids.push(s.id);
     else twinIds.set(key, [s.id]);
   }
-  const liveOnes = streamingTextParts.value.filter((p) => p.state === "streaming");
   // 从后往前认领：流里只有最近若干轮，最新的流 id 属于最新的那条 audit 回复。
   const settled: SynthiaPart[] = [...auditParts.value];
   for (let i = settled.length - 1; i >= 0; i--) {
@@ -1611,6 +1602,10 @@ const parts = computed<readonly SynthiaPart[]>(() => {
   const settledIds = new Set(settled.map((p) => p.id));
   const anchored = new Map<string, SynthiaPart[]>();
   let pending: SynthiaPart[] = [];
+  /** 流尾：所有未解析的流 part（未锚定过程卡 + 未定稿文本），按流内真实顺序。 */
+  const unresolved: SynthiaPart[] = [];
+  /** 已被锚点/原地替换消费掉的流尾 part id。 */
+  const resolvedIds = new Set<string>();
   for (const p of streamFeed.value) {
     const processPart = toProcessPart(p);
     if (processPart) {
@@ -1622,12 +1617,30 @@ const parts = computed<readonly SynthiaPart[]>(() => {
         // 时序锚点：流里攒在它前面的 pending 过程卡（尚未定稿的思维链等）插到
         // 它前面——只锚定稿文本的话，长轮次中途的思维链会一直堆在流尾，读起来
         // 变成「先跑完工具、再思考」的反序。
-        if (pending.length > 0) anchored.set(settled[at]!.id, pending.splice(0));
+        if (pending.length > 0) {
+          for (const consumed of pending) resolvedIds.add(consumed.id);
+          anchored.set(settled[at]!.id, pending.splice(0));
+        }
         settled[at] = processPart;
-      } else pending.push(processPart);
+      } else {
+        pending.push(processPart);
+        unresolved.push(processPart);
+      }
+    } else if (p.state === "streaming") {
+      // 轮内多段叙述要到整轮 finalize 才转 done，中途全程 streaming——它们与
+      // 正在生成的过程卡必须按流内顺序混排，不能分桶拼接（先过程卡后文本会把
+      // 最新的思考卡排到更早的叙述气泡前面）。
+      unresolved.push({
+        kind: "text",
+        id: p.id,
+        role: "agent",
+        state: "streaming",
+        text: p.text,
+        segments: null,
+      });
     } else if (p.state === "done" && pending.length > 0) {
-      anchored.set(p.id, pending);
-      pending = [];
+      for (const consumed of pending) resolvedIds.add(consumed.id);
+      anchored.set(p.id, pending.splice(0));
     }
   }
 
@@ -1642,8 +1655,8 @@ const parts = computed<readonly SynthiaPart[]>(() => {
   for (const [id, before] of anchored) {
     if (!settledIds.has(id)) out.push(...before);
   }
-  // pending 是本轮尚未跟上文本的过程卡（正在思考 / 工具正在跑），永远在流尾。
-  out.push(...pending, ...liveOnes);
+  // 流尾按流内顺序：正在思考/运行中的过程卡与未定稿叙述交错，最新的永远在最后。
+  out.push(...unresolved.filter((p) => !resolvedIds.has(p.id)));
   return out;
 });
 
