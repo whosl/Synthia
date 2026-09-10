@@ -1589,7 +1589,17 @@ async function validateToolCall(
   if (task.agent_role === "project" && payload.turn_id !== turnId) {
     throw conflictApiError("TASK_TOOL_CALL_TURN_MISMATCH");
   }
-  const args = asObject(payload.args, "tool call args");
+  // The runtime persists tool_call args as a JSON string (the stream/UI
+  // contract); accept either the string form or a plain object.
+  let args: unknown = payload.args;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = null;
+    }
+  }
+  asObject(args, "tool call args");
   if (canonicalRequestHash(args) !== canonicalRequestHash(expectedArgs)) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
