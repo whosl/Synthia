@@ -32,7 +32,9 @@ import {
 import { loadAgentState } from "./agent-state.ts";
 import {
   appendSystemNoteToConversation,
+  compactForContextWindow,
   loadFreeAgentConversation,
+  type ContextPolicy,
 } from "./free-agent.ts";
 import type {
   AgentMessage,
@@ -117,6 +119,7 @@ function makeSession(opts: {
   initialGateLock?: { gate: "G1" | "G2" | "G3" | "G4"; submissionId: string };
   processInstanceId?: string;
   referenceContext?: string;
+  contextPolicy?: ContextPolicy;
 }) {
   const agentId = `agent-fa-test-${++idCounter}`;
   const governance = opts.governance ?? new MockGovernanceClient();
@@ -133,6 +136,7 @@ function makeSession(opts: {
     connector: opts.connector ?? null,
     ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     ...(opts.initialGateLock ? { initialGateLock: opts.initialGateLock } : {}),
+    ...(opts.contextPolicy ? { contextPolicy: opts.contextPolicy } : {}),
     agentsDir,
   });
   return { session, agentId, governance };
@@ -1149,5 +1153,123 @@ describe("appendSystemNoteToConversation (H7)", () => {
   test("returns false when no sidecar exists (nothing to annotate)", async () => {
     const ok = await appendSystemNoteToConversation("agent-never-existed", "note", "n1");
     expect(ok).toBeFalse();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context watermark + model-view compaction
+// ---------------------------------------------------------------------------
+
+describe("compactForContextWindow (pure projection)", () => {
+  const policy: ContextPolicy = {
+    contextWindow: 1_000,
+    compactTriggerRatio: 0.5,
+    keepToolResults: 1,
+    toolResultBudgetChars: 100,
+  };
+  const long = "L".repeat(500);
+  const base: readonly AgentMessage[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "go" },
+    { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "fpga-intake", args: {} }] },
+    { role: "tool", toolCallId: "t1", name: "fpga-intake", content: long },
+    { role: "assistant", content: null, toolCalls: [{ toolCallId: "t2", name: "fpga-intake", args: {} }] },
+    { role: "tool", toolCallId: "t2", name: "fpga-intake", content: long },
+    { role: "assistant", content: "done" },
+  ];
+
+  test("null watermark and below-threshold watermark are no-ops", () => {
+    expect(compactForContextWindow(base, policy, null)).toBe(base);
+    expect(compactForContextWindow(base, policy, 499)).toBe(base);
+  });
+
+  test("above threshold: old tool body compacted, recent kept, non-tool untouched", () => {
+    const out = compactForContextWindow(base, policy, 600);
+    expect(out).toHaveLength(base.length);
+    const t1 = out[3]!;
+    const t2 = out[5]!;
+    if (t1.role !== "tool" || t2.role !== "tool") throw new Error("expected tool messages");
+    // 旧结果：截头 + 系统标记，配对字段原样。
+    expect(t1.toolCallId).toBe("t1");
+    expect(t1.name).toBe("fpga-intake");
+    expect(t1.content.startsWith("L".repeat(100))).toBeTrue();
+    expect(t1.content).toContain("context-compacted: 400 chars omitted");
+    // 最近一条（keepToolResults=1）保持全文。
+    expect(t2.content).toBe(long);
+    // system/user/assistant 原样。
+    expect(out[0]).toEqual(base[0]);
+    expect(out[1]).toEqual(base[1]);
+    expect(out[6]).toEqual(base[6]);
+  });
+
+  test("idempotent: a second pass leaves the compacted view unchanged", () => {
+    const once = compactForContextWindow(base, policy, 600);
+    const twice = compactForContextWindow(once, policy, 600);
+    expect(twice).toEqual(once);
+  });
+
+  test("short old tool results are left alone even above threshold", () => {
+    const short: readonly AgentMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: null, toolCalls: [{ toolCallId: "s1", name: "t", args: {} }] },
+      { role: "tool", toolCallId: "s1", name: "t", content: "ok" },
+      { role: "assistant", content: "done" },
+    ];
+    expect(compactForContextWindow(short, policy, 900)).toBe(short);
+  });
+});
+
+describe("free-agent: watermark compaction in the model view", () => {
+  test("usage-reported watermark compacts old tool results for the model only", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      // 这轮回报高水位（> 1000×0.5）——下一轮的模型视图应压缩 tc1 的结果。
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt("两份候选已登记。"),
+    ]);
+    const { session, agentId } = makeSession({
+      model,
+      governance: gov,
+      contextPolicy: {
+        contextWindow: 1_000,
+        compactTriggerRatio: 0.5,
+        keepToolResults: 1,
+        toolResultBudgetChars: 60,
+      },
+    });
+
+    await session.prompt("登记两份 intake 文档");
+
+    // 模型视图（第三次调用的入参）：tc1 结果带压缩标记，tc2 保持原文。
+    const lastCall = model.calls[2]!;
+    const toolMsgs = lastCall.messages.filter((m) => m.role === "tool");
+    expect(toolMsgs).toHaveLength(2);
+    const [first, second] = toolMsgs as Extract<AgentMessage, { role: "tool" }>[];
+    expect(first.toolCallId).toBe("tc1");
+    expect(first.content).toContain("context-compacted:");
+    expect(second.toolCallId).toBe("tc2");
+    expect(second.content).not.toContain("context-compacted:");
+
+    // 持久会话保持全文：重载后的对话里 tc1 无压缩痕迹。
+    const persisted = await loadFreeAgentConversation(agentId, agentsDir);
+    const persistedTools = (persisted?.messages ?? []).filter((m) => m.role === "tool");
+    expect(persistedTools[0]?.content).not.toContain("context-compacted:");
+  });
+
+  test("no contextPolicy (default): full replay regardless of reported usage", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 999_999 } },
+      txt("完成。"),
+    ]);
+    const { session } = makeSession({ model, governance: gov });
+
+    await session.prompt("登记两份");
+
+    const lastCall = model.calls[2]!;
+    const toolMsgs = lastCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolMsgs[0]!.content).not.toContain("context-compacted:");
   });
 });

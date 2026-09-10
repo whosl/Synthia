@@ -130,10 +130,17 @@ export interface BeforeModelCallHook {
   (messages: readonly AgentMessage[]): { stop: true; reason: string } | undefined;
 }
 
+/** 模型一次调用的用量回执；网关不回报时缺省，水位管理按未知处理。 */
+export interface TurnUsage {
+  /** 本次请求的输入 token 数（即压缩水位的直接量度）。 */
+  readonly promptTokens?: number;
+  readonly completionTokens?: number;
+}
+
 /** 模型一次对话回合：要么纯文本（闲聊/答复/收尾），要么一组工具调用。 */
 export type ChatTurn =
-  | { kind: "text"; content: string }
-  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null };
+  | { kind: "text"; content: string; usage?: TurnUsage }
+  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null; usage?: TurnUsage };
 
 /** 对话式模型原语（多轮 tool-calling）。Slice A 在 model-client.ts 上实现 chat()。 */
 export interface ConversationalModel {

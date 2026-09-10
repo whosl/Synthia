@@ -51,6 +51,31 @@ import type {
 // Fixed exported contract (Slice A — do not change the signatures).
 // ---------------------------------------------------------------------------
 
+/**
+ * 上下文水位与朴素压缩策略（模型视图投影，不动持久会话）。
+ *
+ * 网关每次回报的 promptTokens 就是当前输入的真实大小；超过
+ * `contextWindow × compactTriggerRatio` 时，把「最近 keepToolRounds 轮之外」
+ * 的旧工具结果正文替换为有界摘录（保留头部——jobId/operation/state 通常在
+ * 开头），并留系统标记告知模型原文在会话记录里。压缩只发生在
+ * {@link FreeAgentSessionImpl.messagesForModel} 的投影上：持久对话
+ * （conversation.json / Core 事件）保留全文，下次请求自然按新水位重算。
+ */
+export interface ContextPolicy {
+  /** 模型上下文窗口（token）。分母，断言值——部署侧须与网关实际窗口核对。 */
+  readonly contextWindow: number;
+  /** 触发压缩的水位比（默认 0.7）。 */
+  readonly compactTriggerRatio?: number;
+  /** 保持原样的最近工具结果条数（默认 8）。 */
+  readonly keepToolResults?: number;
+  /** 旧工具结果保留的字符预算（默认 1200）。 */
+  readonly toolResultBudgetChars?: number;
+}
+
+const DEFAULT_COMPACT_RATIO = 0.7;
+const DEFAULT_KEEP_TOOL_RESULTS = 8;
+const DEFAULT_TOOL_BUDGET_CHARS = 1_200;
+
 export interface FreeAgentDeps {
   model: ConversationalModel;
   tools: readonly AgentTool[];
@@ -85,6 +110,8 @@ export interface FreeAgentDeps {
   readonly initialGateLock?: { readonly gate: GateId; readonly submissionId: string };
   /** Override for the .runs/ directory (defaults to SYNTHIA_RUNS_DIR or built-in). */
   agentsDir?: string;
+  /** 上下文水位与压缩策略；缺省 = 不压缩（保持既有行为）。 */
+  contextPolicy?: ContextPolicy;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -101,6 +128,56 @@ const REFERENCE_DATA_MARKER = "SYNTHIA_UNTRUSTED_REFERENCE_DATA_V1";
  * to side-task sessions by the Runtime server.
  */
 export const SIDE_TASK_COMPLETION_TOOL = "synthia_complete_side_task";
+
+/**
+ * 模型视图的上下文压缩投影：超水位时把旧工具结果正文截为有界摘录。
+ * 纯函数、幂等（摘录长度天然低于预算，二次调用不再改写）；只动 `content`，
+ * role/toolCallId/name 原样保留——工具配对不变式不受影响。
+ */
+export function compactForContextWindow(
+  messages: readonly AgentMessage[],
+  policy: ContextPolicy,
+  lastPromptTokens: number | null,
+): readonly AgentMessage[] {
+  if (lastPromptTokens === null) return messages;
+  const ratio = policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO;
+  const budget = policy.toolResultBudgetChars ?? DEFAULT_TOOL_BUDGET_CHARS;
+  const keep = policy.keepToolResults ?? DEFAULT_KEEP_TOOL_RESULTS;
+  if (policy.contextWindow <= 0 || ratio <= 0 || lastPromptTokens < policy.contextWindow * ratio) {
+    return messages;
+  }
+  // 从尾部数：最近 keep 条工具结果保持原样，更早的且超预算的截头保留。
+  // 含压缩标记的跳过（标记本身会撑过预算长度，不检测就会二次截断）。
+  let toolSeen = 0;
+  let changed = false;
+  const out: AgentMessage[] = [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role !== "tool") {
+      out.unshift(message);
+      continue;
+    }
+    toolSeen += 1;
+    if (
+      toolSeen <= keep
+      || message.content.length <= budget
+      || message.content.includes("[context-compacted:")
+    ) {
+      out.unshift(message);
+      continue;
+    }
+    changed = true;
+    const omitted = message.content.length - budget;
+    out.unshift({
+      ...message,
+      content:
+        `${message.content.slice(0, budget)}\n`
+        + `…[context-compacted: ${omitted} chars omitted from this older tool result; `
+        + "full text remains in the session record]",
+    });
+  }
+  return changed ? out : messages;
+}
 
 export function createFreeAgentSession(agentId: string, deps: FreeAgentDeps): FreeAgentSession {
   return new FreeAgentSessionImpl(agentId, deps);
@@ -304,6 +381,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   readonly projectId: string;
 
   private readonly deps: FreeAgentDeps;
+  /** 最近一次模型调用回报的输入 token 数；null = 网关未回报，水位管理停摆。 */
+  private lastPromptTokens: number | null = null;
   private readonly toolMap: ReadonlyMap<string, AgentTool>;
   private readonly messages: AgentMessage[] = [];
 
@@ -450,8 +529,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   // ----- core loop -----
 
   private async messagesForModel(): Promise<readonly AgentMessage[]> {
+    // 上下文水位投影：只影响发给模型的视图，持久会话保持全文。
+    const compacted = this.deps.contextPolicy
+      ? compactForContextWindow(this.messages, this.deps.contextPolicy, this.lastPromptTokens)
+      : this.messages;
     const loader = this.deps.loadReferenceContext;
-    if (!loader) return this.messages;
+    if (!loader) return compacted;
     let raw: string | null;
     try {
       raw = await loader();
@@ -461,12 +544,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       raw = null;
     }
     const trimmed = raw?.trim();
-    if (!trimmed) return this.messages;
+    if (!trimmed) return compacted;
     const framed = trimmed.startsWith(REFERENCE_DATA_MARKER)
       ? trimmed
       : `${REFERENCE_DATA_MARKER}\n${trimmed}`;
-    const [system, ...conversation] = this.messages;
-    if (!system || system.role !== "system") return this.messages;
+    const [system, ...conversation] = compacted;
+    if (!system || system.role !== "system") return compacted;
     return [system, { role: "user", content: `${framed}\n` }, ...conversation];
   }
 
@@ -524,6 +607,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
             },
           })
         : await this.deps.model.chat(modelMessages, this.deps.tools);
+
+      // 水位采样：promptTokens 即本次请求的真实输入规模，下一次
+      // messagesForModel 按它决定是否压缩旧工具结果。
+      if (typeof turn.usage?.promptTokens === "number" && turn.usage.promptTokens > 0) {
+        this.lastPromptTokens = turn.usage.promptTokens;
+      }
 
       // An abort can arrive while the model request itself is in flight. Check
       // again before accepting any returned text or tool calls so the request

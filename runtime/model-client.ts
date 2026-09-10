@@ -38,6 +38,8 @@ export interface ModelClientConfig {
   readonly networkRetries?: number;
   /** Max output tokens for tool phases (RTL/TB/XDC/repair). Default 4096. */
   readonly toolMaxTokens?: number;
+  /** 模型上下文窗口（token）——水位管理的分母；断言值，默认 200k。 */
+  readonly contextWindow?: number;
   /** Max output tokens for doc phases (intake/behavior/architecture/register). Default 8192. */
   readonly docMaxTokens?: number;
   /** Max output tokens for the free-agent conversational path (chat/chatStream).
@@ -111,6 +113,8 @@ export interface ChatStreamResult {
   readonly text: string;
   readonly toolCalls: readonly StreamedToolCall[];
   readonly finishReason: string | null;
+  /** 流末 chunk 顶层 usage；网关未上报时缺省。 */
+  readonly usage?: { promptTokens?: number; completionTokens?: number };
 }
 
 export interface ActionRequest {
@@ -153,6 +157,7 @@ export function modelConfigFromEnv(env: Record<string, string | undefined> = pro
     maxParseRetries: env.SYNTHIA_MODEL_PARSE_RETRIES ? Number(env.SYNTHIA_MODEL_PARSE_RETRIES) : 1,
     networkRetries: env.SYNTHIA_MODEL_NETWORK_RETRIES ? Number(env.SYNTHIA_MODEL_NETWORK_RETRIES) : 2,
     toolMaxTokens: env.SYNTHIA_MODEL_TOOL_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_TOOL_MAX_TOKENS) : 4096,
+    ...(env.SYNTHIA_MODEL_CONTEXT_WINDOW ? { contextWindow: Number(env.SYNTHIA_MODEL_CONTEXT_WINDOW) } : {}),
     docMaxTokens: env.SYNTHIA_MODEL_DOC_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_DOC_MAX_TOKENS) : 8192,
     chatMaxTokens: env.SYNTHIA_MODEL_CHAT_MAX_TOKENS ? Number(env.SYNTHIA_MODEL_CHAT_MAX_TOKENS) : 16_384,
     debug: env.SYNTHIA_MODEL_DEBUG === "1" || env.SYNTHIA_MODEL_DEBUG === "true",
@@ -275,6 +280,8 @@ export async function consumeChatSSE(
   let textStarted = false;
   let reasoningStarted = false;
   let finishReason: string | null = null;
+  /** 最终 chunk 顶层的 usage（chat-completions 网关在流末上报）。 */
+  let usage: { promptTokens?: number; completionTokens?: number } | undefined;
   let done = false;
   /** index → mutable aggregation cell (dynamic numeric keys). */
   const cells = new Map<number, { index: number; id: string; name: string; argsRaw: string }>();
@@ -302,11 +309,14 @@ export async function consumeChatSSE(
       done = true;
       return;
     }
-    let parsed: { choices?: Array<{ delta?: WireDelta; finish_reason?: string | null }> } | undefined;
+    let parsed: { choices?: Array<{ delta?: WireDelta; finish_reason?: string | null }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | undefined;
     try {
       parsed = JSON.parse(payload) as typeof parsed;
     } catch {
       return; // skip malformed payloads rather than killing the stream
+    }
+    if (parsed?.usage && (typeof parsed.usage.prompt_tokens === "number" || typeof parsed.usage.completion_tokens === "number")) {
+      usage = { promptTokens: parsed.usage.prompt_tokens, completionTokens: parsed.usage.completion_tokens };
     }
     const choice = parsed?.choices?.[0];
     if (!choice) return;
@@ -385,7 +395,7 @@ export async function consumeChatSSE(
       name: cell.name,
       argsRaw: cell.argsRaw,
     }));
-  return { text, toolCalls, finishReason };
+  return { text, toolCalls, finishReason, ...(usage ? { usage } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,10 +501,15 @@ function toWireMessage(m: AgentMessage): Record<string, unknown> {
 function parseChatTurn(json: unknown): ChatTurn {
   interface WireToolCall { id?: string; function?: { name?: string; arguments?: unknown } }
   interface WireMessage { content?: string | null; tool_calls?: WireToolCall[] }
-  const choices = (json as { choices?: Array<{ message?: WireMessage }> } | undefined)?.choices;
+  const root = json as { choices?: Array<{ message?: WireMessage }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | undefined;
+  const choices = root?.choices;
   const msg = choices?.[0]?.message;
   const content = msg?.content ?? null;
   const wireCalls = msg?.tool_calls;
+  const wireUsage = root?.usage;
+  const usage = wireUsage && (typeof wireUsage.prompt_tokens === "number" || typeof wireUsage.completion_tokens === "number")
+    ? { promptTokens: wireUsage.prompt_tokens, completionTokens: wireUsage.completion_tokens }
+    : undefined;
   if (wireCalls && wireCalls.length > 0) {
     const calls: AgentToolCall[] = wireCalls.map((c, i) => {
       const rawArgs = c.function?.arguments;
@@ -512,11 +527,11 @@ function parseChatTurn(json: unknown): ChatTurn {
         args,
       };
     });
-    return { kind: "tool_calls", calls, content };
+    return { kind: "tool_calls", calls, content, ...(usage ? { usage } : {}) };
   }
   // No tool calls → treat as a text turn. Fall back to empty string if both
   // content and tool_calls are absent (malformed but non-throwing).
-  return { kind: "text", content: typeof content === "string" ? content : "" };
+  return { kind: "text", content: typeof content === "string" ? content : "", ...(usage ? { usage } : {}) };
 }
 
 /**
@@ -782,9 +797,9 @@ export class ModelClient implements LoopModel, ConversationalModel {
           }
           return { toolCallId: c.id, name: c.name, args };
         });
-        return { kind: "tool_calls", calls, content: result.text || null };
+        return { kind: "tool_calls", calls, content: result.text || null, ...(result.usage ? { usage: result.usage } : {}) };
       }
-      return { kind: "text", content: result.text };
+      return { kind: "text", content: result.text, ...(result.usage ? { usage: result.usage } : {}) };
     } finally {
       watchdog.stop();
     }

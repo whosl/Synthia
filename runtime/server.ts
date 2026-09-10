@@ -81,6 +81,7 @@ import {
   createFreeAgentSession,
   loadFreeAgentConversation,
   SIDE_TASK_COMPLETION_TOOL,
+  type ContextPolicy,
   type FreeAgentDeps,
 } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
@@ -821,6 +822,28 @@ async function readProjectInfo(
     const msg = e instanceof Error ? e.message : String(e);
     throw new RuntimeProjectConfigError(503, "project_fact_unavailable", `failed to read project facts: ${msg}`);
   }
+}
+
+/**
+ * 环境变量 → 会话上下文压缩策略。默认启用（200k 窗口兜底）——长会话不设
+ * 防护撞窗口是既成事实的坑；SYNTHIA_MODEL_CONTEXT_WINDOW 用于按网关实际
+ * 窗口校准分母。
+ */
+function contextPolicyFromEnv(
+  env: Record<string, string | undefined>,
+): { contextPolicy: ContextPolicy } {
+  const windowTokens = Number(env.SYNTHIA_MODEL_CONTEXT_WINDOW);
+  const ratio = Number(env.SYNTHIA_MODEL_COMPACT_RATIO);
+  const keep = Number(env.SYNTHIA_MODEL_COMPACT_KEEP_RESULTS);
+  const budget = Number(env.SYNTHIA_MODEL_COMPACT_TOOL_BUDGET);
+  return {
+    contextPolicy: {
+      contextWindow: Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 200_000,
+      ...(Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? { compactTriggerRatio: ratio } : {}),
+      ...(Number.isFinite(keep) && keep >= 0 ? { keepToolResults: keep } : {}),
+      ...(Number.isFinite(budget) && budget > 0 ? { toolResultBudgetChars: budget } : {}),
+    },
+  };
 }
 
 function depsFactoryInput(projectId: string, runtime: {
@@ -2834,6 +2857,7 @@ export class RuntimeServer {
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
       ...(agentsDir ? { agentsDir } : {}),
+      ...contextPolicyFromEnv(process.env),
     };
 
     const session = createFreeAgentSession(agentId, deps);

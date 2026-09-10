@@ -245,9 +245,13 @@ function assistantToChatTurn(message: AssistantMessage): ChatTurn {
     ? [{ toolCallId: block.id, name: block.name, args: block.arguments }]
     : []);
   const text = textFromAssistant(message);
+  // usage 全程透传（input 即本次 prompt 实际 token 数）——会话的水位管理靠它。
+  const usage = (message.usage.input > 0 || message.usage.output > 0)
+    ? { promptTokens: message.usage.input, completionTokens: message.usage.output }
+    : undefined;
   return calls.length > 0
-    ? { kind: "tool_calls", calls, content: text || null }
-    : { kind: "text", content: text };
+    ? { kind: "tool_calls", calls, content: text || null, ...(usage ? { usage } : {}) }
+    : { kind: "text", content: text, ...(usage ? { usage } : {}) };
 }
 
 function assistantToChatCompletion(message: AssistantMessage): ChatCompletionResponse {
@@ -313,7 +317,9 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
       reasoning: true,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200_000,
+      // 上下文窗口显式可配（SYNTHIA_MODEL_CONTEXT_WINDOW，默认 200k）：这是断言值
+      // 不是实测——glm 系网关的真实窗口需部署侧核实，压缩水位以它为分母。
+      contextWindow: config.contextWindow ?? 200_000,
       maxTokens,
       // pi-ai merges model.headers over the SDK defaults on every request
       // (chat, stream, and pipeline action calls alike), identifying traffic
