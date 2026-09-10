@@ -322,27 +322,35 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="evolution-view">
-    <header class="evolution-view-header">
+  <div class="min-h-screen bg-base p-5 text-fg max-[560px]:p-3">
+    <header class="mx-auto mb-4 w-[min(1500px,100%)]">
       <div>
-        <RouterLink to="/projects" class="evolution-back">← 返回项目列表</RouterLink>
-        <h1>进化</h1>
-        <p>查看 Synthia 自动沉淀的能力、真实调用证据和 Curator 评价。</p>
+        <RouterLink to="/projects" class="text-xs text-fg-secondary hover:text-brand">← 返回项目列表</RouterLink>
+        <h1 class="m-0 mt-2 text-[28px] max-[560px]:text-2xl">进化</h1>
+        <p class="m-0 text-fg-secondary">查看 Synthia 自动沉淀的能力、真实调用证据和 Curator 评价。</p>
       </div>
     </header>
 
-    <section v-if="!SELF_EVOLUTION_FEATURE_ENABLED" class="evolution-gated">
-      <h2>Self-evolution 尚未在此 Web 发布中启用</h2>
+    <section
+      v-if="!SELF_EVOLUTION_FEATURE_ENABLED"
+      class="mx-auto w-[min(1500px,100%)] rounded-lg border border-line bg-panel text-center text-fg-secondary"
+    >
+      <h2 class="mt-0 text-fg">Self-evolution 尚未在此 Web 发布中启用</h2>
       <p>页面不会请求 Core。启用明确的 Web feature flag 后，才开放 Learned Skill 观测与控制。</p>
       <RouterLink to="/projects">返回项目列表</RouterLink>
     </section>
 
     <template v-else>
-      <ErrorNotice v-if="loadError" :error="loadError" />
-      <div v-if="loading && !overview" class="evolution-loading" role="status">正在从 Core 加载进化事实…</div>
+      <ErrorNotice v-if="loadError" class="mx-auto w-[min(1500px,100%)]" :error="loadError" />
+      <div
+        v-if="loading && !overview"
+        class="mx-auto w-[min(1500px,100%)] rounded-lg border border-line bg-panel text-center text-fg-secondary"
+        role="status"
+      >正在从 Core 加载进化事实…</div>
 
       <template v-if="overview">
         <EvolutionSummary
+          class="mx-auto w-[min(1500px,100%)]"
           :overview="overview"
           :reason="summaryReason"
           :operating-action="operatingAction"
@@ -354,10 +362,14 @@ onMounted(() => {
           @refresh="refreshAll"
         />
 
-        <p v-if="notice" class="evolution-notice" role="status">{{ notice }}</p>
-        <ErrorNotice v-if="operationError" :error="operationError" />
+        <p
+          v-if="notice"
+          class="mx-auto w-[min(1500px,100%)] rounded-md border border-[color-mix(in_srgb,var(--state-ok)_35%,var(--border))] bg-[color-mix(in_srgb,var(--state-ok)_10%,var(--surface-panel))] px-3 py-2 text-ok"
+          role="status"
+        >{{ notice }}</p>
+        <ErrorNotice v-if="operationError" class="mx-auto w-[min(1500px,100%)]" :error="operationError" />
 
-        <div class="evolution-workspace">
+        <div class="mx-auto mt-4 grid w-[min(1500px,100%)] min-w-0 grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)] gap-4 max-[980px]:grid-cols-1">
           <LearnedSkillList
             :items="skills"
             :selected-skill-id="selectedSkillId"
@@ -365,7 +377,7 @@ onMounted(() => {
             :truncated="skillsTruncated"
             @select="loadSkill"
           />
-          <div class="evolution-detail-column">
+          <div class="grid min-w-0 content-start gap-3">
             <ErrorNotice v-if="detailError" :error="detailError" />
             <LearnedSkillDetail
               :detail="skillDetail"
@@ -389,101 +401,3 @@ onMounted(() => {
     </template>
   </div>
 </template>
-
-<style scoped>
-.evolution-view {
-  min-height: 100vh;
-  padding: var(--space-5);
-  background: var(--surface-base);
-  color: var(--text-primary);
-}
-
-.evolution-view-header,
-.evolution-view > :not(.evolution-view-header) {
-  width: min(1500px, 100%);
-  margin-right: auto;
-  margin-left: auto;
-}
-
-.evolution-view-header {
-  margin-bottom: var(--space-4);
-}
-
-.evolution-view-header h1,
-.evolution-view-header p {
-  margin: 0;
-}
-
-.evolution-view-header h1 {
-  margin-top: var(--space-2);
-  font-size: 28px;
-}
-
-.evolution-view-header p,
-.evolution-back {
-  color: var(--text-secondary);
-}
-
-.evolution-back {
-  font-size: var(--font-size-sm);
-  text-decoration: none;
-}
-
-.evolution-back:hover {
-  color: var(--accent);
-}
-
-.evolution-workspace {
-  display: grid;
-  grid-template-columns: minmax(280px, 0.36fr) minmax(0, 1fr);
-  gap: var(--space-4);
-  margin-top: var(--space-4);
-  min-width: 0;
-}
-
-.evolution-detail-column {
-  display: grid;
-  align-content: start;
-  gap: var(--space-3);
-  min-width: 0;
-}
-
-.evolution-loading,
-.evolution-gated {
-  padding: var(--space-7);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface-panel);
-  color: var(--text-secondary);
-  text-align: center;
-}
-
-.evolution-gated h2 {
-  margin-top: 0;
-  color: var(--text-primary);
-}
-
-.evolution-notice {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--state-ok) 35%, var(--border));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--state-ok) 10%, var(--surface-panel));
-  color: var(--state-ok);
-}
-
-@media (max-width: 980px) {
-  .evolution-workspace {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 560px) {
-  .evolution-view {
-    padding: var(--space-3);
-  }
-
-  .evolution-view-header h1 {
-    font-size: 24px;
-  }
-}
-</style>

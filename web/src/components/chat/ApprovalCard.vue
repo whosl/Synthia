@@ -96,7 +96,7 @@ function submitReject(): void {
 
     <template v-if="state === 'pending'">
       <!-- 待审产物：点开逐项核对，复用中栏编辑器打开快照当时的版本 -->
-      <button type="button" class="approval-members-toggle flex cursor-pointer items-center gap-1 self-start border-none bg-transparent p-0 text-left" @click="membersOpen = !membersOpen">
+      <button type="button" class="flex cursor-pointer items-center gap-1 self-start border-none bg-transparent p-0 text-left text-xs text-fg-secondary hover:text-fg" @click="membersOpen = !membersOpen">
         <span class="w-[10px] text-fg-muted" aria-hidden="true">{{ membersOpen ? "▾" : "▸" }}</span>
         待审产物 · {{ memberCountText }}
       </button>
@@ -134,7 +134,7 @@ function submitReject(): void {
       <div v-if="rejectOpen" class="flex flex-col gap-1">
         <textarea
           v-model="rejectDraft"
-          class="approval-reject-input max-h-[120px] min-h-[48px] w-full resize-none overflow-y-auto rounded-md border border-line bg-base p-2 text-fg placeholder:text-fg-muted focus-visible:border-danger"
+          class="max-h-[120px] min-h-[48px] w-full resize-none overflow-y-auto rounded-md border border-line bg-base p-2 text-xs leading-[1.55] text-fg placeholder:text-fg-muted focus-visible:border-danger focus-visible:outline-none"
           rows="2"
           placeholder="请说明驳回原因，agent 会据此停止本轮（必填）"
           :disabled="deciding"
@@ -154,25 +154,3 @@ function submitReject(): void {
     </div>
   </div>
 </template>
-
-<style scoped>
-/* 未分层全局 reset 的 button/textarea { font: inherit; color: inherit } 与
-   :focus-visible 描边优先级高于 Tailwind utilities 层，这几条只能留在 scoped。 */
-.approval-members-toggle {
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.approval-members-toggle:hover {
-  color: var(--text-primary);
-}
-
-.approval-reject-input {
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-chat);
-}
-
-.approval-reject-input:focus-visible {
-  outline: none;
-}
-</style>

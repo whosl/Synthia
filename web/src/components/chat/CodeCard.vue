@@ -63,7 +63,7 @@ function onClick(): void {
       <button
         v-if="diffable && artifactId"
         type="button"
-        class="code-card-diff flex-none cursor-pointer border-none bg-transparent px-2 py-1 whitespace-nowrap"
+        class="flex-none cursor-pointer border-none bg-transparent px-2 py-1 text-[11px] whitespace-nowrap text-fg-secondary hover:text-brand"
         @click="emit('open-diff', artifactId)"
       >
         查看改动 ⇄
@@ -72,16 +72,3 @@ function onClick(): void {
     <pre v-if="segment && (expanded || !segment.collapsible)" class="mono m-0 overflow-x-auto whitespace-pre bg-panel p-2 pt-0 text-fg"><code>{{ segment.code }}</code></pre>
   </div>
 </template>
-
-<style scoped>
-/* 未分层全局 reset 的 button { font: inherit; color: inherit } 优先级高于 Tailwind
-   utilities 层，裸按钮自身的字号/文字色只能留在 scoped。 */
-.code-card-diff {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.code-card-diff:hover {
-  color: var(--accent);
-}
-</style>

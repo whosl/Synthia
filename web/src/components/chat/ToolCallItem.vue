@@ -66,24 +66,13 @@ function onOpenRecords(): void {
       <span class="min-w-0 flex-1 truncate" :class="part.status === 'error' ? 'text-danger' : 'text-fg'">{{ part.title }}</span>
       <Badge :tone="STATUS_TONE[part.status]" variant="dot" size="sm">{{ TOOL_STATUS_TEXT[part.status] }}</Badge>
       <span v-if="durationText" class="flex-none font-mono text-[11px] text-fg-muted">{{ durationText }}</span>
-      <button v-if="part.jobId" type="button" class="tool-call-records flex-none cursor-pointer border-none bg-transparent p-0" @click.stop="onOpenRecords">运行记录</button>
+      <button v-if="part.jobId" type="button" class="flex-none cursor-pointer border-none bg-transparent p-0 text-[11px] text-fg-muted hover:text-brand" @click.stop="onOpenRecords">运行记录</button>
     </div>
     <div v-if="expandable && expanded" class="px-2 pb-2 pl-[26px] text-xs leading-[1.4] text-danger">{{ part.errorText }}</div>
   </div>
 </template>
 
 <style scoped>
-/* 未分层全局 reset 的 button { font: inherit; color: inherit } 优先级高于 Tailwind
-   utilities 层，裸按钮自身的字号/文字色只能留在 scoped。 */
-.tool-call-records {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.tool-call-records:hover {
-  color: var(--accent);
-}
-
 @keyframes tool-call-spin {
   to {
     transform: rotate(360deg);

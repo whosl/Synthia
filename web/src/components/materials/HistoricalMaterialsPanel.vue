@@ -35,7 +35,6 @@ const props = defineProps<{
   searching: boolean;
   operating: boolean;
   error: string | null;
-  notice: string | null;
   projectEligible: boolean;
 }>();
 
@@ -234,7 +233,6 @@ onBeforeUnmount(() => {
         <p class="m-0">{{ error }}</p>
         <Button size="sm" variant="secondary" @click="emit('refresh')">重试</Button>
       </div>
-      <p v-if="notice" class="mx-5 mt-3 mb-0 rounded-md bg-ok/12 p-3 text-xs text-ok" role="status">{{ notice }}</p>
 
       <TabsContent value="snapshots" as="section" class="min-h-0 flex-1 overflow-y-auto px-5 pt-3 pb-6 max-[560px]:px-3">
         <div class="flex items-center justify-between gap-2">

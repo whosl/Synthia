@@ -34,7 +34,6 @@ const props = defineProps<{
   readonly loading: boolean;
   readonly operating: boolean;
   readonly error: string | null;
-  readonly notice: string | null;
   readonly profile: ProcessProfileV1 | null;
   readonly state: ProcessStateV1 | null;
   readonly gateChain: readonly ProcessGateView[] | null;
@@ -259,7 +258,6 @@ function withdrawChange(): void {
       <Button variant="ghost" size="sm" class="text-brand hover:text-brand-hover" :disabled="loading" @click="emit('refresh')">刷新事实</Button>
     </div>
 
-    <div v-if="notice" class="mx-4 mt-3 rounded-md bg-brand-subtle p-3 text-xs" role="status">{{ notice }}</div>
     <div v-if="error" class="mx-4 mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 rounded-md bg-danger/12 p-3 text-xs text-danger" role="alert">
       <strong>正式能力未就绪</strong>
       <span class="col-start-1">{{ error }}</span>

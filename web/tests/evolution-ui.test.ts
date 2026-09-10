@@ -103,15 +103,14 @@ describe("self-evolution global UI contract", () => {
   });
 
   test("desktop content collapses to one column and remains usable at 320/390 widths", () => {
-    expect(view).toContain("@media (max-width: 980px)");
-    expect(view).toContain("grid-template-columns: 1fr");
-    expect(view).toContain("@media (max-width: 560px)");
-    expect(detail).toContain("@media (max-width: 560px)");
-    expect(summary).toContain("@media (max-width: 560px)");
-    expect(detail).toContain(".learned-skill-heading-row {");
-    expect(detail).toContain("flex-wrap: wrap");
-    expect(detail).toContain(".learned-skill-heading-row > * {");
-    expect(detail).toContain("max-width: 100%");
-    expect(detail).toContain("overflow-wrap: anywhere");
+    expect(view).toContain("max-[980px]:grid-cols-1");
+    expect(view).toContain("max-[560px]:");
+    expect(detail).toContain("max-[560px]:");
+    expect(detail).toContain("max-[900px]:grid-cols-1");
+    expect(summary).toContain("max-[560px]:");
+    // 标题行的换行与长名约束（原 scoped CSS 的 Tailwind 等价物：flex-wrap + min-w-0/max-w-full + wrap-anywhere）
+    expect(detail).toContain('class="flex min-w-0 flex-wrap items-center gap-2"');
+    expect(detail).toContain('class="m-0 min-w-0 max-w-full wrap-anywhere"');
+    expect(detail).toContain('class="min-w-0 max-w-full"');
   });
 });

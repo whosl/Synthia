@@ -68,141 +68,46 @@ function onNew(): void {
 <template>
   <DropdownMenu v-model:open="open">
     <DropdownMenuTrigger as-child>
-      <button type="button" class="task-switcher-trigger">
-        <span v-if="currentAgent" class="task-switcher-current">
+      <button
+        type="button"
+        class="flex h-[26px] cursor-pointer items-center gap-2 rounded-md border border-line bg-panel px-2 text-xs text-fg hover:bg-hover"
+      >
+        <span v-if="currentAgent" class="flex items-center gap-1 font-mono">
           <Badge variant="dot" :tone="statusTone(currentAgent)">{{ shortAgentId(currentAgent.agent_id) }}</Badge>
-          <span class="task-switcher-current-status">{{ statusText(currentAgent) }}</span>
+          <span class="font-sans text-fg-muted">{{ statusText(currentAgent) }}</span>
         </span>
-        <span v-else class="task-switcher-empty">{{ emptyLabel }}</span>
-        <span class="task-switcher-caret" aria-hidden="true">▾</span>
+        <span v-else class="text-fg-muted">{{ emptyLabel }}</span>
+        <span class="text-[10px] text-fg-muted" aria-hidden="true">▾</span>
       </button>
     </DropdownMenuTrigger>
 
     <DropdownMenuContent align="start" class="max-h-80 min-w-[260px]">
       <DropdownMenuItem as-child :disabled="!allowNewAgent">
-        <button type="button" class="task-switcher-row task-switcher-new" :disabled="!allowNewAgent" @click="onNew">
-          <span class="task-switcher-new-icon" aria-hidden="true">+</span>
+        <button
+          type="button"
+          class="mb-px flex w-full cursor-pointer items-center gap-2 rounded-none border-0 border-b border-line bg-transparent px-2 py-1 text-left text-xs font-semibold text-brand hover:bg-hover disabled:cursor-not-allowed disabled:text-fg-muted disabled:opacity-80"
+          :disabled="!allowNewAgent"
+          @click="onNew"
+        >
+          <span class="inline-flex h-4 w-4 items-center justify-center text-[13px]" aria-hidden="true">+</span>
           <span>{{ allowNewAgent ? "开始新对话" : "工程项目暂只保留一个主 Agent" }}</span>
         </button>
       </DropdownMenuItem>
-      <div v-if="agents.length === 0" class="task-switcher-menu-empty">本项目还没有任务</div>
+      <div v-if="agents.length === 0" class="p-2 text-xs text-fg-muted">本项目还没有任务</div>
       <DropdownMenuItem v-for="run in agents" :key="run.agent_id" as-child>
         <button
           type="button"
-          class="task-switcher-row"
-          :class="{ 'is-current': run.agent_id === currentAgent?.agent_id }"
+          class="flex cursor-pointer items-center gap-2 rounded-sm border-0 px-2 py-1 text-left text-xs text-fg hover:bg-hover"
+          :class="run.agent_id === currentAgent?.agent_id ? 'bg-brand-subtle' : 'bg-transparent'"
           role="menuitemradio"
           :aria-checked="run.agent_id === currentAgent?.agent_id"
           @click="onPick(run.agent_id)"
         >
           <Badge variant="dot" :tone="statusTone(run)">{{ shortAgentId(run.agent_id) }}</Badge>
-          <span class="task-switcher-row-status">{{ statusText(run) }}</span>
-          <span class="task-switcher-row-time">{{ formatCreatedAt(run.created_at) }}</span>
+          <span class="flex-1 text-fg-secondary">{{ statusText(run) }}</span>
+          <span class="font-mono text-[11px] text-fg-muted">{{ formatCreatedAt(run.created_at) }}</span>
         </button>
       </DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>
 </template>
-
-<style scoped>
-.task-switcher-trigger {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  height: 26px;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-  background: var(--surface-panel);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-}
-
-.task-switcher-trigger:hover {
-  background: var(--surface-hover);
-}
-
-.task-switcher-current {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-family: var(--font-mono);
-}
-
-.task-switcher-current-status {
-  color: var(--text-muted);
-  font-family: var(--font-sans);
-}
-
-.task-switcher-empty {
-  color: var(--text-muted);
-}
-
-.task-switcher-caret {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-
-.task-switcher-menu-empty {
-  padding: var(--space-2);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.task-switcher-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  text-align: left;
-}
-
-.task-switcher-row:hover {
-  background: var(--surface-hover);
-}
-
-.task-switcher-row.is-current {
-  background: var(--accent-subtle);
-}
-
-.task-switcher-new {
-  color: var(--accent);
-  font-weight: 600;
-  border-bottom: 1px solid var(--border-subtle);
-  border-radius: 0;
-  margin-bottom: 1px;
-}
-
-.task-switcher-new:disabled {
-  color: var(--text-muted);
-  cursor: not-allowed;
-  opacity: 0.8;
-}
-
-.task-switcher-new-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  font-size: 13px;
-}
-
-.task-switcher-row-status {
-  flex: 1;
-  color: var(--text-secondary);
-}
-
-.task-switcher-row-time {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
-}
-</style>

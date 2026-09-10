@@ -69,7 +69,7 @@ function onKeydown(ev: KeyboardEvent): void {
     <div class="flex items-end gap-2">
       <textarea
         ref="textareaEl"
-        class="chat-composer-input max-h-[160px] min-h-[30px] min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-line bg-base p-2 text-fg transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] placeholder:text-fg-muted focus-visible:border-brand disabled:cursor-not-allowed disabled:bg-hover disabled:opacity-55"
+        class="chat-composer-input max-h-[160px] min-h-[30px] min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-line bg-base p-2 leading-[1.55] text-fg transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] placeholder:text-fg-muted focus-visible:border-brand focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-hover disabled:opacity-55"
         :value="modelValue"
         :placeholder="placeholder"
         aria-label="发送给 Agent 的消息"
@@ -89,17 +89,9 @@ function onKeydown(ev: KeyboardEvent): void {
 </template>
 
 <style scoped>
-/* 未分层全局 reset 的 textarea { font: inherit } 与 :focus-visible 描边优先级高于
-   Tailwind utilities 层，行高/去描边/steering 边框色留在 scoped。
+/* steering 态描边必须压过模板里的 focus-visible:border-brand（两个类 + 伪类的
+   特异性高于单个变体工具类），与 reset 分层无关，故留在 scoped。
    （.chat-composer-input 同时是 ProjectView 聚焦用的 querySelector 钩子，类名勿动。） */
-.chat-composer-input {
-  line-height: var(--line-height-chat);
-}
-
-.chat-composer-input:focus-visible {
-  outline: none;
-}
-
 .chat-composer.steering .chat-composer-input {
   border-color: color-mix(in srgb, var(--state-warn) 45%, var(--border-subtle));
 }

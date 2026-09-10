@@ -38,7 +38,6 @@ const props = defineProps<{
   messageText: string;
   messageError: string | null;
   error: string | null;
-  notice: string | null;
   /** Embedded mode lives inside the right Agent pane instead of a modal drawer. */
   embedded?: boolean;
   /** Render only the Side Agent creation form for the ＋ pane. */
@@ -201,7 +200,6 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
       <Button variant="secondary" size="sm" @click="emit('refresh')">重试</Button>
     </div>
-    <p v-if="notice" class="mx-5 mt-3 mb-0 rounded-md bg-ok/12 p-3 text-xs text-ok" role="status">{{ notice }}</p>
 
     <section
       v-if="createOnly || !embedded"
@@ -221,7 +219,7 @@ onBeforeUnmount(() => {
 
       <form
         v-if="createOnly || createOpen"
-        class="side-create-form mt-3 grid gap-3 rounded-md border border-line bg-base p-3"
+        class="mt-3 grid gap-3 rounded-md border border-line bg-base p-3"
         :class="createOnly ? 'grid-cols-1' : 'grid-cols-2 max-[720px]:grid-cols-1'"
         @submit.prevent="submitCreate"
       >
@@ -229,7 +227,7 @@ onBeforeUnmount(() => {
           <span>探索目标</span>
           <textarea
             v-model="objective"
-            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2"
+            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 text-fg"
             rows="3"
             maxlength="2000"
             placeholder="例如：比较两种流水线结构，不改动正式主线"
@@ -239,7 +237,7 @@ onBeforeUnmount(() => {
           <span>允许写入的精确路径</span>
           <textarea
             v-model="writePathsText"
-            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2"
+            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 font-mono text-[12.5px] text-fg"
             rows="3"
             spellcheck="false"
             placeholder="rtl/pipeline.v&#10;tb/pipeline_tb.sv"
@@ -410,7 +408,7 @@ onBeforeUnmount(() => {
                   <h4 class="m-0">文本差异</h4>
                   <p class="mt-1 mb-0 text-xs text-fg-secondary">仅选择无冲突、未采纳的文件。任一选中文件冲突时整批不会写入。</p>
                 </div>
-                <button type="button" class="side-link-button flex-none cursor-pointer border-0 bg-transparent p-0" @click="selectAllAvailable">选择全部可采纳</button>
+                <button type="button" class="flex-none cursor-pointer border-0 bg-transparent p-0 text-xs text-brand" @click="selectAllAvailable">选择全部可采纳</button>
               </div>
 
               <article v-for="file in diff.files" :key="file.path" class="mt-3 overflow-hidden rounded-md border border-line">
@@ -449,12 +447,12 @@ onBeforeUnmount(() => {
                 <pre class="m-0 max-h-[260px] overflow-auto whitespace-pre bg-base p-3 text-fg"><code>{{ file.diff }}</code></pre>
               </article>
 
-              <div class="side-adoption-box mt-3 rounded-md bg-hover p-3">
+              <div class="mt-3 rounded-md bg-hover p-3">
                 <label class="flex flex-col gap-1 text-xs text-fg-secondary">
                   <span>人工采纳理由</span>
                   <textarea
                     v-model="adoptionReason"
-                    class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2"
+                    class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 text-fg"
                     rows="2"
                     maxlength="1000"
                     :disabled="operating"
@@ -482,25 +480,3 @@ onBeforeUnmount(() => {
     </div>
   </aside>
 </template>
-
-<style scoped>
-/*
- * style.css 里 button/textarea 的全局元素规则（font/color: inherit）未分层，
- * 优先级高于 Tailwind utilities 层（迁移计划 §6 已记录该坑），
- * 这三处颜色/字体覆盖因此只能留在 scoped。
- */
-.side-create-form textarea,
-.side-adoption-box textarea {
-  color: var(--text-primary);
-}
-
-.side-create-form label:nth-child(2) textarea {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-}
-
-.side-link-button {
-  color: var(--accent);
-  font-size: var(--font-size-sm);
-}
-</style>

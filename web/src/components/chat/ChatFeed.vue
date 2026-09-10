@@ -129,7 +129,7 @@ onMounted(() => void nextTick(scrollToBottom));
           <p class="m-0 text-[13px] font-semibold text-fg">开始你的第一个任务</p>
           <p class="m-0 max-w-[280px] text-xs leading-[1.4] text-fg-muted">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
           <div class="mt-2 flex w-full flex-col gap-2">
-            <button v-for="task in exampleTasks" :key="task" type="button" class="chat-feed-example cursor-pointer rounded-md border-none bg-hover px-3 py-2 text-left transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle" @click="fillExample(task)">
+            <button v-for="task in exampleTasks" :key="task" type="button" class="cursor-pointer rounded-md border-none bg-hover px-3 py-2 text-left text-xs text-fg-secondary transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg" @click="fillExample(task)">
               {{ task }}
             </button>
           </div>
@@ -171,7 +171,7 @@ onMounted(() => void nextTick(scrollToBottom));
           <button
             v-else-if="item.part.kind === 'evidence'"
             type="button"
-            class="chat-feed-evidence block w-full cursor-pointer rounded-sm border-none bg-transparent px-2 py-1 text-left transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle"
+            class="block w-full cursor-pointer rounded-sm border-none bg-transparent px-2 py-1 text-left text-xs text-fg-muted transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg"
             @click="emit('open-records', null)"
           >
             📎 生成了 {{ item.part.count }} 项证据 · 查看
@@ -199,7 +199,7 @@ onMounted(() => void nextTick(scrollToBottom));
 
     <Transition name="chat-feed-jump-fade">
       <div v-if="!stickToBottom && renderItems.length > 0" class="flex flex-none justify-center pb-2">
-        <button type="button" class="chat-feed-jump cursor-pointer rounded-full border border-line-strong bg-raised px-3 py-1 shadow-[0_4px_12px_var(--shadow-color)] hover:bg-hover" @click="scrollToBottom">回到最新 ↓</button>
+        <button type="button" class="cursor-pointer rounded-full border border-line-strong bg-raised px-3 py-1 text-xs text-fg-secondary shadow-[0_4px_12px_var(--shadow-color)] hover:bg-hover hover:text-fg" @click="scrollToBottom">回到最新 ↓</button>
       </div>
     </Transition>
 
@@ -222,36 +222,6 @@ onMounted(() => void nextTick(scrollToBottom));
 </template>
 
 <style scoped>
-/* 裸按钮的 font/color 被未分层全局 reset（button{font:inherit;color:inherit}）接管，
-   优先级高于 Tailwind utilities 层；这几枚按钮的字号/文字色/hover 文字色留在
-   scoped（hover 底色无冲突，在模板走 Tailwind 类）。 */
-.chat-feed-example {
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.chat-feed-example:hover {
-  color: var(--text-primary);
-}
-
-.chat-feed-evidence {
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
-}
-
-.chat-feed-evidence:hover {
-  color: var(--text-primary);
-}
-
-.chat-feed-jump {
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.chat-feed-jump:hover {
-  color: var(--text-primary);
-}
-
 /* .mono（未分层全局原子类，12.5px）会压过 utilities 层字号，这里补回 12px。 */
 .chat-feed-lifecycle-detail {
   font-size: var(--font-size-sm);

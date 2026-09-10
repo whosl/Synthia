@@ -2498,7 +2498,6 @@ const historicalMaterialsProps = computed(() => ({
   searching: materialsSearching.value,
   operating: materialsOperating.value,
   error: materialsError.value,
-  notice: null,
   projectEligible: project.value?.project_type === "engineering",
 }));
 
@@ -2708,7 +2707,6 @@ function onToggleChatOverlay(): void {
             :message-text="sideTaskMessageText"
             :message-error="sideTaskMessageError"
             :error="sideTasksError"
-            :notice="null"
             @close="closeSideTasks"
             @refresh="loadSideTasks()"
             @select-task="onSelectSideTask"
@@ -2786,7 +2784,6 @@ function onToggleChatOverlay(): void {
               :message-text="sideTaskMessageText"
               :message-error="sideTaskMessageError"
               :error="sideTasksError"
-              :notice="null"
               @close="closeSideTasks"
               @refresh="loadSideTasks()"
               @select-task="onSelectSideTask"
@@ -2833,7 +2830,6 @@ function onToggleChatOverlay(): void {
           :loading="formalDeliveryLoading"
           :operating="formalDeliveryOperating"
           :error="formalDeliveryError"
-          :notice="null"
           :profile="processProfile"
           :state="processState"
           :gate-chain="processGateChain"
