@@ -42,8 +42,15 @@ function required(name: string): string {
 }
 
 const model = new EvolutionModelAdapter(
-  createRuntimeModelFromEnv(),
-  process.env.SYNTHIA_MODEL_NAME ?? "evolution-json",
+  createRuntimeModelFromEnv({
+    ...(process.env.SYNTHIA_EVOLUTION_MODEL_NAME !== undefined
+      ? { SYNTHIA_MODEL_NAME: process.env.SYNTHIA_EVOLUTION_MODEL_NAME }
+      : {}),
+    ...(process.env.SYNTHIA_EVOLUTION_MODEL_API !== undefined
+      ? { SYNTHIA_MODEL_API: process.env.SYNTHIA_EVOLUTION_MODEL_API }
+      : {}),
+  }),
+  process.env.SYNTHIA_EVOLUTION_MODEL_NAME ?? process.env.SYNTHIA_MODEL_NAME ?? "evolution-json",
 );
 
 const distiller = new DistillerWorker(new CoreDistillerEvolutionClient({
@@ -77,7 +84,13 @@ async function main(): Promise<void> {
   process.stdout.write(`[evolution-workers] host ${workerId} core=${coreUrl}\n`);
   while (!stopped) {
     try {
-      await scheduler.tick();
+      const result = await scheduler.tick();
+      for (const lane of ["distiller", "curator"] as const) {
+        const r = result[lane];
+        if (r.state === "failed") {
+          process.stderr.write(`[evolution-workers] ${lane} failed: ${JSON.stringify(r).slice(0, 600)}\n`);
+        }
+      }
     } catch (error) {
       process.stderr.write(
         `[evolution-workers] tick failed: ${error instanceof Error ? error.message : String(error)}\n`,
