@@ -1627,9 +1627,8 @@ const parts = computed<readonly SynthiaPart[]>(() => {
         unresolved.push(processPart);
       }
     } else if (p.state === "streaming") {
-      // 轮内多段叙述要到整轮 finalize 才转 done，中途全程 streaming——它们与
-      // 正在生成的过程卡必须按流内顺序混排，不能分桶拼接（先过程卡后文本会把
-      // 最新的思考卡排到更早的叙述气泡前面）。
+      // 轮内多段叙述与正在生成的过程卡按流内顺序混排，不能分桶拼接（先过程卡
+      // 后文本会把最新的思考卡排到更早的叙述气泡前面）。
       unresolved.push({
         kind: "text",
         id: p.id,
@@ -1638,9 +1637,21 @@ const parts = computed<readonly SynthiaPart[]>(() => {
         text: p.text,
         segments: null,
       });
-    } else if (p.state === "done" && pending.length > 0) {
-      for (const consumed of pending) resolvedIds.add(consumed.id);
-      anchored.set(p.id, pending.splice(0));
+    } else if (p.kind === "text" && p.state === "done") {
+      // 已定稿但 durable 事件尚未轮询到位的叙述：仍从流渲染（否则它会消失到
+      // 下一次事件轮询才回来）；落库的孪生认领同一 id 后由 settledIds 去重。
+      unresolved.push({
+        kind: "text",
+        id: p.id,
+        role: "agent",
+        state: "done",
+        text: p.text,
+        segments: null,
+      });
+      if (pending.length > 0) {
+        for (const consumed of pending) resolvedIds.add(consumed.id);
+        anchored.set(p.id, pending.splice(0));
+      }
     }
   }
 
@@ -1656,7 +1667,8 @@ const parts = computed<readonly SynthiaPart[]>(() => {
     if (!settledIds.has(id)) out.push(...before);
   }
   // 流尾按流内顺序：正在思考/运行中的过程卡与未定稿叙述交错，最新的永远在最后。
-  out.push(...unresolved.filter((p) => !resolvedIds.has(p.id)));
+  // settledIds 去重：done 叙述的 durable 孪生落地并认领同一流 id 后只渲染一份。
+  out.push(...unresolved.filter((p) => !resolvedIds.has(p.id) && !settledIds.has(p.id)));
   return out;
 });
 

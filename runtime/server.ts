@@ -2239,8 +2239,28 @@ export class RuntimeServer {
      */
     const toolCalls = new Map<string, { name: string; args: string }>();
     let sideTaskCompletionRequested = false;
+    /**
+     * 当前仍在接收 delta 的流 cell。模型响应的块序是严格的（reasoning/text
+     * 结束才会有下一块或 tool_use）：新块开启或工具启动即证明上一块已完结。
+     * 在那个时刻就发 done 定稿事件，而不是等整轮 finalize——否则 UI 里每个
+     * 中间叙述都保持 streaming 态，全部挂着闪烁光标、思考卡永远显示「思考中」。
+     */
+    let openPartId: string | null = null;
+    const closeOpenPart = (): void => {
+      if (!openPartId) return;
+      const cell = parts.get(openPartId);
+      if (cell) {
+        hub.emit({
+          type: "part",
+          part: { kind: cell.kind, id: openPartId, state: "done", text: cell.text, ts: new Date().toISOString() },
+        });
+      }
+      openPartId = null;
+    };
     const openText = (partId: string, kind: "text" | "reasoning"): void => {
+      closeOpenPart();
       parts.set(partId, { kind, text: "" });
+      openPartId = partId;
       hub.emit({
         type: "part",
         part: { kind, id: partId, state: "streaming", text: "", ts: new Date().toISOString() },
@@ -2258,6 +2278,8 @@ export class RuntimeServer {
       onReasoningDelta: appendText,
       onToolStart: async (callId, name, args, fullArgs) => {
         toolCalls.set(callId, { name, args });
+        // 工具启动 = 上一块（叙述或思考）已完结：立即定稿，光标/标题就地收口。
+        closeOpenPart();
         hub.emit({
           type: "part",
           part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
@@ -2327,6 +2349,7 @@ export class RuntimeServer {
         }
         parts.clear();
         toolCalls.clear();
+        openPartId = null;
       },
       sideTaskCompletionRequested: () => sideTaskCompletionRequested,
       reasoningTexts: () => reasoningTexts,
