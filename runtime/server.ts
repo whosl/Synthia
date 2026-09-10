@@ -1858,18 +1858,20 @@ export class RuntimeServer {
         opts.finalize();
         this.syncHandleFromSession(agentId, session);
         // 思维链先于回复正文入库，保持会话时序。best-effort：core 同步失败不吞
-        // 回复（audit 里仍有完整副本，UI 兜底展示）。
+        // 回复（audit 里仍有完整副本，UI 兜底展示）。序号延续工具边界已同步的
+        // 部分（nextThinkingSeq），event id 不与中途落库的冲突。
         for (let i = 0; i < opts.reasoningTexts().length; i++) {
+          const index = opts.nextThinkingSeq();
           try {
             await this.appendCoreTaskEvent(
               agentId,
-              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${i}`).slice(0, 40)}`,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
               "assistant_thinking",
               { text: opts.reasoningTexts()[i]! },
             );
           } catch (error) {
             process.stderr.write(
-              `[runtime-server] assistant_thinking sync failed for ${agentId}#${i}: ${error instanceof Error ? error.message : String(error)}\n`,
+              `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
             );
           }
         }
@@ -2158,12 +2160,53 @@ export class RuntimeServer {
     finalize: () => void;
     sideTaskCompletionRequested: () => boolean;
     reasoningTexts: () => readonly string[];
+    nextThinkingSeq: () => number;
   } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
     const parts = new Map<string, { kind: "text" | "reasoning"; text: string }>();
-    /** 本轮思维链全文（finalize 时收集，供同步 core assistant_thinking 事件）。 */
+    /** 本轮思维链全文（finalize 时收集未同步的尾部，供同步 core assistant_thinking 事件）。 */
     const reasoningTexts: string[] = [];
+    /**
+     * 已同步到 Core 的思维链 part id。思维链事件在工具调用边界增量落库（见
+     * flushPendingThinking），finalize 只补未同步的尾部，避免整轮思维链集中
+     * 写在所有工具事件之后——那会让 Core 日志的 sequence 丢失轮内时序，
+     * 刷新回放变成「先工具后思考」。
+     */
+    const flushedThinking = new Set<string>();
+    /** 思维链事件的轮内序号（event id 后缀）。调用边界一致则重放确定。 */
+    let thinkingSeq = 0;
+    /**
+     * 把已完结、未同步的思维链按流内顺序同步到 Core。模型发起工具调用时，
+     * 本轮思考已经完结（块序保证 reasoning 先于 tool_use），此时落库 sequence
+     * 恰好等于发生序。best-effort：单条失败记日志继续，不吞掉调用方的工具事件。
+     */
+    const flushPendingThinking = (): Promise<void> => {
+      let chain = Promise.resolve();
+      for (const [id, cell] of parts) {
+        if (cell.kind !== "reasoning" || !cell.text.trim() || flushedThinking.has(id)) continue;
+        flushedThinking.add(id);
+        this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
+        const index = thinkingSeq;
+        thinkingSeq += 1;
+        const text = cell.text;
+        chain = chain
+          .then(() =>
+            this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
+              "assistant_thinking",
+              { text },
+            ),
+          )
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          });
+      }
+      return chain;
+    };
     /**
      * callId → 工具名/入参。onToolEnd 只带 callId（定稿事件整体替换前一条，
      * 前端沿用已有 part 的 name/args），但落 audit 要写一条自足的记录，
@@ -2194,6 +2237,9 @@ export class RuntimeServer {
           type: "part",
           part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
         });
+        // 先落本轮已完结的思维链，再落 tool_call：两者共用 appendCoreTaskEvent
+        // 的串行链，sequence 即发生序（think → tool，而不是 tool 全部先落）。
+        await flushPendingThinking();
         await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
@@ -2246,8 +2292,9 @@ export class RuntimeServer {
         for (const [id, cell] of parts) {
           hub.emit({ type: "part", part: { kind: cell.kind, id, state: "done", text: cell.text, ts } });
           // 思维链落 audit（free_agent_thinking），刷新页面后由 auditToParts 重放。
-          // 全文另入 reasoningTexts，供同步 core assistant_thinking 事件。
-          if (cell.kind === "reasoning" && cell.text.trim()) {
+          // 已在工具边界同步过的只剩 hub 定稿；未同步的尾部（回复前的最后一段
+          // 思考）进 reasoningTexts，由收尾循环按延续序号落库。
+          if (cell.kind === "reasoning" && cell.text.trim() && !flushedThinking.has(id)) {
             reasoningTexts.push(cell.text);
             this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
           }
@@ -2257,6 +2304,12 @@ export class RuntimeServer {
       },
       sideTaskCompletionRequested: () => sideTaskCompletionRequested,
       reasoningTexts: () => reasoningTexts,
+      /** 收尾循环用的下一个思维链事件序号（延续工具边界已消耗的部分）。 */
+      nextThinkingSeq: () => {
+        const next = thinkingSeq;
+        thinkingSeq += 1;
+        return next;
+      },
     };
   }
 
