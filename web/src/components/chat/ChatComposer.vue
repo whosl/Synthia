@@ -12,7 +12,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { canSendText, composerPlaceholder } from "../../domain/composer.ts";
 import type { ChatComposerMode } from "../../views/project-view-contract.ts";
-import Button from "../ui/Button.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<{
   modelValue: string;

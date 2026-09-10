@@ -8,8 +8,8 @@
 import { computed, ref } from "vue";
 import type { TaskAgentSummary } from "../../api/types.ts";
 import { TASK_STATUS_TEXT, isTerminalStatus, shortAgentId } from "../../domain/tasks.ts";
-import Dropdown from "../ui/Dropdown.vue";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 
 const props = defineProps<{
   readonly agents: readonly TaskAgentSummary[];
@@ -66,8 +66,8 @@ function onNew(): void {
 </script>
 
 <template>
-  <Dropdown v-model:open="open" align="start" class="task-switcher">
-    <template #trigger>
+  <DropdownMenu v-model:open="open">
+    <DropdownMenuTrigger as-child>
       <button type="button" class="task-switcher-trigger">
         <span v-if="currentAgent" class="task-switcher-current">
           <Badge variant="dot" :tone="statusTone(currentAgent)">{{ shortAgentId(currentAgent.agent_id) }}</Badge>
@@ -76,30 +76,32 @@ function onNew(): void {
         <span v-else class="task-switcher-empty">{{ emptyLabel }}</span>
         <span class="task-switcher-caret" aria-hidden="true">▾</span>
       </button>
-    </template>
+    </DropdownMenuTrigger>
 
-    <div class="task-switcher-menu">
-      <button type="button" class="task-switcher-row task-switcher-new" :disabled="!allowNewAgent" @click="onNew">
-        <span class="task-switcher-new-icon" aria-hidden="true">+</span>
-        <span>{{ allowNewAgent ? "开始新对话" : "工程项目暂只保留一个主 Agent" }}</span>
-      </button>
+    <DropdownMenuContent align="start" class="max-h-80 min-w-[260px]">
+      <DropdownMenuItem as-child :disabled="!allowNewAgent">
+        <button type="button" class="task-switcher-row task-switcher-new" :disabled="!allowNewAgent" @click="onNew">
+          <span class="task-switcher-new-icon" aria-hidden="true">+</span>
+          <span>{{ allowNewAgent ? "开始新对话" : "工程项目暂只保留一个主 Agent" }}</span>
+        </button>
+      </DropdownMenuItem>
       <div v-if="agents.length === 0" class="task-switcher-menu-empty">本项目还没有任务</div>
-      <button
-        v-for="run in agents"
-        :key="run.agent_id"
-        type="button"
-        class="task-switcher-row"
-        :class="{ 'is-current': run.agent_id === currentAgent?.agent_id }"
-        role="menuitemradio"
-        :aria-checked="run.agent_id === currentAgent?.agent_id"
-        @click="onPick(run.agent_id)"
-      >
-        <Badge variant="dot" :tone="statusTone(run)">{{ shortAgentId(run.agent_id) }}</Badge>
-        <span class="task-switcher-row-status">{{ statusText(run) }}</span>
-        <span class="task-switcher-row-time">{{ formatCreatedAt(run.created_at) }}</span>
-      </button>
-    </div>
-  </Dropdown>
+      <DropdownMenuItem v-for="run in agents" :key="run.agent_id" as-child>
+        <button
+          type="button"
+          class="task-switcher-row"
+          :class="{ 'is-current': run.agent_id === currentAgent?.agent_id }"
+          role="menuitemradio"
+          :aria-checked="run.agent_id === currentAgent?.agent_id"
+          @click="onPick(run.agent_id)"
+        >
+          <Badge variant="dot" :tone="statusTone(run)">{{ shortAgentId(run.agent_id) }}</Badge>
+          <span class="task-switcher-row-status">{{ statusText(run) }}</span>
+          <span class="task-switcher-row-time">{{ formatCreatedAt(run.created_at) }}</span>
+        </button>
+      </DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
 </template>
 
 <style scoped>
@@ -140,15 +142,6 @@ function onNew(): void {
 .task-switcher-caret {
   color: var(--text-muted);
   font-size: 10px;
-}
-
-.task-switcher-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 260px;
-  max-height: 320px;
-  overflow-y: auto;
 }
 
 .task-switcher-menu-empty {

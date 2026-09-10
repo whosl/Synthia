@@ -10,8 +10,8 @@
 import { useRouter } from "vue-router";
 import type { TopBarEmits, TopBarProps } from "../../views/project-view-contract.ts";
 import Icon from "../ui/Icon.vue";
-import Button from "../ui/Button.vue";
-import Tooltip from "../ui/Tooltip.vue";
+import Button from "../ui/AppButton.vue";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -26,8 +26,11 @@ function onBack(): void {
 <template>
   <div class="topbar">
     <div class="topbar-left">
-      <Tooltip text="返回项目列表">
-        <Button variant="ghost" size="sm" aria-label="返回项目列表" @click="onBack">←</Button>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="sm" aria-label="返回项目列表" @click="onBack">←</Button>
+        </TooltipTrigger>
+        <TooltipContent>返回项目列表</TooltipContent>
       </Tooltip>
       <strong class="topbar-project-name">{{ props.projectName || "（项目）" }}</strong>
 
@@ -58,14 +61,20 @@ function onBack(): void {
         <Icon name="spark" :size="17" />
       </button>
 
-      <Tooltip placement="left" :text="props.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'">
-        <Button variant="ghost" size="sm" aria-label="切换主题" @click="emit('toggle-theme')">
-          <Icon :name="props.theme === 'dark' ? 'sun' : 'moon'" :size="17" />
-        </Button>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="sm" aria-label="切换主题" @click="emit('toggle-theme')">
+            <Icon :name="props.theme === 'dark' ? 'sun' : 'moon'" :size="17" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="left">{{ props.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题' }}</TooltipContent>
       </Tooltip>
 
-      <Tooltip text="退出登录" placement="left">
-        <Button variant="ghost" size="sm" aria-label="退出登录" @click="emit('logout')"><Icon name="logout" :size="17" /></Button>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="sm" aria-label="退出登录" @click="emit('logout')"><Icon name="logout" :size="17" /></Button>
+        </TooltipTrigger>
+        <TooltipContent side="left">退出登录</TooltipContent>
       </Tooltip>
     </div>
   </div>

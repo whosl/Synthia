@@ -168,7 +168,7 @@ export const ARTIFACT_DOT_GLYPH: Readonly<Record<ArtifactDotState, string>> = {
 };
 
 /**
- * 状态点 → `ui/Badge.vue` 的语气色。定义在这里而不是各组件里，是因为文件树行、
+ * 状态点 → `ui/AppBadge.vue` 的语气色。定义在这里而不是各组件里，是因为文件树行、
  * 编辑器版本条都要画同一个点，抄三份迟早会各自漂移。
  *
  * `unregistered` 与 `invalidated` 同为 neutral 不是偷懒：两者都是「不在治理链上」，

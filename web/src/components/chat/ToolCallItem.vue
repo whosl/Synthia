@@ -13,7 +13,7 @@
  */
 import { computed, ref } from "vue";
 import { TOOL_STATUS_TEXT, toolDurationLabel, type SynthiaToolPart } from "../../domain/parts.ts";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
 
 const props = defineProps<{ part: SynthiaToolPart }>();
 const emit = defineEmits<{ "open-records": [jobId: string] }>();

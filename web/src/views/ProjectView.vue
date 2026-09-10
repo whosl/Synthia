@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
-import Button from "../components/ui/Button.vue";
+import Button from "../components/ui/AppButton.vue";
 import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
@@ -192,7 +192,7 @@ import type {
   TopBarProps,
 } from "./project-view-contract.ts";
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
-import Splitter from "../components/ui/Splitter.vue";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import TopBar from "../components/layout/TopBar.vue";
 import ProjectProgressChip from "../components/impl/ProjectProgressChip.vue";
 import ImplProgressChip from "../components/impl/ImplProgressChip.vue";
@@ -2055,6 +2055,25 @@ const leftCollapsed = computed(() => viewportWidth.value < 1024);
 const rightCollapsed = computed(() => viewportWidth.value < 1280);
 const treeDrawerOpen = ref(false);
 const chatOverlayOpen = ref(false);
+
+/**
+ * 三栏拖拽（ui/resizable，reka Splitter 的 px 模式）：左/右栏像素宽、中栏吃剩余空间，
+ * 与旧 ui/Splitter.vue 语义一致。reka 按面板组合分 key 持久化（autoSaveId），断点
+ * 切换收起某栏不会冲掉另一组布局记忆；这里再读一次旧 Splitter 的 localStorage
+ * px 值作为初始宽，让迁移前拖过的宽度不丢。
+ */
+function readStoredPaneWidth(key: string, min: number, max: number, fallback: number): number {
+  const raw = window.localStorage.getItem(key);
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+const LEFT_PANE_MIN = 180;
+const LEFT_PANE_MAX = 420;
+const RIGHT_PANE_MIN = 280;
+const RIGHT_PANE_MAX = 560;
+const leftPaneDefault = readStoredPaneWidth("synthia.splitter.left", LEFT_PANE_MIN, LEFT_PANE_MAX, 240);
+const rightPaneDefault = readStoredPaneWidth("synthia.splitter.right", RIGHT_PANE_MIN, RIGHT_PANE_MAX, 380);
 function focusConversation(): void {
   chatOverlayOpen.value = true;
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
@@ -2602,23 +2621,34 @@ function onToggleChatOverlay(): void {
     <div v-if="loadErrorText" class="project-view-error" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
     <div v-if="loading" class="project-loading" role="status">正在准备项目工作区…</div>
 
-    <Splitter
+    <ResizablePanelGroup
       v-else-if="project"
+      direction="horizontal"
+      auto-save-id="synthia.splitter"
+      :keyboard-resize-by="1"
       class="project-view-body"
-      storage-key="synthia.splitter"
-      :left-collapsed="leftCollapsed"
-      :right-collapsed="rightCollapsed"
     >
-      <template #left>
-        <FileTree
-          v-bind="fileTreeProps"
-          @update:viewMode="onUpdateViewMode"
-          @open-file="onOpenFile"
-          @close-drawer="onCloseDrawer"
-          @register="onRegister"
-        />
+      <template v-if="!leftCollapsed">
+        <ResizablePanel
+          id="left"
+          :order="1"
+          size-unit="px"
+          :default-size="leftPaneDefault"
+          :min-size="LEFT_PANE_MIN"
+          :max-size="LEFT_PANE_MAX"
+          class="min-h-0 overflow-hidden"
+        >
+          <FileTree
+            v-bind="fileTreeProps"
+            @update:viewMode="onUpdateViewMode"
+            @open-file="onOpenFile"
+            @close-drawer="onCloseDrawer"
+            @register="onRegister"
+          />
+        </ResizablePanel>
+        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
-      <template #center>
+      <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
         <WorkspaceWelcome
           v-if="!openArtifactId"
           :project-name="project.name"
@@ -2636,9 +2666,19 @@ function onToggleChatOverlay(): void {
           @save="onSave"
           @dirty-change="editorDirty = $event"
         />
-      </template>
-      <template #right>
-        <div class="project-agent-workbench">
+      </ResizablePanel>
+      <template v-if="!rightCollapsed">
+        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizablePanel
+          id="right"
+          :order="3"
+          size-unit="px"
+          :default-size="rightPaneDefault"
+          :min-size="RIGHT_PANE_MIN"
+          :max-size="RIGHT_PANE_MAX"
+          class="min-h-0 overflow-hidden"
+        >
+          <div class="project-agent-workbench">
           <AgentPaneTabs
             :active-pane="activeAgentPane"
             :side-agents="visibleSideAgents"
@@ -2690,11 +2730,12 @@ function onToggleChatOverlay(): void {
             @update:message-text="sideTaskMessageText = $event"
             @send-message="onSendSideTaskMessage"
           />
-        </div>
+          </div>
+        </ResizablePanel>
       </template>
-    </Splitter>
+    </ResizablePanelGroup>
 
-    <!-- <1024px：文件树抽屉化（spec R3），与 Splitter 内的左栏互斥渲染 -->
+    <!-- <1024px：文件树抽屉化（spec R3），与 ResizablePanelGroup 内的左栏互斥渲染 -->
     <Transition name="project-view-veil-fade">
       <div v-if="leftCollapsed && treeDrawerOpen" class="project-view-veil" @click.self="onCloseDrawer">
         <div class="project-view-drawer">
@@ -2709,7 +2750,7 @@ function onToggleChatOverlay(): void {
       </div>
     </Transition>
 
-    <!-- <1280px：对话栏浮层化（spec R3），与 Splitter 内的右栏互斥渲染 -->
+    <!-- <1280px：对话栏浮层化（spec R3），与 ResizablePanelGroup 内的右栏互斥渲染 -->
     <Transition name="project-view-veil-fade">
       <div v-if="rightCollapsed && chatOverlayOpen" class="project-view-veil project-view-veil-end" @click.self="onToggleChatOverlay">
         <div class="project-view-overlay">

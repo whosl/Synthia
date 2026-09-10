@@ -19,8 +19,8 @@ import { EDITOR_READONLY_BANNER } from "../../views/project-view-contract.ts";
 import type { CodeEditorEmits, CodeEditorProps } from "../../views/project-view-contract.ts";
 import { isDocPreviewLanguage, monacoThemeFor } from "../../domain/editor-state.ts";
 import { artifactDocName } from "../../domain/artifacts.ts";
-import Badge from "../ui/Badge.vue";
-import Button from "../ui/Button.vue";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
 import VersionBar from "./VersionBar.vue";
 import DocPreview from "./DocPreview.vue";
 

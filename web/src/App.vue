@@ -10,6 +10,9 @@
  */
 import { onMounted } from "vue";
 import { useRoute } from "vue-router";
+import { Toaster } from "vue-sonner";
+import "vue-sonner/style.css";
+import { TooltipProvider } from "./components/ui/tooltip";
 import { viewKey } from "./domain/navigation.ts";
 import { initTheme } from "./domain/theme.ts";
 
@@ -21,5 +24,19 @@ onMounted(() => {
 </script>
 
 <template>
-  <router-view :key="viewKey(route)" />
+  <TooltipProvider>
+    <router-view :key="viewKey(route)" />
+  </TooltipProvider>
+  <!-- 全局通知（迁移计划 §4：后续阶段把三处 setTimeout 横幅 notice 接到 toast()） -->
+  <Toaster
+    position="top-right"
+    :toast-options="{
+      style: {
+        background: 'var(--surface-raised)',
+        border: '1px solid var(--border-subtle)',
+        color: 'var(--text-primary)',
+        fontSize: 'var(--font-size-base)',
+      },
+    }"
+  />
 </template>

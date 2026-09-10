@@ -12,8 +12,8 @@ import { computed, ref } from "vue";
 import type { ArtifactRevision } from "../../api/types.ts";
 import { REVISION_STATE_TEXT } from "../../domain/gates.ts";
 import { artifactDotState, ARTIFACT_DOT_TEXT, ARTIFACT_DOT_TONE } from "../../views/project-view-contract.ts";
-import Dropdown from "../ui/Dropdown.vue";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 
 const props = defineProps<{
   /** 该 artifact 的全部版本，顺序不限（本组件自行按版本号降序展示）。 */
@@ -49,8 +49,8 @@ function onSelect(revisionId: string): void {
 </script>
 
 <template>
-  <Dropdown v-model:open="open" align="start" class="version-bar">
-    <template #trigger>
+  <DropdownMenu v-model:open="open">
+    <DropdownMenuTrigger as-child>
       <button type="button" class="version-bar-trigger">
         <span v-if="activeRevision" class="version-bar-version">v{{ activeRevision.version }}</span>
         <span v-else class="version-bar-version version-bar-empty">无版本</span>
@@ -64,28 +64,28 @@ function onSelect(revisionId: string): void {
         </Badge>
         <span class="version-bar-caret" aria-hidden="true">▾</span>
       </button>
-    </template>
+    </DropdownMenuTrigger>
 
-    <div class="version-bar-list" role="listbox">
+    <DropdownMenuContent align="start" class="max-h-[280px] min-w-[220px]">
       <p v-if="sortedRevisions.length === 0" class="version-bar-list-empty">暂无版本</p>
-      <button
-        v-for="rev in sortedRevisions"
-        :key="rev.id"
-        type="button"
-        role="option"
-        class="version-bar-item"
-        :aria-selected="rev.id === activeRevisionId"
-        :class="{ 'version-bar-item-active': rev.id === activeRevisionId }"
-        @click="onSelect(rev.id)"
-      >
-        <span class="version-bar-item-version">v{{ rev.version }}</span>
-        <Badge variant="dot" size="sm" :tone="ARTIFACT_DOT_TONE[artifactDotState(rev.state)]">
-          {{ REVISION_STATE_TEXT[rev.state] ?? ARTIFACT_DOT_TEXT[artifactDotState(rev.state)] }}
-        </Badge>
-        <span class="version-bar-item-time">{{ formatTime(rev.created_at) }}</span>
-      </button>
-    </div>
-  </Dropdown>
+      <DropdownMenuItem v-for="rev in sortedRevisions" :key="rev.id" as-child>
+        <button
+          type="button"
+          role="option"
+          class="version-bar-item"
+          :aria-selected="rev.id === activeRevisionId"
+          :class="{ 'version-bar-item-active': rev.id === activeRevisionId }"
+          @click="onSelect(rev.id)"
+        >
+          <span class="version-bar-item-version">v{{ rev.version }}</span>
+          <Badge variant="dot" size="sm" :tone="ARTIFACT_DOT_TONE[artifactDotState(rev.state)]">
+            {{ REVISION_STATE_TEXT[rev.state] ?? ARTIFACT_DOT_TEXT[artifactDotState(rev.state)] }}
+          </Badge>
+          <span class="version-bar-item-time">{{ formatTime(rev.created_at) }}</span>
+        </button>
+      </DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
 </template>
 
 <style scoped>
@@ -121,15 +121,6 @@ function onSelect(revisionId: string): void {
 .version-bar-caret {
   color: var(--text-muted);
   font-size: 10px;
-}
-
-.version-bar-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 220px;
-  max-height: 280px;
-  overflow: auto;
 }
 
 .version-bar-list-empty {

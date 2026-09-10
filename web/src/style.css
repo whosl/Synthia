@@ -97,7 +97,7 @@
   --duration: 150ms;
   --duration-slow: 180ms;
 
-  /* 三栏骨架尺寸（可被 Splitter 持久化的拖拽宽度覆盖，见 components/ui/Splitter.vue） */
+  /* 三栏骨架尺寸（拖拽调宽由 ui/resizable 持久化，见 views/ProjectView.vue 的 ResizablePanelGroup） */
   --topbar-height: 52px;
   --tree-width: 240px;
   --chat-width: 380px;

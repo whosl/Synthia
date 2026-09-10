@@ -6,7 +6,7 @@ import { formatActivity } from "../domain/project-overview.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import Button from "../components/ui/Button.vue";
+import Button from "../components/ui/AppButton.vue";
 import Icon from "../components/ui/Icon.vue";
 
 const { loading, refreshing, error, reviews, incompleteRows, reload } =

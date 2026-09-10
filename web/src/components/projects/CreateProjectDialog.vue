@@ -16,7 +16,7 @@ import {
   type WriteAttempt,
 } from "../../domain/write-attempt.ts";
 import ErrorNotice from "../ErrorNotice.vue";
-import Button from "../ui/Button.vue";
+import Button from "../ui/AppButton.vue";
 import Icon from "../ui/Icon.vue";
 
 const emit = defineEmits<{ close: []; created: [projectId: string] }>();

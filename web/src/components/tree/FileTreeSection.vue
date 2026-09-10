@@ -11,7 +11,7 @@
 import type { WorkspaceFileStatus } from "../../api/types.ts";
 import type { FileTreeResult } from "../../domain/file-tree.ts";
 import { ARTIFACT_DOT_TONE } from "../../views/project-view-contract.ts";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
 
 const props = defineProps<{
   result: FileTreeResult;

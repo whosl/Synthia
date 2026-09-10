@@ -10,7 +10,7 @@
  */
 import { computed, ref } from "vue";
 import { renderMarkdown } from "../../domain/markdown.ts";
-import Button from "../ui/Button.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<{
   /** Markdown 原文；加载中或无内容时传空串，组件只负责渲染，不理解加载态。 */

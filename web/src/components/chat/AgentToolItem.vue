@@ -13,7 +13,7 @@
 import { computed, ref, watch } from "vue";
 import type { SynthiaAgentToolPart } from "../../domain/parts.ts";
 import { formatToolPayload } from "../../domain/tool-detail.ts";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
 
 const props = defineProps<{ part: SynthiaAgentToolPart }>();
 

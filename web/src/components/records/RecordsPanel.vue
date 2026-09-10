@@ -9,7 +9,7 @@ import { nextTick, ref, watch } from "vue";
 import type { JobEvidenceContent } from "../../api/types.ts";
 import { recordEntryKey, type RecordJob } from "../../domain/records.ts";
 import type { RecordEntryContentState, RecordsPanelEmits, RecordsPanelProps } from "../../views/project-view-contract.ts";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
 
 const props = defineProps<RecordsPanelProps>();
 const emit = defineEmits<RecordsPanelEmits>();

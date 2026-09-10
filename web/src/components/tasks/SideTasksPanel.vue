@@ -18,8 +18,8 @@ import {
   formatSideTaskHash,
   sideTaskEventText,
 } from "../../domain/side-tasks.ts";
-import Badge from "../ui/Badge.vue";
-import Button from "../ui/Button.vue";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<{
   open: boolean;

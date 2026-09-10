@@ -19,7 +19,7 @@ import { project, type Projection } from "../../domain/markdown-stream.ts";
 import { segmentAgentReply, type ReplyCodeSegment } from "../../domain/reply-segments.ts";
 import type { SynthiaTextPart } from "../../domain/parts.ts";
 import { STEER_BADGE_TEXT } from "../../domain/composer.ts";
-import Badge from "../ui/Badge.vue";
+import Badge from "../ui/AppBadge.vue";
 import CodeCard from "./CodeCard.vue";
 
 const props = defineProps<{

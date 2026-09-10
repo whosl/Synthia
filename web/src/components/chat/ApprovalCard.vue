@@ -19,8 +19,8 @@ import {
   type ApprovalMember,
 } from "../../domain/unified.ts";
 import type { ApprovalCardProps } from "../../views/project-view-contract.ts";
-import Badge from "../ui/Badge.vue";
-import Button from "../ui/Button.vue";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<ApprovalCardProps>();
 
