@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 import App from "./App.vue";
 import { router } from "./router.ts";
 import { readToken } from "./stores/auth.ts";
+import "./util/uuid-shim.ts";
 import "./style.css";
 
 // 离线 mock（`VITE_MOCK=1`）：接管 /api/v1/**，并预置一个假 token 让路由守卫放行。

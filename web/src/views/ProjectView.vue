@@ -109,6 +109,7 @@ import {
   auditToParts,
   conversationEventsToParts,
   type SynthiaPart,
+  type SynthiaReasoningPart,
   type SynthiaTextPart,
 } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
@@ -1512,9 +1513,20 @@ const auditParts = computed<readonly SynthiaPart[]>(() => {
     return legacyParts;
   }
   const durableConversation = conversationEventsToParts(mainTaskEvents.value);
+  // Core 0020 起在轮次定稿时同步 assistant_thinking，audit 的 free_agent_thinking
+  // 是同步失败时的兜底副本（runtime/server.ts「UI 兜底展示」）。直接拼接会把整块
+  // 思维链堆到所有工具卡之后（audit 里 thinking 全部晚于 durable 的工具事件），
+  // 定稿后还会与 Core 事件重复一份——按文本指纹去重，已入 Core 的不再从 audit 重放。
+  const durableThinking = new Set(
+    durableConversation
+      .filter((part): part is SynthiaReasoningPart => part.kind === "reasoning")
+      .map((part) => part.text.trim()),
+  );
   return [
     ...durableConversation,
-    ...legacyParts.filter((part) => part.kind !== "text" && part.kind !== "agent_tool"),
+    ...legacyParts.filter((part) =>
+      (part.kind !== "reasoning" || !durableThinking.has(part.text.trim()))
+      && part.kind !== "text" && part.kind !== "agent_tool"),
   ];
 });
 
@@ -1605,8 +1617,14 @@ const parts = computed<readonly SynthiaPart[]>(() => {
       const at = processPart.kind === "agent_tool" || processPart.kind === "reasoning"
         ? settled.findIndex((s) => s.id === processPart.id)
         : -1;
-      if (at >= 0) settled[at] = processPart; // audit 已收录 → 原地换成更全的那份，不再入流
-      else pending.push(processPart);
+      if (at >= 0) {
+        // audit 已收录 → 原地换成更全的那份，不再入流。这张已定稿的卡同时是
+        // 时序锚点：流里攒在它前面的 pending 过程卡（尚未定稿的思维链等）插到
+        // 它前面——只锚定稿文本的话，长轮次中途的思维链会一直堆在流尾，读起来
+        // 变成「先跑完工具、再思考」的反序。
+        if (pending.length > 0) anchored.set(settled[at]!.id, pending.splice(0));
+        settled[at] = processPart;
+      } else pending.push(processPart);
     } else if (p.state === "done" && pending.length > 0) {
       anchored.set(p.id, pending);
       pending = [];
