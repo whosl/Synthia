@@ -1488,6 +1488,20 @@ export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult
         });
       }
     }
+    // 权限交互快照与上下文水位活在 runtime 会话里——Core-owned 任务也要
+    // 合并这两个字段（best-effort：runtime 不可达时缺省，不阻塞 detail）。
+    if (row.runtime_agent_id) {
+      try {
+        const rt = await requireRuntime(ctx).getTask(row.runtime_agent_id);
+        if (rt && typeof rt === "object") {
+          const extra = rt as { permission?: unknown; context_usage?: unknown };
+          if (extra.permission !== undefined) Object.assign(detail, { permission: extra.permission });
+          if (extra.context_usage !== undefined) Object.assign(detail, { context_usage: extra.context_usage });
+        }
+      } catch {
+        // runtime 不可达：detail 仍可返回（持久化事实在 Core 侧是完整的）。
+      }
+    }
     return { status: 200, data: detail };
   }
   const runtime = requireRuntime(ctx);
