@@ -56,45 +56,61 @@ function isCollapsed(key: string): boolean {
 </script>
 
 <template>
-  <div class="filetree-section-body">
-    <div v-if="result.degraded" class="filetree-degraded">
-      <p>{{ result.degradedMessage }}</p>
-      <button v-if="offersViewEscape" type="button" class="filetree-degraded-action" @click="emit('escape-view')">
+  <div class="min-h-0 flex-1 overflow-y-auto pt-1 pb-2">
+    <div v-if="result.degraded" class="m-2 rounded-md bg-hover p-3 text-xs leading-[1.4] text-fg-secondary">
+      <p class="m-0 mb-2">{{ result.degradedMessage }}</p>
+      <button
+        v-if="offersViewEscape"
+        type="button"
+        class="cursor-pointer border-0 bg-transparent p-0 text-xs text-brand hover:text-brand-hover"
+        @click="emit('escape-view')"
+      >
         切到产物类型视图
       </button>
     </div>
 
-    <div v-else-if="result.groups.length === 0" class="filetree-empty">{{ result.degradedMessage ?? "暂无产物" }}</div>
+    <div v-else-if="result.groups.length === 0" class="p-3 text-center text-xs text-fg-muted">{{ result.degradedMessage ?? "暂无产物" }}</div>
 
     <div
       v-for="group in result.groups"
       v-else
       :key="group.key"
-      class="filetree-group"
-      :class="{ 'is-highlighted': highlightedGroupKey === group.key }"
+      class="rounded-sm transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)]"
+      :class="highlightedGroupKey === group.key ? 'bg-brand-subtle' : ''"
       :data-group-key="group.key"
     >
-      <button type="button" class="filetree-group-header" @click="emit('toggle-group', group.key)">
-        <span class="filetree-group-caret" :class="{ 'is-collapsed': isCollapsed(group.key) }" aria-hidden="true">▾</span>
-        <span class="filetree-group-label">{{ group.label }}</span>
-        <span class="filetree-group-count">{{ group.files.length }}</span>
+      <button
+        type="button"
+        class="flex w-full cursor-pointer items-center gap-1 border-0 bg-transparent px-3 py-1 text-left text-xs leading-[1.4] text-fg-secondary hover:text-fg"
+        @click="emit('toggle-group', group.key)"
+      >
+        <span
+          class="inline-block text-[10px] transition-transform duration-150 ease-[cubic-bezier(0.16,1,0.3,1)]"
+          :class="isCollapsed(group.key) ? '-rotate-90' : ''"
+          aria-hidden="true"
+        >▾</span>
+        <span class="flex-1 text-left font-medium">{{ group.label }}</span>
+        <span class="text-[11px] text-fg-muted">{{ group.files.length }}</span>
       </button>
 
-      <ul v-if="!isCollapsed(group.key)" class="filetree-file-list">
+      <ul v-if="!isCollapsed(group.key)" class="m-0 list-none p-0">
         <li v-for="file in group.files" :key="file.artifactId">
           <button
             type="button"
-            class="filetree-file"
-            :class="{
-              'is-active': file.artifactId === openArtifactId,
-              'is-highlighted': highlightedPhase !== null && file.phase === highlightedPhase,
-            }"
+            class="flex w-full cursor-pointer items-center gap-2 rounded-sm border-0 bg-transparent py-1 pr-3 pl-5 text-left text-[13px] leading-[1.4] text-fg"
+            :class="[
+              file.artifactId === openArtifactId
+                ? 'bg-brand-subtle text-brand'
+                : highlightedPhase !== null && file.phase === highlightedPhase
+                  ? 'bg-brand-subtle transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)]'
+                  : 'hover:bg-hover',
+            ]"
             :data-phase="file.phase ?? undefined"
             :title="file.path ?? file.name"
             @click="emit('open-file', file.artifactId)"
           >
-            <span class="filetree-file-name">{{ file.name }}</span>
-            <span v-if="file.revisionCount > 1 && file.latestRevision" class="filetree-file-version">
+            <span class="flex-1 truncate">{{ file.name }}</span>
+            <span v-if="file.revisionCount > 1 && file.latestRevision" class="flex-none font-mono text-[11px] text-fg-muted">
               v{{ file.latestRevision.version }}
             </span>
             <Badge v-if="pendingBadge(file.status)" variant="dot" size="sm" tone="warn">
@@ -108,143 +124,3 @@ function isCollapsed(key: string): boolean {
   </div>
 </template>
 
-<style scoped>
-.filetree-section-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-1) 0 var(--space-2);
-}
-
-.filetree-degraded {
-  margin: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius);
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.filetree-degraded p {
-  margin: 0 0 var(--space-2);
-}
-
-.filetree-degraded-action {
-  border: none;
-  background: transparent;
-  color: var(--accent);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  padding: 0;
-}
-
-.filetree-degraded-action:hover {
-  color: var(--accent-hover);
-}
-
-.filetree-empty {
-  padding: var(--space-3);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  text-align: center;
-}
-
-.filetree-group {
-  border-radius: var(--radius-sm);
-  transition: background-color var(--duration-slow) var(--ease-out);
-}
-
-.filetree-group.is-highlighted {
-  background: var(--accent-subtle);
-}
-
-.filetree-group-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 100%;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  padding: var(--space-1) var(--space-3);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.filetree-group-header:hover {
-  color: var(--text-primary);
-}
-
-.filetree-group-caret {
-  display: inline-block;
-  font-size: 10px;
-  transition: transform var(--duration) var(--ease-out);
-}
-
-.filetree-group-caret.is-collapsed {
-  transform: rotate(-90deg);
-}
-
-.filetree-group-label {
-  flex: 1;
-  text-align: left;
-  font-weight: 500;
-}
-
-.filetree-group-count {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.filetree-file-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.filetree-file {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-5);
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  line-height: var(--line-height-list);
-  border-radius: var(--radius-sm);
-  text-align: left;
-}
-
-.filetree-file:hover {
-  background: var(--surface-hover);
-}
-
-.filetree-file.is-highlighted {
-  background: var(--accent-subtle);
-  transition: background-color var(--duration-slow) var(--ease-out);
-}
-
-.filetree-file.is-active {
-  background: var(--accent-subtle);
-  color: var(--accent);
-}
-
-.filetree-file-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.filetree-file-version {
-  flex: none;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
-}
-</style>

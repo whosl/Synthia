@@ -145,63 +145,78 @@ function onViewEntry(jobId: string, name: string): void {
 </script>
 
 <template>
-  <div class="records-panel">
-    <div class="records-panel-header">
-      <h2 class="records-panel-title">运行记录</h2>
-      <button type="button" class="records-panel-close" aria-label="关闭运行记录" @click="emit('close')">✕</button>
+  <div class="flex h-full min-h-0 flex-col bg-panel text-fg">
+    <div class="flex flex-none items-center gap-2 border-b border-line p-3">
+      <h2 class="m-0 flex-1 text-[13px] font-semibold text-fg">运行记录</h2>
+      <button
+        type="button"
+        class="flex-none cursor-pointer border-0 bg-transparent p-1 text-xs leading-none text-fg-muted hover:text-fg"
+        aria-label="关闭运行记录"
+        @click="emit('close')"
+      >✕</button>
     </div>
 
-    <div class="records-panel-scroll">
-      <div v-if="jobs.length === 0" class="records-panel-empty">暂无证据记录</div>
+    <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+      <div v-if="jobs.length === 0" class="my-auto px-4 py-6 text-center text-xs text-fg-muted">暂无证据记录</div>
 
       <div
         v-for="job in jobs"
         v-else
         :key="job.jobId"
         :ref="(el) => setCardEl(job.jobId, el as Element | null)"
-        class="record-card"
-        :class="{ 'is-highlighted': highlightedJobId === job.jobId }"
+        class="rounded-md bg-hover transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)]"
+        :class="highlightedJobId === job.jobId ? 'bg-brand-subtle' : ''"
       >
-        <button type="button" class="record-card-header" @click="toggleCard(job.jobId)">
-          <span class="record-card-caret" :class="{ 'is-collapsed': !isExpanded(job.jobId) }" aria-hidden="true">▾</span>
-          <span class="record-card-title">{{ job.title }} · 第 {{ job.round }} 轮</span>
+        <button
+          type="button"
+          class="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-2 text-left text-xs text-fg"
+          @click="toggleCard(job.jobId)"
+        >
+          <span
+            class="w-[10px] flex-none text-[10px] text-fg-muted transition-transform duration-150 ease-[cubic-bezier(0.16,1,0.3,1)]"
+            :class="isExpanded(job.jobId) ? '' : '-rotate-90'"
+            aria-hidden="true"
+          >▾</span>
+          <span class="min-w-0 flex-1 truncate">{{ job.title }} · 第 {{ job.round }} 轮</span>
           <Badge :tone="job.ok ? 'ok' : 'danger'" size="sm">{{ statusText(job) }}</Badge>
-          <span v-if="job.errorCode" class="record-card-error-code mono">{{ job.errorCode }}</span>
+          <span v-if="job.errorCode" class="flex-none font-mono text-[11px] text-danger">{{ job.errorCode }}</span>
         </button>
 
-        <div v-if="isExpanded(job.jobId)" class="record-card-body">
-          <div class="record-card-meta">
+        <div v-if="isExpanded(job.jobId)" class="flex flex-col gap-2 pr-2 pb-2 pl-[26px]">
+          <div class="flex flex-wrap gap-2 text-[11px] text-fg-muted">
             <span v-if="job.ts">{{ formatTime(job.ts) }}</span>
             <span class="mono">job:{{ job.jobId }}</span>
             <span class="mono">sha256:{{ shortHash(job.inputSha256) }}</span>
           </div>
 
-          <div v-if="job.entries.length === 0" class="record-entries-empty">无证据条目</div>
-          <ul v-else class="record-entries">
-            <li v-for="entry in job.entries" :key="entry.name" class="record-entry">
-              <div class="record-entry-head">
-                <span class="record-entry-name mono" :title="entry.name">{{ entry.name }}</span>
+          <div v-if="job.entries.length === 0" class="text-xs text-fg-muted">无证据条目</div>
+          <ul v-else class="m-0 flex list-none flex-col gap-1 p-0">
+            <li v-for="entry in job.entries" :key="entry.name" class="rounded-sm bg-panel px-2 py-1">
+              <div class="flex items-center gap-2 text-xs">
+                <span class="mono min-w-0 flex-1 truncate text-fg" :title="entry.name">{{ entry.name }}</span>
                 <button
                   type="button"
-                  class="record-entry-view"
+                  class="flex-none cursor-pointer border-0 bg-transparent p-0 text-[11px] text-brand not-disabled:hover:text-brand-hover disabled:cursor-default disabled:text-fg-muted"
                   :disabled="contentState(job.jobId, entry.name)?.status === 'loading'"
                   @click="onViewEntry(job.jobId, entry.name)"
                 >
                   {{ entryButtonLabel(job.jobId, entry.name) }}
                 </button>
               </div>
-              <div class="record-entry-meta">
-                <span class="record-entry-media">{{ entry.mediaType }}</span>
-                <span class="record-entry-size">{{ formatSize(entry.sizeBytes) }}</span>
-                <span class="record-entry-hash mono">{{ shortHash(entry.sha256) }}</span>
+              <div class="mt-[2px] flex flex-wrap gap-2">
+                <span class="flex-none text-[11px] text-fg-muted">{{ entry.mediaType }}</span>
+                <span class="flex-none text-[11px] text-fg-muted">{{ formatSize(entry.sizeBytes) }}</span>
+                <span class="flex-none font-mono text-[11px] text-fg-muted">{{ shortHash(entry.sha256) }}</span>
               </div>
 
-              <div v-if="isEntryVisible(job.jobId, entry.name)" class="record-entry-content">
-                <span v-if="contentState(job.jobId, entry.name)?.status === 'loading'" class="record-entry-loading">加载中…</span>
-                <span v-else-if="errorMessage(job.jobId, entry.name)" class="record-entry-error">{{ errorMessage(job.jobId, entry.name) }}</span>
+              <div v-if="isEntryVisible(job.jobId, entry.name)" class="mt-1">
+                <span v-if="contentState(job.jobId, entry.name)?.status === 'loading'" class="text-xs text-fg-muted">加载中…</span>
+                <span v-else-if="errorMessage(job.jobId, entry.name)" class="text-xs text-danger">{{ errorMessage(job.jobId, entry.name) }}</span>
                 <template v-else-if="readyContent(job.jobId, entry.name)">
-                  <pre class="record-entry-pre mono">{{ readyContent(job.jobId, entry.name)!.content }}</pre>
-                  <p v-if="readyContent(job.jobId, entry.name)!.truncated" class="record-entry-truncated">内容过长，已截断</p>
+                  <!-- record-entry-pre：未分层的全局 pre{monospace 12.5px} 规则优先级高于
+                       Tailwind utilities 层，11px 字号只能留在 scoped（同 CodeCard 的处置）。 -->
+                  <pre class="record-entry-pre m-0 max-h-[320px] overflow-auto rounded-sm bg-hover p-2 break-words whitespace-pre-wrap text-fg">{{ readyContent(job.jobId, entry.name)!.content }}</pre>
+                  <p v-if="readyContent(job.jobId, entry.name)!.truncated" class="m-0 mt-1 text-[11px] text-fg-muted">内容过长，已截断</p>
                 </template>
               </div>
             </li>
@@ -213,231 +228,10 @@ function onViewEntry(jobId: string, name: string): void {
 </template>
 
 <style scoped>
-.records-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--surface-panel);
-  color: var(--text-primary);
-}
-
-.records-panel-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.records-panel-title {
-  flex: 1;
-  margin: 0;
-  font-size: var(--font-size-base);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.records-panel-close {
-  flex: none;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  padding: var(--space-1);
-  line-height: 1;
-}
-
-.records-panel-close:hover {
-  color: var(--text-primary);
-}
-
-.records-panel-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-}
-
-.records-panel-empty {
-  margin: auto 0;
-  padding: var(--space-6) var(--space-4);
-  text-align: center;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.record-card {
-  border-radius: var(--radius);
-  background: var(--surface-hover);
-  transition: background-color var(--duration-slow) var(--ease-out);
-}
-
-.record-card.is-highlighted {
-  background: var(--accent-subtle);
-}
-
-.record-card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-2);
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.record-card-caret {
-  flex: none;
-  width: 10px;
-  color: var(--text-muted);
-  font-size: 10px;
-  transition: transform var(--duration) var(--ease-out);
-}
-
-.record-card-caret.is-collapsed {
-  transform: rotate(-90deg);
-}
-
-.record-card-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.record-card-error-code {
-  flex: none;
-  color: var(--state-danger);
-  font-size: 11px;
-}
-
-.record-card-body {
-  padding: 0 var(--space-2) var(--space-2) calc(var(--space-2) + 18px);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.record-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.record-entries-empty {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.record-entries {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.record-entry {
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-panel);
-}
-
-.record-entry-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--font-size-sm);
-}
-
-.record-entry-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: 2px;
-}
-
-.record-entry-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.record-entry-media,
-.record-entry-size,
-.record-entry-hash {
-  flex: none;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.record-entry-view {
-  flex: none;
-  border: none;
-  background: transparent;
-  color: var(--accent);
-  font-size: 11px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.record-entry-view:hover {
-  color: var(--accent-hover);
-}
-
-.record-entry-view:disabled {
-  color: var(--text-muted);
-  cursor: default;
-}
-
-.record-entry-content {
-  margin-top: var(--space-1);
-}
-
-.record-entry-loading {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.record-entry-error {
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-}
-
+/* 见模板注释：全局 pre 元素规则未分层，11px 字号留给 scoped。 */
 .record-entry-pre {
-  margin: 0;
-  padding: var(--space-2);
-  max-height: 320px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-primary);
-  background: var(--surface-hover);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-}
-
-.record-entry-truncated {
-  margin: var(--space-1) 0 0;
-  color: var(--text-muted);
   font-size: 11px;
 }
 </style>
+
+

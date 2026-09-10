@@ -74,23 +74,39 @@ async function toggleReport(): Promise<void> {
 </script>
 
 <template>
-  <div ref="root" class="ichip" @mouseenter="onEnter" @mouseleave="onLeave">
-    <button type="button" class="ichip-pill" :aria-expanded="open" @click="toggle">
-      <span class="ichip-title">物理实现</span>
-      <span class="ichip-text">{{ chipText }}</span>
-      <span class="ichip-caret" aria-hidden="true">▾</span>
+  <div ref="root" class="relative inline-flex min-w-0" @mouseenter="onEnter" @mouseleave="onLeave">
+    <button
+      type="button"
+      class="inline-flex max-w-[300px] cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-transparent px-[11px] py-[3px] text-xs whitespace-nowrap text-fg hover:border-brand hover:bg-brand-subtle"
+      :aria-expanded="open"
+      @click="toggle"
+    >
+      <span class="font-semibold">物理实现</span>
+      <span class="truncate text-fg-secondary">{{ chipText }}</span>
+      <span class="text-[9px] text-fg-muted" aria-hidden="true">▾</span>
     </button>
 
-    <div v-if="open" class="ichip-pop" role="menu">
-      <h4>物理实现各阶段</h4>
-      <div class="ichip-rows">
-        <div v-for="action in RUN_ACTIONS" :key="action.key" class="ichip-row" :data-state="cellByKey.get(action.key)?.state">
-          <span class="ichip-dot" />
-          <span class="ichip-row-label">{{ cellByKey.get(action.key)?.label }}</span>
-          <span class="ichip-row-detail">{{ cellByKey.get(action.key)?.detail }}</span>
+    <div
+      v-if="open"
+      class="absolute top-[calc(100%+10px)] left-0 z-[100] w-[380px] rounded-[10px] border border-line-strong bg-raised px-4 py-3.5 shadow-[0_14px_38px_var(--shadow-color)]"
+      role="menu"
+    >
+      <h4 class="m-0 mb-2.5 text-[11px] font-semibold text-fg-muted">物理实现各阶段</h4>
+      <div class="flex flex-col gap-1">
+        <div
+          v-for="action in RUN_ACTIONS"
+          :key="action.key"
+          class="group flex items-center gap-2 rounded-md border border-line px-2 py-1.5 data-[state=failed]:border-[color-mix(in_srgb,var(--state-danger)_35%,var(--border-subtle))] data-[state=succeeded]:border-[color-mix(in_srgb,var(--state-ok)_35%,var(--border-subtle))]"
+          :data-state="cellByKey.get(action.key)?.state"
+        >
+          <span
+            class="size-[7px] flex-none rounded-full bg-fg-muted group-data-[state=failed]:bg-danger group-data-[state=running]:animate-[ichip-pulse_1.2s_infinite] group-data-[state=running]:bg-warn group-data-[state=succeeded]:bg-ok"
+          />
+          <span class="flex-none text-xs font-semibold text-fg">{{ cellByKey.get(action.key)?.label }}</span>
+          <span class="min-w-0 flex-1 wrap-anywhere text-[10px] text-fg-muted group-data-[state=running]:text-warn">{{ cellByKey.get(action.key)?.detail }}</span>
           <button
             type="button"
-            class="ichip-run"
+            class="flex-none cursor-pointer rounded-[5px] border border-line-strong bg-hover px-2.5 py-[3px] text-[11px] text-fg not-disabled:hover:border-brand not-disabled:hover:text-brand disabled:cursor-default disabled:opacity-55"
             :disabled="isPending(action.key) || isRunning(action.key)"
             @click="emit('run-action', action)"
           >
@@ -99,147 +115,53 @@ async function toggleReport(): Promise<void> {
         </div>
       </div>
 
-      <p v-if="runError" class="ichip-run-error" role="alert">{{ runError }}</p>
+      <p
+        v-if="runError"
+        class="m-0 mt-2.5 wrap-anywhere rounded-md border border-[color-mix(in_srgb,var(--state-danger)_45%,var(--border-subtle))] px-2.5 py-2 text-[11px] text-danger"
+        role="alert"
+      >{{ runError }}</p>
 
-      <div v-if="summary.timing" class="ichip-timing" :data-tone="tone">
-        <span class="ichip-metric"><b>{{ formatNs(summary.timing.wns) }}</b> WNS</span>
-        <span class="ichip-metric"><b>{{ formatNs(summary.timing.tns) }}</b> TNS</span>
-        <span class="ichip-metric"><b>{{ formatNs(summary.timing.whs) }}</b> WHS</span>
-        <span class="ichip-status">{{ TIMING_STATUS_LABELS[summary.timing.status] }}<template v-if="summary.timing.clocks.length > 0"> · {{ summary.timing.clocks.join("、") }}</template></span>
+      <div
+        v-if="summary.timing"
+        class="group/timing mt-2.5 flex flex-wrap items-baseline gap-3 border-t border-dashed border-line pt-2.5"
+        :data-tone="tone"
+      >
+        <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.wns) }}</b> WNS</span>
+        <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.tns) }}</b> TNS</span>
+        <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.whs) }}</b> WHS</span>
+        <span class="text-[11px] text-fg-secondary">{{ TIMING_STATUS_LABELS[summary.timing.status] }}<template v-if="summary.timing.clocks.length > 0"> · {{ summary.timing.clocks.join("、") }}</template></span>
       </div>
-      <p v-else-if="summary.timingError" class="ichip-note">时序摘要不可得（{{ summary.timingError }}）——进度不受影响</p>
-      <p v-else class="ichip-note">尚无成功布局布线的时序数据</p>
+      <p v-else-if="summary.timingError" class="m-0 mt-2.5 border-t border-dashed border-line pt-2.5 text-[11px] text-fg-muted">时序摘要不可得（{{ summary.timingError }}）——进度不受影响</p>
+      <p v-else class="m-0 mt-2.5 border-t border-dashed border-line pt-2.5 text-[11px] text-fg-muted">尚无成功布局布线的时序数据</p>
 
-      <button v-if="loadStaReport" type="button" class="ichip-report-toggle" @click="toggleReport">
+      <button
+        v-if="loadStaReport"
+        type="button"
+        class="mt-2.5 cursor-pointer rounded-[5px] border border-line-strong bg-hover px-2.5 py-1 text-[11px] text-fg hover:border-brand hover:text-brand"
+        @click="toggleReport"
+      >
         {{ reportOpen ? "收起 sta.rpt" : "查看 sta.rpt 原文" }}
       </button>
-      <pre v-if="reportOpen" class="ichip-report">{{ reportLoading ? "加载中…" : reportError ? `加载失败：${reportError}` : reportText }}</pre>
+      <!-- ichip-report：未分层的全局 pre{monospace 12.5px/1.6} 规则优先级高于 Tailwind
+           utilities 层，11px/1.5 只能留在 scoped（同 CodeCard 的处置）。 -->
+      <pre v-if="reportOpen" class="ichip-report m-0 mt-2.5 max-h-[280px] overflow-auto rounded-md border border-line bg-hover p-2.5 whitespace-pre">{{ reportLoading ? "加载中…" : reportError ? `加载失败：${reportError}` : reportText }}</pre>
     </div>
   </div>
 </template>
 
 <style scoped>
-.ichip { position: relative; display: inline-flex; min-width: 0; }
-
-.ichip-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 300px;
-  padding: 3px 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.ichip-pill:hover { border-color: var(--accent); background: var(--accent-subtle); }
-.ichip-title { font-weight: 600; }
-.ichip-text { overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
-.ichip-caret { font-size: 9px; color: var(--text-muted); }
-
-.ichip-pop {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: 0;
-  z-index: var(--z-dropdown);
-  width: 380px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--surface-raised);
-  box-shadow: 0 14px 38px var(--shadow-color);
-}
-.ichip-pop h4 {
-  margin: 0 0 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
+/* 运行中圆点的脉冲关键帧：Tailwind 内置 animate-pulse 的节奏/幅度不同，保留原名。 */
+@keyframes ichip-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
-.ichip-rows { display: flex; flex-direction: column; gap: 4px; }
-.ichip-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-}
-.ichip-row[data-state="succeeded"] { border-color: color-mix(in srgb, var(--state-ok) 35%, var(--border-subtle)); }
-.ichip-row[data-state="failed"] { border-color: color-mix(in srgb, var(--state-danger) 35%, var(--border-subtle)); }
-.ichip-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
-.ichip-row[data-state="succeeded"] .ichip-dot { background: var(--state-ok); }
-.ichip-row[data-state="failed"] .ichip-dot { background: var(--state-danger); }
-.ichip-row[data-state="running"] .ichip-dot { background: var(--state-warn); animation: ichip-pulse 1.2s infinite; }
-@keyframes ichip-pulse { 50% { opacity: 0.35; } }
-.ichip-row-label { flex: none; font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.ichip-row-detail { flex: 1 1 auto; min-width: 0; font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
-.ichip-row[data-state="running"] .ichip-row-detail { color: var(--state-warn); }
-
-.ichip-run {
-  flex: none;
-  padding: 3px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--surface-hover);
-  color: var(--text-primary);
-  font-size: 11px;
-  cursor: pointer;
-}
-.ichip-run:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.ichip-run:disabled { opacity: 0.55; cursor: default; }
-
-.ichip-run-error {
-  margin: 10px 0 0;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--state-danger) 45%, var(--border-subtle));
-  border-radius: 6px;
-  font-size: 11px;
-  color: var(--state-danger);
-  overflow-wrap: anywhere;
-}
-
-.ichip-timing {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 12px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border-subtle);
-}
-.ichip-metric { font-size: 10px; color: var(--text-muted); }
-.ichip-metric b { margin-right: 3px; font-size: 14px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
-.ichip-timing[data-tone="ok"] .ichip-metric b { color: var(--state-ok); }
-.ichip-timing[data-tone="bad"] .ichip-metric b { color: var(--state-danger); }
-.ichip-status { font-size: 11px; color: var(--text-secondary); }
-
-.ichip-note { margin: 10px 0 0; padding-top: 10px; border-top: 1px dashed var(--border-subtle); font-size: 11px; color: var(--text-muted); }
-
-.ichip-report-toggle {
-  margin-top: 10px;
-  padding: 4px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--surface-hover);
-  color: var(--text-primary);
-  font-size: 11px;
-  cursor: pointer;
-}
-.ichip-report-toggle:hover { border-color: var(--accent); color: var(--accent); }
+/* 见模板注释：全局 pre 元素规则未分层，字号/行高留给 scoped。 */
 .ichip-report {
-  max-height: 280px;
-  overflow: auto;
-  margin: 10px 0 0;
-  padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--surface-hover);
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre;
 }
 </style>
+
+

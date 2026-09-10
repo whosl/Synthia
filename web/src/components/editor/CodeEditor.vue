@@ -279,27 +279,27 @@ function submitSave(): void {
 </script>
 
 <template>
-  <div class="code-editor">
-    <div v-if="!file" class="code-editor-empty">
-      <p class="code-editor-empty-title">未打开任何文件</p>
-      <p class="code-editor-empty-hint">从左侧文件树选择一个文件开始查看</p>
+  <div class="flex h-full min-h-0 flex-col bg-base text-fg">
+    <div v-if="!file" class="flex flex-1 flex-col items-center justify-center gap-1">
+      <p class="m-0 text-[13px] text-fg-secondary">未打开任何文件</p>
+      <p class="m-0 text-xs text-fg-muted">从左侧文件树选择一个文件开始查看</p>
     </div>
 
     <template v-else>
-      <div class="code-editor-header">
-        <div class="code-editor-header-main">
-          <span class="code-editor-title" :title="fileTitle">{{ fileTitle }}</span>
+      <div class="flex min-h-[40px] flex-none flex-wrap items-center justify-between gap-3 border-b border-line bg-panel px-3 py-1.5">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="truncate text-xs text-fg" :title="fileTitle">{{ fileTitle }}</span>
           <VersionBar :revisions="file.revisions" :active-revision-id="activeRevision?.id ?? null" @select-revision="onSelectRevision" />
         </div>
-        <div class="code-editor-header-status">
-          <span v-if="diffAgainst" class="code-editor-diff-tag">
+        <div class="flex flex-none items-center gap-2">
+          <span v-if="diffAgainst" class="inline-flex items-center gap-2 text-xs text-fg-secondary">
             对比 v{{ diffAgainst.base.version }} → v{{ diffAgainst.head.version }}
             <Button size="sm" variant="ghost" @click="emit('exit-diff')">退出对比</Button>
           </span>
           <template v-else>
             <Badge v-if="statusText" size="sm" :tone="statusTone">{{ statusText }}</Badge>
             <Button v-if="isDocPreviewLanguage(language) && !loading && content !== null && (editable || markdownEditing)" size="sm" :disabled="dirty || saving" @click="markdownEditing = !markdownEditing">{{ markdownEditing ? '预览文档' : '编辑文档' }}</Button>
-            <span v-if="dirty" class="dirty-label">未保存</span>
+            <span v-if="dirty" class="text-[11px] text-warn">未保存</span>
             <Button v-if="editable" size="sm" variant="ghost" :disabled="!dirty || saving" @click="submitSave">
               {{ saving ? "保存中…" : "保存" }}
             </Button>
@@ -307,144 +307,18 @@ function submitSave(): void {
         </div>
       </div>
 
-      <p v-if="saveError" class="code-editor-save-error" role="alert">{{ saveError }}</p>
+      <p v-if="saveError" class="m-0 flex-none border-b border-line bg-panel px-3 py-1 text-xs leading-[1.4] text-danger" role="alert">{{ saveError }}</p>
 
-      <div class="code-editor-body">
-        <div v-if="loading" class="code-editor-loading">加载中…</div>
-        <div v-else-if="content === null" class="code-editor-loading">无法显示文件内容，请从文件树重新打开以重试。</div>
+      <div class="flex min-h-0 flex-1 flex-col">
+        <div v-if="loading" class="flex flex-1 items-center justify-center text-xs text-fg-muted">加载中…</div>
+        <div v-else-if="content === null" class="flex flex-1 items-center justify-center text-xs text-fg-muted">无法显示文件内容，请从文件树重新打开以重试。</div>
         <DocPreview v-else-if="showDocPreview" :content="content ?? ''" />
-        <div v-else class="code-editor-monaco-wrap">
-          <div v-if="monacoError" class="code-editor-loading" role="alert">{{ monacoError }}<Button @click="ensureMonacoMounted">重试</Button></div>
-          <div v-else-if="monacoLoading" class="code-editor-loading">正在加载编辑器…</div>
-          <div ref="editorHost" class="code-editor-monaco-host" />
+        <div v-else class="relative flex min-h-0 flex-1">
+          <div v-if="monacoError" class="absolute inset-0 z-[1] flex items-center justify-center gap-3 bg-base text-xs text-fg-muted" role="alert">{{ monacoError }}<Button @click="ensureMonacoMounted">重试</Button></div>
+          <div v-else-if="monacoLoading" class="absolute inset-0 z-[1] flex items-center justify-center bg-base text-xs text-fg-muted">正在加载编辑器…</div>
+          <div ref="editorHost" class="min-h-0 min-w-0 flex-1" />
         </div>
       </div>
     </template>
   </div>
 </template>
-
-<style scoped>
-.code-editor {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--surface-base);
-  color: var(--text-primary);
-}
-
-.code-editor-empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-}
-
-.code-editor-empty-title {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--font-size-base);
-}
-
-.code-editor-empty-hint {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.code-editor-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-height: 40px;
-  flex-wrap: wrap;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  padding-left: var(--space-3);
-  padding-right: var(--space-3);
-  background: var(--surface-panel);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.code-editor-header-main {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.code-editor-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--font-size-sm);
-  color: var(--text-primary);
-}
-
-.code-editor-header-status {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.code-editor-save-error {
-  flex: none;
-  margin: 0;
-  padding: var(--space-1) var(--space-3);
-  background: var(--surface-panel);
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.code-editor-diff-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.code-editor-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.code-editor-loading {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.code-editor-monaco-wrap {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-  display: flex;
-}
-
-.code-editor-monaco-wrap .code-editor-loading {
-  position: absolute;
-  inset: 0;
-  background: var(--surface-base);
-}
-
-.code-editor-monaco-host {
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-}
-.dirty-label { color: var(--state-warn); font-size: 11px; }
-.code-editor-monaco-wrap .code-editor-loading { z-index: 1; gap: 12px; }
-</style>

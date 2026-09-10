@@ -198,13 +198,18 @@ watch(
 </script>
 
 <template>
-  <div ref="rootEl" class="filetree" :class="{ 'is-dragging': dragging }">
-    <div v-if="pendingCount > 0" class="filetree-register">
-      <div class="filetree-register-row">
-        <span class="filetree-register-text">工作区有 {{ pendingCount }} 个改动</span>
+  <div
+    ref="rootEl"
+    class="flex h-full min-h-0 flex-col bg-panel text-fg"
+    :class="dragging ? 'cursor-row-resize select-none' : ''"
+  >
+    <!-- 一键登记横幅：钉在两栏之上，改动分布在哪一栏都看得见。 -->
+    <div v-if="pendingCount > 0" class="flex-none border-b border-line bg-brand-subtle px-3 py-2">
+      <div class="flex items-center gap-2">
+        <span class="flex-1 text-xs text-fg">工作区有 {{ pendingCount }} 个改动</span>
         <button
           type="button"
-          class="filetree-register-action"
+          class="flex-none cursor-pointer rounded-sm border-0 bg-brand px-2 py-[2px] text-xs text-primary-foreground not-disabled:hover:bg-brand-hover disabled:cursor-default disabled:opacity-60"
           :disabled="registering"
           @click="reasonOpen ? submitRegister() : (reasonOpen = true)"
         >
@@ -212,30 +217,36 @@ watch(
         </button>
       </div>
 
-      <div v-if="reasonOpen" class="filetree-register-form">
+      <div v-if="reasonOpen" class="mt-2 flex items-center gap-2">
         <input
           v-model="reason"
           type="text"
-          class="filetree-register-input"
+          class="min-w-0 flex-1 rounded-sm border border-line bg-panel px-2 py-[2px] text-xs text-fg focus-visible:border-brand focus-visible:outline-none"
           placeholder="这次改了什么（可留空）"
           :disabled="registering"
           @keydown.enter.prevent="submitRegister"
           @keydown.esc.prevent="reasonOpen = false"
         />
-        <button type="button" class="filetree-register-cancel" :disabled="registering" @click="reasonOpen = false">
+        <button
+          type="button"
+          class="flex-none cursor-pointer border-0 bg-transparent p-0 text-xs text-fg-secondary"
+          :disabled="registering"
+          @click="reasonOpen = false"
+        >
           取消
         </button>
       </div>
 
-      <p v-if="registerError" class="filetree-register-error">{{ registerError }}</p>
+      <!-- 旧 scoped 写的是未定义变量 var(--danger)，颜色静默回落为继承；这里补上语义令牌 --state-danger。 -->
+      <p v-if="registerError" class="m-0 mt-2 text-xs leading-[1.4] text-danger">{{ registerError }}</p>
     </div>
 
-    <section class="filetree-section" :style="{ flexBasis: `${sourcePct}%` }">
-      <header class="filetree-section-head">
-        <span class="filetree-section-title">源文件</span>
-        <span class="filetree-section-count">{{ sourceCount }}</span>
+    <section class="flex min-h-0 shrink grow-0 flex-col" :style="{ flexBasis: `${sourcePct}%` }">
+      <header class="flex flex-none items-baseline gap-2 border-b border-line px-3 pt-2 pb-1">
+        <span class="text-xs font-semibold text-fg">源文件</span>
+        <span class="ml-auto font-mono text-[11px] text-fg-muted">{{ sourceCount }}</span>
       </header>
-      <div class="filetree-switcher">
+      <div class="flex-none px-2 pt-2">
         <ViewSwitcher :model-value="viewMode" @update:model-value="emit('update:viewMode', $event)" />
       </div>
       <FileTreeSection
@@ -253,7 +264,7 @@ watch(
     </section>
 
     <div
-      class="filetree-divider"
+      class="flex-none h-[5px] cursor-row-resize bg-line transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand focus-visible:bg-brand focus-visible:outline-none"
       role="separator"
       aria-orientation="horizontal"
       aria-label="调整源文件与文档产物的分栏高度"
@@ -263,11 +274,12 @@ watch(
       @keydown.down.prevent="nudge(4)"
     />
 
-    <section class="filetree-section filetree-section-docs">
-      <header class="filetree-section-head">
-        <span class="filetree-section-title">{{ documentContext === "gjb" ? "文档产物" : "文档" }}</span>
-        <span v-if="documentContext === 'gjb'" class="filetree-section-hint">GJB 参考</span>
-        <span class="filetree-section-count">{{ docCount }}</span>
+    <!-- 下栏吃掉除上栏 flex-basis 之外的全部剩余高度。 -->
+    <section class="flex min-h-0 flex-1 flex-col">
+      <header class="flex flex-none items-baseline gap-2 border-b border-line px-3 pt-2 pb-1">
+        <span class="text-xs font-semibold text-fg">{{ documentContext === "gjb" ? "文档产物" : "文档" }}</span>
+        <span v-if="documentContext === 'gjb'" class="text-[11px] tracking-[0.04em] text-fg-muted">GJB 参考</span>
+        <span class="ml-auto font-mono text-[11px] text-fg-muted">{{ docCount }}</span>
       </header>
       <FileTreeSection
         :result="split.docs"
@@ -284,158 +296,3 @@ watch(
   </div>
 </template>
 
-<style scoped>
-.filetree {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--surface-panel);
-  color: var(--text-primary);
-}
-
-.filetree.is-dragging {
-  user-select: none;
-  cursor: row-resize;
-}
-
-/* 一键登记横幅：钉在两栏之上，改动分布在哪一栏都看得见。 */
-.filetree-register {
-  flex: none;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--accent-subtle);
-}
-
-.filetree-register-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.filetree-register-text {
-  flex: 1;
-  font-size: var(--font-size-sm);
-  color: var(--text-primary);
-}
-
-.filetree-register-action {
-  flex: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 2px var(--space-2);
-  background: var(--accent);
-  color: var(--text-on-accent);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-}
-
-.filetree-register-action:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.filetree-register-action:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.filetree-register-form {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-}
-
-.filetree-register-input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 2px var(--space-2);
-  background: var(--surface-panel);
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-}
-
-.filetree-register-input:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.filetree-register-cancel {
-  flex: none;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  padding: 0;
-}
-
-.filetree-register-error {
-  margin: var(--space-2) 0 0;
-  color: var(--danger);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-}
-
-.filetree-section {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex-grow: 0;
-  flex-shrink: 1;
-}
-
-/* 下栏吃掉除上栏 flex-basis 之外的全部剩余高度。 */
-.filetree-section-docs {
-  flex: 1 1 0;
-}
-
-.filetree-section-head {
-  flex: none;
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3) var(--space-1);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.filetree-section-title {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.filetree-section-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-  letter-spacing: 0.04em;
-}
-
-.filetree-section-count {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-.filetree-switcher {
-  flex: none;
-  padding: var(--space-2) var(--space-2) 0;
-}
-
-.filetree-divider {
-  flex: none;
-  height: 5px;
-  cursor: row-resize;
-  background: var(--border-subtle);
-  transition: background-color var(--duration) var(--ease-out);
-}
-
-.filetree-divider:hover,
-.filetree-divider:focus-visible {
-  background: var(--accent);
-  outline: none;
-}
-</style>

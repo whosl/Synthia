@@ -25,64 +25,27 @@ const safeHtml = computed(() => renderMarkdown(props.content));
 </script>
 
 <template>
-  <div class="doc-preview">
-    <div class="doc-preview-toolbar">
+  <div class="flex h-full min-h-0 flex-col bg-base">
+    <div class="flex flex-none gap-1 border-b border-line bg-panel px-3 py-1">
       <Button size="sm" :variant="mode === 'preview' ? 'secondary' : 'ghost'" @click="mode = 'preview'">预览</Button>
       <Button size="sm" :variant="mode === 'source' ? 'secondary' : 'ghost'" @click="mode = 'source'">源码</Button>
     </div>
-    <div class="doc-preview-body">
+    <div class="min-h-0 flex-1 overflow-auto">
       <!-- eslint-disable-next-line vue/no-v-html -->
-      <div v-if="mode === 'preview'" class="doc-preview-rendered markdown-body" v-html="safeHtml" />
-      <pre v-else class="doc-preview-source">{{ content }}</pre>
+      <div
+        v-if="mode === 'preview'"
+        class="doc-preview-rendered markdown-body mx-auto max-w-[860px] p-6 text-[13px] leading-[1.55] text-fg"
+        v-html="safeHtml"
+      />
+      <!-- pre 的等宽/12.5px/1.6 由 style.css 未分层的 code,pre,kbd 元素规则供给，此处只需布局类 -->
+      <pre v-else class="m-0 p-4 break-words whitespace-pre-wrap text-fg">{{ content }}</pre>
     </div>
   </div>
 </template>
 
 <style scoped>
-.doc-preview {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--surface-base);
-}
-
-.doc-preview-toolbar {
-  flex: none;
-  display: flex;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  background: var(--surface-panel);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.doc-preview-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.doc-preview-source {
-  margin: 0;
-  padding: var(--space-4);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-  line-height: var(--line-height-code);
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.doc-preview-rendered {
-  padding: var(--space-6);
-  max-width: 860px;
-  margin: 0 auto;
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  line-height: var(--line-height-chat);
-}
-
-/* v-html 注入的内容不受 scoped 属性选择器约束，需要 :deep() */
+/* v-html 注入的内容不受 scoped 属性选择器约束，markdown 排印需要 :deep()（同 MessageItem）；
+   Tailwind 无法表达「容器内全部 h1–h4/li/code…」这种对注入 DOM 的后代选择器，故整段保留。 */
 .doc-preview-rendered :deep(h1),
 .doc-preview-rendered :deep(h2),
 .doc-preview-rendered :deep(h3),

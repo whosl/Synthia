@@ -7,6 +7,7 @@ import {
   processProgress,
   PROCESS_GATE_STATUS_TEXT,
 } from "../../domain/process-profile.ts";
+import { Dialog, DialogContent } from "../ui/dialog";
 
 const props = defineProps<{
   readonly stageChain: readonly ProcessGateView[] | null;
@@ -28,293 +29,83 @@ function select(stageId: string): void {
 </script>
 
 <template>
-  <div class="stage-rail" aria-label="G0 至 G4 工程流程">
-    <div v-if="!stageChain" class="stage-rail-empty">{{ emptyText }}</div>
+  <div class="flex h-full w-full min-w-0 items-center" aria-label="G0 至 G4 工程流程">
+    <div v-if="!stageChain" class="text-xs text-fg-muted">{{ emptyText }}</div>
     <template v-else>
-      <ol class="stage-rail-desktop">
-        <li v-for="(entry, index) in stageChain" :key="entry.node.id" class="stage-rail-step">
-          <span v-if="index > 0" class="stage-rail-line" :class="`state-${entry.status}`" aria-hidden="true" />
+      <ol class="m-0 flex w-full min-w-0 list-none items-center p-0 max-[767px]:hidden">
+        <li v-for="(entry, index) in stageChain" :key="entry.node.id" class="flex min-w-0 flex-1 items-center">
+          <span
+            v-if="index > 0"
+            class="h-[2px] flex-1 basis-4 bg-line-strong data-[state=done]:bg-ok"
+            :data-state="entry.status"
+            aria-hidden="true"
+          />
           <button
             type="button"
-            class="stage-rail-node"
-            :class="`state-${entry.status}`"
+            class="group grid min-w-0 cursor-pointer grid-cols-[auto_auto] grid-rows-[auto_auto] gap-x-[5px] rounded-sm border-0 bg-transparent px-[5px] py-[2px] text-left text-fg-muted hover:bg-hover focus-visible:bg-hover data-[state=current]:text-fg data-[state=done]:text-fg data-[state=failed]:text-danger data-[state=gated]:text-warn"
+            :data-state="entry.status"
             :aria-current="entry.status === 'current' || entry.status === 'gated' || entry.status === 'failed' ? 'step' : undefined"
             :title="`${entry.node.id} · ${entry.node.name} · ${statusText(entry.status)}\n${entry.node.goal}`"
             @click="select(entry.node.id)"
           >
-            <span class="stage-rail-dot" aria-hidden="true" />
-            <span class="stage-rail-code">{{ entry.node.id }}</span>
-            <span class="stage-rail-name">{{ entry.node.name }}</span>
+            <!--
+              状态点配色对齐 ProjectProgressChip 的门语义（done→ok / gated→warn）。
+              旧 scoped CSS 写的是 --state-success / --state-warning——这两个变量在
+              style.css 里不存在，规则静默失效；这里用现行令牌补上原设计意图。
+            -->
+            <span
+              class="row-span-2 size-[9px] self-center rounded-full border-2 border-line-strong group-data-[state=current]:border-brand group-data-[state=current]:bg-brand group-data-[state=current]:shadow-[0_0_0_3px_var(--accent-subtle)] group-data-[state=done]:border-ok group-data-[state=done]:bg-ok group-data-[state=failed]:border-danger group-data-[state=failed]:bg-danger group-data-[state=gated]:border-warn group-data-[state=gated]:bg-warn"
+              aria-hidden="true"
+            />
+            <span class="text-[10px] leading-none font-bold text-inherit">{{ entry.node.id }}</span>
+            <span class="max-w-[92px] truncate text-[11px] leading-[1.2] text-inherit">{{ entry.node.name }}</span>
           </button>
         </li>
       </ol>
 
-      <button type="button" class="stage-rail-mobile-summary" @click="mobileOverlayOpen = true">
+      <button
+        type="button"
+        class="hidden w-full cursor-pointer rounded-sm border border-line bg-hover px-2 py-[5px] text-left text-xs text-fg max-[767px]:block"
+        @click="mobileOverlayOpen = true"
+      >
         <template v-if="current">
           {{ current.node.id }} {{ current.node.name }} · {{ statusText(current.status) }} · {{ progress.done }}/{{ progress.total }}
         </template>
       </button>
 
-      <Teleport to="body">
-        <div v-if="mobileOverlayOpen" class="stage-rail-overlay" @click.self="mobileOverlayOpen = false">
-          <section class="stage-rail-overlay-panel" aria-modal="true" role="dialog" aria-label="工程流程详情">
-            <header class="stage-rail-overlay-header">
-              <div>
-                <strong>G0–G4 工程流程</strong>
-                <p>{{ progress.done }}/{{ progress.total }} 已完成</p>
-              </div>
-              <button type="button" class="stage-rail-overlay-close" @click="mobileOverlayOpen = false">关闭</button>
-            </header>
-            <ol class="stage-rail-overlay-list">
-              <li v-for="entry in stageChain" :key="entry.node.id">
-                <button
-                  type="button"
-                  class="stage-rail-overlay-row"
-                  :class="`state-${entry.status}`"
-                  @click="select(entry.node.id); mobileOverlayOpen = false"
-                >
-                  <span class="stage-rail-overlay-code">{{ entry.node.id }}</span>
-                  <span class="stage-rail-overlay-copy">
-                    <strong>{{ entry.node.name }}</strong>
-                    <small>{{ entry.node.goal }}</small>
-                  </span>
-                  <span class="stage-rail-overlay-status">{{ statusText(entry.status) }}</span>
-                </button>
-              </li>
-            </ol>
-          </section>
-        </div>
-      </Teleport>
+      <!-- 窄屏底部弹层：ui/dialog 提供 portal/焦点圈定/Esc/点外关闭（迁移计划 §4 映射）。 -->
+      <Dialog v-model:open="mobileOverlayOpen">
+        <DialogContent
+          :show-close-button="false"
+          aria-label="工程流程详情"
+          class="top-auto bottom-0 left-0 max-h-[88vh] w-full max-w-full translate-x-0 translate-y-0 overflow-y-auto rounded-b-none border-0 bg-panel p-4 shadow-none sm:max-w-full"
+        >
+          <header class="flex items-start justify-between gap-3">
+            <div>
+              <strong>G0–G4 工程流程</strong>
+              <p class="m-0 mt-[3px] text-xs text-fg-muted">{{ progress.done }}/{{ progress.total }} 已完成</p>
+            </div>
+            <button type="button" class="cursor-pointer border-0 bg-transparent text-brand" @click="mobileOverlayOpen = false">关闭</button>
+          </header>
+          <ol class="m-0 grid list-none gap-2 p-0">
+            <li v-for="entry in stageChain" :key="entry.node.id">
+              <button
+                type="button"
+                class="grid w-full cursor-pointer grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-base p-3 text-left text-fg data-[state=current]:border-brand data-[state=failed]:border-danger data-[state=gated]:border-brand"
+                :data-state="entry.status"
+                @click="select(entry.node.id); mobileOverlayOpen = false"
+              >
+                <span class="text-xs font-bold text-fg-secondary">{{ entry.node.id }}</span>
+                <span class="grid min-w-0 gap-[3px]">
+                  <strong>{{ entry.node.name }}</strong>
+                  <small class="leading-[1.35] text-fg-muted">{{ entry.node.goal }}</small>
+                </span>
+                <span class="text-xs font-bold text-fg-secondary">{{ statusText(entry.status) }}</span>
+              </button>
+            </li>
+          </ol>
+        </DialogContent>
+      </Dialog>
     </template>
   </div>
 </template>
-
-<style scoped>
-.stage-rail {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-}
-
-.stage-rail-empty {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.stage-rail-desktop {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.stage-rail-step {
-  display: flex;
-  flex: 1 1 0;
-  align-items: center;
-  min-width: 0;
-}
-
-.stage-rail-line {
-  flex: 1 1 16px;
-  height: 2px;
-  background: var(--border-strong);
-}
-
-.stage-rail-line.state-done {
-  background: var(--state-success);
-}
-
-.stage-rail-node {
-  display: grid;
-  grid-template-columns: auto auto;
-  grid-template-rows: auto auto;
-  column-gap: 5px;
-  min-width: 0;
-  padding: 2px 5px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  text-align: left;
-  cursor: pointer;
-}
-
-.stage-rail-node:hover,
-.stage-rail-node:focus-visible {
-  background: var(--surface-hover);
-}
-
-.stage-rail-dot {
-  grid-row: 1 / 3;
-  align-self: center;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--border-strong);
-  border-radius: 50%;
-}
-
-.stage-rail-node.state-done .stage-rail-dot {
-  border-color: var(--state-success);
-  background: var(--state-success);
-}
-
-.stage-rail-node.state-current .stage-rail-dot {
-  border-color: var(--accent);
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-subtle);
-}
-
-.stage-rail-node.state-gated .stage-rail-dot {
-  border-color: var(--state-warning);
-  background: var(--state-warning);
-}
-
-.stage-rail-node.state-failed .stage-rail-dot {
-  border-color: var(--state-danger);
-  background: var(--state-danger);
-}
-
-.stage-rail-code {
-  color: inherit;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.stage-rail-name {
-  max-width: 92px;
-  overflow: hidden;
-  color: inherit;
-  font-size: 11px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.stage-rail-node.state-done,
-.stage-rail-node.state-current {
-  color: var(--text-primary);
-}
-
-.stage-rail-node.state-gated {
-  color: var(--state-warning);
-}
-
-.stage-rail-node.state-failed {
-  color: var(--state-danger);
-}
-
-.stage-rail-mobile-summary {
-  display: none;
-  width: 100%;
-  padding: 5px var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-  text-align: left;
-}
-
-.stage-rail-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-overlay);
-  display: flex;
-  align-items: flex-end;
-  background: rgba(0, 0, 0, 0.48);
-}
-
-.stage-rail-overlay-panel {
-  width: 100%;
-  max-height: 88vh;
-  padding: var(--space-4);
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  background: var(--surface-panel);
-  overflow: auto;
-}
-
-.stage-rail-overlay-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.stage-rail-overlay-header p {
-  margin: 3px 0 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.stage-rail-overlay-close {
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-}
-
-.stage-rail-overlay-list {
-  display: grid;
-  gap: var(--space-2);
-  margin: var(--space-4) 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.stage-rail-overlay-row {
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-base);
-  color: var(--text-primary);
-  text-align: left;
-}
-
-.stage-rail-overlay-row.state-current,
-.stage-rail-overlay-row.state-gated {
-  border-color: var(--accent);
-}
-
-.stage-rail-overlay-row.state-failed {
-  border-color: var(--state-danger);
-}
-
-.stage-rail-overlay-code,
-.stage-rail-overlay-status {
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  font-weight: 700;
-}
-
-.stage-rail-overlay-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.stage-rail-overlay-copy small {
-  color: var(--text-muted);
-  line-height: 1.35;
-}
-
-@media (max-width: 767px) {
-  .stage-rail-desktop {
-    display: none;
-  }
-
-  .stage-rail-mobile-summary {
-    display: block;
-  }
-}
-</style>

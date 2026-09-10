@@ -51,9 +51,12 @@ function onSelect(revisionId: string): void {
 <template>
   <DropdownMenu v-model:open="open">
     <DropdownMenuTrigger as-child>
-      <button type="button" class="version-bar-trigger">
-        <span v-if="activeRevision" class="version-bar-version">v{{ activeRevision.version }}</span>
-        <span v-else class="version-bar-version version-bar-empty">无版本</span>
+      <button
+        type="button"
+        class="inline-flex h-6 cursor-pointer items-center gap-2 rounded-sm border-0 bg-transparent px-2 text-xs text-fg hover:bg-hover"
+      >
+        <span v-if="activeRevision" class="font-mono font-semibold">v{{ activeRevision.version }}</span>
+        <span v-else class="font-sans font-normal text-fg-muted">无版本</span>
         <Badge
           v-if="activeRevision"
           variant="dot"
@@ -62,106 +65,28 @@ function onSelect(revisionId: string): void {
         >
           {{ ARTIFACT_DOT_TEXT[artifactDotState(activeRevision.state)] }}
         </Badge>
-        <span class="version-bar-caret" aria-hidden="true">▾</span>
+        <span class="text-[10px] text-fg-muted" aria-hidden="true">▾</span>
       </button>
     </DropdownMenuTrigger>
 
     <DropdownMenuContent align="start" class="max-h-[280px] min-w-[220px]">
-      <p v-if="sortedRevisions.length === 0" class="version-bar-list-empty">暂无版本</p>
+      <p v-if="sortedRevisions.length === 0" class="m-0 px-3 py-2 text-xs text-fg-muted">暂无版本</p>
       <DropdownMenuItem v-for="rev in sortedRevisions" :key="rev.id" as-child>
         <button
           type="button"
           role="option"
-          class="version-bar-item"
+          class="flex cursor-pointer items-center gap-2 rounded-sm border-0 px-2 py-1 text-left text-xs text-fg hover:bg-hover"
+          :class="rev.id === activeRevisionId ? 'bg-brand-subtle' : 'bg-transparent'"
           :aria-selected="rev.id === activeRevisionId"
-          :class="{ 'version-bar-item-active': rev.id === activeRevisionId }"
           @click="onSelect(rev.id)"
         >
-          <span class="version-bar-item-version">v{{ rev.version }}</span>
+          <span class="min-w-[32px] font-mono font-semibold">v{{ rev.version }}</span>
           <Badge variant="dot" size="sm" :tone="ARTIFACT_DOT_TONE[artifactDotState(rev.state)]">
             {{ REVISION_STATE_TEXT[rev.state] ?? ARTIFACT_DOT_TEXT[artifactDotState(rev.state)] }}
           </Badge>
-          <span class="version-bar-item-time">{{ formatTime(rev.created_at) }}</span>
+          <span class="ml-auto text-[11px] whitespace-nowrap text-fg-muted">{{ formatTime(rev.created_at) }}</span>
         </button>
       </DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>
 </template>
-
-<style scoped>
-.version-bar-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  height: 24px;
-  padding: 0 var(--space-2);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-}
-
-.version-bar-trigger:hover {
-  background: var(--surface-hover);
-}
-
-.version-bar-version {
-  font-family: var(--font-mono);
-  font-weight: 600;
-}
-
-.version-bar-empty {
-  font-family: var(--font-sans);
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.version-bar-caret {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-
-.version-bar-list-empty {
-  margin: 0;
-  padding: var(--space-2) var(--space-3);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.version-bar-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.version-bar-item:hover {
-  background: var(--surface-hover);
-}
-
-.version-bar-item-active {
-  background: var(--accent-subtle);
-}
-
-.version-bar-item-version {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  min-width: 32px;
-}
-
-.version-bar-item-time {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-</style>

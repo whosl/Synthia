@@ -46,122 +46,48 @@ function select(stageId: string): void {
 </script>
 
 <template>
-  <div ref="root" class="gchip" @mouseenter="onEnter" @mouseleave="onLeave">
-    <button type="button" class="gchip-pill" :aria-expanded="open" @click="toggle">
-      <span class="gchip-title">项目概览</span>
-      <span class="gchip-text">{{ chipText }}</span>
-      <span class="gchip-caret" aria-hidden="true">▾</span>
+  <div ref="root" class="relative inline-flex min-w-0" @mouseenter="onEnter" @mouseleave="onLeave">
+    <button
+      type="button"
+      class="inline-flex max-w-[380px] cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-transparent px-[11px] py-[3px] text-xs whitespace-nowrap text-fg hover:border-brand hover:bg-brand-subtle"
+      :aria-expanded="open"
+      @click="toggle"
+    >
+      <span class="font-semibold">项目概览</span>
+      <span class="truncate text-fg-secondary">{{ chipText }}</span>
+      <span class="text-[9px] text-fg-muted" aria-hidden="true">▾</span>
     </button>
 
-    <div v-if="open" class="gchip-pop" role="menu">
-      <h4>项目信息</h4>
-      <dl class="gchip-info">
-        <div class="gchip-info-row"><dt>类型</dt><dd>{{ typeLabel }}</dd></div>
-        <div v-if="profileLabel" class="gchip-info-row"><dt>流程</dt><dd>{{ profileLabel }}</dd></div>
-        <div class="gchip-info-row"><dt>器件</dt><dd>{{ partText }}</dd></div>
+    <div
+      v-if="open"
+      class="absolute top-[calc(100%+10px)] left-0 z-[100] w-[320px] rounded-[10px] border border-line-strong bg-raised px-4 py-3.5 shadow-[0_14px_38px_var(--shadow-color)]"
+      role="menu"
+    >
+      <h4 class="m-0 mb-2.5 text-[11px] font-semibold text-fg-muted">项目信息</h4>
+      <dl class="m-0 flex flex-col gap-[5px]">
+        <div class="flex gap-3 text-xs"><dt class="w-[30px] flex-none text-fg-muted">类型</dt><dd class="m-0 wrap-anywhere text-fg">{{ typeLabel }}</dd></div>
+        <div v-if="profileLabel" class="flex gap-3 text-xs"><dt class="w-[30px] flex-none text-fg-muted">流程</dt><dd class="m-0 wrap-anywhere text-fg">{{ profileLabel }}</dd></div>
+        <div class="flex gap-3 text-xs"><dt class="w-[30px] flex-none text-fg-muted">器件</dt><dd class="m-0 wrap-anywhere text-fg">{{ partText }}</dd></div>
       </dl>
 
-      <h4 class="gchip-progress-title">项目进度</h4>
-      <div v-if="stageChain" class="gchip-gates">
+      <h4 class="m-0 mt-3.5 mb-2.5 border-t border-dashed border-line pt-3 text-[11px] font-semibold text-fg-muted">项目进度</h4>
+      <div v-if="stageChain" class="flex flex-col gap-1">
         <button
           v-for="entry in stageChain"
           :key="entry.node.id"
           type="button"
-          class="gchip-gate"
+          class="group flex w-full cursor-pointer items-center gap-[9px] rounded-md border-0 bg-transparent px-2 py-1.5 text-left text-xs text-fg hover:bg-hover"
           :data-state="entry.status"
           @click="select(entry.node.id)"
         >
-          <span class="gchip-dot" />
-          <span class="gchip-gate-name">{{ entry.node.id }} {{ entry.node.name }}</span>
-          <span class="gchip-gate-status">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
+          <span
+            class="size-2 flex-none rounded-full border-2 border-line-strong group-data-[state=current]:border-brand group-data-[state=current]:bg-brand group-data-[state=done]:border-ok group-data-[state=done]:bg-ok group-data-[state=failed]:border-danger group-data-[state=failed]:bg-danger group-data-[state=gated]:border-warn group-data-[state=gated]:bg-warn"
+          />
+          <span class="flex-none group-data-[state=current]:text-brand">{{ entry.node.id }} {{ entry.node.name }}</span>
+          <span class="ml-auto text-[11px] text-fg-muted group-data-[state=failed]:text-danger group-data-[state=gated]:text-brand">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
         </button>
       </div>
-      <p v-else class="gchip-empty">{{ emptyText }}</p>
+      <p v-else class="m-0 text-xs text-fg-muted">{{ emptyText }}</p>
     </div>
   </div>
 </template>
-
-<style scoped>
-.gchip { position: relative; display: inline-flex; min-width: 0; }
-
-.gchip-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 380px;
-  padding: 3px 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.gchip-pill:hover { border-color: var(--accent); background: var(--accent-subtle); }
-
-.gchip-title { font-weight: 600; }
-.gchip-text { overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
-.gchip-caret { font-size: 9px; color: var(--text-muted); }
-
-.gchip-pop {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: 0;
-  z-index: var(--z-dropdown);
-  width: 320px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--surface-raised);
-  box-shadow: 0 14px 38px var(--shadow-color);
-}
-.gchip-pop h4 {
-  margin: 0 0 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-.gchip-progress-title { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle); }
-
-.gchip-info { margin: 0; display: flex; flex-direction: column; gap: 5px; }
-.gchip-info-row { display: flex; gap: 12px; font-size: 12px; }
-.gchip-info-row dt { flex: none; width: 30px; color: var(--text-muted); }
-.gchip-info-row dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
-
-.gchip-empty { margin: 0; font-size: 12px; color: var(--text-muted); }
-
-.gchip-gates { display: flex; flex-direction: column; gap: 4px; }
-.gchip-gate {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-.gchip-gate:hover { background: var(--surface-hover); }
-.gchip-gate-name { flex: none; }
-.gchip-gate-status { margin-left: auto; font-size: 11px; color: var(--text-muted); }
-
-.gchip-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border: 2px solid var(--border-strong);
-  border-radius: 50%;
-}
-.gchip-gate[data-state="done"] .gchip-dot { border-color: var(--state-ok); background: var(--state-ok); }
-.gchip-gate[data-state="current"] .gchip-dot { border-color: var(--accent); background: var(--accent); }
-.gchip-gate[data-state="gated"] .gchip-dot { border-color: var(--state-warn); background: var(--state-warn); }
-.gchip-gate[data-state="failed"] .gchip-dot { border-color: var(--state-danger); background: var(--state-danger); }
-.gchip-gate[data-state="current"] .gchip-gate-name,
-.gchip-gate[data-state="gated"] .gchip-gate-status { color: var(--accent); }
-.gchip-gate[data-state="failed"] .gchip-gate-status { color: var(--state-danger); }
-</style>

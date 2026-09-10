@@ -40,83 +40,32 @@ const argsText = computed(() => {
 </script>
 
 <template>
-  <div class="permission-card" :class="`state-${part.state}`">
-    <div class="permission-head">
-      <span class="permission-glyph" aria-hidden="true">{{ part.state === "pending" ? "🛡" : part.state === "allowed" ? "✓" : "✗" }}</span>
-      <span class="permission-title">
+  <!-- 旧 scoped 的 var(--surface, #faf6f0) 里 --surface 从未定义，卡片恒为米色兜底
+       （深色主题下是废样式）；这里落到语义令牌 bg-panel，与同区 ApprovalCard 一致。 -->
+  <div
+    class="rounded-sm border border-line bg-panel px-3 py-2"
+    :class="part.state === 'pending' ? 'border-brand' : ''"
+  >
+    <div class="flex items-center gap-2 text-xs text-fg">
+      <span aria-hidden="true">{{ part.state === "pending" ? "🛡" : part.state === "allowed" ? "✓" : "✗" }}</span>
+      <span>
         {{ part.state === "pending" ? "权限请求" : "权限裁决" }}：<code>{{ part.tool }}</code>
       </span>
       <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
     </div>
-    <pre v-if="argsText" class="permission-args">{{ argsText }}</pre>
-    <div v-if="part.state === 'pending'" class="permission-actions">
-      <button type="button" class="permission-btn allow" @click="emit('resolve', part.callId, true)">允许</button>
-      <button type="button" class="permission-btn deny" @click="emit('resolve', part.callId, false)">拒绝</button>
+    <pre v-if="argsText" class="my-2 max-h-[180px] overflow-auto break-words whitespace-pre-wrap text-fg-secondary">{{ argsText }}</pre>
+    <div v-if="part.state === 'pending'" class="flex gap-2">
+      <button
+        type="button"
+        class="cursor-pointer rounded-sm border border-brand bg-transparent px-3.5 py-1 text-xs text-brand"
+        @click="emit('resolve', part.callId, true)"
+      >允许</button>
+      <button
+        type="button"
+        class="cursor-pointer rounded-sm border border-line bg-transparent px-3.5 py-1 text-xs text-danger"
+        @click="emit('resolve', part.callId, false)"
+      >拒绝</button>
     </div>
-    <div v-else-if="part.reason" class="permission-reason">{{ part.reason }}</div>
+    <div v-else-if="part.reason" class="text-xs text-fg-muted">{{ part.reason }}</div>
   </div>
 </template>
-
-<style scoped>
-.permission-card {
-  border: 1px solid var(--border, #d8cfc4);
-  border-radius: var(--radius-sm, 8px);
-  background: var(--surface, #faf6f0);
-  padding: var(--space-2, 8px) var(--space-3, 12px);
-}
-
-.state-pending {
-  border-color: var(--accent, #c2571b);
-}
-
-.permission-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2, 8px);
-  font-size: var(--font-size-sm, 13px);
-  color: var(--text-primary, #2d2a26);
-}
-
-.permission-title code {
-  font-family: var(--font-mono, monospace);
-  font-size: var(--font-size-code, 12px);
-}
-
-.permission-args {
-  margin: var(--space-2, 8px) 0;
-  max-height: 180px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono, monospace);
-  font-size: var(--font-size-code, 12px);
-  color: var(--text-secondary, #5b564f);
-}
-
-.permission-actions {
-  display: flex;
-  gap: var(--space-2, 8px);
-}
-
-.permission-btn {
-  border-radius: var(--radius-sm, 6px);
-  border: 1px solid var(--border, #d8cfc4);
-  padding: 4px 14px;
-  font-size: var(--font-size-sm, 13px);
-  cursor: pointer;
-}
-
-.permission-btn.allow {
-  border-color: var(--accent, #c2571b);
-  color: var(--accent, #c2571b);
-}
-
-.permission-btn.deny {
-  color: var(--state-danger, #b3352c);
-}
-
-.permission-reason {
-  color: var(--text-muted, #8a837a);
-  font-size: 12px;
-}
-</style>
