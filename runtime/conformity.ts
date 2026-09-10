@@ -27,6 +27,12 @@
 import type { ArtifactType, GjbGate } from "./types.ts";
 import { extractTopicKeywords, extractModulePorts } from "./loop.ts";
 
+/** Result of a content-conformity check (shape shared with loop.ts's checker). */
+interface ConformityResult {
+  readonly ok: boolean;
+  readonly problems: readonly string[];
+}
+
 /** An artifact checked by the conformity gate. */
 export interface ConformityArtifact {
   readonly artifactType: ArtifactType;

@@ -70,7 +70,6 @@ import {
   submitJobHandler,
   withdrawGateSubmissionHandler,
 } from "./handlers.ts";
-import { getProjectToolSummaryHandler } from "./tool-summary.ts";
 import {
   abortTaskHandler,
   createTaskHandler,

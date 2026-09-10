@@ -7,8 +7,8 @@ import {
   canToggleLearning,
   formatEvolutionTime,
 } from "../../domain/evolution.ts";
-import Badge from "../ui/Badge.vue";
-import Button from "../ui/Button.vue";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<{
   overview: EvolutionOverviewV1;

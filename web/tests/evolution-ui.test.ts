@@ -22,7 +22,7 @@ describe("self-evolution global UI contract", () => {
   });
 
   test("Web consumes Core only and freezes retries instead of directly invoking Runtime", () => {
-    expect(view).toContain('import { api } from "../main.ts"');
+    expect(view).toContain('import { api } from "../api/service.ts"');
     expect(view).toContain("freezeWriteAttempt");
     expect(view).toContain("expected_revision: current.settings_revision");
     expect(view).toContain("expected_control_revision: detail.control_revision");

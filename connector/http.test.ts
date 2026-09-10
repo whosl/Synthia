@@ -191,6 +191,8 @@ describe("mTLS direct connector factory", () => {
         endpoint: { endpoint_url: "https://100.96.223.49:8444", client_cert_path: "/nonexistent/a.pem", client_key_path: "/nonexistent/b.pem", server_ca_path: "/nonexistent/c.pem" },
       }),
     ).toThrow("unreadable");
+  });
+});
 
 describe("isolated M4-F direct mTLS transport", () => {
   test("pins the 18443 Tailscale target and presents exact TLS material", async () => {

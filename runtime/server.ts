@@ -70,8 +70,8 @@ import {
   buildCoreApiConnector,
   buildCoreGovernanceClient,
   buildCoreTaskClient,
-  buildCoreTaskConversationClient,
-  buildCoreTaskEvolutionClient,  buildCoreTaskWorkspaceClient,
+  buildCoreTaskEvolutionClient,
+  buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
 import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
 import { SkillLoader } from "./skill-loader.ts";
@@ -93,7 +93,8 @@ import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
 import { assembleWordDocumentTool } from "./word-document-tool.ts";
 import { assembleLearnedSkillTools } from "./learned-skill-tools.ts";
-import type { TaskEvolutionClient } from "./evolution-client.ts";import {
+import type { TaskEvolutionClient } from "./evolution-client.ts";
+import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
 } from "./context-snapshot.ts";
@@ -2007,13 +2008,26 @@ export class RuntimeServer {
         const mustFailClosed = !cancelled && !recoverableProjectTurn
           && !!(handle?.taskEvents ?? handle?.taskWorkspace);
         let status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
+        let projectSettlingEvent: TaskConversationEventResult | undefined;
+        if (recoverableProjectTurn) {
+          // A Project Agent is a durable conversation, not a bounded Run. A
+          // model/network failure ends only this turn: persist the visible error
+          // and return the same agent to awaiting_user. If that recovery cannot
+          // be written durably, fall back to fail-closed just like other Core
+          // callback failures.
+          try {
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0assistant-error`).slice(0, 40)}`,
+              "assistant_message",
               { turn_id: turnId, text: `[error] ${reason}` },
             );
             projectSettlingEvent = await this.appendCoreTaskEvent(
               agentId,
               `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user-error`).slice(0, 40)}`,
               "status",
-              { turn_id: turnId, status: "awaiting_user", reason },            );
+              { turn_id: turnId, status: "awaiting_user", reason },
+            );
             await this.flushCoreTaskEvents(agentId);
             if (handle) {
               handle.status = "awaiting_user";
@@ -2035,10 +2049,66 @@ export class RuntimeServer {
               }
             }
             status = "awaiting_user";
+            if (handle && projectSettlingEvent) {
+              await this.sealProjectLearningEpisode(
+                handle,
+                turnId,
+                text,
+                `[error] ${reason}`,
+                status,
+                projectSettlingEvent.sequence,
+                opts.toolEventRange(),
+              );
+            }
+          } catch (error) {
+            status = "fail_closed";
+            await this.failClosedCoreTask(
+              agentId,
+              `project-agent turn recovery failed after ${reason}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else if (mustFailClosed) {
+          await this.failClosedCoreTask(agentId, `task execution failed: ${reason}`);
+        } else if (!coreOwnsCancellation) {
+          // P1b: a pure free agent (no Core task-event wiring) is a durable
+          // conversation, exactly like the project-role branch above — a
+          // transport/model failure after retries ends THIS turn, not the
+          // agent. Recover to awaiting_user with an in-band system note (the
+          // H7 helper) so one resend continues the task, instead of marking
+          // the agent failed (the T1 AES run lost ~2.5h to exactly this).
+          const handle = this.registry.get(agentId);
+          if (handle) {
+            handle.status = "awaiting_user";
+            delete handle.endedReason;
+            delete handle.terminalCause;
+            if (handle.currentState) {
+              const {
+                endedReason: _endedReason,
+                terminalCause: _terminalCause,
+                ...recoverableState
+              } = handle.currentState;
+              const awaiting: AgentState = {
+                ...recoverableState,
+                status: "awaiting_user",
+                updatedAt: new Date().toISOString(),
+              };
+              await saveAgentState(awaiting);
+              handle.currentState = awaiting;
+            }
+          }
+          status = "awaiting_user";
+          await appendSystemNoteToConversation(
+            agentId,
+            `模型/传输层错误打断了上一轮（${reason.slice(0, 200)}）。已恢复为待命状态；已完成的工具调用与登记产物有效，请从中断处继续任务。`,
+            `turn-error-${turnId}`,
+          ).catch(() => undefined);
+          await this.appendCoreTaskEvent(
+            agentId,
             `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
             "status",
             { turn_id: turnId, status, reason },
-          ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));        }
+          ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));
+        }
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
       })
@@ -2208,7 +2278,10 @@ export class RuntimeServer {
   ): PromptStreamOptions & {
     finalize: () => void;
     sideTaskCompletionRequested: () => boolean;
-    toolEventRange: () => { readonly start: number | null; readonly end: number | null };  } {
+    reasoningTexts: () => readonly string[];
+    nextThinkingSeq: () => number;
+    toolEventRange: () => { readonly start: number | null; readonly end: number | null };
+  } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
     const parts = new Map<string, { kind: "text" | "reasoning"; text: string }>();
@@ -2242,14 +2315,14 @@ export class RuntimeServer {
           const index = thinkingSeq;
           thinkingSeq += 1;
           chain = chain
-            .then(() =>
-              this.appendCoreTaskEvent(
+            .then(async () => {
+              await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
                 "assistant_thinking",
                 { text },
-              ),
-            )
+              );
+            })
             .catch((error: unknown) => {
               process.stderr.write(
                 `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -2262,14 +2335,14 @@ export class RuntimeServer {
           const index = narrationSeq;
           narrationSeq += 1;
           chain = chain
-            .then(() =>
-              this.appendCoreTaskEvent(
+            .then(async () => {
+              await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0narration\0${index}`).slice(0, 40)}`,
                 "assistant_message",
                 { text },
-              ),
-            )
+              );
+            })
             .catch((error: unknown) => {
               process.stderr.write(
                 `[runtime-server] assistant narration sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -2304,10 +2377,9 @@ export class RuntimeServer {
       }
       openPartId = null;
     };
-          await this.appendCoreTaskEvent(
-            agentId,
     let firstToolEventSequence: number | null = null;
-    let lastToolEventSequence: number | null = null;    const openText = (partId: string, kind: "text" | "reasoning"): void => {
+    let lastToolEventSequence: number | null = null;
+    const openText = (partId: string, kind: "text" | "reasoning"): void => {
       closeOpenPart();
       parts.set(partId, { kind, text: "" });
       openPartId = partId;
@@ -2338,8 +2410,8 @@ export class RuntimeServer {
         // 先落本轮已完结的思维链与叙述，再落 tool_call：三者共用 appendCoreTaskEvent
         // 的串行链，sequence 即发生序（think/narration → tool，而不是 tool 全部先落）。
         await flushPendingCells();
-        await this.appendCoreTaskEvent(
-        const event = await this.appendCoreTaskEvent(          agentId,
+        const event = await this.appendCoreTaskEvent(
+          agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
           "tool_call",
           { turn_id: turnId, tool_call_id: callId, name, args: fullArgs ?? args },
@@ -2419,7 +2491,8 @@ export class RuntimeServer {
         thinkingSeq += 1;
         return next;
       },
-      toolEventRange: () => ({ start: firstToolEventSequence, end: lastToolEventSequence }),    };
+      toolEventRange: () => ({ start: firstToolEventSequence, end: lastToolEventSequence }),
+    };
   }
 
   private async appendCoreTaskEvent(

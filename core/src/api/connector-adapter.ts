@@ -1321,7 +1321,8 @@ export async function createConnectorFromEnv(
     // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
     // on-disk endpoint origin and let the factory load the client/server
     // certificate material from the config paths.
-    const httpModule = (await import("../../../connector/http.ts")) as unknown as {
+    const directHttpModulePath: string = "../../../connector/http.ts";
+    const httpModule = (await import(directHttpModulePath)) as unknown as {
       createMtlsDirectRemoteConnector: RemoteFactory;
     };
     const directEndpoint = String(config.endpoint_url ?? "");
