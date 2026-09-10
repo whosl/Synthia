@@ -1,0 +1,88 @@
+/**
+ * Tailwind v4 入口 + shadcn-vue 令牌桥接（迁移计划 specs/web-ui-shadcn-migration-plan.md §3）。
+ *
+ * - 只引入 theme 与 utilities，跳过 preflight——现有 style.css 自带 reset，
+ *   迁移期内两套并存，避免全局样式互相踩踏；
+ * - dark variant 映射到现有 [data-theme="dark"] attribute（domain/theme.ts 不变）；
+ * - shadcn 语义变量（--background/--primary/…）全部指向 style.css 的现有令牌，
+ *   色值唯一来源仍是 style.css；注意 shadcn 的 --accent 语义是「悬停底色」，
+ *   本仓库的品牌强调色对应其 --primary。
+ */
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --background: var(--surface-base);
+  --foreground: var(--text-primary);
+  --card: var(--surface-panel);
+  --card-foreground: var(--text-primary);
+  --popover: var(--surface-raised);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--accent);
+  --primary-foreground: var(--text-on-accent);
+  --secondary: var(--surface-raised);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--surface-hover);
+  --muted-foreground: var(--text-muted);
+  --accent-shadcn: var(--surface-hover);
+  --accent-shadcn-foreground: var(--text-primary);
+  --destructive: var(--state-danger);
+  --destructive-foreground: var(--text-on-accent);
+  --border: var(--border-subtle);
+  --input: var(--border-strong);
+  --ring: var(--accent);
+  --radius: 6px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  /* shadcn 组件里的 accent = 悬停/选中底色（对应本仓库 --surface-hover） */
+  --color-accent: var(--accent-shadcn);
+  --color-accent-foreground: var(--accent-shadcn-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* 本仓库语义令牌的直达工具类（bg-base / text-fg-secondary / border-line …） */
+  --color-base: var(--surface-base);
+  --color-panel: var(--surface-panel);
+  --color-raised: var(--surface-raised);
+  --color-hover: var(--surface-hover);
+  --color-fg: var(--text-primary);
+  --color-fg-secondary: var(--text-secondary);
+  --color-fg-muted: var(--text-muted);
+  --color-line: var(--border-subtle);
+  --color-line-strong: var(--border-strong);
+  --color-brand: var(--accent);
+  --color-brand-hover: var(--accent-hover);
+  --color-brand-subtle: var(--accent-subtle);
+  --color-ok: var(--state-ok);
+  --color-warn: var(--state-warn);
+  --color-danger: var(--state-danger);
+  --color-info: var(--state-info);
+
+  /* 字号/字体直写值（--font-sans 在 @theme 内自引用会成环，故展开字面量） */
+  --font-sans: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Consolas, "Liberation Mono", Menlo, monospace;
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 8px);
+}
