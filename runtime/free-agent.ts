@@ -1012,13 +1012,13 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // 工具执行期间（Vivado 一轮可达数分钟）流里必须有东西，否则前端只看得到
         // 一段死寂。开 part → 执行 → 同 id 转 done/error。
         const fullArgs = JSON.stringify(call.args ?? {});
-        await opts.onToolStart?.(
+        const toolEventSequence = await opts.onToolStart?.(
           call.toolCallId,
           call.name,
           truncateForStream(fullArgs),
           fullArgs,
         );
-        const result = await this.executeToolCall(call);
+        const result = await this.executeToolCall(call, toolEventSequence ?? undefined);
         await opts.onToolEnd?.(
           call.toolCallId,
           !result.isError,
@@ -1075,7 +1075,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * Returns an error-shaped result on block / unknown tool / execution failure
    * so the model can self-correct.
    */
-  private async executeToolCall(call: AgentToolCall): Promise<AgentToolResult> {
+  private async executeToolCall(call: AgentToolCall, toolEventSequence?: number): Promise<AgentToolResult> {
     const ctx: ToolExecContext = {
       projectId: this.deps.projectId,
       ...(this.deps.taskId ? { taskId: this.deps.taskId } : {}),
@@ -1087,6 +1087,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
       toolCallId: call.toolCallId,
       turnId: this.currentTurnId,
+      ...(toolEventSequence !== undefined ? { toolEventSequence } : {}),
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
