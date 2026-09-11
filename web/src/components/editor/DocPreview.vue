@@ -89,6 +89,7 @@ const safeHtml = computed(() => renderMarkdown(props.content));
 .doc-preview-rendered :deep(code) {
   font-family: var(--font-mono);
   font-size: var(--font-size-code);
+  font-variant-numeric: tabular-nums;
   background: var(--surface-hover);
   border-radius: var(--radius-sm);
   padding: 1px var(--space-1);
@@ -128,6 +129,8 @@ const safeHtml = computed(() => renderMarkdown(props.content));
   border: 1px solid var(--border-subtle);
   padding: var(--space-1) var(--space-2);
   text-align: left;
+  /* 表格数字等宽，数值列逐行扫描不抖动 */
+  font-variant-numeric: tabular-nums;
 }
 
 .doc-preview-rendered :deep(th) {

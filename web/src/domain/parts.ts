@@ -61,6 +61,12 @@ export interface SynthiaTextPart {
   readonly text: string;
   /** Agent 叙述分段（>15 行代码块折叠为代码卡）；user 气泡为 null。 */
   readonly segments: readonly ReplySegment[] | null;
+  /**
+   * 消息时间（ISO）：目前只有 `conversationEventsToParts` 的 user_message 会填
+   * （event.created_at），供 ChatFeed 回合分隔线显示相对时间；其余构造路径
+   * （audit 物化、SSE 流式）不填 → 分隔线退化为纯细线。
+   */
+  readonly ts?: string | null;
 }
 
 export type GatePartState = "evaluating" | "awaiting" | "passed" | "failed";
@@ -255,6 +261,7 @@ export function conversationEventsToParts(
         state: "done",
         text,
         segments: role === "agent" ? segmentAgentReply(text) : null,
+        ts: role === "user" ? event.created_at : null,
       });
       continue;
     }

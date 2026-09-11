@@ -1,11 +1,15 @@
 <script setup lang="ts">
 /**
- * Agent 工具调用条（free-agent 自身发起的 tool_calls：「▸ ⚙ read_file 完成」）。
+ * Agent 工具调用条（free-agent 自身发起的 tool_calls：「▸ ⚙ read_file」）。
  *
  * 与 {@link ToolCallItem} 的区别：那个是流水线阶段工具条（validate_sources /
  * simulate / synthesize / implement，来自 audit，有四态与耗时），这个是 Agent
  * 在对话轮里直接调的任意工具，只来自 SSE 实时流，三态（running/done/error）。
  * 同样不落 audit，本轮结束刷新页面不再重放。
+ *
+ * 单行密度：状态图标 + 工具名（带 operation 入参时追加具体操作），不带状态
+ * 文字徽章；error 默认展开——工具报错是用户唯一需要立刻看到的一种，藏在折叠
+ * 里等于没报。
  *
  * 入参与结果由服务端截断至 2000 字符（runtime/free-agent.ts:truncateForStream），
  * 完整内容在会话消息与运行记录里——这条只是「现在正在调什么」的实时可见性。
@@ -13,7 +17,6 @@
 import { computed, ref, watch } from "vue";
 import type { SynthiaAgentToolPart } from "../../domain/parts.ts";
 import { formatToolPayload } from "../../domain/tool-detail.ts";
-import Badge from "../ui/AppBadge.vue";
 
 const props = defineProps<{ part: SynthiaAgentToolPart }>();
 
@@ -21,18 +24,6 @@ const STATE_GLYPH: Record<SynthiaAgentToolPart["state"], string> = {
   running: "◐",
   done: "⚙",
   error: "⚠️",
-};
-
-const STATE_TONE: Record<SynthiaAgentToolPart["state"], "accent" | "ok" | "danger"> = {
-  running: "accent",
-  done: "ok",
-  error: "danger",
-};
-
-const STATE_TEXT: Record<SynthiaAgentToolPart["state"], string> = {
-  running: "运行中",
-  done: "完成",
-  error: "失败",
 };
 
 const touched = ref(false);
@@ -77,7 +68,7 @@ const displayName = computed(() => {
 <template>
   <div class="rounded-sm bg-hover" :class="part.state === 'done' ? 'opacity-72' : ''">
     <div
-      class="flex w-full cursor-pointer items-center gap-1 px-2 py-1 text-left text-xs text-fg-secondary"
+      class="flex w-full cursor-pointer items-center gap-1.5 px-2 py-1 text-left text-xs leading-[1.2] text-fg-secondary"
       role="button"
       tabindex="0"
       @click="toggle"
@@ -91,7 +82,6 @@ const displayName = computed(() => {
         aria-hidden="true"
       >{{ STATE_GLYPH[part.state] }}</span>
       <span class="min-w-0 flex-1 truncate font-mono text-[12.5px]" :class="part.state === 'error' ? 'text-danger' : 'text-fg'">{{ displayName }}</span>
-      <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
     </div>
     <div v-if="expanded" class="px-2 pb-2 pl-[22px]">
       <template v-if="argsText">

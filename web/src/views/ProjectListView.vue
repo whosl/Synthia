@@ -203,7 +203,7 @@ function projectCreated(id: string) {
           <h2 id="projects-title" class="m-0 text-[17px] font-semibold">
             我的项目
             <span
-              class="ml-2 inline-flex min-w-[22px] items-center justify-center rounded-[5px] bg-hover px-[5px] py-0.5 text-[11px] text-fg-secondary"
+              class="ml-2 inline-flex min-w-[22px] items-center justify-center rounded-[5px] bg-hover px-[5px] py-0.5 text-[11px] text-fg-secondary tabular-nums"
               >{{ visibleRows.length }}</span
             >
           </h2>
@@ -365,7 +365,7 @@ function projectCreated(id: string) {
               >{{
                 PROJECT_STATUS_TEXT[row.project.status] ?? row.project.status
               }}</Badge
-            ><time :datetime="row.updatedAt" class="text-[10px] text-fg-muted">{{
+            ><time :datetime="row.updatedAt" class="text-[10px] text-fg-muted tabular-nums">{{
               formatActivity(row.updatedAt)
             }}</time>
           </div>

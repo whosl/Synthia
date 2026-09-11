@@ -55,7 +55,7 @@ function onSelect(revisionId: string): void {
         type="button"
         class="inline-flex h-6 cursor-pointer items-center gap-2 rounded-sm border-0 bg-transparent px-2 text-xs text-fg hover:bg-hover"
       >
-        <span v-if="activeRevision" class="font-mono font-semibold">v{{ activeRevision.version }}</span>
+        <span v-if="activeRevision" class="font-mono font-semibold tabular-nums">v{{ activeRevision.version }}</span>
         <span v-else class="font-sans font-normal text-fg-muted">无版本</span>
         <Badge
           v-if="activeRevision"
@@ -80,11 +80,11 @@ function onSelect(revisionId: string): void {
           :aria-selected="rev.id === activeRevisionId"
           @click="onSelect(rev.id)"
         >
-          <span class="min-w-[32px] font-mono font-semibold">v{{ rev.version }}</span>
+          <span class="min-w-[32px] font-mono font-semibold tabular-nums">v{{ rev.version }}</span>
           <Badge variant="dot" size="sm" :tone="ARTIFACT_DOT_TONE[artifactDotState(rev.state)]">
             {{ REVISION_STATE_TEXT[rev.state] ?? ARTIFACT_DOT_TEXT[artifactDotState(rev.state)] }}
           </Badge>
-          <span class="ml-auto text-[11px] whitespace-nowrap text-fg-muted">{{ formatTime(rev.created_at) }}</span>
+          <span class="ml-auto text-[11px] whitespace-nowrap text-fg-muted tabular-nums">{{ formatTime(rev.created_at) }}</span>
         </button>
       </DropdownMenuItem>
     </DropdownMenuContent>

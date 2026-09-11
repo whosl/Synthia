@@ -18,7 +18,7 @@ export interface ImplCell {
   readonly detail: string;
 }
 
-const STAGE_LABELS: Record<ToolSummaryStage["operation"], { key: ImplCell["key"]; label: string }> = {
+export const STAGE_LABELS: Record<ToolSummaryStage["operation"], { key: ImplCell["key"]; label: string }> = {
   validate_sources: { key: "validate", label: "代码校验" },
   simulate: { key: "simulate", label: "仿真" },
   synthesize: { key: "synthesize", label: "综合" },

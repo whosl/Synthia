@@ -112,6 +112,16 @@ describe("conversationEventsToParts：Project Agent 持久化对话", () => {
       expect.objectContaining({ kind: "interrupt", text: "已打断当前回复，按新消息继续。" }),
     ]);
   });
+
+  test("user_message 带出事件时间（回合分隔线用），assistant_message 为 null", () => {
+    const parts = conversationEventsToParts([
+      conversationEvent(1, "user_message", { text: "看看进度" }),
+      conversationEvent(2, "assistant_message", { text: "正在综合。" }),
+    ]);
+    const texts = textParts(parts);
+    expect(texts[0]).toMatchObject({ role: "user", ts: "2026-08-25T10:00:01Z" });
+    expect(texts[1]).toMatchObject({ role: "agent", ts: null });
+  });
 });
 
 function toolParts(parts: readonly SynthiaPart[]): SynthiaToolPart[] {

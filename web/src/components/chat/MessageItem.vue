@@ -133,6 +133,13 @@ function codeCardTitle(seg: ReplyCodeSegment): string {
 .message-body :deep(.markdown-body code) {
   font-family: var(--font-mono);
   font-size: var(--font-size-code);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表格数字等宽：消息里的数值列表逐行扫描时不抖动（表格本身暂无其它排印规则）。 */
+.message-body :deep(.markdown-body th),
+.message-body :deep(.markdown-body td) {
+  font-variant-numeric: tabular-nums;
 }
 
 .message-body :deep(.markdown-body :not(pre) > code) {

@@ -184,7 +184,7 @@ function onViewEntry(jobId: string, name: string): void {
 
         <div v-if="isExpanded(job.jobId)" class="flex flex-col gap-2 pr-2 pb-2 pl-[26px]">
           <div class="flex flex-wrap gap-2 text-[11px] text-fg-muted">
-            <span v-if="job.ts">{{ formatTime(job.ts) }}</span>
+            <span v-if="job.ts" class="tabular-nums">{{ formatTime(job.ts) }}</span>
             <span class="mono">job:{{ job.jobId }}</span>
             <span class="mono">sha256:{{ shortHash(job.inputSha256) }}</span>
           </div>
@@ -205,7 +205,7 @@ function onViewEntry(jobId: string, name: string): void {
               </div>
               <div class="mt-[2px] flex flex-wrap gap-2">
                 <span class="flex-none text-[11px] text-fg-muted">{{ entry.mediaType }}</span>
-                <span class="flex-none text-[11px] text-fg-muted">{{ formatSize(entry.sizeBytes) }}</span>
+                <span class="flex-none text-[11px] text-fg-muted tabular-nums">{{ formatSize(entry.sizeBytes) }}</span>
                 <span class="flex-none font-mono text-[11px] text-fg-muted">{{ shortHash(entry.sha256) }}</span>
               </div>
 

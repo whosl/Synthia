@@ -83,7 +83,7 @@ function select(stageId: string): void {
           <span
             class="size-2 flex-none rounded-full border-2 border-line-strong group-data-[state=current]:border-brand group-data-[state=current]:bg-brand group-data-[state=done]:border-ok group-data-[state=done]:bg-ok group-data-[state=failed]:border-danger group-data-[state=failed]:bg-danger group-data-[state=gated]:border-warn group-data-[state=gated]:bg-warn"
           />
-          <span class="flex-none group-data-[state=current]:text-brand">{{ entry.node.id }} {{ entry.node.name }}</span>
+          <span class="flex-none tabular-nums group-data-[state=current]:text-brand">{{ entry.node.id }} {{ entry.node.name }}</span>
           <span class="ml-auto text-[11px] text-fg-muted group-data-[state=failed]:text-danger group-data-[state=gated]:text-brand">{{ PROCESS_GATE_STATUS_TEXT[entry.status] }}</span>
         </button>
       </div>

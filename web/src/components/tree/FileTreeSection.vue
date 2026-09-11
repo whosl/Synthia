@@ -90,7 +90,7 @@ function isCollapsed(key: string): boolean {
           aria-hidden="true"
         >▾</span>
         <span class="flex-1 text-left font-medium">{{ group.label }}</span>
-        <span class="text-[11px] text-fg-muted">{{ group.files.length }}</span>
+        <span class="text-[11px] text-fg-muted tabular-nums">{{ group.files.length }}</span>
       </button>
 
       <ul v-if="!isCollapsed(group.key)" class="m-0 list-none p-0">
@@ -110,7 +110,7 @@ function isCollapsed(key: string): boolean {
             @click="emit('open-file', file.artifactId)"
           >
             <span class="flex-1 truncate">{{ file.name }}</span>
-            <span v-if="file.revisionCount > 1 && file.latestRevision" class="flex-none font-mono text-[11px] text-fg-muted">
+            <span v-if="file.revisionCount > 1 && file.latestRevision" class="flex-none font-mono text-[11px] text-fg-muted tabular-nums">
               v{{ file.latestRevision.version }}
             </span>
             <Badge v-if="pendingBadge(file.status)" variant="dot" size="sm" tone="warn">

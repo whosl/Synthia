@@ -2030,6 +2030,12 @@ function focusConversation(): void {
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
 }
 
+// 首页示例任务：填入当前草稿并聚焦输入框（与 ChatFeed 空态示例同一 EXAMPLE_TASKS 数据源）。
+function onWelcomeExample(text: string): void {
+  chatDraft.value = text;
+  focusConversation();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 右栏：发言模式 / 发送 / 打断
 // ─────────────────────────────────────────────────────────────────────
@@ -2588,7 +2594,7 @@ function onToggleChatOverlay(): void {
           @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
         >
           正式流程
-          <span v-if="processState" class="text-[11px] text-fg-secondary">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
+          <span v-if="processState" class="text-[11px] text-fg-secondary tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
         </button>
         <button
           v-if="historicalMaterialsEnabled"
@@ -2640,8 +2646,15 @@ function onToggleChatOverlay(): void {
           :engineering="projectType(project) === 'engineering'"
           :has-agent="hasAgent"
           :show-browse="leftCollapsed"
+          :type-label="projectTypeLabel"
+          :profile-label="projectProfileLabel"
+          :process-state="processState"
+          :stage-chain="stageChain"
+          :summary="toolSummary"
+          :example-tasks="EXAMPLE_TASKS"
           @start="focusConversation"
           @browse="treeDrawerOpen = true"
+          @example="onWelcomeExample"
         />
         <CodeEditor v-if="openArtifactId"
           v-bind="codeEditorProps"

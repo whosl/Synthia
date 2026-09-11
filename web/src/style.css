@@ -183,6 +183,14 @@ body {
  * 故层叠顺序 base < theme < utilities——Tailwind 工具类（如链接上的 text-fg、
  * 输入框上的 text-xs、outline-none）得以覆盖这些默认值，而裸元素行为不变。 */
 @layer base {
+  /* Linear 式标题收紧：字距微收让标题读感更笃定精确。
+   * 组件上自带 tracking 工具类的标题（更紧或更宽的 eyebrow）仍由 utilities 层覆盖，不受影响。 */
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
+
   a {
     color: var(--accent);
     text-decoration: none;

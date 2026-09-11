@@ -5,16 +5,20 @@
  *
  * 铁律：
  * - `parts` 已经是 ProjectView 按 turn 顺序合并去重后的权威数组，本组件绝不
- *   重新排序/分组（严格回合制）；
+ *   重新排序/分组（严格回合制）。**显示层折叠不算分组**：连续的工具/Agent 工具
+ *   调用条目允许折叠成一个 `ToolActivityGroup`（`domain/chat-groups.ts`），
+ *   组内条目顺序与原数组完全一致，只是默认收起已完成的工具噪音；
  * - 流式 token 级追加靠 `:key="item.part.id"` 复用 `MessageItem` 组件实例——
  *   part 内容变但 id 不变时 Vue 只更新该实例的 props，不会整量重渲染整个列表；
+ *   折叠组的 key 取首条目 part.id，同组流式追加条目时 key 不变，契约不回归；
  * - 产物卡（`SynthiaDocPart`）点击一律 `open-doc`，在中栏编辑器打开，不弹抽屉；
  *   「查看改动」走 `open-diff`，同样交给中栏 Monaco，流内不渲染行级 diff。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { Sparkles, X } from "lucide-vue-next";
 import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
-import type { GatePartState } from "../../domain/parts.ts";
+import { formatRelativeTime, groupToolActivity } from "../../domain/chat-groups.ts";
+import type { GatePartState, SynthiaPart } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
 import { TASK_STATUS_TEXT } from "../../domain/tasks.ts";
 import Button from "../ui/AppButton.vue";
@@ -25,6 +29,7 @@ import ChatComposer from "./ChatComposer.vue";
 import CodeCard from "./CodeCard.vue";
 import MessageItem from "./MessageItem.vue";
 import ReasoningItem from "./ReasoningItem.vue";
+import ToolActivityGroup from "./ToolActivityGroup.vue";
 import ToolCallItem from "./ToolCallItem.vue";
 
 const props = defineProps<ChatFeedProps>();
@@ -32,6 +37,19 @@ const emit = defineEmits<ChatFeedEmits>();
 
 /** 插话消息配对识别（steer 打标），不改变 parts 顺序（见 domain/composer.ts）。 */
 const renderItems = computed(() => buildChatRenderItems(props.parts));
+
+/** 显示层折叠：极大连续工具条目段收成活动组（顺序不变，见 domain/chat-groups.ts）。 */
+const feedRows = computed(() => groupToolActivity(renderItems.value));
+
+/** 回合分隔线：每条 user 消息（含插话）前一条细线，流首条目不画。 */
+function isTurnStart(part: SynthiaPart, rowIndex: number): boolean {
+  return rowIndex > 0 && part.kind === "text" && part.role === "user";
+}
+
+/** 分隔线上的相对时间（part 无 ts → null，只画细线）。 */
+function turnTimeText(part: SynthiaPart): string | null {
+  return part.kind === "text" && part.ts ? formatRelativeTime(part.ts) : null;
+}
 
 const GATE_STATE_TEXT: Readonly<Record<GatePartState, string>> = {
   evaluating: "评审中",
@@ -123,78 +141,101 @@ onMounted(() => void nextTick(scrollToBottom));
     <div v-if="streamPhase === 'degraded'" class="flex-none bg-warn/14 px-3 py-1 text-center text-xs text-warn">实时连接中断，已切换定时刷新</div>
     <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="flex-none bg-hover px-3 py-1 text-center text-xs text-fg-muted">正在连接实时更新…</div>
 
-    <div ref="scrollEl" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3" @scroll="onScroll">
-      <div v-if="renderItems.length === 0" class="my-auto flex flex-col items-center gap-2 px-4 py-6 text-center">
-        <template v-if="composerMode === 'new-task'">
-          <p class="m-0 text-[13px] font-semibold text-fg">开始你的第一个任务</p>
-          <p class="m-0 max-w-[280px] text-xs leading-[1.4] text-fg-muted">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
-          <div class="mt-2 flex w-full flex-col gap-2">
-            <button v-for="task in exampleTasks" :key="task" type="button" class="cursor-pointer rounded-md border-none bg-hover px-3 py-2 text-left text-xs text-fg-secondary transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg" @click="fillExample(task)">
-              {{ task }}
-            </button>
-          </div>
-        </template>
-        <template v-else-if="agentStatus === null">
-          <p class="m-0 text-[13px] font-semibold text-fg">正在加载对话…</p>
-        </template>
+    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" @scroll="onScroll">
+      <!--
+        阅读列宽约束（720px）落在滚动容器内的一层：滚动条仍贴栏右缘，
+        空态与所有 part 种类都坐在约束里（长行不顶满宽栏，扫视省力）。
+        min-h-full 保证内容不足一屏时空态仍能 my-auto 垂直居中。
+      -->
+      <div class="mx-auto flex min-h-full w-full max-w-[720px] flex-col gap-3 p-3">
+        <div v-if="renderItems.length === 0" class="my-auto flex flex-col items-center gap-2 px-4 py-6 text-center">
+          <template v-if="composerMode === 'new-task'">
+            <p class="m-0 text-[13px] font-semibold text-fg">开始你的第一个任务</p>
+            <p class="m-0 max-w-[280px] text-xs leading-[1.4] text-fg-muted">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
+            <div class="mt-2 flex w-full flex-col gap-2">
+              <button v-for="task in exampleTasks" :key="task" type="button" class="cursor-pointer rounded-md border-none bg-hover px-3 py-2 text-left text-xs text-fg-secondary transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg" @click="fillExample(task)">
+                {{ task }}
+              </button>
+            </div>
+          </template>
+          <template v-else-if="agentStatus === null">
+            <p class="m-0 text-[13px] font-semibold text-fg">正在加载对话…</p>
+          </template>
+          <template v-else>
+            <p class="m-0 text-[13px] font-semibold text-fg">暂无对话记录</p>
+          </template>
+        </div>
+
         <template v-else>
-          <p class="m-0 text-[13px] font-semibold text-fg">暂无对话记录</p>
+          <template v-for="(row, rowIndex) in feedRows" :key="row.id">
+            <ToolActivityGroup
+              v-if="row.kind === 'tool-group'"
+              :group="row.group"
+              @open-records="emit('open-records', $event)"
+            />
+
+            <template v-else>
+              <div v-if="isTurnStart(row.item.part, rowIndex)" class="flex items-center gap-2" aria-hidden="true">
+                <span class="h-px flex-1 bg-line"></span>
+                <template v-if="turnTimeText(row.item.part)">
+                  <span class="flex-none text-[11px] leading-none text-fg-muted">{{ turnTimeText(row.item.part) }}</span>
+                  <span class="h-px flex-1 bg-line"></span>
+                </template>
+              </div>
+
+              <MessageItem v-if="row.item.part.kind === 'text'" :part="row.item.part" :steer="row.item.steer" />
+
+              <ToolCallItem v-else-if="row.item.part.kind === 'tool'" :part="row.item.part" @open-records="emit('open-records', $event)" />
+
+              <ReasoningItem v-else-if="row.item.part.kind === 'reasoning'" :part="row.item.part" />
+
+              <AgentToolItem v-else-if="row.item.part.kind === 'agent_tool'" :part="row.item.part" />
+
+              <div v-else-if="row.item.part.kind === 'gate'" class="flex items-center gap-2 rounded-md bg-hover px-3 py-2">
+                <span class="flex-none text-brand" aria-hidden="true">◆</span>
+                <span class="min-w-0 flex-1 text-xs text-fg">{{ row.item.part.review }}</span>
+                <Badge :tone="GATE_STATE_TONE[row.item.part.state]" size="sm">{{ GATE_STATE_TEXT[row.item.part.state] }}</Badge>
+              </div>
+
+              <CodeCard
+                v-else-if="row.item.part.kind === 'doc'"
+                :segment="null"
+                :title="row.item.part.title"
+                :artifact-id="row.item.part.doc.artifact_id"
+                :diffable="row.item.part.prevRevisionId !== null"
+                @open="emit('open-doc', row.item.part.doc.artifact_id, row.item.part.doc.revision_id)"
+                @open-diff="emit('open-diff', row.item.part.doc.artifact_id, row.item.part.doc.revision_id)"
+              />
+
+              <button
+                v-else-if="row.item.part.kind === 'evidence'"
+                type="button"
+                class="block w-full cursor-pointer rounded-sm border-none bg-transparent px-2 py-1 text-left text-xs text-fg-muted transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg"
+                @click="emit('open-records', null)"
+              >
+                📎 生成了 {{ row.item.part.count }} 项证据 · 查看
+              </button>
+
+              <div v-else-if="row.item.part.kind === 'governance'" class="px-2 py-1 text-xs leading-[1.4] text-fg-muted">{{ row.item.part.text }}</div>
+
+              <div v-else-if="row.item.part.kind === 'lifecycle'" class="flex gap-2 rounded-md p-3" :class="row.item.part.state === 'succeeded' ? 'bg-ok/12' : 'bg-danger/10'">
+                <span class="flex-none text-[15px]" aria-hidden="true">{{ row.item.part.state === "succeeded" ? "🎉" : "⚠️" }}</span>
+                <div class="flex min-w-0 flex-col gap-1">
+                  <p class="m-0 text-[13px] font-semibold text-fg">{{ row.item.part.text }}</p>
+                  <p v-if="row.item.part.bitstream" class="chat-feed-lifecycle-detail mono m-0 text-fg-secondary">
+                    {{ row.item.part.bitstream.name }} · sha256:{{ shortHash(row.item.part.bitstream.sha256) }}
+                  </p>
+                  <p v-if="row.item.part.evidenceCount > 0" class="m-0 text-xs text-fg-secondary">证据链 {{ row.item.part.evidenceCount }} 项</p>
+                </div>
+              </div>
+
+              <div v-else-if="row.item.part.kind === 'note'" class="rounded-sm bg-hover px-2 py-1 text-xs leading-[1.4]" :class="row.item.part.tone === 'warn' ? 'text-warn' : row.item.part.tone === 'error' ? 'text-danger' : 'text-fg-secondary'">{{ row.item.part.text }}</div>
+
+              <div v-else-if="row.item.part.kind === 'interrupt'" class="px-2 py-1 text-xs leading-[1.4] text-warn">⏹ {{ row.item.part.text }}</div>
+            </template>
+          </template>
         </template>
       </div>
-
-      <template v-else>
-        <template v-for="item in renderItems" :key="item.part.id">
-          <MessageItem v-if="item.part.kind === 'text'" :part="item.part" :steer="item.steer" />
-
-          <ToolCallItem v-else-if="item.part.kind === 'tool'" :part="item.part" @open-records="emit('open-records', $event)" />
-
-          <ReasoningItem v-else-if="item.part.kind === 'reasoning'" :part="item.part" />
-
-          <AgentToolItem v-else-if="item.part.kind === 'agent_tool'" :part="item.part" />
-
-          <div v-else-if="item.part.kind === 'gate'" class="flex items-center gap-2 rounded-md bg-hover px-3 py-2">
-            <span class="flex-none text-brand" aria-hidden="true">◆</span>
-            <span class="min-w-0 flex-1 text-xs text-fg">{{ item.part.review }}</span>
-            <Badge :tone="GATE_STATE_TONE[item.part.state]" size="sm">{{ GATE_STATE_TEXT[item.part.state] }}</Badge>
-          </div>
-
-          <CodeCard
-            v-else-if="item.part.kind === 'doc'"
-            :segment="null"
-            :title="item.part.title"
-            :artifact-id="item.part.doc.artifact_id"
-            :diffable="item.part.prevRevisionId !== null"
-            @open="emit('open-doc', item.part.doc.artifact_id, item.part.doc.revision_id)"
-            @open-diff="emit('open-diff', item.part.doc.artifact_id, item.part.doc.revision_id)"
-          />
-
-          <button
-            v-else-if="item.part.kind === 'evidence'"
-            type="button"
-            class="block w-full cursor-pointer rounded-sm border-none bg-transparent px-2 py-1 text-left text-xs text-fg-muted transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand-subtle hover:text-fg"
-            @click="emit('open-records', null)"
-          >
-            📎 生成了 {{ item.part.count }} 项证据 · 查看
-          </button>
-
-          <div v-else-if="item.part.kind === 'governance'" class="px-2 py-1 text-xs leading-[1.4] text-fg-muted">{{ item.part.text }}</div>
-
-          <div v-else-if="item.part.kind === 'lifecycle'" class="flex gap-2 rounded-md p-3" :class="item.part.state === 'succeeded' ? 'bg-ok/12' : 'bg-danger/10'">
-            <span class="flex-none text-[15px]" aria-hidden="true">{{ item.part.state === "succeeded" ? "🎉" : "⚠️" }}</span>
-            <div class="flex min-w-0 flex-col gap-1">
-              <p class="m-0 text-[13px] font-semibold text-fg">{{ item.part.text }}</p>
-              <p v-if="item.part.bitstream" class="chat-feed-lifecycle-detail mono m-0 text-fg-secondary">
-                {{ item.part.bitstream.name }} · sha256:{{ shortHash(item.part.bitstream.sha256) }}
-              </p>
-              <p v-if="item.part.evidenceCount > 0" class="m-0 text-xs text-fg-secondary">证据链 {{ item.part.evidenceCount }} 项</p>
-            </div>
-          </div>
-
-          <div v-else-if="item.part.kind === 'note'" class="rounded-sm bg-hover px-2 py-1 text-xs leading-[1.4]" :class="item.part.tone === 'warn' ? 'text-warn' : item.part.tone === 'error' ? 'text-danger' : 'text-fg-secondary'">{{ item.part.text }}</div>
-
-          <div v-else-if="item.part.kind === 'interrupt'" class="px-2 py-1 text-xs leading-[1.4] text-warn">⏹ {{ item.part.text }}</div>
-        </template>
-      </template>
     </div>
 
     <Transition name="chat-feed-jump-fade">
