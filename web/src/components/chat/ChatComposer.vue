@@ -8,6 +8,9 @@
  * v-model（modelValue）最终由 ProjectView 按对话持有：点击「空态示例任务」时 ChatFeed
  * 能直接把文案填进输入框（`EXAMPLE_TASKS` 注释「可一键填入」——是填入，不是
  * 直接发送），composer 自身不需要关心草稿从哪来。
+ *
+ * 盒底左侧的 `controls` 插槽给会话级控制（跳过权限开关、上下文水位环），内容由
+ * ChatFeed 喂入并直接冒泡到 ProjectView；本组件不解读插槽内容，保持「只管消息语义」。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { canSendText, composerPlaceholder } from "../../domain/composer.ts";
@@ -66,10 +69,15 @@ function onKeydown(ev: KeyboardEvent): void {
   <div class="chat-composer flex flex-col gap-1 border-t border-line bg-panel px-3 pb-3 pt-2" :class="{ steering: mode === 'steer', sending }">
     <p v-if="mode === 'steer'" class="m-0 text-[11px] text-warn">插一句不保证按顺序生效，将在当前步骤结束后注入</p>
 
-    <div class="flex items-end gap-2">
+    <!--
+      盒式输入区（对齐 Cursor/Claude Code 的现行 agent 惯例）：textarea 无边框坐在
+      盒内，焦点/插话描边上移到盒子；底行左槽放会话级控制（跳过权限开关、上下文
+      水位环——由 ChatFeed 通过 controls 插槽喂入，本组件不解读），右侧发送/打断。
+    -->
+    <div class="chat-composer-box rounded-md border border-line bg-base transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] focus-within:border-brand has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55">
       <textarea
         ref="textareaEl"
-        class="chat-composer-input max-h-[160px] min-h-[30px] min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-line bg-base p-2 leading-[1.55] text-fg transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] placeholder:text-fg-muted focus-visible:border-brand focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-hover disabled:opacity-55"
+        class="chat-composer-input max-h-[160px] min-h-[30px] w-full min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-2 pt-2 leading-[1.55] text-fg placeholder:text-fg-muted focus-visible:outline-none disabled:cursor-not-allowed"
         :value="modelValue"
         :placeholder="placeholder"
         aria-label="发送给 Agent 的消息"
@@ -78,21 +86,24 @@ function onKeydown(ev: KeyboardEvent): void {
         @input="onInput"
         @keydown="onKeydown"
       />
-      <div class="flex flex-none gap-1">
-        <Button v-if="canAbort" variant="danger" size="sm" :disabled="sending" title="打断当前回复" @click="emit('abort')">
-          ⏹ 打断
-        </Button>
-        <Button variant="primary" size="sm" :disabled="!sendEnabled" :loading="sending" @click="submit">↑ 发送</Button>
+      <div class="flex items-center justify-between gap-2 px-1.5 pb-1.5 pt-0.5">
+        <span class="flex min-w-0 items-center gap-1.5"><slot name="controls" /></span>
+        <span class="flex flex-none gap-1">
+          <Button v-if="canAbort" variant="danger" size="sm" :disabled="sending" title="打断当前回复" @click="emit('abort')">
+            ⏹ 打断
+          </Button>
+          <Button variant="primary" size="sm" :disabled="!sendEnabled" :loading="sending" @click="submit">↑ 发送</Button>
+        </span>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* steering 态描边必须压过模板里的 focus-visible:border-brand（两个类 + 伪类的
-   特异性高于单个变体工具类），与 reset 分层无关，故留在 scoped。
+/* steering 态描边必须压过模板里的 focus-within:border-brand（类 + 伪类的特异性
+   低于这里的三选择器组合），与 reset 分层无关，故留在 scoped。
    （.chat-composer-input 同时是 ProjectView 聚焦用的 querySelector 钩子，类名勿动。） */
-.chat-composer.steering .chat-composer-input {
+.chat-composer.steering .chat-composer-box {
   border-color: color-mix(in srgb, var(--state-warn) 45%, var(--border-subtle));
 }
 </style>
