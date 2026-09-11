@@ -361,6 +361,7 @@ function projectCreated(id: string) {
           <div class="grid justify-items-start gap-[9px] max-[1200px]:hidden">
             <Badge
               size="sm"
+              variant="dot"
               :tone="row.project.status === 'active' ? 'ok' : 'neutral'"
               >{{
                 PROJECT_STATUS_TEXT[row.project.status] ?? row.project.status
@@ -413,6 +414,7 @@ function projectCreated(id: string) {
           ><span class="max-[600px]:flex-1">{{ item.project.name }}</span
           ><Badge
             size="sm"
+            variant="dot"
             :tone="item.task.status === 'awaiting_approval' ? 'warn' : 'accent'"
             >{{
               item.task.status === "awaiting_approval" ? "等待确认" : "进行中"

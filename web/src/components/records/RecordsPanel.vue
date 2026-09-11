@@ -178,7 +178,7 @@ function onViewEntry(jobId: string, name: string): void {
             aria-hidden="true"
           >▾</span>
           <span class="min-w-0 flex-1 truncate">{{ job.title }} · 第 {{ job.round }} 轮</span>
-          <Badge :tone="job.ok ? 'ok' : 'danger'" size="sm">{{ statusText(job) }}</Badge>
+          <Badge :tone="job.ok ? 'ok' : 'danger'" variant="dot" size="sm">{{ statusText(job) }}</Badge>
           <span v-if="job.errorCode" class="flex-none font-mono text-[11px] text-danger">{{ job.errorCode }}</span>
         </button>
 

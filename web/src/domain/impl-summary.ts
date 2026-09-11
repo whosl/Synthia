@@ -1,5 +1,5 @@
 /**
- * 物理实现进度的展示语义（纯函数，供 ImplProgressChip 与测试使用）。
+ * 物理实现进度的展示语义（纯函数，供 StageStatusChip 与测试使用）。
  *
  * 弹层行 = validate → simulate → synthesize → implement → 码流 → STA。
  * 状态归约：never/running/succeeded/failed 四类；码流格独立于 implement 格
@@ -66,11 +66,16 @@ export function implProgressText(summary: ToolSummary): string {
  * 顶栏摘要 chip 的一行文案：最深到达格 + 计数（如「布局布线 4✓」「仿真 4✗」）。
  * 未产出码流（探索流）不算「到达」，避免把合成失败态误报为当前阶段。
  */
-export function implChipText(summary: ToolSummary): string {
+/** 管线最深到达格；全部未运行时为 null。chip 文案与 face 状态点共用同一归约。 */
+export function implDeepestCell(summary: ToolSummary): ImplCell | null {
   const cells = implCells(summary).filter(cell => PIPELINE_KEYS.includes(cell.key));
-  const current = [...cells]
+  return [...cells]
     .reverse()
-    .find(cell => cell.state !== "never" && (cell.key !== "bitstream" || cell.state === "succeeded"));
+    .find(cell => cell.state !== "never" && (cell.key !== "bitstream" || cell.state === "succeeded")) ?? null;
+}
+
+export function implChipText(summary: ToolSummary): string {
+  const current = implDeepestCell(summary);
   if (!current) return "未开始";
   if (current.state === "running") return `${current.label} · 运行中`;
   if (current.state === "succeeded") {

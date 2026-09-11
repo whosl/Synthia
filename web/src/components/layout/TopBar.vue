@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 顶栏（spec §3.1）：返回按钮 + 项目名 + 进度摘要插槽 + 主题切换 + 用户区。
- * progress 插槽由 ProjectView 注入两个摘要 chip（项目门链 / 物理实现），
- * TopBar 自身不感知进度数据。
+ * progress 插槽由 ProjectView 注入阶段状态 chip（StageStatusChip：门链 +
+ * 物理实现的合并摘要，详情在悬浮面板），TopBar 自身不感知进度数据。
  *
  * 受控组件：只吃 TopBarProps，只吐 TopBarEmits（views/project-view-contract.ts）。
  * 返回项目列表是纯本地导航，不跨栏耦合数据，因此不走 emit，直接用 router 完成。

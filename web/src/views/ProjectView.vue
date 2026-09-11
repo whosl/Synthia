@@ -196,8 +196,7 @@ import type {
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import TopBar from "../components/layout/TopBar.vue";
-import ProjectProgressChip from "../components/impl/ProjectProgressChip.vue";
-import ImplProgressChip from "../components/impl/ImplProgressChip.vue";
+import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
@@ -2562,20 +2561,17 @@ function onToggleChatOverlay(): void {
         @logout="onLogout"
       >
         <template #progress>
-          <ProjectProgressChip
+          <StageStatusChip
             :type-label="projectTypeLabel"
             :profile-label="projectProfileLabel"
             :target-part="project?.target_part ?? null"
             :stage-chain="stageChain"
             :empty-text="stageEmptyText"
-            @select-stage="onSelectStage"
-          />
-          <ImplProgressChip
-            v-if="toolSummary"
             :summary="toolSummary"
             :load-sta-report="staReportLoader"
             :pending-keys="[...implRunPending]"
             :run-error="implRunError"
+            @select-stage="onSelectStage"
             @run-action="onRunImplAction"
           />
         </template>
