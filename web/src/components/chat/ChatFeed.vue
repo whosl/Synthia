@@ -26,6 +26,7 @@ import Badge from "../ui/AppBadge.vue";
 import AgentToolItem from "./AgentToolItem.vue";
 import ApprovalCard from "./ApprovalCard.vue";
 import ChatComposer from "./ChatComposer.vue";
+import ChangeListCard from "./ChangeListCard.vue";
 import CodeCard from "./CodeCard.vue";
 import ContextRing from "./ContextRing.vue";
 import MessageItem from "./MessageItem.vue";
@@ -213,6 +214,13 @@ onMounted(() => void nextTick(scrollToBottom));
                 :diffable="row.item.part.prevRevisionId !== null"
                 @open="emit('open-doc', row.item.part.doc.artifact_id, row.item.part.doc.revision_id)"
                 @open-diff="emit('open-diff', row.item.part.doc.artifact_id, row.item.part.doc.revision_id)"
+              />
+
+              <ChangeListCard
+                v-else-if="row.item.part.kind === 'changes'"
+                :part="row.item.part"
+                @open-doc="(artifactId, revisionId) => emit('open-doc', artifactId, revisionId)"
+                @open-diff="(artifactId, revisionId) => emit('open-diff', artifactId, revisionId)"
               />
 
               <button

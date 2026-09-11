@@ -117,6 +117,7 @@ import {
   type SynthiaReasoningPart,
 } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
+import { injectChangeCards } from "../domain/change-cards.ts";
 import {
   applyStreamEvent,
   subscribeTaskStream,
@@ -1624,7 +1625,9 @@ const parts = computed<readonly SynthiaPart[]>(() => {
   // 流尾按流内顺序：正在思考/运行中的过程卡与未定稿叙述交错，最新的永远在最后。
   // settledIds 去重：done 叙述的 durable 孪生落地并认领同一流 id 后只渲染一份。
   out.push(...unresolved.filter((p) => !resolvedIds.has(p.id) && !settledIds.has(p.id)));
-  return out;
+  // 轮末注「本轮改动」汇总卡：末轮仍在进行（流式未收口/运行中）时先不注，
+  // 轮内 doc 卡已在流里，汇总卡等轮次落定再出现。
+  return injectChangeCards(out, { tailOpen: unresolved.length > 0 || detail.value?.status === "running" });
 });
 
 // ─────────────────────────────────────────────────────────────────────

@@ -211,6 +211,27 @@ export interface SynthiaPermissionPart {
   readonly reason: string | null;
 }
 
+/** 「本轮改动」汇总卡的一行：一个产物的一版修订。 */
+export interface SynthiaChangeItem {
+  readonly artifactId: string;
+  readonly revisionId: string;
+  /** 非 null 时可「查看改动」（中栏 Monaco diff）；null = 首版（新文件），只能打开。 */
+  readonly prevRevisionId: string | null;
+  readonly path: string;
+  readonly title: string;
+}
+
+/**
+ * 轮末「本轮改动」汇总卡：由 ProjectView 在合并后的 parts 上按轮归集 doc part
+ * 注入（见 domain/change-cards.ts），audit/事件流里没有这个 part。
+ */
+export interface SynthiaChangesPart {
+  readonly kind: "changes";
+  readonly id: string;
+  readonly ts: string | null;
+  readonly items: readonly SynthiaChangeItem[];
+}
+
 export type SynthiaPart =
   | SynthiaToolPart
   | SynthiaTextPart
@@ -223,7 +244,8 @@ export type SynthiaPart =
   | SynthiaInterruptPart
   | SynthiaReasoningPart
   | SynthiaAgentToolPart
-  | SynthiaPermissionPart;
+  | SynthiaPermissionPart
+  | SynthiaChangesPart;
 
 // ─── 工具条状态文案（四态，主页面中文）────────────────────────────────
 
