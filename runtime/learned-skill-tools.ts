@@ -220,8 +220,8 @@ function closeTool(): AgentTool {
       const applicationId = identifier(row?.application_id);
       const outcomeClaim = row?.outcome_claim === null ? null : nonEmpty(row?.outcome_claim);
       const corrections = integer(row?.human_corrections, 0, 1_000_000);
-      const evidenceRefs = stringList(row?.evidence_refs);
-      const toolRunRefs = stringList(row?.tool_run_refs);
+      const evidenceRefs = refList(row?.evidence_refs);
+      const toolRunRefs = refList(row?.tool_run_refs);
       const sequence = ctx.toolEventSequence;
       if (
         !applicationId
@@ -317,4 +317,13 @@ function stringList(value: unknown): readonly string[] | null {
   if (!Array.isArray(value) || value.length > 100) return null;
   const parsed = value.map(identifier);
   return parsed.every((item): item is string => item !== null) ? parsed : null;
+}
+
+/** Evidence/tool-run refs cite workspace URIs and job paths, not bare ids. */
+function refList(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value) || value.length > 100) return null;
+  const parsed = value.map(nonEmpty);
+  return parsed.every((item): item is string => item !== null && !/\s/u.test(item))
+    ? parsed as readonly string[]
+    : null;
 }
