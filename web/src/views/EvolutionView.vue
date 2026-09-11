@@ -36,6 +36,7 @@ import {
   type FrozenWriteAttempt,
 } from "../domain/evolution.ts";
 import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
+import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import EvolutionSummary from "../components/evolution/EvolutionSummary.vue";
 import LearnedSkillList from "../components/evolution/LearnedSkillList.vue";
@@ -322,14 +323,12 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-base p-5 text-fg max-[560px]:p-3">
-    <header class="mx-auto mb-4 w-[min(1500px,100%)]">
-      <div>
-        <RouterLink to="/projects" class="text-xs text-fg-secondary hover:text-brand">← 返回项目列表</RouterLink>
-        <h1 class="m-0 mt-2 text-[28px] max-[560px]:text-2xl">进化</h1>
+  <PageShell section="evolution">
+    <div class="text-fg">
+      <header class="mb-4">
+        <h1 class="m-0 text-[28px] max-[560px]:text-2xl">自进化</h1>
         <p class="m-0 text-fg-secondary">查看 Synthia 自动沉淀的能力、真实调用证据和 Curator 评价。</p>
-      </div>
-    </header>
+      </header>
 
     <section
       v-if="!SELF_EVOLUTION_FEATURE_ENABLED"
@@ -399,5 +398,6 @@ onMounted(() => {
         </div>
       </template>
     </template>
-  </div>
+    </div>
+  </PageShell>
 </template>

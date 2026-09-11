@@ -8,12 +8,14 @@ import {
   LogOut,
   Moon,
   Sparkles,
+  Sprout,
   Sun,
 } from "lucide-vue-next";
 import { resolveTheme, toggleTheme } from "../../domain/theme.ts";
 import { useAuthStore } from "../../stores/auth.ts";
+import { SELF_EVOLUTION_FEATURE_ENABLED } from "../../domain/feature-flags.ts";
 
-defineProps<{ section: "projects" | "approvals" }>();
+defineProps<{ section: "projects" | "approvals" | "evolution" }>();
 const router = useRouter();
 const auth = useAuthStore();
 const theme = ref(
@@ -92,6 +94,16 @@ function logout() {
           :aria-current="section === 'approvals' ? 'page' : undefined"
           ><Inbox :size="18" />审批中心</router-link
         >
+        <router-link
+          v-if="SELF_EVOLUTION_FEATURE_ENABLED"
+          to="/evolution"
+          :class="[
+            navLinkClass,
+            section === 'evolution' ? navSelectedClass : navIdleClass,
+          ]"
+          :aria-current="section === 'evolution' ? 'page' : undefined"
+          ><Sprout :size="18" />自进化</router-link
+        >
       </nav>
       <div
         class="mt-auto border-b border-line px-3 py-[18px] text-fg-secondary max-[900px]:hidden"
@@ -128,7 +140,11 @@ function logout() {
           class="flex items-center gap-3.5 text-xs text-fg-muted max-[600px]:gap-2 max-[600px]:text-[11px]"
           >工作空间 <span>/</span>
           <strong class="font-medium text-fg-secondary">{{
-            section === "projects" ? "项目工作台" : "审批中心"
+            section === "projects"
+              ? "项目工作台"
+              : section === "evolution"
+                ? "自进化"
+                : "审批中心"
           }}</strong></span
         >
         <div class="flex items-center gap-4 max-[600px]:gap-2">
