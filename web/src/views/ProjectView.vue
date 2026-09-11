@@ -117,7 +117,7 @@ import {
   type SynthiaReasoningPart,
 } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
-import { injectChangeCards } from "../domain/change-cards.ts";
+import { injectChangeCards, type RevisionChangeInput } from "../domain/change-cards.ts";
 import {
   applyStreamEvent,
   subscribeTaskStream,
@@ -1627,7 +1627,10 @@ const parts = computed<readonly SynthiaPart[]>(() => {
   out.push(...unresolved.filter((p) => !resolvedIds.has(p.id) && !settledIds.has(p.id)));
   // 轮末注「本轮改动」汇总卡：末轮仍在进行（流式未收口/运行中）时先不注，
   // 轮内 doc 卡已在流里，汇总卡等轮次落定再出现。
-  return injectChangeCards(out, { tailOpen: unresolved.length > 0 || detail.value?.status === "running" });
+  return injectChangeCards(out, {
+    tailOpen: unresolved.length > 0 || detail.value?.status === "running",
+    revisions: revisionChanges.value,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1637,6 +1640,30 @@ const parts = computed<readonly SynthiaPart[]>(() => {
 const fileTreeEntries = computed<FileTreeEntry[]>(() =>
   buildFileTreeEntries(artifacts.value, revisionsByArtifact.value, detail.value?.docs ?? [], workspace.value?.files ?? []),
 );
+
+/**
+ * 「本轮改动」汇总卡的修订输入：版本链上每次登记的平铺列表（带登记时间）。
+ * durable 会话（project agent / 探索任务）没有 governance doc 卡，改动归因
+ * 靠「修订登记时间落在哪一轮用户消息的时间窗内」（见 domain/change-cards.ts）。
+ * 定义在 parts computed 之后但安全：computed 惰性求值，parts 首次被读时
+ * 这里已经完成初始化（同 prevRevisionIdOf 的提升模式）。
+ */
+const revisionChanges = computed<RevisionChangeInput[]>(() => {
+  const out: RevisionChangeInput[] = [];
+  for (const entry of fileTreeEntries.value) {
+    for (const revision of entry.revisions) {
+      out.push({
+        artifactId: entry.artifactId,
+        revisionId: revision.id,
+        version: revision.version,
+        createdAt: revision.created_at,
+        path: entry.path ?? entry.artifactId,
+        prevRevisionId: prevRevisionId(entry, revision.id),
+      });
+    }
+  }
+  return out;
+});
 
 /**
  * 对话流产物卡的「上一版」修订 id：非 null 时卡上出现「查看改动」，点了跳中栏 diff。
