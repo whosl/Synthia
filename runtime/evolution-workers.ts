@@ -63,8 +63,8 @@ export const CURATOR_SYSTEM_PROMPT = [
   "Every evaluation must cite only evidence ids or hashes supplied for that application.",
   "Return one remediation per distinct primary skill: no_op, patch, scope_change, or state_action.",
   'Top-level output is exactly {"evaluations":[...],"remediations":[...]} — no other keys.',
-  "Each evaluation is exactly {application_id, outcome, confidence, reason, evidence_refs, supersedes_id}: confidence is 0..1, evidence_refs cites supplied evidence ids/hashes ONLY (an empty supplied evidence list means evidence_refs must be []), supersedes_id is null unless replacing an earlier evaluation id.",
-  'Each remediation is exactly {skill_id, action} for "no_op", plus "patch" (the full skill object) for "patch", plus "state_action" for "state_action".',
+  "Each evaluation is {outcome, confidence, reason, evidence_refs, supersedes_id} — OMIT application_id when the claim contains exactly one application (the worker infers it): confidence is 0..1, evidence_refs cites supplied evidence ids/hashes ONLY (an empty supplied evidence list means evidence_refs must be []), supersedes_id is null unless replacing an earlier evaluation id.",
+  'Each remediation is {action} plus skill_id — but OMIT skill_id when the claim contains exactly one primary skill (the worker infers it; transcribing long ids by hand is error-prone).',
   "The worker derives active-version/control CAS fields; never invent permissions or execute assets.",
 ].join("\n");
 
@@ -566,15 +566,20 @@ function parseEvaluation(
 ): CuratorEvaluationV1 {
   const label = `evaluations[${index}]`;
   const row = strictRecord(raw, label);
-  exactKeys(row, [
-    "application_id",
-    "outcome",
-    "confidence",
-    "reason",
-    "evidence_refs",
-    "supersedes_id",
-  ], label);
-  const applicationId = identifier(row.application_id, `${label}.application_id`);
+  // application_id may be omitted when exactly one application is claimed —
+  // the model transcribes long ids unreliably (observed one-char substitution).
+  const applicationIdOptional = expected.size === 1;
+  const evalExpected = ["application_id", "outcome", "confidence", "reason", "evidence_refs", "supersedes_id"];
+  const evalActual = Object.keys(row).sort();
+  const evalCanonical = [...evalExpected].sort();
+  const evalOk = applicationIdOptional
+    ? evalActual.every((key) => evalCanonical.includes(key))
+      && (evalActual.length === evalCanonical.length || evalActual.length === evalCanonical.length - 1)
+    : evalActual.length === evalCanonical.length && evalActual.every((key, index) => key === evalCanonical[index]);
+  if (!evalOk) malformed(`${label} fields must be exactly: ${evalCanonical.join(", ")}`);
+  const applicationId = row.application_id === undefined
+    ? (applicationIdOptional ? [...expected.keys()][0]! : malformed(`${label}.application_id is required`))
+    : identifier(row.application_id, `${label}.application_id`);
   const bundle = expected.get(applicationId);
   if (!bundle) malformed(`${label}.application_id was not claimed`);
   const outcome = oneOf(
@@ -589,7 +594,12 @@ function parseEvaluation(
   const allowedRefs = new Set(bundle.evidence.flatMap((item) => [item.id, item.sha256]));
   const evidenceRefs = array(row.evidence_refs, `${label}.evidence_refs`, 100).map((value, refIndex) => {
     const ref = boundedText(value, `${label}.evidence_refs[${refIndex}]`, 1_024);
-    if (!allowedRefs.has(ref)) malformed(`${label} cites evidence outside the claim`);
+    if (!allowedRefs.has(ref)) {
+      // Diagnostic: the S3 chain showed refs-present evaluations rejected
+      // while empty-refs ones pass — surface the sets to pin the seam.
+      process.stderr.write(`[curator-refs] rejected=${ref} allowed=[${[...allowedRefs].join(",")}] bundleEvidenceCount=${bundle.evidence.length}\n`);
+      malformed(`${label} cites evidence outside the claim`);
+    }
     return ref;
   });
   if (outcome !== "inconclusive" && evidenceRefs.length === 0) {
@@ -628,13 +638,29 @@ function parseRemediation(
     ["no_op", "patch", "scope_change", "state_action"] as const,
     `${label}.action`,
   );
-  const expectedKeys = action === "no_op"
-    ? ["skill_id", "action"]
-    : action === "state_action"
-      ? ["skill_id", "action", "state_action"]
-      : ["skill_id", "action", "patch"];
-  exactKeys(row, expectedKeys, label);
-  const skillId = identifier(row.skill_id, `${label}.skill_id`);
+  // The model transcribes 40-char ids unreliably (one observed b6->b5
+  // substitution); with exactly one claimed primary skill the id is
+  // unambiguous, so it may be omitted and inferred here.
+  const actionKeys = action === "state_action"
+    ? ["state_action"]
+    : action === "patch"
+      ? ["patch"]
+      : [];
+  // skill_id stays accepted; with exactly one claimed primary skill it may be
+  // omitted (the model transcribes long ids unreliably — one observed
+  // b6->b5 substitution — so the worker infers the unambiguous id).
+  const skillIdOptional = expected.size === 1;
+  const expectedKeys = ["skill_id", "action", ...actionKeys];
+  const actualKeys = Object.keys(row).sort();
+  const canonical = [...expectedKeys].sort();
+  const matches = skillIdOptional
+    ? actualKeys.every((key) => canonical.includes(key))
+      && (actualKeys.length === canonical.length || actualKeys.length === canonical.length - 1)
+    : actualKeys.length === canonical.length && actualKeys.every((key, index) => key === canonical[index]);
+  if (!matches) malformed(`${label} fields must be exactly: ${canonical.join(", ")}`);
+  const skillId = row.skill_id === undefined
+    ? (skillIdOptional ? [...expected.keys()][0]! : malformed(`${label}.skill_id is required`))
+    : identifier(row.skill_id, `${label}.skill_id`);
   const bundle = expected.get(skillId);
   if (!bundle) malformed(`${label}.skill_id was not claimed`);
   const skill = bundle.primary_version.skill;
@@ -879,5 +905,8 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
 }
 
 function malformed(message: string): never {
+  if (process.env.SYNTHIA_EVOLUTION_DEBUG === "1") {
+    process.stderr.write(`[malformed] ${message}\n${new Error("trace").stack?.split("\n").slice(1, 6).join("\n")}\n`);
+  }
   throw new EvolutionWorkerValidationError(message);
 }
