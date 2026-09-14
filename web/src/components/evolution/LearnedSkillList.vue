@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Sprout } from "lucide-vue-next";
 import type { LearnedSkillSummaryV1 } from "../../api/evolution.ts";
 import {
   QUALITY_STATE_TEXT,
@@ -7,6 +8,14 @@ import {
   successRateText,
 } from "../../domain/evolution.ts";
 import Badge from "../ui/AppBadge.vue";
+import { Skeleton } from "../ui/skeleton";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../ui/empty";
 
 defineProps<{
   items: readonly LearnedSkillSummaryV1[];
@@ -26,11 +35,20 @@ const emit = defineEmits<{ select: [skillId: string] }>();
         <p class="m-0 text-xs text-fg-secondary">{{ items.length }} 项能力</p>
       </div>
     </div>
-    <div v-if="loading" class="grid gap-2 px-4 py-6 text-center text-fg-secondary" role="status">正在加载 Skill…</div>
-    <div v-else-if="items.length === 0" class="grid gap-2 px-4 py-6 text-center text-fg-secondary">
-      <strong>尚未沉淀 Learned Skill</strong>
-      <span>turn / 任务片段封存后，Distiller 可以自动创建第一项能力。</span>
+    <div v-if="loading" class="grid content-start gap-2 p-4" role="status" aria-label="正在加载 Skill">
+      <div v-for="n in 4" :key="n" class="grid gap-2 rounded-md border border-line p-3">
+        <Skeleton class="h-3 w-1/2" />
+        <Skeleton class="h-2 w-3/4" />
+      </div>
+      <span class="visually-hidden">正在加载 Skill…</span>
     </div>
+    <Empty v-else-if="items.length === 0">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><Sprout :size="20" /></EmptyMedia>
+        <EmptyTitle>尚未沉淀 Learned Skill</EmptyTitle>
+        <EmptyDescription>turn / 任务片段封存后，Distiller 可以自动创建第一项能力。</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
     <div v-else class="grid content-start overflow-auto">
       <button
         v-for="skill in items"

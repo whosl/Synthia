@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { FileSearch, History } from "lucide-vue-next";
 import type {
   LearnedSkillControlAction,
   LearnedSkillDetailV1,
@@ -19,6 +20,24 @@ import {
 } from "../../domain/evolution.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
+import { Input } from "../ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { Skeleton } from "../ui/skeleton";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../ui/empty";
+import StatCard from "../StatCard.vue";
+import ConfirmDialog from "../ConfirmDialog.vue";
 
 const props = defineProps<{
   detail: LearnedSkillDetailV1 | null;
@@ -42,8 +61,54 @@ const emit = defineEmits<{
 
 const currentEvaluationSet = computed(() => currentEvaluationIds(props.application?.evaluations ?? []));
 
-function onControlReason(event: Event): void {
-  emit("update:controlReason", (event.target as HTMLInputElement).value);
+// StatCard 的 value 走属性绑定（JS 字符串不能用双引号），测试锁定的原表达式留在 script
+const firstSolvedText = computed(() => {
+  const detail = props.detail;
+  return detail ? detail.metrics.first_solved_problem_families ?? "未知" : "未知";
+});
+
+// disable/archive 改变 Skill 可用性、影响 Agent 检索，需二次确认；enable/restore/pin/unpin 直接执行
+const pendingControl = ref<"disable" | "archive" | null>(null);
+const controlConfirmText = computed(() => {
+  if (!pendingControl.value) return null;
+  const name = props.detail?.name ?? "此 Skill";
+  return pendingControl.value === "disable"
+    ? {
+        title: `禁用 Learned Skill「${name}」？`,
+        description: "禁用后 Agent 将停止使用它；版本与真实调用历史全部保留，可填写原因后随时恢复。",
+        confirmLabel: "确认禁用",
+      }
+    : {
+        title: `Archive「${name}」？`,
+        description: "Archive 后普通 Agent 搜索将隐藏它；固定 application 仍可查看和关闭，可稍后 Restore。",
+        confirmLabel: "确认 Archive",
+      };
+});
+
+function requestControl(action: LearnedSkillControlAction): void {
+  if (action === "disable" || action === "archive") {
+    pendingControl.value = action;
+    return;
+  }
+  emit("control", action);
+}
+
+function confirmControl(): void {
+  const action = pendingControl.value;
+  pendingControl.value = null;
+  if (action) emit("control", action);
+}
+
+function closeControlConfirm(): void {
+  pendingControl.value = null;
+}
+
+function onControlReason(value: string | number): void {
+  emit("update:controlReason", String(value));
+}
+
+function onSelectVersion(value: unknown): void {
+  if (typeof value === "string" && value) emit("select-version", value);
 }
 
 function pretty(value: unknown): string {
@@ -57,8 +122,21 @@ function shortHash(value: string): string {
 
 <template>
   <main class="grid min-h-0 min-w-0 content-start gap-4 rounded-lg border border-line bg-panel p-5 max-[560px]:p-3">
-    <div v-if="loading" class="p-5 text-center text-fg-secondary" role="status">正在加载 Skill 事实…</div>
-    <div v-else-if="!detail" class="p-5 text-center text-fg-secondary">从左侧选择一个 Learned Skill 查看版本、资产和真实调用评价。</div>
+    <div v-if="loading" class="grid content-start gap-3" role="status" aria-label="正在加载 Skill 事实">
+      <Skeleton class="h-5 w-1/3" />
+      <Skeleton class="h-3 w-2/3" />
+      <div class="grid grid-cols-2 gap-3">
+        <Skeleton v-for="n in 4" :key="n" class="h-16 rounded-md" />
+      </div>
+      <span class="visually-hidden">正在加载 Skill 事实…</span>
+    </div>
+    <Empty v-else-if="!detail">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><FileSearch :size="20" /></EmptyMedia>
+        <EmptyTitle>尚未选择 Learned Skill</EmptyTitle>
+        <EmptyDescription>从左侧选择一个 Learned Skill 查看版本、资产和真实调用评价。</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
     <template v-else>
       <header class="flex items-start justify-between gap-2 max-[560px]:flex-col max-[560px]:items-stretch">
         <div class="min-w-0">
@@ -77,14 +155,14 @@ function shortHash(value: string): string {
         <div class="grid flex-[0_1_300px] justify-items-end gap-2 max-[560px]:w-full max-[560px]:basis-auto max-[560px]:justify-items-stretch">
           <label class="grid w-full gap-1 text-xs text-fg-secondary">
             <span>Skill 控制原因</span>
-            <input
-              :value="controlReason"
+            <Input
+              :model-value="controlReason"
               type="text"
               maxlength="500"
               placeholder="说明本次 Pin、状态或可用性变更"
               :disabled="operatingAction !== null"
-              class="h-8 min-w-0 rounded-md border border-line-strong bg-base px-2 text-fg"
-              @input="onControlReason"
+              class="h-8 bg-base px-2"
+              @update:model-value="onControlReason"
             />
           </label>
           <div class="flex flex-wrap justify-end gap-2">
@@ -93,7 +171,7 @@ function shortHash(value: string): string {
               :variant="detail.enabled ? 'danger' : 'primary'"
               :loading="operatingAction === (detail.enabled ? 'disable' : 'enable')"
               :disabled="operatingAction !== null || !controlReason.trim() || (!detail.enabled && !rolloutEnabled)"
-              @click="emit('control', detail.enabled ? 'disable' : 'enable')"
+              @click="requestControl(detail.enabled ? 'disable' : 'enable')"
             >
               {{ detail.enabled ? "禁用此 Skill" : "恢复此 Skill" }}
             </Button>
@@ -111,7 +189,7 @@ function shortHash(value: string): string {
               variant="secondary"
               :loading="operatingAction === (detail.availability_state === 'archived' ? 'restore' : 'archive')"
               :disabled="operatingAction !== null || !controlReason.trim() || !rolloutEnabled"
-              @click="emit('control', detail.availability_state === 'archived' ? 'restore' : 'archive')"
+              @click="requestControl(detail.availability_state === 'archived' ? 'restore' : 'archive')"
             >
               {{ detail.availability_state === "archived" ? "Restore" : "Archive" }}
             </Button>
@@ -125,32 +203,31 @@ function shortHash(value: string): string {
       </header>
 
       <section class="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3 max-[900px]:grid-cols-2" aria-label="Skill 真实调用指标">
-        <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-          <span class="text-fg-secondary">局部目标解决率</span>
-          <strong class="text-[20px]">{{ successRateText(detail.metrics) }}</strong>
-          <small v-if="detail.metrics.measurement_state === 'unknown'" class="text-fg-secondary">证据不足，不推断提升</small>
-          <small v-else class="text-fg-secondary">{{ detail.metrics.success }} 成功 / {{ detail.metrics.evaluated }} 已评价</small>
-        </article>
-        <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-          <span class="text-fg-secondary">应用与待评价</span>
-          <strong class="text-[20px]">{{ detail.metrics.primary_applied }} / {{ detail.metrics.pending }}</strong>
-          <small class="text-fg-secondary">primary applied / pending</small>
-        </article>
-        <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-          <span class="text-fg-secondary">中位处理时间</span>
-          <strong class="text-[20px]">{{ formatEvolutionDuration(detail.metrics.median_duration_ms) }}</strong>
-          <small class="text-fg-secondary">从 apply 到局部目标关闭</small>
-        </article>
-        <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-          <span class="text-fg-secondary">人工纠正</span>
-          <strong class="text-[20px]">{{ detail.metrics.human_corrections ?? "未知" }}</strong>
-          <small class="text-fg-secondary">inconclusive {{ detail.metrics.inconclusive }} 次</small>
-        </article>
-        <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-          <span class="text-fg-secondary">首次解决问题族</span>
-          <strong class="text-[20px]">{{ detail.metrics.first_solved_problem_families ?? "未知" }}</strong>
-          <small class="text-fg-secondary">暂无问题族事实时不推断为 0</small>
-        </article>
+        <StatCard
+          label="局部目标解决率"
+          :value="successRateText(detail.metrics)"
+          :hint="detail.metrics.measurement_state === 'unknown' ? '证据不足，不推断提升' : `${detail.metrics.success} 成功 / ${detail.metrics.evaluated} 已评价`"
+        />
+        <StatCard
+          label="应用与待评价"
+          :value="`${detail.metrics.primary_applied} / ${detail.metrics.pending}`"
+          hint="primary applied / pending"
+        />
+        <StatCard
+          label="中位处理时间"
+          :value="formatEvolutionDuration(detail.metrics.median_duration_ms)"
+          hint="从 apply 到局部目标关闭"
+        />
+        <StatCard
+          label="人工纠正"
+          :value="detail.metrics.human_corrections ?? '未知'"
+          :hint="`inconclusive ${detail.metrics.inconclusive} 次`"
+        />
+        <StatCard
+          label="首次解决问题族"
+          :value="firstSolvedText"
+          hint="暂无问题族事实时不推断为 0"
+        />
       </section>
 
       <section class="grid min-w-0 gap-3 border-t border-line pt-4">
@@ -162,25 +239,33 @@ function shortHash(value: string): string {
               distillation {{ detail.source_summary.distillation_run_id }}
             </p>
           </div>
-          <label class="grid gap-1 text-xs text-fg-secondary">
+          <label for="skill-version-select" class="grid gap-1 text-xs text-fg-secondary">
             <span>查看版本</span>
-            <select
-              :value="version?.version.version_id ?? ''"
-              class="h-8 min-w-0 rounded-md border border-line-strong bg-base px-2 text-fg"
-              @change="emit('select-version', ($event.target as HTMLSelectElement).value)"
+            <Select
+              :model-value="version?.version.version_id ?? ''"
+              @update:model-value="onSelectVersion"
             >
-              <option
-                v-for="item in detail.versions"
-                :key="item.version_id"
-                :value="item.version_id"
-              >
-                v{{ item.version_no }} · {{ QUALITY_STATE_TEXT[item.quality_state] }}
-              </option>
-            </select>
+              <SelectTrigger id="skill-version-select" size="sm" class="w-full bg-base">
+                <SelectValue placeholder="选择版本" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="item in detail.versions"
+                  :key="item.version_id"
+                  :value="item.version_id"
+                >
+                  v{{ item.version_no }} · {{ QUALITY_STATE_TEXT[item.quality_state] }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </label>
         </div>
 
-        <div v-if="!version" class="p-5 text-center text-fg-secondary">版本内容加载中…</div>
+        <div v-if="!version" class="grid content-start gap-2" role="status" aria-label="正在加载版本内容">
+          <Skeleton class="h-3 w-1/2" />
+          <Skeleton class="h-20 rounded-md" />
+          <span class="visually-hidden">版本内容加载中…</span>
+        </div>
         <template v-else>
           <div class="flex flex-wrap gap-x-4 gap-y-2 text-xs text-fg-secondary">
             <span>parent：{{ version.version.parent_version_id ?? "首版" }}</span>
@@ -192,11 +277,11 @@ function shortHash(value: string): string {
           <div class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
             <div class="min-w-0 rounded-md border border-line bg-base p-3">
               <h4 class="m-0">适用条件（供 Agent 自由判断）</h4>
-              <pre class="m-0 mt-2 max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap">{{ pretty(version.version.applicability) }}</pre>
+              <pre class="evolution-code m-0 mt-2 max-h-[280px] max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap rounded-sm bg-panel p-2 text-fg-secondary">{{ pretty(version.version.applicability) }}</pre>
             </div>
             <div class="min-w-0 rounded-md border border-line bg-base p-3">
               <h4 class="m-0">局部结果契约</h4>
-              <pre class="m-0 mt-2 max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap">{{ pretty(version.version.outcome_contract) }}</pre>
+              <pre class="evolution-code m-0 mt-2 max-h-[280px] max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap rounded-sm bg-panel p-2 text-fg-secondary">{{ pretty(version.version.outcome_contract) }}</pre>
             </div>
           </div>
           <div class="grid gap-2">
@@ -212,7 +297,7 @@ function shortHash(value: string): string {
                 </span>
                 <code class="text-fg-secondary" :title="file.sha256">{{ shortHash(file.sha256) }}</code>
               </summary>
-              <pre class="m-0 mt-2 max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap">{{ file.content }}</pre>
+              <pre class="evolution-code m-0 mt-2 max-h-[320px] max-w-full overflow-auto wrap-anywhere whitespace-pre-wrap rounded-sm bg-panel p-2 text-fg-secondary">{{ file.content }}</pre>
             </details>
           </div>
         </template>
@@ -226,7 +311,13 @@ function shortHash(value: string): string {
           </div>
           <Badge tone="info">{{ applications.length }} 次可见调用</Badge>
         </div>
-        <div v-if="applications.length === 0" class="p-5 text-center text-fg-secondary">尚无可见调用；当前指标保持“提升未知”。</div>
+        <Empty v-if="applications.length === 0">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><History :size="20" /></EmptyMedia>
+            <EmptyTitle>尚无可见调用</EmptyTitle>
+            <EmptyDescription>当前指标保持“提升未知”。</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
         <div v-else class="grid min-w-0 grid-cols-[minmax(220px,0.7fr)_minmax(0,1.3fr)] gap-3 max-[900px]:grid-cols-1">
           <div class="grid content-start gap-2">
             <button
@@ -249,7 +340,11 @@ function shortHash(value: string): string {
             </button>
           </div>
 
-          <div v-if="applicationLoading" class="p-5 text-center text-fg-secondary" role="status">正在加载完整评价历史…</div>
+          <div v-if="applicationLoading" class="grid content-start gap-2" role="status" aria-label="正在加载完整评价历史">
+            <Skeleton class="h-3 w-2/5" />
+            <Skeleton class="h-24 rounded-md" />
+            <span class="visually-hidden">正在加载完整评价历史…</span>
+          </div>
           <article v-else-if="application" class="grid min-w-0 gap-3 rounded-md border border-line bg-base p-3">
             <header class="flex items-start justify-between gap-2 max-[560px]:flex-col max-[560px]:items-stretch">
               <div>
@@ -306,6 +401,23 @@ function shortHash(value: string): string {
           当前只显示前 {{ applications.length }} 次可见调用，仍有更多结果未加载。
         </p>
       </section>
+
+      <ConfirmDialog
+        :open="pendingControl !== null"
+        :title="controlConfirmText?.title ?? ''"
+        :description="controlConfirmText?.description ?? ''"
+        :confirm-label="controlConfirmText?.confirmLabel ?? ''"
+        @update:open="closeControlConfirm"
+        @confirm="confirmControl"
+      />
     </template>
   </main>
 </template>
+
+<style scoped>
+/* 同 chat/AgentToolItem 的 .agent-tool-code：未分层全局 pre 规则（font/line-height）
+   优先级高于 Tailwind utilities 层，代码块行高留在 scoped。 */
+.evolution-code {
+  line-height: var(--line-height-list);
+}
+</style>

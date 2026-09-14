@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
-  ArrowRight,
   Check,
   Inbox,
   RefreshCw,
@@ -9,11 +8,22 @@ import {
 } from "lucide-vue-next";
 import { api } from "../api/service.ts";
 import { useProjectOverview } from "../composables/use-project-overview.ts";
-import { formatActivity } from "../domain/project-overview.ts";
+import { createPoller, type Poller } from "../domain/tasks.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
-import Badge from "../components/ui/AppBadge.vue";
+import ApprovalCard from "../components/approvals/ApprovalCard.vue";
 import Button from "../components/ui/AppButton.vue";
+import { Button as UiButton } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Skeleton } from "../components/ui/skeleton";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/ui/empty";
 
 const { loading, refreshing, error, reviews, incompleteRows, reload } =
   useProjectOverview(api);
@@ -30,6 +40,19 @@ const missingReviews = computed(() =>
     row.issues.some((issue) => issue.label === "待审批记录"),
   ),
 );
+
+// 30s 轻轮询：仅标签页可见时拉取（reload 内部对并发 refreshing 去重）
+let poller: Poller | null = null;
+onMounted(() => {
+  poller = createPoller(() => {
+    if (document.visibilityState === "hidden") return;
+    void reload();
+  }, 30000);
+});
+onBeforeUnmount(() => {
+  poller?.stop();
+  poller = null;
+});
 </script>
 
 <template>
@@ -41,6 +64,7 @@ const missingReviews = computed(() =>
         <p class="m-0 mb-2.5 text-[10px] font-semibold tracking-[2px] text-brand">
           REVIEW & CONTINUE
         </p>
+        <!-- clamp/text-[28px] 为响应式标题排印，无对应字号 token，保留任意值 -->
         <h1
           class="m-0 mb-3 text-[clamp(26px,2.8vw,36px)] leading-[1.3] font-semibold tracking-[-1px] max-[600px]:text-[28px]"
         >
@@ -56,6 +80,7 @@ const missingReviews = computed(() =>
         ><RefreshCw :size="16" />刷新</Button
       >
     </div>
+    <!-- rounded-[12px]：圆角刻度 sm=4/md=6/lg=10/xl=14 无 12px 档，保留任意值 -->
     <div
       class="mb-8 flex items-center gap-[18px] rounded-[12px] border border-line bg-panel p-6"
     >
@@ -79,7 +104,7 @@ const missingReviews = computed(() =>
     <ErrorNotice v-if="error" :error="error" />
     <div
       v-if="missingReviews.length"
-      class="mb-6 flex items-start gap-3 rounded-[10px] border bg-[color-mix(in_srgb,var(--state-warn)_5%,var(--surface-panel))] p-4 leading-[1.7] text-warn [border-color:color-mix(in_srgb,var(--state-warn)_25%,var(--border-subtle))]"
+      class="mb-6 flex items-start gap-3 rounded-lg border bg-[color-mix(in_srgb,var(--state-warn)_5%,var(--surface-panel))] p-4 leading-[1.7] text-warn [border-color:color-mix(in_srgb,var(--state-warn)_25%,var(--border-subtle))]"
       role="status"
     >
       <Inbox :size="18" class="mt-[3px] shrink-0" /><span class="flex-1"
@@ -97,6 +122,7 @@ const missingReviews = computed(() =>
       >
         <h2 id="reviews-title" class="m-0 text-[17px] font-semibold">
           待审批记录
+          <!-- rounded-[5px]/min-w-[22px]/text-[11px] 等密度微调无 token 档，保留任意值 -->
           <span
             class="ml-2 inline-flex min-w-[22px] items-center justify-center rounded-[5px] bg-hover px-[5px] py-0.5 text-[11px] text-fg-secondary"
             >{{ visibleReviews.length }}</span
@@ -104,98 +130,84 @@ const missingReviews = computed(() =>
         </h2>
         <label
           class="flex items-center gap-2 rounded-[8px] border border-line bg-panel px-3 text-fg-muted focus-within:border-brand focus-within:outline-2 focus-within:outline-brand-subtle max-[600px]:w-full"
-          ><Search :size="16" class="shrink-0" /><input
+          ><Search :size="16" class="shrink-0" /><Input
             v-model="query"
             type="search"
-            class="h-9 w-52 min-w-0 border-none bg-transparent text-xs outline-none max-[600px]:w-full"
+            class="h-9 w-52 min-w-0 border-none bg-transparent px-0 text-xs shadow-none focus-visible:ring-0 max-[600px]:w-full"
             aria-label="搜索审批记录"
             placeholder="搜索项目、阶段或提交人…"
         /></label>
       </div>
       <div
         v-if="loading"
-        class="flex min-h-[250px] flex-col items-center justify-center rounded-[12px] border border-dashed border-line-strong p-8 text-center"
+        class="grid gap-3"
         role="status"
+        aria-label="正在加载审批记录"
       >
-        正在读取各项目的审批记录…
+        <div
+          v-for="n in 3"
+          :key="n"
+          class="flex items-center gap-5 rounded-[12px] border border-line bg-panel p-6"
+        >
+          <Skeleton class="size-11 rounded-[12px]" />
+          <div class="grid flex-1 content-start gap-2.5">
+            <Skeleton class="h-3 w-2/5" /><Skeleton class="h-2 w-[65%]" />
+          </div>
+        </div>
+        <span class="visually-hidden">正在读取各项目的审批记录…</span>
       </div>
-      <div
-        v-else-if="error && !reviews.length"
-        class="flex min-h-[250px] flex-col items-center justify-center rounded-[12px] border border-dashed border-line-strong p-8 text-center"
-      >
-        <RefreshCw :size="36" class="mb-2 text-brand" />
-        <h3 class="mt-[1em] mb-0 font-medium">暂时无法获取审批记录</h3>
-        <p class="my-[1em] leading-[1.7] text-fg-secondary">
-          请检查连接后重试。
-        </p>
-        <Button :loading="refreshing" @click="reload">重新加载</Button>
-      </div>
-      <div
-        v-else-if="!visibleReviews.length"
-        class="flex min-h-[250px] flex-col items-center justify-center rounded-[12px] border border-dashed border-line-strong p-8 text-center"
-      >
-        <Search v-if="query" :size="38" class="mb-2 text-brand" /><Check
-          v-else
-          :size="38"
-          class="mb-2 text-brand"
-        />
-        <h3 class="mt-[1em] mb-0 font-medium">
-          {{
-            query
-              ? "没有匹配的审批记录"
-              : missingReviews.length
-                ? "已加载的项目暂无待审批记录"
-                : "当前没有待审批记录"
-          }}
-        </h3>
-        <p class="my-[1em] leading-[1.7] text-fg-secondary">
-          {{
-            query
-              ? "试试其他关键词。"
-              : missingReviews.length
-                ? "请重试加载其他项目，确认完整的待办。"
-                : "可以返回项目，继续下一步工程工作。"
-          }}
-        </p>
-        <Button v-if="query" @click="query = ''">清除搜索</Button
-        ><router-link v-else to="/projects">返回项目工作台 →</router-link>
-      </div>
+      <Empty v-else-if="error && !reviews.length" class="min-h-[250px] border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><RefreshCw :size="20" /></EmptyMedia>
+          <EmptyTitle>暂时无法获取审批记录</EmptyTitle>
+          <EmptyDescription>请检查连接后重试。</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button :loading="refreshing" @click="reload">重新加载</Button>
+        </EmptyContent>
+      </Empty>
+      <Empty v-else-if="!visibleReviews.length" class="min-h-[250px] border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"
+            ><Search v-if="query" :size="20" /><Check v-else :size="20"
+          /></EmptyMedia>
+          <EmptyTitle>
+            {{
+              query
+                ? "没有匹配的审批记录"
+                : missingReviews.length
+                  ? "已加载的项目暂无待审批记录"
+                  : "当前没有待审批记录"
+            }}
+          </EmptyTitle>
+          <EmptyDescription>
+            {{
+              query
+                ? "试试其他关键词。"
+                : missingReviews.length
+                  ? "请重试加载其他项目，确认完整的待办。"
+                  : "可以返回项目，继续下一步工程工作。"
+            }}
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button v-if="query" @click="query = ''">清除搜索</Button>
+          <UiButton
+            v-else
+            as-child
+            variant="outline"
+            class="h-[30px] border-line-strong bg-panel px-3 text-[13px] font-normal text-fg shadow-none hover:bg-hover hover:text-fg"
+          >
+            <router-link to="/projects">返回项目工作台 →</router-link>
+          </UiButton>
+        </EmptyContent>
+      </Empty>
       <div v-else class="grid gap-3">
-        <article
+        <ApprovalCard
           v-for="item in visibleReviews"
           :key="`${item.project.id}:${item.submission.id}`"
-          class="flex items-center gap-5 rounded-[12px] border border-line bg-panel p-6 max-[600px]:flex-wrap max-[600px]:gap-3 max-[600px]:p-[18px]"
-        >
-          <span
-            class="grid size-11 shrink-0 place-items-center rounded-[12px] bg-warn/10 text-warn max-[600px]:hidden"
-            ><Inbox :size="18"
-          /></span>
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-3">
-              <h3 class="m-0 text-[15px] font-[550]">{{ item.title }}</h3>
-              <Badge size="sm" tone="warn">等待确认</Badge>
-            </div>
-            <p class="my-2">{{ item.project.name }}</p>
-            <span
-              class="text-[11px] leading-[1.7] wrap-anywhere text-fg-secondary"
-              >{{ item.submission.submitter_id }} 提交 ·
-              {{
-                formatActivity(
-                  item.submission.submitted_at ?? item.submission.created_at,
-                )
-              }}</span
-            >
-          </div>
-          <router-link
-            class="flex items-center gap-2 text-xs whitespace-nowrap max-[600px]:w-full max-[600px]:border-t max-[600px]:border-line max-[600px]:pt-3.5"
-            :to="{
-              name: 'project',
-              params: { id: item.project.id },
-              query: { sub: item.submission.id },
-            }"
-            >查看并处理<ArrowRight :size="16"
-          /></router-link>
-        </article>
+          :item="item"
+        />
       </div>
     </section>
   </PageShell>

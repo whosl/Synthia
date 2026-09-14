@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { RouterLink } from "vue-router";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import { Sprout } from "lucide-vue-next";
 import { api } from "../api/service.ts";
 import {
   createCuratorRun,
@@ -35,12 +35,23 @@ import {
   freezeWriteAttempt,
   type FrozenWriteAttempt,
 } from "../domain/evolution.ts";
+import { createPoller, type Poller } from "../domain/tasks.ts";
 import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import EvolutionSummary from "../components/evolution/EvolutionSummary.vue";
 import LearnedSkillList from "../components/evolution/LearnedSkillList.vue";
 import LearnedSkillDetail from "../components/evolution/LearnedSkillDetail.vue";
+import { Button as UiButton } from "../components/ui/button";
+import { Skeleton } from "../components/ui/skeleton";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/ui/empty";
 
 const overview = ref<EvolutionOverviewV1 | null>(null);
 const skills = ref<readonly LearnedSkillSummaryV1[]>([]);
@@ -128,11 +139,14 @@ async function loadSkill(skillId: string): Promise<void> {
   }
 }
 
-async function refreshAll(): Promise<void> {
+async function refreshAll(background = false): Promise<void> {
   if (!SELF_EVOLUTION_FEATURE_ENABLED) return;
-  loading.value = true;
-  loadError.value = null;
-  notice.value = null;
+  // 后台轮询不动 loading/notice，避免每 30s 闪骨架屏或清掉操作反馈
+  if (!background) {
+    loading.value = true;
+    loadError.value = null;
+    notice.value = null;
+  }
   try {
     const [nextOverview, page] = await Promise.all([
       getEvolutionOverview(api),
@@ -145,6 +159,12 @@ async function refreshAll(): Promise<void> {
       ? selectedSkillId.value
       : page.items[0]?.skill_id ?? null;
     selectedSkillId.value = retained;
+    if (background) {
+      // 轻轮询只把列表投影合并进当前详情头部，不重取版本与调用记录（详情刷新交给手动刷新/重选）
+      const summary = page.items.find((skill) => skill.skill_id === retained);
+      if (summary) replaceSkill(summary);
+      return;
+    }
     if (retained) await loadSkill(retained);
     else {
       skillDetail.value = null;
@@ -154,9 +174,9 @@ async function refreshAll(): Promise<void> {
       applicationDetail.value = null;
     }
   } catch (error) {
-    loadError.value = error;
+    if (!background) loadError.value = error;
   } finally {
-    loading.value = false;
+    if (!background) loading.value = false;
   }
 }
 
@@ -317,8 +337,21 @@ async function runCurator(mode: "run" | "dry_run"): Promise<void> {
   }
 }
 
+// 30s 轻轮询：仅标签页可见时后台刷新概览与列表；写操作在途时跳过，
+// 避免陈旧的 overview 投影覆盖刚提交的写结果
+let poller: Poller | null = null;
 onMounted(() => {
-  if (SELF_EVOLUTION_FEATURE_ENABLED) void refreshAll();
+  if (!SELF_EVOLUTION_FEATURE_ENABLED) return;
+  void refreshAll();
+  poller = createPoller(() => {
+    if (document.visibilityState === "hidden") return;
+    if (operatingAction.value !== null) return;
+    void refreshAll(true);
+  }, 30000);
+});
+onBeforeUnmount(() => {
+  poller?.stop();
+  poller = null;
 });
 </script>
 
@@ -330,26 +363,44 @@ onMounted(() => {
         <p class="m-0 text-fg-secondary">查看 Synthia 自动沉淀的能力、真实调用证据和 Curator 评价。</p>
       </header>
 
-    <section
-      v-if="!SELF_EVOLUTION_FEATURE_ENABLED"
-      class="mx-auto w-[min(1500px,100%)] rounded-lg border border-line bg-panel text-center text-fg-secondary"
-    >
-      <h2 class="mt-0 text-fg">Self-evolution 尚未在此 Web 发布中启用</h2>
-      <p>页面不会请求 Core。启用明确的 Web feature flag 后，才开放 Learned Skill 观测与控制。</p>
-      <RouterLink to="/projects">返回项目列表</RouterLink>
-    </section>
+    <!-- 宽度由 PageShell 的 max-w-[1392px] 统一约束，不再每层重复 w-[min(1500px,100%)] -->
+    <Empty v-if="!SELF_EVOLUTION_FEATURE_ENABLED" class="border">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><Sprout :size="20" /></EmptyMedia>
+        <EmptyTitle>Self-evolution 尚未在此 Web 发布中启用</EmptyTitle>
+        <EmptyDescription>页面不会请求 Core。启用明确的 Web feature flag 后，才开放 Learned Skill 观测与控制。</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <UiButton
+          as-child
+          variant="outline"
+          class="h-[30px] border-line-strong bg-panel px-3 text-[13px] font-normal text-fg shadow-none hover:bg-hover hover:text-fg"
+        >
+          <router-link to="/projects">返回项目列表</router-link>
+        </UiButton>
+      </EmptyContent>
+    </Empty>
 
     <template v-else>
-      <ErrorNotice v-if="loadError" class="mx-auto w-[min(1500px,100%)]" :error="loadError" />
+      <ErrorNotice v-if="loadError" :error="loadError" />
       <div
         v-if="loading && !overview"
-        class="mx-auto w-[min(1500px,100%)] rounded-lg border border-line bg-panel text-center text-fg-secondary"
+        class="grid gap-4"
         role="status"
-      >正在从 Core 加载进化事实…</div>
+        aria-label="正在加载进化事实"
+      >
+        <div class="grid gap-4 rounded-lg border border-line bg-panel p-5">
+          <Skeleton class="h-4 w-40" />
+          <Skeleton class="h-8 w-3/5" />
+          <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
+            <Skeleton v-for="n in 4" :key="n" class="h-20 rounded-md" />
+          </div>
+        </div>
+        <span class="visually-hidden">正在从 Core 加载进化事实…</span>
+      </div>
 
       <template v-if="overview">
         <EvolutionSummary
-          class="mx-auto w-[min(1500px,100%)]"
           :overview="overview"
           :reason="summaryReason"
           :operating-action="operatingAction"
@@ -358,17 +409,17 @@ onMounted(() => {
           @toggle-learning="updateSettings('learning')"
           @toggle-skills="updateSettings('skills')"
           @run-curator="runCurator"
-          @refresh="refreshAll"
+          @refresh="refreshAll()"
         />
 
         <p
           v-if="notice"
-          class="mx-auto w-[min(1500px,100%)] rounded-md border border-[color-mix(in_srgb,var(--state-ok)_35%,var(--border))] bg-[color-mix(in_srgb,var(--state-ok)_10%,var(--surface-panel))] px-3 py-2 text-ok"
+          class="rounded-md border border-[color-mix(in_srgb,var(--state-ok)_35%,var(--border))] bg-[color-mix(in_srgb,var(--state-ok)_10%,var(--surface-panel))] px-3 py-2 text-ok"
           role="status"
         >{{ notice }}</p>
-        <ErrorNotice v-if="operationError" class="mx-auto w-[min(1500px,100%)]" :error="operationError" />
+        <ErrorNotice v-if="operationError" :error="operationError" />
 
-        <div class="mx-auto mt-4 grid w-[min(1500px,100%)] min-w-0 grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)] gap-4 max-[980px]:grid-cols-1">
+        <div class="mt-4 grid min-w-0 grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)] gap-4 max-[980px]:grid-cols-1">
           <LearnedSkillList
             :items="skills"
             :selected-skill-id="selectedSkillId"

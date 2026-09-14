@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CuratorRunV1, EvolutionOverviewV1 } from "../../api/evolution.ts";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import {
   canRunCurator,
   canToggleLearnedSkills,
@@ -9,6 +9,9 @@ import {
 } from "../../domain/evolution.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
+import { Input } from "../ui/input";
+import StatCard from "../StatCard.vue";
+import ConfirmDialog from "../ConfirmDialog.vue";
 
 const props = defineProps<{
   overview: EvolutionOverviewV1;
@@ -31,8 +34,51 @@ const learningUnavailable = computed(() => !canToggleLearning(props.overview));
 const skillsUnavailable = computed(() => !canToggleLearnedSkills(props.overview));
 const curatorUnavailable = computed(() => !canRunCurator(props.overview));
 
-function onReason(event: Event): void {
-  emit("update:reason", (event.target as HTMLInputElement).value);
+// 暂停学习 / 全局禁用是危险方向（影响全体 Agent）；恢复与启用直接执行
+const pendingDanger = ref<"learning" | "skills" | null>(null);
+const dangerConfirmText = computed(() => {
+  if (pendingDanger.value === "learning") {
+    return {
+      title: "暂停学习？",
+      description: "Distiller 将停止从封存片段提炼新 Skill；已沉淀的 Learned Skill 仍可使用并继续记录调用。",
+      confirmLabel: "确认暂停",
+    };
+  }
+  if (pendingDanger.value === "skills") {
+    return {
+      title: "全局禁用 Learned Skills？",
+      description: "所有 Agent 将立即停止使用 Learned Skills；历史事实与调用记录保留，可稍后重新启用。",
+      confirmLabel: "确认禁用",
+    };
+  }
+  return null;
+});
+
+function requestToggle(kind: "learning" | "skills"): void {
+  const dangerous = kind === "learning"
+    ? !props.overview.learning_paused
+    : props.overview.learned_skills_enabled;
+  if (dangerous) {
+    pendingDanger.value = kind;
+    return;
+  }
+  if (kind === "learning") emit("toggle-learning");
+  else emit("toggle-skills");
+}
+
+function confirmDanger(): void {
+  const kind = pendingDanger.value;
+  pendingDanger.value = null;
+  if (kind === "learning") emit("toggle-learning");
+  else if (kind === "skills") emit("toggle-skills");
+}
+
+function closeDanger(): void {
+  pendingDanger.value = null;
+}
+
+function onReason(value: string | number): void {
+  emit("update:reason", String(value));
 }
 </script>
 
@@ -53,26 +99,26 @@ function onReason(event: Event): void {
     </div>
 
     <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
-      <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-        <span class="text-fg-secondary">待 Curator 评价</span>
-        <strong class="text-2xl leading-none">{{ overview.pending_applications }}</strong>
-        <small class="text-fg-secondary">pending application 单独统计</small>
-      </article>
-      <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-        <span class="text-fg-secondary">已观察 Skill</span>
-        <strong class="text-2xl leading-none">{{ overview.skill_counts.active_observed }}</strong>
-        <small class="text-fg-secondary">不含待观察与 inconclusive</small>
-      </article>
-      <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-        <span class="text-fg-secondary">需要关注</span>
-        <strong class="text-2xl leading-none">{{ overview.skill_counts.needs_review + overview.skill_counts.degraded + overview.skill_counts.quarantined }}</strong>
-        <small class="text-fg-secondary">复核、降级或隔离</small>
-      </article>
-      <article class="grid min-w-0 gap-1 rounded-md border border-line bg-base p-3">
-        <span class="text-fg-secondary">已禁用 / 归档</span>
-        <strong class="text-2xl leading-none">{{ overview.skill_counts.disabled + overview.skill_counts.archived }}</strong>
-        <small class="text-fg-secondary">历史事实仍然保留</small>
-      </article>
+      <StatCard
+        label="待 Curator 评价"
+        :value="overview.pending_applications"
+        hint="pending application 单独统计"
+      />
+      <StatCard
+        label="已观察 Skill"
+        :value="overview.skill_counts.active_observed"
+        hint="不含待观察与 inconclusive"
+      />
+      <StatCard
+        label="需要关注"
+        :value="overview.skill_counts.needs_review + overview.skill_counts.degraded + overview.skill_counts.quarantined"
+        hint="复核、降级或隔离"
+      />
+      <StatCard
+        label="已禁用 / 归档"
+        :value="overview.skill_counts.disabled + overview.skill_counts.archived"
+        hint="历史事实仍然保留"
+      />
     </div>
 
     <div class="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
@@ -90,7 +136,7 @@ function onReason(event: Event): void {
             :variant="overview.learning_paused ? 'primary' : 'danger'"
             :loading="operatingAction === 'settings-learning'"
             :disabled="operating || learningUnavailable || reasonMissing"
-            @click="emit('toggle-learning')"
+            @click="requestToggle('learning')"
           >
             {{ overview.learning_paused ? "恢复学习" : "暂停学习" }}
           </Button>
@@ -99,7 +145,7 @@ function onReason(event: Event): void {
             :variant="overview.learned_skills_enabled ? 'danger' : 'primary'"
             :loading="operatingAction === 'settings-skills'"
             :disabled="operating || skillsUnavailable || reasonMissing"
-            @click="emit('toggle-skills')"
+            @click="requestToggle('skills')"
           >
             {{ overview.learned_skills_enabled ? "禁用 Learned Skills" : "启用 Learned Skills" }}
           </Button>
@@ -144,14 +190,14 @@ function onReason(event: Event): void {
 
     <label class="grid gap-1 font-semibold">
       <span>控制原因（写操作必填）</span>
-      <input
-        :value="reason"
+      <Input
+        :model-value="reason"
         type="text"
         maxlength="500"
         placeholder="例如：本周维护窗口，暂停自动提炼"
         :disabled="operatingAction !== null"
-        class="h-[34px] w-full min-w-0 rounded-md border border-line-strong bg-base px-2 text-fg"
-        @input="onReason"
+        class="h-[34px] bg-base px-2"
+        @update:model-value="onReason"
       />
     </label>
     <p v-if="reasonMissing" class="m-0 text-xs text-fg-secondary">填写原因后才可执行控制操作；失败重试会复用同一请求体和幂等键。</p>
@@ -162,5 +208,14 @@ function onReason(event: Event): void {
       周期 {{ overview.curator.schedule_days }} 天 · 空闲 {{ overview.curator.idle_hours }} 小时后执行 ·
       每轮最多 {{ overview.curator.max_vivado_jobs }} 个 Vivado 任务 · 最长 {{ overview.curator.max_duration_minutes }} 分钟
     </p>
+
+    <ConfirmDialog
+      :open="pendingDanger !== null"
+      :title="dangerConfirmText?.title ?? ''"
+      :description="dangerConfirmText?.description ?? ''"
+      :confirm-label="dangerConfirmText?.confirmLabel ?? ''"
+      @update:open="closeDanger"
+      @confirm="confirmDanger"
+    />
   </section>
 </template>
