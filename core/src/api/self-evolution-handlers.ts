@@ -1277,18 +1277,28 @@ export async function taskSearchLearnedSkillsHandler(ctx: RequestContext): Promi
   await requireAgentDiscoveryEnabled(ctx, ctx.pool);
   const q = (ctx.url.searchParams.get("q") ?? "").trim();
   const limit = pageLimit(ctx.url);
+  // Agent callers send natural-language queries ("UART baud_gen 编译前检查…").
+  // A whole-phrase ILIKE matches nothing for them, so match on whitespace-split
+  // terms instead: a skill is a hit when ANY term matches ANY text column.
+  const terms = [...new Set(q.split(/\s+/u).map((t) => t.trim()).filter((t) => t.length >= 2))].slice(0, 8);
+  const clauses: string[] = [];
+  const params: string[] = [];
+  for (const term of terms) {
+    const ph = `$${params.length + 1}`;
+    params.push(term);
+    clauses.push(`(s.name ILIKE '%' || ${ph} || '%' OR s.summary ILIKE '%' || ${ph} || '%' OR s.applicability_summary ILIKE '%' || ${ph} || '%')`);
+  }
+  params.push(String(limit));
+  const termFilter = clauses.length > 0 ? ` AND (${clauses.join(" OR ")})` : "";
   const result = await ctx.pool.query(
     `SELECT s.id,s.active_version_id,vs.quality_state
        FROM learned_skill s
        JOIN learned_skill_version_status vs ON vs.version_id=s.active_version_id
       WHERE s.enabled=true AND s.availability_state='available'
-        AND vs.quality_state <> 'quarantined'
-        AND ($1='' OR s.name ILIKE '%' || $1 || '%'
-          OR s.summary ILIKE '%' || $1 || '%'
-          OR s.applicability_summary ILIKE '%' || $1 || '%')
-      ORDER BY CASE WHEN s.name ILIKE '%' || $1 || '%' THEN 0 ELSE 1 END,s.id
-      LIMIT $2`,
-    [q, limit],
+        AND vs.quality_state <> 'quarantined'${termFilter}
+      ORDER BY CASE WHEN s.name ILIKE '%' || ${terms.length > 0 ? `$1` : `''`} || '%' THEN 0 ELSE 1 END,s.id
+      LIMIT $${params.length}`,
+    params,
   );
   const items: Record<string, unknown>[] = [];
   for (const row of result.rows as Row[]) {
@@ -1579,7 +1589,17 @@ async function validateToolCall(
   if (task.agent_role === "project" && payload.turn_id !== turnId) {
     throw conflictApiError("TASK_TOOL_CALL_TURN_MISMATCH");
   }
-  const args = asObject(payload.args, "tool call args");
+  // The runtime persists tool_call args as a JSON string (the stream/UI
+  // contract); accept either the string form or a plain object.
+  let args: unknown = payload.args;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = null;
+    }
+  }
+  asObject(args, "tool call args");
   if (canonicalRequestHash(args) !== canonicalRequestHash(expectedArgs)) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
@@ -1783,7 +1803,16 @@ export async function closeSkillApplicationHandler(ctx: RequestContext): Promise
       if (expectedTurnId !== null && endPayload.turn_id !== expectedTurnId) {
         throw conflictApiError("APPLICATION_CLOSE_EVENT_MISMATCH");
       }
-      const closeArgs = asObject(endPayload.args, "application close event args");
+      // Same string-args tolerance as the apply check above.
+      let closeArgsRaw: unknown = endPayload.args;
+      if (typeof closeArgsRaw === "string") {
+        try {
+          closeArgsRaw = JSON.parse(closeArgsRaw);
+        } catch {
+          closeArgsRaw = null;
+        }
+      }
+      const closeArgs = asObject(closeArgsRaw, "application close event args");
       if (canonicalRequestHash(closeArgs) !== canonicalRequestHash({
         application_id: applicationId,
         outcome_claim: outcomeClaim,

@@ -141,13 +141,11 @@ function strictTextContent(turn: unknown): string {
     malformed("model did not return a text turn");
   }
   const row = turn as Record<string, unknown>;
-  const actualKeys = Object.keys(row).sort();
-  if (
-    actualKeys.length !== TEXT_TURN_KEYS.length
-    || actualKeys.some((key, index) => key !== TEXT_TURN_KEYS[index])
-    || row.kind !== "text"
-    || typeof row.content !== "string"
-  ) {
+  // ChatTurn legitimately carries transport metadata beyond {kind, content}
+  // (e.g. the optional usage block), so unknown extra fields are tolerated.
+  // A tool-call list on a claimed text turn is still mixed content and stays
+  // rejected — the strict JSON contract has no tool surface to consume it.
+  if (row.kind !== "text" || typeof row.content !== "string" || row.calls !== undefined) {
     malformed("model did not return one pure text turn");
   }
   return row.content as string;

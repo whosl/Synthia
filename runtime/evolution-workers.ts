@@ -25,8 +25,8 @@ import type {
 } from "./evolution-worker-client.ts";
 
 export const EVOLUTION_WORKER_SCHEMA_VERSION = "evolution-worker.v1";
-export const DISTILLER_PROMPT_VERSION = "distiller-prompt.v1";
-export const CURATOR_PROMPT_VERSION = "curator-prompt.v1";
+export const DISTILLER_PROMPT_VERSION = "distiller-prompt.v3";
+export const CURATOR_PROMPT_VERSION = "curator-prompt.v2";
 export const EVOLUTION_MODEL_OUTPUT_MAX_BYTES = 1_500_000;
 export const EVOLUTION_LEASE_MIN_SECONDS = 30;
 export const EVOLUTION_LEASE_MAX_SECONDS = 900;
@@ -47,7 +47,10 @@ export const DISTILLER_SYSTEM_PROMPT = [
   "Learned Skill files are inert guidance assets and must never request permissions, Connector access, governance writes, or hardware download.",
   "Allowed assets: root SKILL.md, references/, templates/, and scripts/*.tcl|*.py|*.ts. Shell is forbidden.",
   "Actions: {action:'no_op'}, {action:'create',skill:{...}}, or {action:'patch',skill:{skill_id,...}}.",
-  "For patch, select an existing skill_id. The worker derives expected parent/revision; never invent CAS fields.",
+  "skill fields are exactly: slug, name, summary, description, applicability, outcome_contract, files.",
+  "skill.slug is kebab-case; applicability and outcome_contract are JSON objects describing when to apply the skill and its guaranteed result contract.",
+  'skill.files items are exactly {path, kind, language, content}: for "SKILL.md" use kind "skill_md" and language null; references/ files use kind "reference" and language null; templates/ use "template" and null; scripts/*.tcl|*.py|*.ts use kind "script" and language "tcl"|"python"|"typescript" respectively. Exactly one file must have path "SKILL.md".',
+  "For patch, select an existing skill_id and repeat every skill field plus skill_id. The worker derives expected parent/revision; never invent CAS fields.",
 ].join("\n");
 
 export const CURATOR_SYSTEM_PROMPT = [
@@ -59,6 +62,9 @@ export const CURATOR_SYSTEM_PROMPT = [
   "Do not treat the main Agent's outcome claim as authoritative.",
   "Every evaluation must cite only evidence ids or hashes supplied for that application.",
   "Return one remediation per distinct primary skill: no_op, patch, scope_change, or state_action.",
+  'Top-level output is exactly {"evaluations":[...],"remediations":[...]} — no other keys.',
+  "Each evaluation is exactly {application_id, outcome, confidence, reason, evidence_refs, supersedes_id}: confidence is 0..1, evidence_refs cites supplied evidence ids/hashes ONLY (an empty supplied evidence list means evidence_refs must be []), supersedes_id is null unless replacing an earlier evaluation id.",
+  'Each remediation is exactly {skill_id, action} for "no_op", plus "patch" (the full skill object) for "patch", plus "state_action" for "state_action".',
   "The worker derives active-version/control CAS fields; never invent permissions or execute assets.",
 ].join("\n");
 

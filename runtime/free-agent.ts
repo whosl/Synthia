@@ -23,6 +23,7 @@ import { join, dirname } from "node:path";
 
 import { saveAgentState, createAgentState, agentStatePath } from "./agent-state.ts";
 import type { AgentState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import type {
   RuntimeTaskKind,
   TaskAuthorizationScope,
@@ -216,6 +217,8 @@ export interface FreeAgentDeps {
   workspaceId?: string;
   authorization?: TaskAuthorizationScope;
   workspace?: TaskWorkspaceClient;
+  /** Task-bound Learned Skill facts; injected for Core-owned tasks only. */
+  evolution?: TaskEvolutionClient;
   inputHash?: string;
   taskDescriptorHash?: string;
   /**
@@ -540,6 +543,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private readonly messages: AgentMessage[] = [];
 
   private _status: FreeAgentStatus = "idle";
+  /** Durable turn id of the in-flight prompt; null outside a turn. */
+  private currentTurnId: string | null = null;
   private abortFlag = false;
   private abortReason: string | undefined;
   private readonly pendingSteer: string[] = [];
@@ -631,6 +636,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     if (this._status === "running") {
       throw new Error("free-agent: a prompt is already in progress");
     }
+
+    // Current durable turn id, used by tools that seal per-turn facts
+    // (skill applications) into Core.
+    this.currentTurnId = opts.turnId ?? null;
 
     // Reset abort for this prompt round.
     this.abortFlag = false;
@@ -1003,13 +1012,13 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // 工具执行期间（Vivado 一轮可达数分钟）流里必须有东西，否则前端只看得到
         // 一段死寂。开 part → 执行 → 同 id 转 done/error。
         const fullArgs = JSON.stringify(call.args ?? {});
-        await opts.onToolStart?.(
+        const toolEventSequence = await opts.onToolStart?.(
           call.toolCallId,
           call.name,
           truncateForStream(fullArgs),
           fullArgs,
         );
-        const result = await this.executeToolCall(call);
+        const result = await this.executeToolCall(call, toolEventSequence ?? undefined);
         await opts.onToolEnd?.(
           call.toolCallId,
           !result.isError,
@@ -1066,7 +1075,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * Returns an error-shaped result on block / unknown tool / execution failure
    * so the model can self-correct.
    */
-  private async executeToolCall(call: AgentToolCall): Promise<AgentToolResult> {
+  private async executeToolCall(call: AgentToolCall, toolEventSequence?: number): Promise<AgentToolResult> {
     const ctx: ToolExecContext = {
       projectId: this.deps.projectId,
       ...(this.deps.taskId ? { taskId: this.deps.taskId } : {}),
@@ -1075,6 +1084,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.workspaceId ? { workspaceId: this.deps.workspaceId } : {}),
       ...(this.deps.authorization ? { authorization: this.deps.authorization } : {}),
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
+      ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
+      toolCallId: call.toolCallId,
+      turnId: this.currentTurnId,
+      ...(toolEventSequence !== undefined ? { toolEventSequence } : {}),
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
