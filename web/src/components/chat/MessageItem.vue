@@ -99,63 +99,11 @@ function codeCardTitle(seg: ReplyCodeSegment): string {
 </template>
 
 <style scoped>
-/* 流式光标的闪烁关键帧（Tailwind 无内置步进闪烁动画；message-cursor 类名保留）。 */
+/* 流式光标的闪烁关键帧（Tailwind 无内置步进闪烁动画；message-cursor 类名保留）。
+   markdown 排印已并入全局 styles/markdown.css（.message-body .markdown-body 覆写层）。 */
 @keyframes message-cursor-blink {
   50% {
     opacity: 0;
   }
-}
-
-/* v-html 注入的 Markdown 内容：scoped 属性选择器不会附着在动态插入的节点上，
-   须用 :deep() 才能命中（见 Vue scoped CSS 对 v-html 内容的已知限制）。
-   .markdown-body 元素自身的行高/颜色已在模板上用 Tailwind 标注。 */
-.message-body :deep(.markdown-body p) {
-  margin: 0 0 var(--space-2);
-}
-
-.message-body :deep(.markdown-body p:last-child) {
-  margin-bottom: 0;
-}
-
-.message-body :deep(.markdown-body ul),
-.message-body :deep(.markdown-body ol) {
-  margin: 0 0 var(--space-2);
-  padding-left: var(--space-5);
-}
-
-.message-body :deep(.markdown-body pre) {
-  padding: var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-  overflow-x: auto;
-}
-
-.message-body :deep(.markdown-body code) {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 表格数字等宽：消息里的数值列表逐行扫描时不抖动（表格本身暂无其它排印规则）。 */
-.message-body :deep(.markdown-body th),
-.message-body :deep(.markdown-body td) {
-  font-variant-numeric: tabular-nums;
-}
-
-.message-body :deep(.markdown-body :not(pre) > code) {
-  padding: 1px 4px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.message-body :deep(.markdown-body blockquote) {
-  margin: 0 0 var(--space-2);
-  padding-left: var(--space-3);
-  border-left: 2px solid var(--border-strong);
-  color: var(--text-secondary);
-}
-
-.message-body :deep(.markdown-body a) {
-  color: var(--accent);
 }
 </style>

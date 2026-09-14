@@ -329,7 +329,12 @@ export interface CodeEditorEmits {
   "dirty-change": [dirty: boolean];
   /** 版本下拉选择另一版本查看（revisionId 必须是 file.revisions 中的一个 id）。 */
   "select-revision": [revisionId: string];
-  /** 版本对比：选两版进 diff editor；ProjectView 补齐 baseContent 后回填 diffAgainst。 */
+  /**
+   * 版本对比：选两版进 diff editor；ProjectView 补齐 baseContent 后回填 diffAgainst。
+   * 入口是 VersionBar 行内「对比」按钮（当前查看版本 × 行内版本，base/head 已按
+   * 版本号排序），CodeEditor 只做透传；对话流产物卡的「查看改动」走 ProjectView
+   * 内部同款 compareRevisions，不经过本事件。
+   */
   "compare-revisions": [baseRevisionId: string, headRevisionId: string];
   /** 退出对比模式，回到单文件视图。 */
   "exit-diff": [];

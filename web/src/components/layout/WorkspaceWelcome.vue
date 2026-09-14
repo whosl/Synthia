@@ -10,9 +10,18 @@
  * domain/impl-summary 的 STAGE_LABELS，门禁文案复用
  * domain/process-profile 的 PROCESS_GATE_STATUS_TEXT/processProgress。
  * 视觉取舍：去掉旧 splash 的径向光晕与大图标，保持文档式的安静版面。
+ *
+ * 保留的任意值备案（无对应 token，集中在此说明，不散落解释）：
+ * - max-w-[720px]：主页内容栏宽，介于 Tailwind 2xl(672)/3xl(768) 之间；
+ * - text-[22px] + font-[550] + leading-[1.45]：欢迎页主标题层级，字号 token
+ *   只有 12/13/15 三档，字重 550 介于 medium/semibold 之间；
+ * - max-[600px]:：欢迎区自己的窄屏断点（隐藏门名、收紧留白），与顶栏 700px
+ *   断点故意错开；
+ * - text-[11px]/text-[10px]/tracking-[0.08em]：全仓库通用的弱化文本与
+ *   eyebrow 字距惯用法（同 FormalGateChainSection 等）。
  */
 import { computed } from "vue";
-import { CircleCheck, CircleX, Folder, LoaderCircle, Sparkles } from "lucide-vue-next";
+import { Check, CircleCheck, CircleX, Folder, LoaderCircle, Sparkles } from "lucide-vue-next";
 import Button from "../ui/AppButton.vue";
 import Badge from "../ui/AppBadge.vue";
 import type { ProcessStateV1, ToolSummary } from "../../api/types.ts";
@@ -67,12 +76,13 @@ const gateBadge = computed(() => {
 
 const progress = computed(() => (props.stageChain?.length ? processProgress(props.stageChain) : null));
 
-const GATE_DOT_CLASS: Record<ProcessGateStatus, string> = {
-  done: "border-ok bg-ok",
-  current: "animate-pulse border-brand bg-brand",
-  gated: "border-warn bg-warn",
-  failed: "border-danger bg-danger",
-  pending: "border-line-strong",
+/** 步进器节点圈：done 打勾、current 品牌色高亮、gated/failed 用状态色、pending 弱化。 */
+const GATE_NODE_CLASS: Record<ProcessGateStatus, string> = {
+  done: "border-ok bg-ok/10 text-ok",
+  current: "border-brand bg-brand-subtle text-brand",
+  gated: "border-warn bg-warn/10 text-warn",
+  failed: "border-danger bg-danger/10 text-danger",
+  pending: "border-line-strong text-fg-muted",
 };
 
 const GATE_LABEL_CLASS: Record<ProcessGateStatus, string> = {
@@ -119,10 +129,16 @@ function activityStateText(state: string): string {
   return ACTIVITY_STATE_TEXT[state] ?? state;
 }
 
-function activityTone(state: string): string {
-  if (state === "succeeded") return "text-ok";
-  if (state === "failed") return "text-danger";
-  return "text-brand";
+/** 动态行图标底片：与状态同色系、低饱和垫底——颜色由底片承担，状态文字保持弱化不撞色。 */
+const ACTIVITY_CHIP_CLASS: Record<string, string> = {
+  running: "bg-brand-subtle text-brand",
+  submitted: "bg-brand-subtle text-brand",
+  succeeded: "bg-ok/10 text-ok",
+  failed: "bg-danger/10 text-danger",
+};
+
+function activityChipClass(state: string): string {
+  return ACTIVITY_CHIP_CLASS[state] ?? "bg-hover text-fg-muted";
 }
 
 // 与 VersionBar/RecordsPanel 一致的短时刻格式（MM/DD HH:mm）。
@@ -158,14 +174,19 @@ const visibleExamples = computed(() => props.exampleTasks.slice(0, 3));
               class="flex min-w-0 items-center gap-2"
               :title="`${entry.node.id} ${entry.node.name} · ${PROCESS_GATE_STATUS_TEXT[entry.status]}`"
             >
-              <span class="size-2.5 flex-none rounded-full border-2" :class="GATE_DOT_CLASS[entry.status]" />
+              <span class="flex size-5 flex-none items-center justify-center rounded-full border" :class="GATE_NODE_CLASS[entry.status]">
+                <Check v-if="entry.status === 'done'" :size="11" :stroke-width="3" aria-hidden="true" />
+                <span v-else class="font-mono text-[10px] leading-none font-semibold tabular-nums">{{ index + 1 }}</span>
+              </span>
               <span class="whitespace-nowrap text-xs" :class="GATE_LABEL_CLASS[entry.status]"
                 >{{ entry.node.id }}<span class="max-[600px]:hidden">&nbsp;{{ entry.node.name }}</span></span
               >
             </span>
+            <!-- 已走完的一段连线跟着亮：进度感来自「连到哪」，不只是节点本身 -->
             <span
               v-if="index < stageChain.length - 1"
-              class="mx-3 h-px min-w-3 flex-1 bg-line max-[600px]:mx-2"
+              class="mx-3 h-px min-w-3 flex-1 max-[600px]:mx-2"
+              :class="entry.status === 'done' ? 'bg-ok/40' : 'bg-line'"
               aria-hidden="true"
             />
           </li>
@@ -175,16 +196,16 @@ const visibleExamples = computed(() => props.exampleTasks.slice(0, 3));
       <!-- 最近动态：真实阶段运行记录；全新项目退化为一次性引导 -->
       <section aria-label="最近动态" class="flex flex-col gap-3">
         <h2 class="m-0 text-[11px] font-semibold tracking-[0.08em] text-fg-muted">{{ activityRows.length ? "最近动态" : "从这里开始" }}</h2>
-        <ul v-if="activityRows.length" class="m-0 flex list-none flex-col p-0">
+        <ul v-if="activityRows.length" class="m-0 flex list-none flex-col gap-1 p-0">
           <li
             v-for="row in activityRows"
             :key="row.key"
-            class="flex items-center gap-2.5 border-t border-line py-2 text-xs first:border-t-0"
+            class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors duration-150 hover:bg-hover"
           >
-            <span class="flex flex-none items-center" :class="activityTone(row.state)">
-              <LoaderCircle v-if="row.state === 'running' || row.state === 'submitted'" :size="13" class="animate-spin" />
-              <CircleCheck v-else-if="row.state === 'succeeded'" :size="13" />
-              <CircleX v-else :size="13" />
+            <span class="flex size-5 flex-none items-center justify-center rounded-full" :class="activityChipClass(row.state)">
+              <LoaderCircle v-if="row.state === 'running' || row.state === 'submitted'" :size="12" class="animate-spin" />
+              <CircleCheck v-else-if="row.state === 'succeeded'" :size="12" />
+              <CircleX v-else :size="12" />
             </span>
             <span class="text-fg">{{ row.label }}</span>
             <span class="text-fg-muted">{{ activityStateText(row.state) }}</span>

@@ -34,7 +34,7 @@ const safeHtml = computed(() => renderMarkdown(props.content));
       <!-- eslint-disable-next-line vue/no-v-html -->
       <div
         v-if="mode === 'preview'"
-        class="doc-preview-rendered markdown-body mx-auto max-w-[860px] p-6 text-[13px] leading-[1.55] text-fg"
+        class="markdown-body mx-auto max-w-[860px] p-6 text-[13px] leading-[1.55] text-fg"
         v-html="safeHtml"
       />
       <!-- pre 的等宽/12.5px/1.6 由 style.css 未分层的 code,pre,kbd 元素规则供给，此处只需布局类 -->
@@ -42,104 +42,3 @@ const safeHtml = computed(() => renderMarkdown(props.content));
     </div>
   </div>
 </template>
-
-<style scoped>
-/* v-html 注入的内容不受 scoped 属性选择器约束，markdown 排印需要 :deep()（同 MessageItem）；
-   Tailwind 无法表达「容器内全部 h1–h4/li/code…」这种对注入 DOM 的后代选择器，故整段保留。 */
-.doc-preview-rendered :deep(h1),
-.doc-preview-rendered :deep(h2),
-.doc-preview-rendered :deep(h3),
-.doc-preview-rendered :deep(h4) {
-  margin: var(--space-6) 0 var(--space-3);
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--text-primary);
-}
-
-.doc-preview-rendered :deep(h1) {
-  font-size: 1.5em;
-}
-
-.doc-preview-rendered :deep(h2) {
-  font-size: 1.3em;
-}
-
-.doc-preview-rendered :deep(h3) {
-  font-size: 1.1em;
-}
-
-.doc-preview-rendered :deep(p) {
-  margin: 0 0 var(--space-3);
-}
-
-.doc-preview-rendered :deep(ul),
-.doc-preview-rendered :deep(ol) {
-  margin: 0 0 var(--space-3);
-  padding-left: var(--space-6);
-}
-
-.doc-preview-rendered :deep(li) {
-  margin: var(--space-1) 0;
-}
-
-.doc-preview-rendered :deep(a) {
-  color: var(--accent);
-}
-
-.doc-preview-rendered :deep(code) {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-  font-variant-numeric: tabular-nums;
-  background: var(--surface-hover);
-  border-radius: var(--radius-sm);
-  padding: 1px var(--space-1);
-}
-
-.doc-preview-rendered :deep(pre) {
-  margin: 0 0 var(--space-4);
-  padding: var(--space-3);
-  background: var(--surface-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-  overflow: auto;
-}
-
-.doc-preview-rendered :deep(pre code) {
-  background: none;
-  padding: 0;
-}
-
-.doc-preview-rendered :deep(blockquote) {
-  margin: 0 0 var(--space-3);
-  padding: var(--space-1) var(--space-4);
-  border-left: 3px solid var(--border-strong);
-  color: var(--text-secondary);
-  background: var(--surface-panel);
-  border-radius: 0 var(--radius) var(--radius) 0;
-}
-
-.doc-preview-rendered :deep(table) {
-  border-collapse: collapse;
-  margin: 0 0 var(--space-4);
-  font-size: var(--font-size-sm);
-}
-
-.doc-preview-rendered :deep(th),
-.doc-preview-rendered :deep(td) {
-  border: 1px solid var(--border-subtle);
-  padding: var(--space-1) var(--space-2);
-  text-align: left;
-  /* 表格数字等宽，数值列逐行扫描不抖动 */
-  font-variant-numeric: tabular-nums;
-}
-
-.doc-preview-rendered :deep(th) {
-  background: var(--surface-panel);
-}
-
-.doc-preview-rendered :deep(hr) {
-  border: none;
-  border-top: 1px solid var(--border-subtle);
-  margin: var(--space-6) 0;
-}
-</style>

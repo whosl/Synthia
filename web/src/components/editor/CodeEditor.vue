@@ -15,12 +15,16 @@
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type * as MonacoNamespace from "monaco-editor";
+import { FileX, FolderOpen } from "lucide-vue-next";
 import { EDITOR_READONLY_BANNER } from "../../views/project-view-contract.ts";
 import type { CodeEditorEmits, CodeEditorProps } from "../../views/project-view-contract.ts";
 import { isDocPreviewLanguage, monacoThemeFor } from "../../domain/editor-state.ts";
 import { artifactDocName } from "../../domain/artifacts.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
+import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
+import { Skeleton } from "../ui/skeleton";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import VersionBar from "./VersionBar.vue";
 import DocPreview from "./DocPreview.vue";
 
@@ -266,6 +270,16 @@ function onSelectRevision(revisionId: string): void {
   emit("select-revision", revisionId);
 }
 
+/** 版本条行内「对比」：base/head 已由 VersionBar 按版本号排好序，这里只做透传。 */
+function onCompareRevisions(baseRevisionId: string, headRevisionId: string): void {
+  emit("compare-revisions", baseRevisionId, headRevisionId);
+}
+
+/** 预览/编辑分段切换：与原 markdownEditing 布尔同一份本地 UI 态，只是表达方式变了。 */
+function onMarkdownModeChange(value: string | number): void {
+  markdownEditing.value = value === "edit";
+}
+
 /**
  * 保存：把编辑器里当前的字节交给编排层写回工作区文件。
  *
@@ -280,16 +294,24 @@ function submitSave(): void {
 
 <template>
   <div class="flex h-full min-h-0 flex-col bg-base text-fg">
-    <div v-if="!file" class="flex flex-1 flex-col items-center justify-center gap-1">
-      <p class="m-0 text-[13px] text-fg-secondary">未打开任何文件</p>
-      <p class="m-0 text-xs text-fg-muted">从左侧文件树选择一个文件开始查看</p>
-    </div>
+    <Empty v-if="!file">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><FolderOpen :size="20" /></EmptyMedia>
+        <EmptyTitle>未打开任何文件</EmptyTitle>
+        <EmptyDescription>从左侧文件树选择一个文件开始查看</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
 
     <template v-else>
       <div class="flex min-h-[40px] flex-none flex-wrap items-center justify-between gap-3 border-b border-line bg-panel px-3 py-1.5">
         <div class="flex min-w-0 items-center gap-2">
           <span class="truncate text-xs text-fg" :title="fileTitle">{{ fileTitle }}</span>
-          <VersionBar :revisions="file.revisions" :active-revision-id="activeRevision?.id ?? null" @select-revision="onSelectRevision" />
+          <VersionBar
+            :revisions="file.revisions"
+            :active-revision-id="activeRevision?.id ?? null"
+            @select-revision="onSelectRevision"
+            @compare-revisions="onCompareRevisions"
+          />
         </div>
         <div class="flex flex-none items-center gap-2">
           <span v-if="diffAgainst" class="inline-flex items-center gap-2 text-xs text-fg-secondary">
@@ -298,7 +320,18 @@ function submitSave(): void {
           </span>
           <template v-else>
             <Badge v-if="statusText" size="sm" :tone="statusTone">{{ statusText }}</Badge>
-            <Button v-if="isDocPreviewLanguage(language) && !loading && content !== null && (editable || markdownEditing)" size="sm" :disabled="dirty || saving" @click="markdownEditing = !markdownEditing">{{ markdownEditing ? '预览文档' : '编辑文档' }}</Button>
+            <!-- 预览/编辑是同一个只读↔可写的两态互斥，分段切换比来回翻文案的单个按钮更如实 -->
+            <Tabs
+              v-if="isDocPreviewLanguage(language) && !loading && content !== null && (editable || markdownEditing)"
+              :model-value="markdownEditing ? 'edit' : 'preview'"
+              class="flex-none flex-row gap-0"
+              @update:model-value="onMarkdownModeChange"
+            >
+              <TabsList class="h-6 rounded-md p-0.5" aria-label="文档视图切换">
+                <TabsTrigger value="preview" class="h-5 flex-none rounded-sm px-2 text-xs font-normal" :disabled="dirty || saving">预览</TabsTrigger>
+                <TabsTrigger value="edit" class="h-5 flex-none rounded-sm px-2 text-xs font-normal" :disabled="!editable">编辑</TabsTrigger>
+              </TabsList>
+            </Tabs>
             <span v-if="dirty" class="text-[11px] text-warn">未保存</span>
             <Button v-if="editable" size="sm" variant="ghost" :disabled="!dirty || saving" @click="submitSave">
               {{ saving ? "保存中…" : "保存" }}
@@ -310,8 +343,20 @@ function submitSave(): void {
       <p v-if="saveError" class="m-0 flex-none border-b border-line bg-panel px-3 py-1 text-xs leading-[1.4] text-danger" role="alert">{{ saveError }}</p>
 
       <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="loading" class="flex flex-1 items-center justify-center text-xs text-fg-muted">加载中…</div>
-        <div v-else-if="content === null" class="flex flex-1 items-center justify-center text-xs text-fg-muted">无法显示文件内容，请从文件树重新打开以重试。</div>
+        <div v-if="loading" class="flex flex-1 flex-col gap-3 p-4" role="status">
+          <Skeleton class="h-3 w-2/5" />
+          <Skeleton class="h-3 w-4/5" />
+          <Skeleton class="h-3 w-3/5" />
+          <Skeleton class="h-3 w-1/3" />
+          <span class="visually-hidden">正在加载文件内容…</span>
+        </div>
+        <Empty v-else-if="content === null">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><FileX :size="20" /></EmptyMedia>
+            <EmptyTitle>无法显示文件内容</EmptyTitle>
+            <EmptyDescription>请从文件树重新打开以重试。</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
         <DocPreview v-else-if="showDocPreview" :content="content ?? ''" />
         <div v-else class="relative flex min-h-0 flex-1">
           <div v-if="monacoError" class="absolute inset-0 z-[1] flex items-center justify-center gap-3 bg-base text-xs text-fg-muted" role="alert">{{ monacoError }}<Button @click="ensureMonacoMounted">重试</Button></div>
