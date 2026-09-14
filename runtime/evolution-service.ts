@@ -13,8 +13,6 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type { ChatPoster } from "./model-client.ts";
 import { ModelClient } from "./model-client.ts";
 import { EvolutionModelAdapter } from "./evolution-model-adapter.ts";
-import { CoreEvolutionEvalClient } from "./evolution-eval-client.ts";
-import { EvolutionEvaluator } from "./evolution-evaluator.ts";
 import {
   EvolutionScheduler,
   type EvolutionSchedulerClock,
@@ -587,11 +585,6 @@ export function createEvolutionServiceFromEnv(
   const distillerToken = requiredEnv(env, "SYNTHIA_EVOLUTION_DISTILLER_TOKEN");
   const curatorToken = requiredEnv(env, "SYNTHIA_EVOLUTION_CURATOR_TOKEN");
   const schedulerToken = requiredEnv(env, "SYNTHIA_EVOLUTION_SCHEDULER_TOKEN");
-  const evolutionEvalEnabled = env.SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION === "1"
-    || env.SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION === "true";
-  const evaluatorToken = evolutionEvalEnabled
-    ? requiredEnv(env, "SYNTHIA_EVOLUTION_EVALUATOR_TOKEN")
-    : null;
   const modelUrl = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_URL");
   const modelKey = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_KEY");
   const modelId = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_NAME");
@@ -648,17 +641,6 @@ export function createEvolutionServiceFromEnv(
     fetchImpl: fetchImpl as typeof fetch,
     requestTimeoutMs: ioTimeoutMs,
   });
-  const evaluator = evaluatorToken === null
-    ? undefined
-    : new EvolutionEvaluator(
-        new CoreEvolutionEvalClient({
-          baseUrl: curatorContext.coreBaseUrl,
-          evaluatorToken,
-          fetchImpl: fetchImpl as typeof fetch,
-          requestTimeoutMs: ioTimeoutMs,
-        }),
-        model,
-      );
   const manualContext = {
     ...curatorContext,
     workerId: env.SYNTHIA_EVOLUTION_CURATOR_MANUAL_WORKER_ID
@@ -676,7 +658,6 @@ export function createEvolutionServiceFromEnv(
         model,
         {
           workerId: manualContext.workerId,
-          ...(evaluator === undefined ? {} : { evaluator }),
         },
       ),
     );
@@ -687,7 +668,6 @@ export function createEvolutionServiceFromEnv(
         model,
         {
           workerId: scheduledContext.workerId,
-          ...(evaluator === undefined ? {} : { evaluator }),
         },
       ),
     );

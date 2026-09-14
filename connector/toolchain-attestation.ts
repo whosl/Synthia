@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { lstat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
-import { canonicalEvolutionEvalHash } from "./evolution-eval.ts";
+import { canonicalRequestHash as canonicalEvolutionEvalHash } from "../core/src/hashing.ts";
 
 export const VIVADO_TOOLCHAIN_ATTESTATION_SCHEMA = "synthia-vivado-toolchain-attestation.v1" as const;
 export const FULL_TREE_MANIFEST_SCHEMA = "synthia-vivado-full-tree-manifest.v1" as const;

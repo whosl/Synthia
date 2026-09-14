@@ -1,4 +1,4 @@
-import { EVOLUTION_EVAL_ACTIVE_CONFIG_HEADER, EVOLUTION_EVAL_PROCESS_INSTANCE_HEADER, EVOLUTION_EVAL_TOOLCHAIN_ATTESTATION_HEADER, RemoteConnectorClient, RemoteConnectorError, type RemoteEnvelope, type RemoteResponse, type RemoteTransport, type RemoteClientOptions } from "./remote.ts";
+import { RemoteConnectorClient, RemoteConnectorError, type RemoteEnvelope, type RemoteResponse, type RemoteTransport, type RemoteClientOptions } from "./remote.ts";
 
 export interface CloudflareAccessToken {
   clientId: string;
@@ -45,11 +45,7 @@ function headerValue(value: unknown, name: string): string {
   return value;
 }
 
-const CONTROLLED_REQUEST_HEADERS = new Map<string, RegExp>([
-  [EVOLUTION_EVAL_ACTIVE_CONFIG_HEADER, /^[0-9a-f]{64}$/],
-  [EVOLUTION_EVAL_PROCESS_INSTANCE_HEADER, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/],
-  [EVOLUTION_EVAL_TOOLCHAIN_ATTESTATION_HEADER, /^[0-9a-f]{64}$/],
-]);
+const CONTROLLED_REQUEST_HEADERS = new Map<string, RegExp>([]);
 
 function mergeControlledRequestHeaders(
   target: Record<string, string>,

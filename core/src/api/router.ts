@@ -15,7 +15,6 @@
 import type { Pool } from "pg";
 import { authenticate } from "./auth.ts";
 import type { ConnectorPort } from "./connector-port.ts";
-import type { EvolutionEvalConnectorPort } from "../services/evolution-eval-connector-port.ts";
 import type { RuntimeClient } from "./task-proxy.ts";
 import { requireP4ProjectVisibility } from "./p4-project-access.ts";
 import {
@@ -26,14 +25,12 @@ import { errorEnvelope, resolveCorrelationId, successEnvelope } from "./envelope
 import {
   ApiError,
   conflictApiError,
-  evolutionScopeForbiddenError,
   internalError,
   isPgUniqueViolation,
   notFoundError,
   validationError,
 } from "./errors.ts";
 import type {
-  EvolutionEvalDeploymentReadiness,
   HandlerResult,
   RequestContext,
 } from "./handlers.ts";
@@ -156,8 +153,6 @@ import {
   failCuratorRunHandler,
   failDistillationRunHandler,
   getEvolutionOverviewHandler,
-  postM4fEvolutionLiveCertificationProbeHandler,
-  getM4fEvolutionReadinessHandler,
   getLearnedSkillHandler,
   getLearnedSkillVersionHandler,
   getSkillApplicationHandler,
@@ -170,17 +165,6 @@ import {
   taskViewLearnedSkillVersionHandler,
   updateEvolutionSettingsHandler,
 } from "./self-evolution-handlers.ts";
-import {
-  cancelEvolutionEvalJobHandler,
-  evolutionEvalEvidenceHandler,
-  prepareEvolutionEvalJobHandler,
-  readEvolutionEvalWorkspaceHandler,
-  recoverEvolutionEvalJobsHandler,
-  statusEvolutionEvalJobHandler,
-  submitEvolutionEvalJobHandler,
-  writeEvolutionEvalWorkspaceHandler,
-} from "./evolution-eval-handlers.ts";
-import { issueM4fEvolutionEvalCanaryHandler } from "./evolution-eval-canary-handlers.ts";
 
 const API_PREFIX = "/api/v1";
 const CLASSIFICATIONS: Record<string, true> = { D1: true, D2: true, D3: true, D4: true, UNCLASSIFIED: true };
@@ -199,7 +183,6 @@ type RequiredScope =
   | "core:task-runtime"
   | "core:evolution-distiller"
   | "core:evolution-curator"
-  | "core:evolution-eval"
   | "core:evolution-scheduler";
 type RequiredScopeCheck = RequiredScope | readonly RequiredScope[];
 
@@ -297,9 +280,6 @@ export async function routeApi(
   runtimeClient?: RuntimeClient,
   featureFlags: Readonly<CoreFeatureFlags> = DISABLED_CORE_FEATURE_FLAGS,
   runtimeActorId = "synthia-runtime",
-  evolutionEvalConnector?: EvolutionEvalConnectorPort,
-  evolutionEvalReadiness?: EvolutionEvalDeploymentReadiness,
-  evolutionEvalLiveCertificationProbe?: () => Promise<void>,
 ): Promise<Response> {
   const url = new URL(request.url);
   const correlationId = resolveCorrelationId(request.headers.get("x-correlation-id"));
@@ -365,12 +345,9 @@ export async function routeApi(
     idempotencyKey: request.headers.get("idempotency-key"),
     classification,
     connector,
-    evolutionEvalConnector,
     runtimeClient,
     runtimeActorId,
     featureFlags,
-    evolutionEvalReadiness,
-    evolutionEvalLiveCertificationProbe,
   };
 
   const match = matchRoute(ctx);
@@ -384,9 +361,7 @@ export async function routeApi(
     ? match.requiredScope
     : [match.requiredScope];
   if (!requiredScopes.some((scope) => identity.scopes.includes(scope))) {
-    const scopeError = requiredScopes.includes("core:evolution-eval")
-      ? evolutionScopeForbiddenError()
-      : forbiddenErrorWithRequired(match.requiredScope);
+    const scopeError = forbiddenErrorWithRequired(match.requiredScope);
     return jsonBody(403, errorEnvelope(scopeError, correlationId));
   }
 
@@ -431,43 +406,11 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
   if (segments.length === 2 && segments[0] === "evolution" && segments[1] === "overview" && method === "GET") {
     return { handler: getEvolutionOverviewHandler, params: {}, requiredScope: "core:read" };
   }
-  if (
-    segments.length === 2
-    && segments[0] === "evolution"
-    && segments[1] === "m4f-readiness"
-    && method === "GET"
-  ) {
-    return { handler: getM4fEvolutionReadinessHandler, params: {}, requiredScope: "core:read" };
-  }
-  if (
-    segments.length === 2
-    && segments[0] === "evolution"
-    && segments[1] === "m4f-live-certification"
-    && method === "POST"
-  ) {
-    return {
-      handler: postM4fEvolutionLiveCertificationProbeHandler,
-      params: {},
-      requiredScope: "core:write",
-    };
-  }
   if (segments.length === 2 && segments[0] === "evolution" && segments[1] === "settings" && method === "POST") {
     return { handler: updateEvolutionSettingsHandler, params: {}, requiredScope: "core:write" };
   }
   if (segments.length === 2 && segments[0] === "evolution" && segments[1] === "curator-runs" && method === "POST") {
     return { handler: createCuratorRunHandler, params: {}, requiredScope: "core:write" };
-  }
-  if (
-    segments.length === 2
-    && segments[0] === "evolution"
-    && segments[1] === "m4f-canary-bindings"
-    && method === "POST"
-  ) {
-    return {
-      handler: issueM4fEvolutionEvalCanaryHandler,
-      params: {},
-      requiredScope: "core:admin",
-    };
   }
   if (segments[0] === "learned-skills") {
     if (segments.length === 1 && method === "GET") {
@@ -535,52 +478,6 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
       }
       if (segments.length === 4 && segments[3] === "claim-scheduled" && method === "POST") {
         return { handler: claimScheduledCuratorRunHandler, params: {}, requiredScope: "core:evolution-curator" };
-      }
-      if (
-        segments.length === 6
-        && segments[4] === "eval-jobs"
-        && method === "POST"
-      ) {
-        const params = { runId: segments[3]! };
-        if (segments[5] === "prepare") {
-          return { handler: prepareEvolutionEvalJobHandler, params, requiredScope: "core:evolution-eval" };
-        }
-        if (segments[5] === "recover") {
-          return { handler: recoverEvolutionEvalJobsHandler, params, requiredScope: "core:evolution-eval" };
-        }
-      }
-      if (
-        segments.length === 8
-        && segments[4] === "eval-jobs"
-        && segments[6] === "workspace"
-        && method === "POST"
-      ) {
-        const params = { runId: segments[3]!, evalJobId: segments[5]! };
-        if (segments[7] === "read") {
-          return { handler: readEvolutionEvalWorkspaceHandler, params, requiredScope: "core:evolution-eval" };
-        }
-        if (segments[7] === "write") {
-          return { handler: writeEvolutionEvalWorkspaceHandler, params, requiredScope: "core:evolution-eval" };
-        }
-      }
-      if (
-        segments.length === 7
-        && segments[4] === "eval-jobs"
-        && method === "POST"
-      ) {
-        const params = { runId: segments[3]!, evalJobId: segments[5]! };
-        if (segments[6] === "submit") {
-          return { handler: submitEvolutionEvalJobHandler, params, requiredScope: "core:evolution-eval" };
-        }
-        if (segments[6] === "status") {
-          return { handler: statusEvolutionEvalJobHandler, params, requiredScope: "core:evolution-eval" };
-        }
-        if (segments[6] === "cancel") {
-          return { handler: cancelEvolutionEvalJobHandler, params, requiredScope: "core:evolution-eval" };
-        }
-        if (segments[6] === "evidence") {
-          return { handler: evolutionEvalEvidenceHandler, params, requiredScope: "core:evolution-eval" };
-        }
       }
       if (segments.length === 5 && method === "POST") {
         const params = { runId: segments[3]! };

@@ -36,16 +36,10 @@ import {
 import {
   capabilityUnavailableError,
   conflictApiError,
-  evolutionEvalApiError,
   forbiddenError,
   notFoundError,
   validationError,
 } from "./errors.ts";
-import {
-  materializeEvolutionEvalClaim,
-  reconcileEvolutionEvalAfterCommit,
-  type EvolutionEvalClaimMaterialization,
-} from "./evolution-eval-handlers.ts";
 import {
   runIdempotent,
   type HandlerResult,
@@ -426,111 +420,6 @@ export async function getEvolutionOverviewHandler(ctx: RequestContext): Promise<
   return { status: 200, data: await overview(ctx.pool, ctx) };
 }
 
-/**
- * Read-only startup proof for the dedicated M4-F runner.  `ready` means Core
- * was started with all three gates, a dedicated Connector, and the exact B v2
- * identity shown below.  The dispatcher still revalidates B and the live
- * Worker on every tick before any new effect.
- */
-export async function getM4fEvolutionReadinessHandler(
-  ctx: RequestContext,
-): Promise<HandlerResult> {
-  const certification = ctx.evolutionEvalReadiness;
-  const dispatcherHostEnabled = ctx.featureFlags?.evolutionEvalDispatcherHost === true;
-  const newEffectsEnabled = ctx.featureFlags?.evolutionEvalExecution === true;
-  const rolloutEnabled = ctx.featureFlags?.selfEvolution === true;
-  const connectorConfigured = ctx.evolutionEvalConnector !== undefined;
-  return {
-    status: 200,
-    data: {
-      schema: "synthia-m4f-core-readiness.v1",
-      ready: dispatcherHostEnabled
-        && newEffectsEnabled
-        && rolloutEnabled
-        && connectorConfigured
-        && certification !== undefined
-        && Date.now() < Date.parse(certification.expiresAt),
-      dispatcher_host_enabled: dispatcherHostEnabled,
-      new_effects_enabled: newEffectsEnabled,
-      rollout_enabled: rolloutEnabled,
-      connector_configured: connectorConfigured,
-      certification: certification === undefined
-        ? null
-        : {
-            gate_id: certification.gateId,
-            certification_hash: certification.certificationHash,
-            expires_at: certification.expiresAt,
-            endpoint_origin: certification.endpointOrigin,
-            project_id: certification.projectId,
-            connector_id: certification.connectorId,
-            worker_process_instance_id: certification.workerProcessInstanceId,
-            ledger_epoch: certification.ledgerEpoch,
-            active_config_sha256: certification.activeConfigSha256,
-          },
-    },
-  };
-}
-
-/**
- * Prove that the frozen M4-F identity still maps to the authenticated live
- * Worker and its certified ledger immediately before the runner creates any
- * role, task, distillation, or application facts. This handler is deliberately
- * read-only: it does not use idempotency or write an audit/outbox row.
- */
-export async function postM4fEvolutionLiveCertificationProbeHandler(
-  ctx: RequestContext,
-): Promise<HandlerResult> {
-  requireHumanControl(ctx);
-  const body = asObject(ctx.body);
-  exactFields(body, [
-    "schema",
-    "gate_id",
-    "certification_hash",
-    "project_id",
-    "ledger_epoch",
-  ]);
-  const certification = ctx.evolutionEvalReadiness;
-  const probe = ctx.evolutionEvalLiveCertificationProbe;
-  if (certification === undefined || probe === undefined) {
-    throw capabilityUnavailableError("M4F_LIVE_CERTIFICATION_UNAVAILABLE");
-  }
-  if (
-    body.schema !== "synthia-m4f-live-certification-probe.v1"
-    || body.gate_id !== certification.gateId
-    || body.certification_hash !== certification.certificationHash
-    || body.project_id !== certification.projectId
-    || body.ledger_epoch !== certification.ledgerEpoch
-  ) {
-    throw validationError("M4-F live certification request does not match Core startup identity");
-  }
-  try {
-    await probe();
-  } catch (error) {
-    throw capabilityUnavailableError(
-      "M4F_LIVE_CERTIFICATION_FAILED",
-      {
-        code: error instanceof ConnectorError
-          ? error.code
-          : "EVOLUTION_EVAL_CERTIFICATION_INVALID",
-      },
-    );
-  }
-  return {
-    status: 200,
-    data: {
-      schema: "synthia-m4f-live-certification.v1",
-      fresh: true,
-      gate_id: certification.gateId,
-      certification_hash: certification.certificationHash,
-      project_id: certification.projectId,
-      endpoint_origin: certification.endpointOrigin,
-      connector_id: certification.connectorId,
-      worker_process_instance_id: certification.workerProcessInstanceId,
-      ledger_epoch: certification.ledgerEpoch,
-      checked_at: new Date().toISOString(),
-    },
-  };
-}
 
 function pageLimit(url: URL): number {
   const raw = url.searchParams.get("limit");
@@ -2476,7 +2365,6 @@ async function failLeasedRun(
         ) {
           throw conflictApiError("EVOLUTION_LEASE_CONFLICT");
         }
-        await validateCuratorEvolutionFailure(tx, runId);
       }
       const result = await tx.query(
         `UPDATE ${table}
@@ -2811,7 +2699,6 @@ async function claimCuratorRun(
       readonly applicationId: string;
       readonly evidenceSnapshotHash: string;
     }[];
-    readonly evalMaterialization: EvolutionEvalClaimMaterialization;
   } | null = null;
   try {
     claim = await withTransaction(conn as unknown as TransactionClient, async (tx) => {
@@ -2898,26 +2785,17 @@ async function claimCuratorRun(
           evidenceSnapshotHash: await applicationSnapshotHash(tx, applicationId),
         });
       }
-      const evalMaterialization = await materializeEvolutionEvalClaim(
-        tx,
-        ctx,
-        { id: String(claimedRun.id), mode: String(claimedRun.mode) },
-        applications,
-      );
-      return { run: claimedRun, applications, evalMaterialization };
+      return { run: claimedRun, applications };
     });
   } finally {
     conn.release();
   }
   if (!claim) return { status: 200, data: { schema: "curator-claim.v1", run: null } };
-  const { run, applications: claimedApplications, evalMaterialization } = claim;
-  const evalRecovery = run.mode === "dry_run"
-    ? evalMaterialization.recovery
-    : await reconcileEvolutionEvalAfterCommit(ctx, String(run.id));
+  const { run, applications: claimedApplications } = claim;
   const applications = await Promise.all(
     claimedApplications.map(async (application) => ({
       ...await curatorApplicationBundle(ctx, application.applicationId),
-      eval_input: evalMaterialization.evalInputs.get(application.applicationId) ?? null,
+      eval_input: null,
       evidence_snapshot_hash: application.evidenceSnapshotHash,
     })),
   );
@@ -2933,7 +2811,6 @@ async function claimCuratorRun(
         lease_token: run.lease_token,
         lease_expires_at: iso(run.lease_expires_at),
         schedule_bucket: run.schedule_bucket,
-        eval_recovery: evalRecovery,
         applications,
       },
     },
@@ -3498,40 +3375,7 @@ interface CuratorEvalJobRow extends Row {
   readonly evidence_manifest_hash: string | null;
 }
 
-function evalFactConclusion(facts: ReadonlySet<string>): "frozen" | "corrupt" | "unavailable_at_deadline" | "none" {
-  if (facts.has("frozen")) return "frozen";
-  if (facts.has("corrupt")) return "corrupt";
-  if (facts.has("unavailable_at_deadline")) return "unavailable_at_deadline";
-  return "none";
-}
 
-async function lockedCuratorEvalJobs(
-  tx: TransactionClient,
-  runId: string,
-): Promise<CuratorEvalJobRow[]> {
-  await tx.query(
-    `SELECT job.id FROM evolution_eval_job job
-       JOIN tool_run tool ON tool.id=job.tool_run_id
-      WHERE job.curator_run_id=$1 ORDER BY job.ordinal
-      FOR UPDATE OF job,tool`,
-    [runId],
-  );
-  const result = await tx.query(
-    `SELECT job.id,job.tool_run_id,job.application_id,job.version_id,
-            job.reconciliation_state,tool.state::text,tool.error_code,
-            COALESCE(array_agg(fact.fact_type ORDER BY fact.created_at,fact.id)
-              FILTER (WHERE fact.id IS NOT NULL),'{}'::text[]) AS evidence_facts,
-            max(fact.manifest_hash) FILTER (WHERE fact.fact_type='frozen') AS evidence_manifest_hash
-       FROM evolution_eval_job job
-       JOIN tool_run tool ON tool.id=job.tool_run_id
-       LEFT JOIN evolution_eval_evidence_fact fact ON fact.eval_job_id=job.id
-      WHERE job.curator_run_id=$1
-      GROUP BY job.id,tool.state,tool.error_code
-      ORDER BY job.ordinal`,
-    [runId],
-  );
-  return result.rows as CuratorEvalJobRow[];
-}
 
 function evalJobRefKey(ref: {
   readonly evalJobId: string;
@@ -3541,117 +3385,7 @@ function evalJobRefKey(ref: {
   return `${ref.evalJobId}\0${ref.toolRunId}\0${ref.evidenceManifestHash ?? ""}`;
 }
 
-async function validateCuratorEvolutionCompletion(
-  tx: TransactionClient,
-  runId: string,
-  evaluations: readonly CuratorEvaluationPayload[],
-  remediations: readonly RemediationPayload[],
-): Promise<void> {
-  const jobs = await lockedCuratorEvalJobs(tx, runId);
-  const terminal = new Set(["rejected", "succeeded", "failed", "cancelled", "timeout", "unknown_effect"]);
-  if (jobs.some((job) => !terminal.has(job.state) || job.reconciliation_state === "required")) {
-    throw evolutionEvalApiError("EVOLUTION_EVAL_RECONCILIATION_REQUIRED", 409, true);
-  }
-  const affectedApplications = new Set<string>();
-  const primaryVersionIds = new Set<string>();
-  for (const job of jobs) {
-    const facts = new Set(job.evidence_facts ?? []);
-    const conclusion = evalFactConclusion(facts);
-    const durableNotAccepted = job.state === "failed" && new Set([
-      "EVOLUTION_EVAL_NOT_ACCEPTED",
-      "EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE",
-    ]).has(job.error_code ?? "");
-    if (
-      new Set(["succeeded", "failed", "cancelled", "timeout"]).has(job.state)
-      && !durableNotAccepted
-      && conclusion === "none"
-    ) {
-      throw evolutionEvalApiError("EVOLUTION_EVAL_EVIDENCE_NOT_READY", 409, true);
-    }
-    if (job.state === "unknown_effect" || conclusion === "corrupt" || conclusion === "unavailable_at_deadline") {
-      affectedApplications.add(job.application_id);
-      primaryVersionIds.add(job.version_id);
-    }
-  }
 
-  const byApplication = new Map<string, CuratorEvalJobRow[]>();
-  for (const job of jobs) {
-    const rows = byApplication.get(job.application_id) ?? [];
-    rows.push(job);
-    byApplication.set(job.application_id, rows);
-  }
-  for (const evaluation of evaluations) {
-    const expected = (byApplication.get(evaluation.applicationId) ?? []).map((job) => {
-      const facts = new Set(job.evidence_facts ?? []);
-      return {
-        evalJobId: job.id,
-        toolRunId: job.tool_run_id,
-        evidenceManifestHash: evalFactConclusion(facts) === "frozen"
-          ? job.evidence_manifest_hash
-          : null,
-      };
-    });
-    const actualKeys = [...evaluation.evalJobRefs].map(evalJobRefKey).sort();
-    const expectedKeys = expected.map(evalJobRefKey).sort();
-    if (
-      actualKeys.length !== expectedKeys.length
-      || actualKeys.some((key, index) => key !== expectedKeys[index])
-    ) {
-      throw evolutionEvalApiError("EVOLUTION_EVAL_BINDING_CONFLICT", 409, false, {
-        application_id: evaluation.applicationId,
-      });
-    }
-    if (affectedApplications.has(evaluation.applicationId) && evaluation.outcome !== "inconclusive") {
-      throw evolutionEvalApiError("EVOLUTION_EVAL_UNKNOWN_REQUIRES_COMPLETE", 409, false, {
-        application_id: evaluation.applicationId,
-      });
-    }
-  }
-  if (affectedApplications.size === 0) return;
-  const affectedSkillResult = await tx.query(
-    `SELECT DISTINCT sas.skill_id
-       FROM skill_application_skill sas
-      WHERE sas.role='primary' AND sas.version_id=ANY($1::text[])`,
-    [[...primaryVersionIds]],
-  );
-  const affectedSkillIds = new Set((affectedSkillResult.rows as Row[]).map((row) => String(row.skill_id)));
-  for (const remediation of remediations) {
-    if (affectedSkillIds.has(remediation.skillId) && remediation.action !== "no_op") {
-      throw evolutionEvalApiError("EVOLUTION_EVAL_UNKNOWN_REQUIRES_COMPLETE", 409, false, {
-        skill_id: remediation.skillId,
-      });
-    }
-  }
-}
-
-async function validateCuratorEvolutionFailure(
-  tx: TransactionClient,
-  runId: string,
-): Promise<void> {
-  const jobs = await lockedCuratorEvalJobs(tx, runId);
-  if (jobs.some((job) => job.state === "unknown_effect")) {
-    throw evolutionEvalApiError("EVOLUTION_EVAL_UNKNOWN_REQUIRES_COMPLETE", 409);
-  }
-  if (jobs.some((job) => {
-    const facts = new Set(job.evidence_facts ?? []);
-    return facts.has("corrupt") || facts.has("unavailable_at_deadline");
-  })) {
-    throw evolutionEvalApiError("EVOLUTION_EVAL_EVIDENCE_REQUIRES_COMPLETE", 409);
-  }
-  if (jobs.some((job) => {
-    if (job.reconciliation_state === "required") return true;
-    if (!new Set(["rejected", "succeeded", "failed", "cancelled", "timeout"]).has(job.state)) return true;
-    if (job.state === "rejected") return false;
-    if (
-      job.state === "failed"
-      && new Set(["EVOLUTION_EVAL_NOT_ACCEPTED", "EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE"])
-        .has(job.error_code ?? "")
-    ) return false;
-    return evalFactConclusion(new Set(job.evidence_facts ?? [])) === "none";
-  })) {
-    throw evolutionEvalApiError("EVOLUTION_EVAL_RECONCILIATION_REQUIRED", 409, true);
-  }
-}
 
 export async function completeCuratorRunHandler(ctx: RequestContext): Promise<HandlerResult> {
   requireCapability(ctx, "core:evolution-curator");
@@ -3722,7 +3456,6 @@ export async function completeCuratorRunHandler(ctx: RequestContext): Promise<Ha
       ) {
         throw validationError("remediations must exactly cover the distinct primary skill set");
       }
-      await validateCuratorEvolutionCompletion(tx, runId, evaluations, remediations);
       const skippedActions: Record<string, unknown>[] = [];
       const evaluationIds: string[] = [];
       const producedVersionIds: string[] = [];
