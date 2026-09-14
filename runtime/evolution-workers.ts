@@ -589,7 +589,12 @@ function parseEvaluation(
   const allowedRefs = new Set(bundle.evidence.flatMap((item) => [item.id, item.sha256]));
   const evidenceRefs = array(row.evidence_refs, `${label}.evidence_refs`, 100).map((value, refIndex) => {
     const ref = boundedText(value, `${label}.evidence_refs[${refIndex}]`, 1_024);
-    if (!allowedRefs.has(ref)) malformed(`${label} cites evidence outside the claim`);
+    if (!allowedRefs.has(ref)) {
+      // Diagnostic: the S3 chain showed refs-present evaluations rejected
+      // while empty-refs ones pass — surface the sets to pin the seam.
+      process.stderr.write(`[curator-refs] rejected=${ref} allowed=[${[...allowedRefs].join(",")}] bundleEvidenceCount=${bundle.evidence.length}\n`);
+      malformed(`${label} cites evidence outside the claim`);
+    }
     return ref;
   });
   if (outcome !== "inconclusive" && evidenceRefs.length === 0) {
