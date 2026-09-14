@@ -16,6 +16,7 @@ import { CircleCheck, CircleX, Folder, LoaderCircle, Sparkles } from "lucide-vue
 import Button from "../ui/AppButton.vue";
 import Badge from "../ui/AppBadge.vue";
 import type { ProcessStateV1, ToolSummary } from "../../api/types.ts";
+import { formatTime } from "../../util/format-time.ts";
 import {
   PROCESS_GATE_STATUS_TEXT,
   processProgress,
@@ -125,12 +126,6 @@ function activityTone(state: string): string {
 }
 
 // 与 VersionBar/RecordsPanel 一致的短时刻格式（MM/DD HH:mm）。
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
 const visibleExamples = computed(() => props.exampleTasks.slice(0, 3));
 </script>
 <template>

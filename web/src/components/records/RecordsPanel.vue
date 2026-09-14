@@ -7,6 +7,7 @@
  */
 import { nextTick, ref, watch } from "vue";
 import type { JobEvidenceContent } from "../../api/types.ts";
+import { formatTime } from "../../util/format-time.ts";
 import { recordEntryKey, type RecordJob } from "../../domain/records.ts";
 import type { RecordEntryContentState, RecordsPanelEmits, RecordsPanelProps } from "../../views/project-view-contract.ts";
 import Badge from "../ui/AppBadge.vue";
@@ -29,12 +30,6 @@ function statusText(job: RecordJob): string {
 
 function shortHash(sha: string): string {
   return sha.length > 12 ? `${sha.slice(0, 12)}…` : sha;
-}
-
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
 function formatSize(bytes: number): string {

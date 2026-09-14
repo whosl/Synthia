@@ -10,6 +10,7 @@
  */
 import { computed, ref } from "vue";
 import type { ArtifactRevision } from "../../api/types.ts";
+import { formatTime } from "../../util/format-time.ts";
 import { REVISION_STATE_TEXT } from "../../domain/gates.ts";
 import { artifactDotState, ARTIFACT_DOT_TEXT, ARTIFACT_DOT_TONE } from "../../views/project-view-contract.ts";
 import Badge from "../ui/AppBadge.vue";
@@ -34,12 +35,6 @@ const activeRevision = computed<ArtifactRevision | null>(
 
 /** 下拉列表按版本号降序（最新版在最上）。 */
 const sortedRevisions = computed(() => [...props.revisions].sort((a, b) => b.version - a.version));
-
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
 
 function onSelect(revisionId: string): void {
   open.value = false;

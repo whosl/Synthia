@@ -18,6 +18,7 @@ import {
   formatSideTaskHash,
   sideTaskEventText,
 } from "../../domain/side-tasks.ts";
+import { formatDateTime } from "../../util/format-time.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
 
@@ -144,11 +145,6 @@ function submitAdoption(): void {
     return;
   }
   emit("adopt", parsed.request);
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : value;
 }
 
 function shortCommit(value: string | null): string {
@@ -288,7 +284,7 @@ onBeforeUnmount(() => {
             >
               <span class="block min-w-0">
                 <strong class="min-w-0 line-clamp-2">{{ task.objective }}</strong>
-                <small class="mt-1 block min-w-0 text-fg-muted">{{ formatTime(task.created_at) }}</small>
+                <small class="mt-1 block min-w-0 text-fg-muted">{{ formatDateTime(task.created_at) }}</small>
               </span>
               <span class="flex flex-wrap gap-1">
                 <Badge :tone="SIDE_TASK_STATUS_TONE[task.status]" size="sm">{{ SIDE_TASK_STATUS_TEXT[task.status] }}</Badge>
@@ -340,7 +336,7 @@ onBeforeUnmount(() => {
               >
                 <span class="text-xs text-fg-muted">{{ entry.event.event_kind === "user_message" ? "你" : entry.event.event_kind === "assistant_message" ? "探索 Agent" : "状态" }}</span>
                 <p class="m-0 whitespace-pre-wrap wrap-anywhere">{{ entry.text }}</p>
-                <time class="text-xs text-fg-muted" :datetime="entry.event.created_at">{{ formatTime(entry.event.created_at) }}</time>
+                <time class="text-xs text-fg-muted" :datetime="entry.event.created_at">{{ formatDateTime(entry.event.created_at) }}</time>
               </li>
             </ol>
             <form

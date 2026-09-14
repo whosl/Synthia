@@ -25,6 +25,7 @@ import {
   shouldPrepareReadiness,
 } from "../../domain/formal-delivery.ts";
 import { PROCESS_GATE_STATUS_TEXT, type ProcessGateView } from "../../domain/process-profile.ts";
+import { formatDateTime } from "../../util/format-time.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
 import { Skeleton } from "../ui/skeleton";
@@ -205,12 +206,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function formatTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString("zh-CN", { hour12: false });
 }
 
 function submitChangeRequest(): void {
@@ -531,7 +526,7 @@ function withdrawChange(): void {
         </template>
 
         <div v-if="approval" class="grid gap-2 rounded-md bg-brand-subtle p-3">
-          <p class="m-0 text-xs text-fg-secondary">确认人 {{ approval.confirmed_by }} · {{ formatTime(approval.confirmed_at) }}</p>
+          <p class="m-0 text-xs text-fg-secondary">确认人 {{ approval.confirmed_by }} · {{ formatDateTime(approval.confirmed_at) }}</p>
           <p class="m-0 text-xs text-fg-secondary">
             {{ state?.completed ? "正式交付已密封" : formalProgress ? formalProgressText[formalProgress.status] : "等待 Runtime 读取确认事实" }}。
             四项正式运行由绑定的主 Runtime 自动编排，避免人工重复提交。
@@ -587,7 +582,7 @@ function withdrawChange(): void {
             <Badge size="sm" class="font-bold" :tone="bitstream.class === 'formal' ? 'ok' : 'warn'">{{ bitstreamClassText(bitstream.class) }}</Badge>
             <div class="grid min-w-0 flex-1 gap-[2px]">
               <strong>{{ bitstream.target_part }}</strong>
-              <small class="text-fg-muted">{{ formatTime(bitstream.generated_at) }}</small>
+              <small class="text-fg-muted">{{ formatDateTime(bitstream.generated_at) }}</small>
             </div>
             <span>{{ formatBytes(bitstream.size_bytes) }}</span>
             <code class="text-[10px] text-fg-muted">{{ shortHash(bitstream.sha256) }}</code>
@@ -639,7 +634,7 @@ function withdrawChange(): void {
               </div>
               <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
                 <dt class="text-[11px] text-fg-muted">发布时间</dt>
-                <dd class="m-0 overflow-hidden text-ellipsis">{{ formatTime(selectedRelease.released_at) }}</dd>
+                <dd class="m-0 overflow-hidden text-ellipsis">{{ formatDateTime(selectedRelease.released_at) }}</dd>
               </div>
               <div class="grid min-w-0 gap-[3px] rounded-sm bg-hover p-2">
                 <dt class="text-[11px] text-fg-muted">清单版本</dt>
