@@ -73,17 +73,25 @@ interface HubInternal {
   events: StreamEvent[];
   seq: number;
   retain: number;
+  /** 同一 partId 的连续 delta 在此窗口内聚合为一条事件（ms）。0 = 不聚合。 */
+  deltaBatchMs: number;
+  /** 聚合中的 delta 批（flush 时才分配 seq 入列）。 */
+  pendingDelta: { partId: string; text: string } | null;
+  pendingTimer: ReturnType<typeof setTimeout> | null;
   /** 等待新事件的 next() 唤醒回调。 */
   waiters: Array<() => void>;
 }
 
 const DEFAULT_RETAIN = 2000;
+const DEFAULT_DELTA_BATCH_MS = 80;
+/** 聚合批达到该字符数立即 flush（不等窗口）。 */
+const DELTA_BATCH_CHARS = 64;
 const hubs = new Map<string, HubInternal>();
 
-function hubFor(agentId: string, retain: number = DEFAULT_RETAIN): HubInternal {
+function hubFor(agentId: string, retain: number = DEFAULT_RETAIN, deltaBatchMs: number = DEFAULT_DELTA_BATCH_MS): HubInternal {
   let hub = hubs.get(agentId);
   if (!hub) {
-    hub = { events: [], seq: 0, retain, waiters: [] };
+    hub = { events: [], seq: 0, retain, deltaBatchMs, pendingDelta: null, pendingTimer: null, waiters: [] };
     hubs.set(agentId, hub);
   }
   return hub;
@@ -98,12 +106,13 @@ export class StreamHub {
   private constructor(private readonly hub: HubInternal) {}
 
   /** 取或创建 agent 的 hub。 */
-  static for(agentId: string, retain?: number): StreamHub {
-    return new StreamHub(hubFor(agentId, retain));
+  static for(agentId: string, retain?: number, deltaBatchMs?: number): StreamHub {
+    return new StreamHub(hubFor(agentId, retain, deltaBatchMs));
   }
 
-  /** 当前最大 seq（Last-Event-ID 校验用）。 */
+  /** 当前最大 seq（Last-Event-ID 校验用）。聚合中的 delta 先 flush 保证准确。 */
   get lastSeq(): number {
+    this.flushDeltaBatch();
     return this.hub.seq;
   }
 
@@ -112,9 +121,52 @@ export class StreamHub {
     return this.hub.events[0]?.seq ?? -1;
   }
 
-  /** 发布事件（seq 自增）；返回带 seq 的完整事件。 */
+  /** 把聚合中的 delta 批落成一条事件（分配 seq、入列、唤醒等待者）。 */
+  private flushDeltaBatch(): void {
+    const hub = this.hub;
+    if (hub.pendingTimer) {
+      clearTimeout(hub.pendingTimer);
+      hub.pendingTimer = null;
+    }
+    const pending = hub.pendingDelta;
+    if (!pending) return;
+    hub.pendingDelta = null;
+    const full: StreamEvent = { type: "delta", seq: ++hub.seq, partId: pending.partId, text: pending.text };
+    hub.events.push(full);
+    if (hub.events.length > hub.retain) {
+      hub.events.splice(0, hub.events.length - hub.retain);
+    }
+    for (const wake of hub.waiters.splice(0)) wake();
+  }
+
+  /**
+   * 发布事件。delta 与同一 partId 的前一条在时间窗内聚合为一条（长思考逐
+   * token 发射会把保留窗口单轮打爆，刷新重放触发 stale → reset → 思考块
+   * 丢失）；其余事件先 flush 聚合批再入列，保证全序。delta 的 seq 在 flush
+   * 时才分配，返回值里的 seq 对 delta 表示「不晚于此 seq 可见」。
+   */
   emit(event: StreamEventInput): StreamEvent {
     const hub = this.hub;
+    if (event.type === "delta" && hub.deltaBatchMs > 0) {
+      let pending = hub.pendingDelta;
+      if (pending && pending.partId === event.partId) {
+        pending.text += event.text;
+      } else {
+        this.flushDeltaBatch();
+        pending = { partId: event.partId, text: event.text };
+        hub.pendingDelta = pending;
+      }
+      if (pending.text.length >= DELTA_BATCH_CHARS) {
+        this.flushDeltaBatch();
+      } else if (!hub.pendingTimer) {
+        hub.pendingTimer = setTimeout(() => {
+          hub.pendingTimer = null;
+          this.flushDeltaBatch();
+        }, hub.deltaBatchMs);
+      }
+      return { ...event, seq: hub.seq };
+    }
+    this.flushDeltaBatch();
     const full = { ...event, seq: ++hub.seq } as StreamEvent;
     hub.events.push(full);
     if (hub.events.length > hub.retain) {
@@ -124,19 +176,24 @@ export class StreamHub {
     return full;
   }
 
-  /** seq > cursor 的事件（无等待）。 */
+  /** seq > cursor 的事件（无等待）。聚合中的 delta 先 flush。 */
   since(cursor: number): readonly StreamEvent[] {
+    this.flushDeltaBatch();
     return eventsSince(this.hub, cursor);
   }
 
   /**
    * 订阅：游标从 `after` 开始（缺省从头回放保留窗口）。
-   * 游标早于保留窗口起点时，next() 首批返回单个 `reset` 事件。
+   * 游标早于保留窗口起点时默认返回单个 `reset` 事件；`staleReplay` 为 true
+   * 时改为从头回放保留窗口（`from=turn` 首连场景：客户端没有本地流状态可
+   * 丢弃，reset 只会把它推去轮询兜底，而轮询对轮内思考是盲的）。
    */
-  subscribe(after?: number): StreamCursor {
+  subscribe(after?: number, opts?: { readonly staleReplay?: boolean }): StreamCursor {
     const hub = this.hub;
+    const flush = (): void => this.flushDeltaBatch();
     let stopped = false;
     let cursor = after ?? 0;
+    const staleReplay = opts?.staleReplay === true;
     let stale = after !== undefined && (after > hub.seq
       || (hub.events.length > 0 && after < hub.events[0]!.seq - 1));
     const cursorObj: StreamCursor = {
@@ -157,9 +214,13 @@ export class StreamHub {
         if (stopped) return [];
         if (stale) {
           stale = false;
-          cursor = hub.seq;
-          return [{ type: "reset", seq: hub.seq, reason: "cursor outside retained stream" }];
+          if (!staleReplay) {
+            cursor = hub.seq;
+            return [{ type: "reset", seq: hub.seq, reason: "cursor outside retained stream" }];
+          }
+          cursor = 0; // 全量回放保留窗口
         }
+        flush();
         let pending = eventsSince(hub, cursor);
         if (pending.length === 0) {
           await new Promise<void>((resolve) => {
@@ -185,7 +246,7 @@ export class StreamHub {
   subscribeCurrentTurn(): StreamCursor {
     const events = this.hub.events;
     for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i]!.type === "done") return this.subscribe(events[i]!.seq);
+      if (events[i]!.type === "done") return this.subscribe(events[i]!.seq, { staleReplay: true });
     }
     return this.subscribe();
   }
@@ -194,6 +255,10 @@ export class StreamHub {
   static drop(agentId: string): void {
     const hub = hubs.get(agentId);
     if (hub) {
+      if (hub.pendingTimer) {
+        clearTimeout(hub.pendingTimer);
+        hub.pendingTimer = null;
+      }
       hubs.delete(agentId);
       for (const wake of hub.waiters.splice(0)) wake();
     }

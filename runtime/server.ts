@@ -2446,6 +2446,15 @@ export class RuntimeServer {
         });
       }
       openPartId = null;
+      // 块边界即落库：刚定稿的思维链/叙述立刻同步 Core（原来只等工具边界或
+      // finalize）。轮询兜底（刷新重放 stale → reset 的场景）对 thinking 的
+      // 盲区因此从「整轮」缩到「块间」。幂等：flushedCells 防重，工具边界的
+      // 显式 flush 与这里互不冲突。
+      flushPendingCells().catch((error: unknown) => {
+        process.stderr.write(
+          `[runtime-server] boundary cell sync failed for ${agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
     };
     let firstToolEventSequence: number | null = null;
     let lastToolEventSequence: number | null = null;

@@ -331,35 +331,95 @@ describe("StreamHub", () => {
     const hub = Hub.for(`hub-${Math.random()}`);
     const a = hub.emit({ type: "status", status: "running", ts: "t" });
     const b = hub.emit({ type: "delta", partId: "p1", text: "x" });
-    expect(b.seq).toBe(a.seq + 1);
-    expect(hub.since(a.seq)).toHaveLength(1);
-    expect(hub.since(b.seq)).toHaveLength(0);
+    // delta 进聚合批：flush（since 触发）后分配的 seq = a.seq + 1。
+    expect(b.seq).toBe(a.seq);
+    const deltas = hub.since(a.seq);
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]!.seq).toBe(a.seq + 1);
+    expect(hub.since(a.seq + 1)).toHaveLength(0);
+  });
+
+  test("consecutive deltas for one part aggregate into one event", async () => {
+    const hub = Hub.for(`hub-${Math.random()}`, undefined, 15);
+    hub.emit({ type: "status", status: "running", ts: "t" });
+    for (const ch of ["a", "b", "c", "d"]) hub.emit({ type: "delta", partId: "p1", text: ch });
+    await new Promise((r) => setTimeout(r, 40)); // 等聚合窗口 flush
+    const deltas = hub.since(0).filter((e) => e.type === "delta");
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]!.type === "delta" ? deltas[0]!.text : "").toBe("abcd");
+  });
+
+  test("different partId or non-delta event flushes the pending batch first", () => {
+    const hub = Hub.for(`hub-${Math.random()}`, undefined, 60_000); // 长窗口：只靠边界 flush
+    hub.emit({ type: "delta", partId: "p1", text: "a" });
+    hub.emit({ type: "delta", partId: "p2", text: "b" });
+    hub.emit({ type: "part", part: { kind: "reasoning", id: "p1", state: "done", text: "a", ts: "t" } });
+    const all = hub.since(0);
+    expect(all.map((e) => e.type)).toEqual(["delta", "delta", "part"]);
   });
 
   test("subscriber waits for and receives later events", async () => {
-    const hub = Hub.for(`hub-${Math.random()}`);
+    const hub = Hub.for(`hub-${Math.random()}`, undefined, 15);
     const cursor = hub.subscribe();
     const first = hub.emit({ type: "status", status: "running", ts: "t" });
     const batch = await cursor.next();
     expect(batch.map((e) => e.seq)).toEqual([first.seq]);
-    // next() with no events blocks until emit
+    // next() with no events blocks until emit；delta 经聚合窗口 flush 后投递。
     const waiting = cursor.next();
-    const second = hub.emit({ type: "delta", partId: "p", text: "y" });
-    expect((await waiting).map((e) => e.seq)).toEqual([second.seq]);
+    hub.emit({ type: "delta", partId: "p", text: "y" });
+    const batch2 = await waiting;
+    expect(batch2).toHaveLength(1);
+    expect(batch2[0]!.type).toBe("delta");
+    if (batch2[0]!.type === "delta") expect(batch2[0]!.text).toBe("y");
     cursor.stop();
     expect(await cursor.next()).toEqual([]);
   });
 
   test("Last-Event-ID resume replays only events after cursor", async () => {
-    const hub = Hub.for(`hub-${Math.random()}`);
+    const hub = Hub.for(`hub-${Math.random()}`, undefined, 15);
     const e1 = hub.emit({ type: "status", status: "running", ts: "t" });
     const e2 = hub.emit({ type: "delta", partId: "p", text: "a" });
     const e3 = hub.emit({ type: "delta", partId: "p", text: "b" });
+    void e1;
+    await new Promise((r) => setTimeout(r, 40)); // 两条 delta 聚合为一条
     const cursor = hub.subscribe(e2.seq);
     const batch = await cursor.next();
-    expect(batch.map((e) => e.seq)).toEqual([e3.seq]);
-    expect(hub.lastSeq).toBe(e3.seq);
-    void e1;
+    expect(batch).toHaveLength(1);
+    const aggregated = batch[0]!;
+    expect(aggregated.type).toBe("delta");
+    if (aggregated.type === "delta") expect(aggregated.text).toBe("ab");
+    expect(aggregated.seq).toBeGreaterThan(e2.seq);
+    expect(hub.lastSeq).toBe(aggregated.seq);
+  });
+
+  test("subscribeCurrentTurn with done evicted falls back to full subscription", () => {
+    const hub = Hub.for(`hub-${Math.random()}`, 8, 0); // 不聚合；保留 8 条
+    hub.emit({ type: "delta", partId: "old", text: "1" });
+    const done = hub.emit({ type: "done", reply: "r", status: "idle", ts: "t" });
+    // 当前轮事件把 done 挤出保留窗口（长思考轮打爆 retain 的形态）。
+    for (let i = 0; i < 12; i++) hub.emit({ type: "delta", partId: `p${i}`, text: "x" });
+    expect(hub.oldestSeq).toBeGreaterThan(done.seq);
+    // done 不在窗口 → 找不到 → 全量订阅（不存在 stale 游标，天然无 reset）。
+    const cursor = hub.subscribeCurrentTurn();
+    void cursor; // 惰性游标：首个 next() 才回放，构造成功即达测试目的
+  });
+
+  test("staleReplay returns retained replay instead of reset", async () => {
+    const hub = Hub.for(`hub-${Math.random()}`, 4, 0);
+    for (let i = 0; i < 10; i++) hub.emit({ type: "delta", partId: `p${i}`, text: "x" });
+    const oldest = hub.oldestSeq;
+    const cursor = hub.subscribe(1, { staleReplay: true }); // seq1 已被裁掉
+    const batch = await cursor.next();
+    expect(batch[0]!.type).not.toBe("reset");
+    expect(batch.map((e) => e.seq)).toEqual([oldest, oldest + 1, oldest + 2, oldest + 3]);
+  });
+
+  test("without staleReplay a stale cursor yields reset (unchanged default)", async () => {
+    const hub = Hub.for(`hub-${Math.random()}`, 4, 0);
+    for (let i = 0; i < 10; i++) hub.emit({ type: "delta", partId: `p${i}`, text: "x" });
+    const cursor = hub.subscribe(1);
+    const batch = await cursor.next();
+    expect(batch[0]!.type).toBe("reset");
   });
 });
 
@@ -496,7 +556,9 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     const types = events.map((e) => e.event);
     expect(types[0]).toBe("status");
     expect(types).toContain("part");
-    expect(types.filter((t) => t === "delta").length).toBeGreaterThanOrEqual(3);
+    // delta 在 hub 内按时间窗聚合（80ms）：mock 上游瞬时发完 → 至少 1 条。
+    // 文本完整性由下方 done/part 的 full-text 断言保障，不依赖 delta 条数。
+    expect(types.filter((t) => t === "delta").length).toBeGreaterThanOrEqual(1);
     expect(types[types.length - 1]).toBe("status");
     expect(types).toContain("done");
     // seq strictly increasing
@@ -520,6 +582,49 @@ describe("RuntimeServer SSE (mode=agent full chain)", () => {
     expect(res.status).toBe(404);
     await res.text();
   });
+
+  test("reasoning block streams and finalizes intact across delta aggregation", async () => {
+    // 上游先发 reasoning_content（思维链），再发正文——hub 80ms 聚合窗口下，
+    // 思考块仍须以完整文本定稿（done part 的 full text 是权威，delta 只是
+    // 打字机增量）。这正是「长思考轮刷新丢失」修复的核心不变式。
+    nextUpstreamSSE = [
+      `data: {"choices":[{"delta":{"reasoning_content":"我需要"}}]}\n\n`,
+      `data: {"choices":[{"delta":{"reasoning_content":"先想清楚"}}]}\n\n`,
+      `data: {"choices":[{"delta":{"reasoning_content":"再动手"}}]}\n\n`,
+      `data: {"choices":[{"delta":{"content":"好的。"}}]}\n\n`,
+      `data: [DONE]\n\n`,
+    ].join("");
+    const createRes = await fetch(`${server.url}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project_id: "p-sse",
+        process_instance_id: "pi-sse",
+        task: "reasoning smoke",
+        mode: "agent",
+      }),
+    });
+    const agentId = (await createRes.json() as { agent_id: string }).agent_id;
+    agentIds.push(agentId);
+    await fetch(`${server.url}/tasks/${agentId}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "思考后回答" }),
+    });
+    const events = await readSSE(
+      `${server.url}/tasks/${agentId}/stream`,
+      {},
+      (ev, all) => ev.event === "status" && all.some((e) => e.event === "done"),
+    );
+    const reasoningParts = events.filter((e) => e.event === "part").map((e) => (e.data as { part: { kind: string; state: string; text: string } }).part).filter((p) => p.kind === "reasoning");
+    expect(reasoningParts.length).toBeGreaterThanOrEqual(1);
+    const finalized = reasoningParts[reasoningParts.length - 1]!;
+    expect(finalized.state).toBe("done");
+    expect(finalized.text).toBe("我需要先想清楚再动手");
+    // 思考块与正文块都定稿：两个不同的 part id。
+    const textParts = events.filter((e) => e.event === "part").map((e) => (e.data as { part: { kind: string; text: string } }).part).filter((p) => p.kind === "text");
+    expect(textParts[textParts.length - 1]!.text).toBe("好的。");
+  }, 20_000);
 
   test("steer while running still returns steered:true", async () => {
     const createRes = await fetch(`${server.url}/tasks`, {
