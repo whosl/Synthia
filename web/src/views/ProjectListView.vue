@@ -25,7 +25,6 @@ import CreateProjectDialog from "../components/projects/CreateProjectDialog.vue"
 import ErrorNotice from "../components/ErrorNotice.vue";
 import Badge from "../components/ui/AppBadge.vue";
 import Button from "../components/ui/AppButton.vue";
-import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 
 const router = useRouter();
 const {
@@ -84,13 +83,7 @@ function projectCreated(id: string) {
           从自由探索到正式交付，在这里继续你的工程。
         </p>
       </div>
-      <div class="primary-action" style="display: inline-flex; gap: 8px; align-items: center">
-        <router-link
-          v-if="SELF_EVOLUTION_FEATURE_ENABLED"
-          class="btn secondary"
-          to="/evolution"
-          >进化</router-link
-        >
+      <div class="flex items-center gap-2">
         <Button
           variant="primary"
           class="h-10 gap-2 px-[17px] shadow-[0_4px_10px_color-mix(in_srgb,var(--accent)_15%,transparent)] max-[600px]:h-9 max-[600px]:px-3 max-[600px]:text-xs"

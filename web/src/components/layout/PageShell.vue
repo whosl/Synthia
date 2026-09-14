@@ -28,10 +28,10 @@ const mock = import.meta.env.VITE_MOCK === "1";
 
 // 门户共享的导航/图标按钮样式（原 portal.css 的 .portal-nav a 与 .icon-button）
 const navLinkClass =
-  "flex items-center gap-3 rounded-[8px] p-3 max-[900px]:p-2.5 max-[600px]:gap-1.5 max-[600px]:px-[7px] max-[600px]:py-2.5 max-[600px]:text-[11px]";
+  "flex items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors max-[600px]:gap-1.5 max-[600px]:px-[7px] max-[600px]:py-2 max-[600px]:text-[11px]";
 const navIdleClass = "text-fg-secondary hover:bg-hover hover:text-fg";
 const navSelectedClass =
-  "bg-brand-subtle font-semibold text-brand hover:bg-brand-subtle hover:text-brand";
+  "bg-brand-subtle font-semibold text-brand shadow-[inset_2px_0_0_var(--accent)] hover:bg-brand-subtle hover:text-brand";
 const iconButtonClass =
   "inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[8px] border-0 bg-transparent text-fg-secondary hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -75,7 +75,7 @@ function logout() {
       >
         工作空间
       </p>
-      <nav class="grid gap-[7px] max-[900px]:ml-auto max-[900px]:flex" aria-label="主导航">
+      <nav class="grid gap-1 max-[900px]:ml-auto max-[900px]:flex" aria-label="主导航">
         <router-link
           to="/projects"
           :class="[
@@ -83,7 +83,7 @@ function logout() {
             section === 'projects' ? navSelectedClass : navIdleClass,
           ]"
           :aria-current="section === 'projects' ? 'page' : undefined"
-          ><LayoutGrid :size="18" />项目工作台</router-link
+          ><LayoutGrid :size="16" />项目工作台</router-link
         >
         <router-link
           to="/approvals"
@@ -92,7 +92,7 @@ function logout() {
             section === 'approvals' ? navSelectedClass : navIdleClass,
           ]"
           :aria-current="section === 'approvals' ? 'page' : undefined"
-          ><Inbox :size="18" />审批中心</router-link
+          ><Inbox :size="16" />审批中心</router-link
         >
         <router-link
           v-if="SELF_EVOLUTION_FEATURE_ENABLED"
@@ -102,11 +102,11 @@ function logout() {
             section === 'evolution' ? navSelectedClass : navIdleClass,
           ]"
           :aria-current="section === 'evolution' ? 'page' : undefined"
-          ><Sprout :size="18" />自进化</router-link
+          ><Sprout :size="16" />自进化</router-link
         >
       </nav>
       <div
-        class="mt-auto border-b border-line px-3 py-[18px] text-fg-secondary max-[900px]:hidden"
+        class="mt-auto px-3 py-[18px] text-fg-secondary max-[900px]:hidden"
       >
         <Sparkles :size="18" class="mb-2.5 text-brand" /><strong
           class="block text-xs font-medium"
@@ -117,7 +117,7 @@ function logout() {
         </p>
       </div>
       <div
-        class="flex items-center gap-[7px] pt-3.5 text-[11px] text-fg-secondary max-[900px]:hidden"
+        class="mt-3 flex items-center gap-[7px] border-t border-line pt-3.5 text-[11px] text-fg-secondary max-[900px]:hidden"
       >
         <span
           class="size-1.5 shrink-0 rounded-full bg-ok shadow-[0_0_0_3px_color-mix(in_srgb,var(--state-ok)_10%,transparent)]"

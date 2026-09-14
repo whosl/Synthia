@@ -6,19 +6,20 @@ const summary = readFileSync(new URL("../src/components/evolution/EvolutionSumma
 const detail = readFileSync(new URL("../src/components/evolution/LearnedSkillDetail.vue", import.meta.url), "utf8");
 const list = readFileSync(new URL("../src/components/evolution/LearnedSkillList.vue", import.meta.url), "utf8");
 const router = readFileSync(new URL("../src/router.ts", import.meta.url), "utf8");
-const projectList = readFileSync(new URL("../src/views/ProjectListView.vue", import.meta.url), "utf8");
+const pageShell = readFileSync(new URL("../src/components/layout/PageShell.vue", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
 };
 
 describe("self-evolution global UI contract", () => {
-  test("global route and project-list entry are feature-gated", () => {
+  test("global route and shell-nav entry are feature-gated", () => {
     expect(router).toContain('{ path: "/evolution", name: "evolution", component: EvolutionView }');
-    expect(projectList).toContain('v-if="SELF_EVOLUTION_FEATURE_ENABLED"');
-    expect(projectList).toContain('to="/evolution"');
+    expect(pageShell).toContain('v-if="SELF_EVOLUTION_FEATURE_ENABLED"');
+    expect(pageShell).toContain('to="/evolution"');
     expect(packageJson.scripts["dev:mock"]).toContain("VITE_FEATURE_SELF_EVOLUTION=1");
     expect(packageJson.scripts.dev).not.toContain("VITE_FEATURE_SELF_EVOLUTION");
     expect(packageJson.scripts.build).not.toContain("VITE_FEATURE_SELF_EVOLUTION");
+    expect(packageJson.scripts["build:golden"]).toContain("VITE_FEATURE_SELF_EVOLUTION=1");
   });
 
   test("Web consumes Core only and freezes retries instead of directly invoking Runtime", () => {
