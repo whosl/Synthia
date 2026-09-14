@@ -15,7 +15,7 @@
  *   「查看改动」走 `open-diff`，同样交给中栏 Monaco，流内不渲染行级 diff。
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Shield, ShieldOff, Sparkles, X } from "lucide-vue-next";
+import { ScrollText, Shield, ShieldOff, Sparkles, X } from "lucide-vue-next";
 import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
 import { formatRelativeTime, groupToolActivity } from "../../domain/chat-groups.ts";
 import type { GatePartState, SynthiaPart } from "../../domain/parts.ts";
@@ -140,7 +140,7 @@ onMounted(() => void nextTick(scrollToBottom));
 
 <template>
   <div class="chat-feed flex h-full min-h-0 flex-col bg-panel">
-    <div class="flex min-h-10 items-center justify-between gap-3 border-b border-line px-4 py-2"><span class="flex items-center gap-2 text-xs font-[550]"><Sparkles :size="16" class="text-brand" aria-hidden="true" />主 Agent</span><span class="flex items-center gap-1.5"><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" variant="dot" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><X :size="16" /></Button></span></div>
+    <div class="flex min-h-10 items-center justify-between gap-3 border-b border-line px-4 py-2"><span class="flex items-center gap-2 text-xs font-[550]"><Sparkles :size="16" class="text-brand" aria-hidden="true" />主 Agent</span><span class="flex items-center gap-1.5"><Button variant="ghost" size="sm" class="gap-1 text-xs text-fg-secondary" aria-label="打开运行记录" title="运行记录" @click="emit('open-records', null)"><ScrollText :size="14" aria-hidden="true" />运行记录</Button><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" variant="dot" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><X :size="16" /></Button></span></div>
     <div v-if="streamPhase === 'degraded'" class="flex-none bg-warn/14 px-3 py-1 text-center text-xs text-warn">实时连接中断，已切换定时刷新</div>
     <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="flex-none bg-hover px-3 py-1 text-center text-xs text-fg-muted">正在连接实时更新…</div>
 
