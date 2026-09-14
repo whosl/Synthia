@@ -20,9 +20,20 @@ import {
   selectedMaterialFiles,
 } from "../../domain/historical-materials.ts";
 import type { HistoricalCopyArtifactType } from "../../domain/historical-materials.ts";
+import PanelHeader from "../panels/PanelHeader.vue";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 
 const props = defineProps<{
   open: boolean;
@@ -175,6 +186,10 @@ function submitCopy(): void {
   });
 }
 
+function updateCopyArtifactType(value: unknown): void {
+  if (isHistoricalCopyArtifactType(value)) copyArtifactType.value = value;
+}
+
 onMounted(() => {
   returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   void nextTick(() => panelElement.value?.focus());
@@ -190,21 +205,19 @@ onBeforeUnmount(() => {
   <aside
     v-if="open"
     ref="panelElement"
-    class="flex h-full min-h-0 w-[min(560px,96vw)] flex-col bg-panel text-fg shadow-[0_0_24px_var(--shadow-color)]"
+    class="flex h-full min-h-0 flex-col bg-panel text-fg"
     role="dialog"
     aria-modal="true"
-    aria-labelledby="historical-materials-title"
+    aria-label="历史资料库"
     tabindex="-1"
     @keydown.esc="emit('close')"
   >
-    <header class="flex flex-none items-start justify-between gap-3 border-b border-line px-5 pt-5 pb-3 max-[560px]:px-3">
-      <div>
-        <p class="m-0 mb-1 text-xs font-semibold tracking-[0.04em] text-brand">P2 · 资料治理</p>
-        <h2 id="historical-materials-title" class="m-0 text-[15px]">历史资料库</h2>
-        <p class="m-0 mt-1 text-xs leading-[1.4] text-fg-secondary">导入资料先待确认；只有已确认且仍有效的内容可进入默认检索。</p>
-      </div>
-      <Button variant="ghost" size="sm" aria-label="关闭历史资料库" @click="emit('close')">关闭</Button>
-    </header>
+    <PanelHeader
+      eyebrow="P2 · 资料治理"
+      title="历史资料库"
+      description="导入资料先待确认；只有已确认且仍有效的内容可进入默认检索。"
+      @close="emit('close')"
+    />
 
     <div v-if="!projectEligible" class="mx-5 mt-3 rounded-md bg-hover p-3 text-xs text-fg-secondary" role="status">
       自由项目暂不接入历史资料库。请复制为工程项目后再导入。
@@ -212,21 +225,14 @@ onBeforeUnmount(() => {
 
     <Tabs v-else v-model="tab" class="flex min-h-0 flex-1 flex-col gap-0">
       <TabsList
+        variant="line"
         aria-label="资料库视图"
-        class="flex h-auto w-full justify-start gap-1 rounded-none border-b border-line bg-transparent p-0 px-5 pt-2 max-[560px]:px-3"
+        class="px-5 pt-2 max-[560px]:px-3"
       >
-        <TabsTrigger
-          value="snapshots"
-          class="inline-block h-auto flex-none rounded-none border-0 border-b-2 border-b-transparent bg-transparent px-2 py-2 text-xs font-normal text-fg-secondary hover:text-fg data-[state=active]:border-b-brand data-[state=active]:bg-transparent data-[state=active]:text-fg data-[state=active]:shadow-none dark:text-fg-secondary dark:data-[state=active]:border-b-brand dark:data-[state=active]:bg-transparent"
-        >
+        <TabsTrigger variant="line" value="snapshots">
           导入快照 <span class="text-[11px] text-fg-muted">{{ snapshots.length }}</span>
         </TabsTrigger>
-        <TabsTrigger
-          value="search"
-          class="inline-block h-auto flex-none rounded-none border-0 border-b-2 border-b-transparent bg-transparent px-2 py-2 text-xs font-normal text-fg-secondary hover:text-fg data-[state=active]:border-b-brand data-[state=active]:bg-transparent data-[state=active]:text-fg data-[state=active]:shadow-none dark:text-fg-secondary dark:data-[state=active]:border-b-brand dark:data-[state=active]:bg-transparent"
-        >
-          默认检索
-        </TabsTrigger>
+        <TabsTrigger variant="line" value="search">默认检索</TabsTrigger>
       </TabsList>
 
       <div v-if="error" class="mx-5 mt-3 flex items-center justify-between gap-2 rounded-md bg-danger/12 p-3 text-xs text-danger" role="alert">
@@ -253,9 +259,9 @@ onBeforeUnmount(() => {
               <input type="file" accept="application/json,.json" class="pointer-events-none absolute h-px w-px opacity-0" @change="onImportFile" />
             </label>
           </div>
-          <textarea
+          <Textarea
             v-model="importText"
-            class="mt-2 block min-h-[120px] w-full resize-y rounded-sm border border-line-strong bg-panel p-2 font-mono text-[12.5px] text-fg"
+            class="mt-2 min-h-[120px] resize-y font-mono text-[12.5px]"
             rows="7"
             spellcheck="false"
             aria-label="资料导入 JSON"
@@ -312,11 +318,10 @@ onBeforeUnmount(() => {
           <ul class="m-0 mt-3 list-none p-0">
             <li v-for="file in selectedSnapshot.files" :key="file.id">
               <label class="flex min-w-0 items-center gap-2 py-1 text-xs">
-                <input
-                  type="checkbox"
-                  :checked="selectedFileIds.has(file.id)"
+                <Checkbox
+                  :model-value="selectedFileIds.has(file.id)"
                   :disabled="!canCopyMaterial(selectedSnapshot) || !isSearchableFile(file)"
-                  @change="toggleFile(file.id)"
+                  @update:model-value="toggleFile(file.id)"
                 />
                 <span class="min-w-0 flex-1 truncate font-mono text-[12.5px]">{{ file.path }}</span>
                 <small class="flex-none text-fg-muted">{{ formatBytes(file.bytes) }}</small>
@@ -330,20 +335,25 @@ onBeforeUnmount(() => {
               <Button size="sm" variant="primary" :disabled="operating" :loading="operating" @click="emit('confirm', selectedSnapshot.id)">确认资料</Button>
               <Button size="sm" variant="danger" :disabled="operating" @click="submitDeny">否决</Button>
             </div>
-            <input v-model="denyReason" class="mt-2 w-full rounded-sm border border-line-strong bg-panel p-2 text-fg" type="text" aria-label="否决理由（可选）" placeholder="否决理由（可选）" @keydown.enter.prevent="submitDeny" />
+            <Input v-model="denyReason" class="mt-2" type="text" aria-label="否决理由（可选）" placeholder="否决理由（可选）" @keydown.enter.prevent="submitDeny" />
           </div>
 
           <div v-if="canCopyMaterial(selectedSnapshot)" class="mt-4 rounded-md bg-hover p-3">
             <div class="font-semibold">复制选中内容为当前项目候选</div>
             <p class="m-0 text-xs leading-[1.4] text-fg-secondary">复制会创建新的候选修订，不继承这份历史资料的确认状态。</p>
             <div class="my-2 flex flex-wrap items-center gap-2">
-              <input v-model="copyId" class="min-w-0 flex-[1_1_140px] rounded-sm border border-line-strong bg-panel p-2 text-fg" type="text" aria-label="候选标识" placeholder="候选标识，如 pwm-reference" />
-              <input v-model="copyName" class="min-w-0 flex-[1_1_140px] rounded-sm border border-line-strong bg-panel p-2 text-fg" type="text" aria-label="候选名称" placeholder="候选名称" />
-              <select v-model="copyArtifactType" class="min-w-0 flex-[1_1_220px] rounded-sm border border-line-strong bg-panel p-2 text-fg" aria-label="候选产物类型">
-                <option v-for="option in HISTORICAL_COPY_ARTIFACT_TYPES" :key="option.value" :value="option.value">
-                  {{ option.label }}（{{ option.value }}）
-                </option>
-              </select>
+              <Input v-model="copyId" class="min-w-0 flex-[1_1_140px]" type="text" aria-label="候选标识" placeholder="候选标识，如 pwm-reference" />
+              <Input v-model="copyName" class="min-w-0 flex-[1_1_140px]" type="text" aria-label="候选名称" placeholder="候选名称" />
+              <Select :model-value="copyArtifactType" @update:model-value="updateCopyArtifactType">
+                <SelectTrigger class="min-w-0 flex-[1_1_220px]" aria-label="候选产物类型">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in HISTORICAL_COPY_ARTIFACT_TYPES" :key="option.value" :value="option.value">
+                    {{ option.label }}（{{ option.value }}）
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <Button size="sm" variant="primary" :disabled="!copyAllowed || operating" :loading="operating" @click="submitCopy">
               复制 {{ selectedFiles.length }} 个文件为候选
@@ -354,7 +364,7 @@ onBeforeUnmount(() => {
 
       <TabsContent value="search" as="section" class="min-h-0 flex-1 overflow-y-auto px-5 pt-3 pb-6 max-[560px]:px-3">
         <form class="flex items-center gap-2" @submit.prevent="submitSearch">
-          <input v-model="localSearchQuery" class="min-w-0 flex-1 rounded-sm border border-line-strong bg-panel p-2 text-fg" type="search" placeholder="搜索已确认且仍有效的资料" aria-label="搜索历史资料" />
+          <Input v-model="localSearchQuery" class="min-w-0 flex-1" type="search" placeholder="搜索已确认且仍有效的资料" aria-label="搜索历史资料" />
           <Button type="submit" size="sm" variant="primary" :disabled="searching" :loading="searching">搜索</Button>
         </form>
         <p class="m-0 mt-2 text-xs leading-[1.4] text-fg-secondary">搜索结果只来自 confirmed 且 valid 的资料；待确认/否决/失败内容不会出现在这里。</p>

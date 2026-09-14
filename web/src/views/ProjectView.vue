@@ -196,6 +196,7 @@ import type {
 } from "./project-view-contract.ts";
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
+import { Sheet, SheetContent } from "../components/ui/sheet";
 import TopBar from "../components/layout/TopBar.vue";
 import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
@@ -2581,7 +2582,7 @@ function onToggleChatOverlay(): void {
 
 <template>
   <div class="flex h-dvh min-h-0 flex-col bg-base text-fg">
-    <!-- 摘要 chip 的悬浮面板要盖住下方三栏（z-20）；veil（更晚的同级兄弟）仍在其上 -->
+    <!-- 摘要 chip 的悬浮面板要盖住下方三栏（z-20）；抽屉走 ui/sheet（z 取自 --z-overlay）仍在其上 -->
     <header class="relative z-20 h-[var(--topbar-height)] flex-none border-b border-line bg-panel">
       <TopBar
         v-bind="topBarProps"
@@ -2761,25 +2762,22 @@ function onToggleChatOverlay(): void {
     </ResizablePanelGroup>
 
     <!-- <1024px：文件树抽屉化（spec R3），与 ResizablePanelGroup 内的左栏互斥渲染 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="leftCollapsed && treeDrawerOpen" class="fixed inset-0 z-[var(--z-drawer)] flex bg-black/35" @click.self="onCloseDrawer">
-        <div class="h-full w-[min(320px,86vw)] overflow-hidden bg-panel shadow-[0_0_24px_var(--shadow-color)]">
-          <FileTree
-            v-bind="fileTreeProps"
-            @update:viewMode="onUpdateViewMode"
-            @open-file="onOpenFile"
-            @close-drawer="onCloseDrawer"
-            @register="onRegister"
-          />
-        </div>
-      </div>
-    </Transition>
+    <Sheet :open="leftCollapsed && treeDrawerOpen" @update:open="(open) => { if (!open) onCloseDrawer(); }">
+      <SheetContent side="left" :show-close-button="false" class="w-[min(320px,86vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <FileTree
+          v-bind="fileTreeProps"
+          @update:viewMode="onUpdateViewMode"
+          @open-file="onOpenFile"
+          @close-drawer="onCloseDrawer"
+          @register="onRegister"
+        />
+      </SheetContent>
+    </Sheet>
 
     <!-- <1280px：对话栏浮层化（spec R3），与 ResizablePanelGroup 内的右栏互斥渲染 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="rightCollapsed && chatOverlayOpen" class="fixed inset-0 z-[var(--z-overlay)] flex justify-end bg-black/35" @click.self="onToggleChatOverlay">
-        <div class="project-view-overlay flex h-full w-[min(380px,92vw)] flex-col overflow-hidden bg-panel shadow-[0_0_24px_var(--shadow-color)]">
-          <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
+    <Sheet :open="rightCollapsed && chatOverlayOpen" @update:open="(open) => { if (!open) chatOverlayOpen = false; }">
+      <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
             <AgentPaneTabs
               :active-pane="activeAgentPane"
               :side-agents="visibleSideAgents"
@@ -2832,22 +2830,19 @@ function onToggleChatOverlay(): void {
               @update:message-text="sideTaskMessageText = $event"
               @send-message="onSendSideTaskMessage"
             />
-          </div>
         </div>
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
     <!-- 运行记录抽屉：任意视口宽度可开合，不与左右栏的响应式降级绑定 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="recordsOpen" class="fixed inset-0 z-[var(--z-overlay)] flex justify-end bg-black/35" @click.self="onCloseRecords">
-        <div class="project-view-overlay flex h-full w-[min(380px,92vw)] flex-col overflow-hidden bg-panel shadow-[0_0_24px_var(--shadow-color)]">
-          <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
-        </div>
-      </div>
-    </Transition>
+    <Sheet :open="recordsOpen" @update:open="(open) => { if (!open) onCloseRecords(); }">
+      <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
+      </SheetContent>
+    </Sheet>
 
-    <Transition name="project-view-veil-fade">
-      <div v-if="historicalMaterialsEnabled && materialsOpen" class="fixed inset-0 z-[var(--z-overlay)] flex justify-end bg-black/35" @click.self="closeMaterials">
+    <Sheet :open="historicalMaterialsEnabled && materialsOpen" @update:open="(open) => { if (!open) closeMaterials(); }">
+      <SheetContent side="right" :show-close-button="false" class="w-[min(560px,96vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
         <HistoricalMaterialsPanel
           v-bind="historicalMaterialsProps"
           @close="closeMaterials"
@@ -2859,11 +2854,11 @@ function onToggleChatOverlay(): void {
           @deny="onDenyMaterials"
           @copy="onCopyMaterials"
         />
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
-    <Transition name="project-view-veil-fade">
-      <div v-if="formalDeliveryEnabled && formalDeliveryOpen" class="fixed inset-0 z-[var(--z-overlay)] flex justify-end bg-black/35" @click.self="closeFormalDelivery">
+    <Sheet :open="formalDeliveryEnabled && formalDeliveryOpen" @update:open="(open) => { if (!open) closeFormalDelivery(); }">
+      <SheetContent side="right" :show-close-button="false" class="w-[min(720px,94vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none max-[720px]:w-screen">
         <FormalDeliveryPanel
           :open="formalDeliveryOpen"
           :loading="formalDeliveryLoading"
@@ -2902,24 +2897,13 @@ function onToggleChatOverlay(): void {
           @create-change-request="onCreateChangeRequest"
           @withdraw-change-request="onWithdrawChangeRequest"
         />
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
   </div>
 </template>
 
 <style scoped>
-/* <Transition name="project-view-veil-fade"> 的 enter/leave 类必须是真实 CSS 类。 */
-.project-view-veil-fade-enter-active,
-.project-view-veil-fade-leave-active {
-  transition: opacity var(--duration) var(--ease-out);
-}
-
-.project-view-veil-fade-enter-from,
-.project-view-veil-fade-leave-to {
-  opacity: 0;
-}
-
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
 .project-view-overlay > :deep(.chat-feed) {
   flex: 1;

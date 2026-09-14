@@ -65,11 +65,11 @@ describe("shadcn-vue ui primitives", () => {
     expect(content).toContain('side?: "top" | "right" | "bottom" | "left"');
     expect(content).toContain('side: "right"');
     for (const sideClass of [
-      "slide-in-from-right",
-      "slide-in-from-left",
-      "slide-in-from-top",
-      "slide-in-from-bottom",
-      "slide-out-to-right",
+      "data-[state=closed]:translate-x-full",
+      "data-[state=closed]:-translate-x-full",
+      "data-[state=closed]:-translate-y-full",
+      "data-[state=closed]:translate-y-full",
+      "transition-transform",
       "sm:max-w-sm",
       "w-3/4",
     ]) {

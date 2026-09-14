@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import type {
   AdoptSideTaskRequest,
   CreateSideTaskRequest,
@@ -13,14 +13,14 @@ import {
   SIDE_TASK_STATUS_TEXT,
   SIDE_TASK_STATUS_TONE,
   buildCreateSideTaskRequest,
-  buildSideTaskAdoptionRequest,
   canInspectSideTaskResult,
-  formatSideTaskHash,
   sideTaskEventText,
 } from "../../domain/side-tasks.ts";
 import { formatDateTime } from "../../util/format-time.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
+import { Textarea } from "../ui/textarea";
+import SideTaskDiffCard from "./SideTaskDiffCard.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -39,7 +39,7 @@ const props = defineProps<{
   messageText: string;
   messageError: string | null;
   error: string | null;
-  /** Embedded mode lives inside the right Agent pane instead of a modal drawer. */
+  /** Kept for the ProjectView call-site contract; the panel always renders embedded in the right Agent pane. */
   embedded?: boolean;
   /** Render only the Side Agent creation form for the ＋ pane. */
   createOnly?: boolean;
@@ -56,15 +56,9 @@ const emit = defineEmits<{
   "send-message": [text: string];
 }>();
 
-const panelElement = ref<HTMLElement | null>(null);
-const createOpen = ref(false);
 const objective = ref("");
 const writePathsText = ref("rtl/pwm_gen.v");
 const createError = ref<string | null>(null);
-const adoptionReason = ref("");
-const adoptionError = ref<string | null>(null);
-const selectedPaths = ref<Set<string>>(new Set());
-let returnFocus: HTMLElement | null = null;
 
 const createDraft = computed(() => buildCreateSideTaskRequest({
   parentTaskId: props.parentTaskId,
@@ -73,32 +67,10 @@ const createDraft = computed(() => buildCreateSideTaskRequest({
   writePathsText: writePathsText.value,
 }));
 
-const selectableFiles = computed(() => props.diff?.files.filter(
-  (file) => !file.adopted && file.conflict_reason === null,
-) ?? []);
-
 const visibleConversationEvents = computed(() => props.events.flatMap((event) => {
   const text = sideTaskEventText(event);
   return text === null ? [] : [{ event, text }];
 }));
-
-watch(
-  () => props.diff?.preview_hash ?? null,
-  () => {
-    selectedPaths.value = new Set();
-    adoptionReason.value = "";
-    adoptionError.value = null;
-  },
-);
-
-watch(
-  () => props.selectedTaskId,
-  () => {
-    selectedPaths.value = new Set();
-    adoptionReason.value = "";
-    adoptionError.value = null;
-  },
-);
 
 function submitCreate(): void {
   createError.value = null;
@@ -110,84 +82,19 @@ function submitCreate(): void {
   emit("create", parsed.request);
 }
 
-function toggleCreate(): void {
-  createOpen.value = !createOpen.value;
-  if (!createOpen.value) emit("cancel-create");
-}
-
-function togglePath(path: string): void {
-  const file = props.diff?.files.find((candidate) => candidate.path === path);
-  if (!file || file.adopted || file.conflict_reason !== null) return;
-  const next = new Set(selectedPaths.value);
-  if (next.has(path)) next.delete(path);
-  else next.add(path);
-  selectedPaths.value = next;
-}
-
-function selectAllAvailable(): void {
-  selectedPaths.value = new Set(selectableFiles.value.map((file) => file.path));
-}
-
-function submitAdoption(): void {
-  adoptionError.value = null;
-  if (!props.diff) {
-    adoptionError.value = "差异预览尚未就绪，请刷新后重试。";
-    return;
-  }
-  const parsed = buildSideTaskAdoptionRequest(
-    props.diff,
-    selectedPaths.value,
-    adoptionReason.value,
-    `adopt-${crypto.randomUUID()}`,
-  );
-  if (!parsed.ok) {
-    adoptionError.value = parsed.message;
-    return;
-  }
-  emit("adopt", parsed.request);
-}
-
 function shortCommit(value: string | null): string {
   return value ? value.slice(0, 10) : "—";
 }
-
-onMounted(() => {
-  if (props.embedded) return;
-  returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  void nextTick(() => panelElement.value?.focus());
-});
-
-onBeforeUnmount(() => {
-  if (props.embedded) return;
-  returnFocus?.focus();
-  returnFocus = null;
-});
 </script>
 
 <template>
   <aside
     v-if="open"
-    ref="panelElement"
-    class="flex h-full min-h-0 flex-col bg-panel text-fg"
-    :class="[
-      embedded ? 'w-full min-w-0 shadow-none' : 'w-[min(900px,98vw)] shadow-[0_0_24px_var(--shadow-color)] max-[720px]:w-screen',
-      createOnly ? 'overflow-y-auto' : '',
-    ]"
-    :role="embedded ? 'region' : 'dialog'"
-    :aria-modal="embedded ? undefined : 'true'"
-    aria-labelledby="side-tasks-title"
-    tabindex="-1"
-    @keydown.esc="embedded ? undefined : emit('close')"
+    class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel text-fg"
+    :class="createOnly ? 'overflow-y-auto' : ''"
+    role="region"
+    aria-label="探索任务"
   >
-    <header v-if="!embedded" class="flex items-start justify-between gap-3 border-b border-line p-5 max-[720px]:px-3">
-      <div>
-        <p class="mt-0 mb-1 text-xs font-semibold tracking-[0.04em] text-brand">P3 · 隔离探索</p>
-        <h2 id="side-tasks-title" class="m-0">探索任务</h2>
-        <p class="mt-1 mb-0 text-xs text-fg-secondary">在项目当前提交的独立副本里试验；结果默认未采纳，不改变主 Agent、阶段或审批。</p>
-      </div>
-      <Button variant="ghost" size="sm" aria-label="关闭探索任务" @click="emit('close')">关闭</Button>
-    </header>
-
     <div
       v-if="error"
       class="mx-5 mt-3 flex items-center justify-between gap-3 rounded-md bg-danger/12 p-3 text-xs text-danger"
@@ -197,33 +104,19 @@ onBeforeUnmount(() => {
       <Button variant="secondary" size="sm" @click="emit('refresh')">重试</Button>
     </div>
 
-    <section
-      v-if="createOnly || !embedded"
-      class="flex-none"
-      :class="createOnly ? 'p-4' : 'border-b border-line px-5 py-3 max-[720px]:px-3'"
-    >
-      <div class="flex items-center justify-between gap-3">
-        <div>
-          <strong class="block">{{ createOnly ? "添加 Side Agent" : "新建隔离探索" }}</strong>
-          <small v-if="baseCommit" class="mt-[2px] block text-fg-secondary">绑定主工作区 {{ shortCommit(baseCommit) }}</small>
-          <small v-else class="mt-[2px] block text-fg-secondary">缺少可信 Git HEAD，创建已禁用</small>
-        </div>
-        <Button v-if="!createOnly" size="sm" :variant="createOpen ? 'ghost' : 'primary'" @click="toggleCreate">
-          {{ createOpen ? "收起" : "新建探索" }}
-        </Button>
+    <section v-if="createOnly" class="flex-none p-4">
+      <div>
+        <strong class="block">添加 Side Agent</strong>
+        <small v-if="baseCommit" class="mt-[2px] block text-fg-secondary">绑定主工作区 {{ shortCommit(baseCommit) }}</small>
+        <small v-else class="mt-[2px] block text-fg-secondary">缺少可信 Git HEAD，创建已禁用</small>
       </div>
 
-      <form
-        v-if="createOnly || createOpen"
-        class="mt-3 grid gap-3 rounded-md border border-line bg-base p-3"
-        :class="createOnly ? 'grid-cols-1' : 'grid-cols-2 max-[720px]:grid-cols-1'"
-        @submit.prevent="submitCreate"
-      >
+      <form class="mt-3 grid grid-cols-1 gap-3 rounded-md border border-line bg-base p-3" @submit.prevent="submitCreate">
         <label class="flex flex-col gap-1 text-xs text-fg-secondary">
           <span>探索目标</span>
-          <textarea
+          <Textarea
             v-model="objective"
-            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 text-fg"
+            class="resize-y"
             rows="3"
             maxlength="2000"
             placeholder="例如：比较两种流水线结构，不改动正式主线"
@@ -231,19 +124,17 @@ onBeforeUnmount(() => {
         </label>
         <label class="flex flex-col gap-1 text-xs text-fg-secondary">
           <span>允许写入的精确路径</span>
-          <textarea
+          <Textarea
             v-model="writePathsText"
-            class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 font-mono text-[12.5px] text-fg"
+            class="resize-y font-mono text-[12.5px]"
             rows="3"
             spellcheck="false"
             placeholder="rtl/pipeline.v&#10;tb/pipeline_tb.sv"
           />
           <small class="text-fg-muted">每行一个文件，最多 32 个；单条最多 512 个 UTF-8 字节、32 层，仅允许 rtl/、tb/、doc/、prj/constr/。doc/ 不得放 HDL，不接受目录或通配符。</small>
         </label>
-        <p v-if="createError" class="col-span-full m-0 text-xs text-danger max-[720px]:col-auto" role="alert">{{ createError }}</p>
-        <div
-          class="col-span-full flex items-center justify-between gap-3 text-xs text-fg-muted max-[720px]:col-auto max-[720px]:flex-col max-[720px]:items-start"
-        >
+        <p v-if="createError" class="m-0 text-xs text-danger" role="alert">{{ createError }}</p>
+        <div class="flex items-center justify-between gap-3 text-xs text-fg-muted max-[720px]:flex-col max-[720px]:items-start">
           <span>父主任务：{{ parentTaskId ?? "不可用" }}</span>
           <Button
             type="submit"
@@ -258,50 +149,8 @@ onBeforeUnmount(() => {
       </form>
     </section>
 
-    <div
-      v-if="!createOnly"
-      class="grid min-h-0 flex-1"
-      :class="embedded ? 'grid-cols-1' : 'grid-cols-[260px_minmax(0,1fr)] max-[720px]:grid-cols-1'"
-    >
-      <section
-        v-if="!embedded"
-        class="min-h-0 overflow-y-auto border-r border-line p-3 max-[720px]:max-h-[190px] max-[720px]:border-r-0 max-[720px]:border-b"
-        aria-label="探索任务列表"
-      >
-        <div class="mb-2 flex items-center justify-between gap-3">
-          <strong>任务记录</strong>
-          <Button variant="ghost" size="sm" :loading="loading" :disabled="loading" @click="emit('refresh')">刷新</Button>
-        </div>
-        <p v-if="loading && tasks.length === 0" class="my-4 text-center text-xs text-fg-muted">正在读取探索任务…</p>
-        <p v-else-if="!loading && tasks.length === 0" class="my-4 text-center text-xs text-fg-muted">还没有探索任务。新建后会在独立工作区运行。</p>
-        <ul v-else class="m-0 grid list-none gap-1 p-0">
-          <li v-for="task in tasks" :key="task.task_id">
-            <button
-              type="button"
-              class="flex w-full cursor-pointer flex-col gap-2 rounded-md border bg-transparent p-2 text-left"
-              :class="selectedTaskId === task.task_id ? 'border-line bg-hover' : 'border-transparent hover:border-line hover:bg-hover'"
-              @click="emit('select-task', task.task_id)"
-            >
-              <span class="block min-w-0">
-                <strong class="min-w-0 line-clamp-2">{{ task.objective }}</strong>
-                <small class="mt-1 block min-w-0 text-fg-muted">{{ formatDateTime(task.created_at) }}</small>
-              </span>
-              <span class="flex flex-wrap gap-1">
-                <Badge :tone="SIDE_TASK_STATUS_TONE[task.status]" size="sm">{{ SIDE_TASK_STATUS_TEXT[task.status] }}</Badge>
-                <Badge v-if="task.status === 'succeeded'" :tone="task.adoption_state === 'available' ? 'warn' : 'neutral'" size="sm">
-                  {{ SIDE_TASK_ADOPTION_TEXT[task.adoption_state] }}
-                </Badge>
-              </span>
-            </button>
-          </li>
-        </ul>
-      </section>
-
-      <section
-        class="min-h-0 overflow-y-auto"
-        :class="embedded ? 'p-3' : 'px-5 pt-4 pb-6 max-[720px]:px-3'"
-        aria-live="polite"
-      >
+    <div v-if="!createOnly" class="grid min-h-0 flex-1 grid-cols-1">
+      <section class="min-h-0 overflow-y-auto p-3" aria-live="polite">
         <p v-if="!selectedTask" class="my-4 text-center text-xs text-fg-muted">选择一条任务查看结果与差异。</p>
         <template v-else>
           <header class="flex items-start justify-between gap-3">
@@ -346,13 +195,13 @@ onBeforeUnmount(() => {
             >
               <label class="grid gap-1">
                 <span>{{ selectedTask.status === "awaiting_user" ? "补充信息" : "纠偏探索方向" }}</span>
-                <textarea
-                  :value="messageText"
+                <Textarea
+                  :model-value="messageText"
                   rows="2"
                   maxlength="4000"
                   :disabled="messaging"
                   placeholder="回复 Agent 的问题，或补充本次探索的约束"
-                  @input="emit('update:message-text', ($event.target as HTMLTextAreaElement).value)"
+                  @update:model-value="emit('update:message-text', $event ?? '')"
                 />
               </label>
               <p v-if="messageError" class="col-span-full m-0 text-xs text-danger max-[720px]:col-auto" role="alert">{{ messageError }}</p>
@@ -398,78 +247,7 @@ onBeforeUnmount(() => {
               </ul>
             </section>
 
-            <section class="mt-5">
-              <div class="flex items-end justify-between gap-3">
-                <div>
-                  <h4 class="m-0">文本差异</h4>
-                  <p class="mt-1 mb-0 text-xs text-fg-secondary">仅选择无冲突、未采纳的文件。任一选中文件冲突时整批不会写入。</p>
-                </div>
-                <button type="button" class="flex-none cursor-pointer border-0 bg-transparent p-0 text-xs text-brand" @click="selectAllAvailable">选择全部可采纳</button>
-              </div>
-
-              <article v-for="file in diff.files" :key="file.path" class="mt-3 overflow-hidden rounded-md border border-line">
-                <header class="flex items-center justify-between gap-3 bg-hover px-3 py-2 max-[720px]:flex-col max-[720px]:items-start">
-                  <label class="flex min-w-0 items-center gap-2">
-                    <input
-                      type="checkbox"
-                      :checked="selectedPaths.has(file.path)"
-                      :disabled="file.adopted || file.conflict_reason !== null || operating"
-                      @change="togglePath(file.path)"
-                    />
-                    <code class="min-w-0 truncate">{{ file.path }}</code>
-                  </label>
-                  <span class="flex flex-wrap gap-1">
-                    <Badge v-if="file.adopted" tone="neutral" size="sm">已采纳</Badge>
-                    <Badge v-else-if="file.conflict_reason" tone="danger" size="sm">有冲突</Badge>
-                    <Badge v-else tone="ok" size="sm">可采纳</Badge>
-                    <Badge tone="neutral" size="sm">{{ file.change_kind === "added" ? "新增" : "修改" }}</Badge>
-                  </span>
-                </header>
-                <dl class="m-0 grid grid-cols-3 gap-2 border-t border-line bg-base px-3 py-2 max-[720px]:grid-cols-1">
-                  <div class="min-w-0">
-                    <dt class="text-xs text-fg-muted">探索起点哈希</dt>
-                    <dd class="m-0 mt-[2px]"><code class="wrap-anywhere text-fg-secondary">{{ formatSideTaskHash(file.base_hash) }}</code></dd>
-                  </div>
-                  <div class="min-w-0">
-                    <dt class="text-xs text-fg-muted">候选内容哈希</dt>
-                    <dd class="m-0 mt-[2px]"><code class="wrap-anywhere text-fg-secondary">{{ formatSideTaskHash(file.result_hash) }}</code></dd>
-                  </div>
-                  <div class="min-w-0">
-                    <dt class="text-xs text-fg-muted">当前主线哈希</dt>
-                    <dd class="m-0 mt-[2px]"><code class="wrap-anywhere text-fg-secondary">{{ formatSideTaskHash(file.current_target_hash) }}</code></dd>
-                  </div>
-                </dl>
-                <p v-if="file.conflict_reason" class="m-0 bg-danger/9 px-3 py-2 text-xs text-danger">{{ file.conflict_reason }} 此文件不会被选入采纳。</p>
-                <pre class="m-0 max-h-[260px] overflow-auto whitespace-pre bg-base p-3 text-fg"><code>{{ file.diff }}</code></pre>
-              </article>
-
-              <div class="mt-3 rounded-md bg-hover p-3">
-                <label class="flex flex-col gap-1 text-xs text-fg-secondary">
-                  <span>人工采纳理由</span>
-                  <textarea
-                    v-model="adoptionReason"
-                    class="w-full resize-y rounded-sm border border-line-strong bg-panel p-2 text-fg"
-                    rows="2"
-                    maxlength="1000"
-                    :disabled="operating"
-                    placeholder="说明为什么把这些探索结果带回主工作区"
-                  />
-                </label>
-                <p v-if="adoptionError" class="col-span-full m-0 text-xs text-danger max-[720px]:col-auto" role="alert">{{ adoptionError }}</p>
-                <div class="mt-2 flex items-center justify-between gap-3 text-xs text-fg-secondary max-[720px]:flex-col max-[720px]:items-start">
-                  <span>已选择 {{ selectedPaths.size }} / {{ selectableFiles.length }} 个可采纳文件</span>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    :disabled="selectedPaths.size === 0 || !adoptionReason.trim() || operating"
-                    :loading="operating"
-                    @click="submitAdoption"
-                  >
-                    确认人工采纳
-                  </Button>
-                </div>
-              </div>
-            </section>
+            <SideTaskDiffCard :diff="diff" :operating="operating" @adopt="emit('adopt', $event)" />
           </template>
         </template>
       </section>
