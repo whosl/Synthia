@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { ArrowRight, Cpu, Sparkles, X } from "lucide-vue-next";
+import { ArrowRight, Cpu, Sparkles } from "lucide-vue-next";
 import { api } from "../../api/service.ts";
 import {
   createProject,
@@ -24,6 +24,16 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 
 const emit = defineEmits<{ close: []; created: [projectId: string] }>();
 const name = ref("");
@@ -50,12 +60,10 @@ const disabled = computed(
         !availableIds.value.includes(profileId.value))),
 );
 
-// 单选卡片与表单字段的共享样式（原 portal.css 的 .form-field 与本组件 scoped 样式）
+// 单选卡片与表单字段的共享样式
 const typeOptionClass =
-  "relative grid cursor-pointer gap-2 rounded-[12px] border p-[18px] max-[480px]:p-3.5";
+  "relative grid cursor-pointer gap-2 rounded-xl border p-4 transition-colors max-[480px]:p-3.5";
 const fieldClass = "grid gap-2 text-xs";
-const inputClass =
-  "w-full rounded-[8px] border border-line-strong bg-base px-3 py-[11px] disabled:opacity-60";
 
 async function loadVersions() {
   if (versionsLoading.value) return;
@@ -74,7 +82,7 @@ function close() {
   if (!creating.value) emit("close");
 }
 
-// Esc / 点击遮罩时 Reka 会请求关闭；创建中保持打开（同原生 dialog 的 cancel 守卫）
+// Esc / 点击遮罩 / 内建关闭按钮时 Reka 会请求关闭；创建中保持打开（同原生 dialog 的 cancel 守卫）
 function handleOpenChange(open: boolean) {
   if (!open) close();
 }
@@ -130,84 +138,79 @@ onMounted(() => {
 <template>
   <Dialog :open="true" @update:open="handleOpenChange">
     <DialogContent
-      :show-close-button="false"
-      class="max-h-[calc(100dvh-32px)] w-[min(560px,calc(100vw-32px))] gap-0 overflow-y-auto rounded-[20px] border-line bg-panel p-0 shadow-[0_24px_80px_var(--shadow-color)] sm:max-w-[min(560px,calc(100vw-32px))]"
+      class="max-h-[calc(100dvh-32px)] w-[min(560px,calc(100vw-32px))] gap-0 overflow-y-auto rounded-xl border-line bg-panel p-0 shadow-[0_24px_80px_var(--shadow-color)] sm:max-w-[min(560px,calc(100vw-32px))]"
     >
       <form class="grid gap-5 p-7 max-[480px]:p-5" @submit.prevent="submit">
-        <div class="flex items-center justify-between gap-4">
-          <div>
-            <p
-              class="m-0 mb-2.5 text-[10px] font-semibold tracking-[2px] text-brand"
-            >
-              NEW PROJECT
-            </p>
-            <DialogTitle class="m-0 mt-1 text-2xl leading-normal font-semibold"
-              >从一个新项目开始</DialogTitle
-            >
-          </div>
-          <button
-            class="inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[8px] border-0 bg-transparent text-fg-secondary hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-            type="button"
-            aria-label="关闭新建项目"
-            :disabled="creating"
-            @click="close"
+        <div>
+          <p
+            class="m-0 mb-2.5 text-[11px] font-semibold tracking-[0.08em] text-brand uppercase"
           >
-            <X :size="18" />
-          </button>
+            New Project
+          </p>
+          <DialogTitle class="m-0 mt-1 text-2xl leading-normal font-semibold"
+            >从一个新项目开始</DialogTitle
+          >
         </div>
         <DialogDescription class="m-0 text-[13px] leading-[1.7] text-fg-secondary"
           >选择适合的工作方式，接下来交给你和 Agent。</DialogDescription
         >
         <ErrorNotice v-if="error" :error="error" />
-        <fieldset class="m-0 grid grid-cols-2 gap-3 border-0 p-0" :disabled="creating">
-          <legend class="mb-3">
+        <div>
+          <p class="m-0 mb-3 text-xs">
             项目类型 <span class="leading-[1.7] text-fg-secondary">· 必选</span>
-          </legend>
-          <label
-            :class="[
-              typeOptionClass,
-              type === 'free' ? 'border-brand bg-brand-subtle' : 'border-line-strong',
-            ]"
-            ><input
-              v-model="type"
-              type="radio"
-              value="free"
-              class="absolute top-4 right-4 accent-brand"
-            /><Sparkles :size="22" /><strong>自由项目</strong
-            ><span class="text-xs leading-[1.6] text-fg-secondary"
-              >快速验证想法、排查问题，无固定阶段。</span
-            ></label
+          </p>
+          <RadioGroup
+            v-model="type"
+            class="grid grid-cols-2 gap-3"
+            :disabled="creating"
           >
-          <label
-            :class="[
-              typeOptionClass,
-              type === 'engineering'
-                ? 'border-brand bg-brand-subtle'
-                : 'border-line-strong',
-            ]"
-            ><input
-              v-model="type"
-              type="radio"
-              value="engineering"
-              class="absolute top-4 right-4 accent-brand"
-            /><Cpu :size="22" /><strong>工程项目</strong
-            ><span class="text-xs leading-[1.6] text-fg-secondary"
-              >按流程推进，从需求确认到正式交付。</span
-            ></label
-          >
-        </fieldset>
-        <label :class="fieldClass"
+            <Label
+              for="ptype-free"
+              :class="[
+                typeOptionClass,
+                type === 'free'
+                  ? 'border-brand bg-brand-subtle'
+                  : 'border-line-strong hover:border-fg-muted',
+              ]"
+              ><RadioGroupItem
+                id="ptype-free"
+                value="free"
+                class="absolute top-4 right-4"
+              /><Sparkles :size="22" /><strong>自由项目</strong
+              ><span class="text-xs leading-[1.6] text-fg-secondary"
+                >快速验证想法、排查问题，无固定阶段。</span
+              ></Label
+            >
+            <Label
+              for="ptype-engineering"
+              :class="[
+                typeOptionClass,
+                type === 'engineering'
+                  ? 'border-brand bg-brand-subtle'
+                  : 'border-line-strong hover:border-fg-muted',
+              ]"
+              ><RadioGroupItem
+                id="ptype-engineering"
+                value="engineering"
+                class="absolute top-4 right-4"
+              /><Cpu :size="22" /><strong>工程项目</strong
+              ><span class="text-xs leading-[1.6] text-fg-secondary"
+                >按流程推进，从需求确认到正式交付。</span
+              ></Label
+            >
+          </RadioGroup>
+        </div>
+        <Label :class="fieldClass"
           ><span
             >项目名称
             <span class="leading-[1.7] text-fg-secondary">· 必填</span></span
-          ><input
+          ><Input
             v-model="name"
             required
             maxlength="200"
             placeholder="例如：星载图像处理模块"
             :disabled="creating"
-            :class="inputClass"
-        /></label>
+        /></Label>
         <template v-if="type === 'engineering'">
           <p
             v-if="versionsLoading"
@@ -226,35 +229,33 @@ onMounted(() => {
           <p v-else-if="!versions.length" class="m-0 leading-[1.6] text-warn" role="alert">
             当前没有可用的工程流程，请联系管理员后重试。
           </p>
-          <label v-else :class="fieldClass"
-            ><span>流程版本 · 必选</span
-            ><select
-              v-model="profileId"
-              required
-              :disabled="creating"
-              :class="inputClass"
-            >
-              <option disabled value="">选择流程版本</option>
-              <option
-                v-for="version in versions"
-                :key="version.id"
-                :value="version.id"
-              >
-                {{ version.name }}
-              </option>
-            </select></label
-          >
+          <div v-else :class="fieldClass">
+            <Label for="process-version">流程版本 · 必选</Label>
+            <Select v-model="profileId" :disabled="creating">
+              <SelectTrigger id="process-version" class="w-full">
+                <SelectValue placeholder="选择流程版本" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="version in versions"
+                  :key="version.id"
+                  :value="version.id"
+                >
+                  {{ version.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </template>
-        <label :class="fieldClass"
+        <Label :class="fieldClass"
           ><span
             >目标器件
             <span class="leading-[1.7] text-fg-secondary">· 可稍后填写</span></span
-          ><input
+          ><Input
             v-model="part"
             placeholder="例如：xc7a35tcpg236-1"
             :disabled="creating"
-            :class="inputClass"
-        /></label>
+        /></Label>
         <div class="flex justify-end gap-2 pt-2">
           <Button class="h-[38px]" :disabled="creating" @click="close"
             >取消</Button

@@ -200,3 +200,31 @@ describe("shadcn-vue ui primitives", () => {
     }
   });
 });
+
+describe("ui 组件模板可解析性", () => {
+  // vue-tsc 不会发现模板里的属性引号冲突（双引号 JS 字符串嵌在双引号 HTML
+  // 属性里），而未被引用的组件又进不了 vite 构建图——此处直接用 compiler-sfc
+  // 解析全部 ui 组件，堵住「坏文件潜伏到首次被引用才爆」的缺口。
+  test("所有 ui/**/*.vue 都能被 @vue/compiler-sfc 无错误解析", () => {
+    const { parse } = require("@vue/compiler-sfc") as typeof import("@vue/compiler-sfc");
+    const { readdirSync } = require("node:fs") as typeof import("node:fs");
+    const uiDir = new URL("../src/components/ui/", import.meta.url);
+    const broken: string[] = [];
+    for (const entry of readdirSync(uiDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".vue")) {
+        const file = new URL(entry.name, uiDir);
+        const result = parse(readFileSync(file, "utf8"));
+        if (result.errors.length) broken.push(`${entry.name}: ${String(result.errors[0])}`);
+      }
+      if (entry.isDirectory()) {
+        for (const sub of readdirSync(new URL(`${entry.name}/`, uiDir))) {
+          if (!sub.endsWith(".vue")) continue;
+          const file = new URL(`${entry.name}/${sub}`, uiDir);
+          const result = parse(readFileSync(file, "utf8"));
+          if (result.errors.length) broken.push(`${entry.name}/${sub}: ${String(result.errors[0])}`);
+        }
+      }
+    }
+    expect(broken).toEqual([]);
+  });
+});

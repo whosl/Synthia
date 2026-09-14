@@ -25,6 +25,15 @@ import CreateProjectDialog from "../components/projects/CreateProjectDialog.vue"
 import ErrorNotice from "../components/ErrorNotice.vue";
 import Badge from "../components/ui/AppBadge.vue";
 import Button from "../components/ui/AppButton.vue";
+import { Skeleton } from "../components/ui/skeleton";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/ui/empty";
 
 const router = useRouter();
 const {
@@ -54,8 +63,6 @@ const statCardClass =
   "flex items-center gap-4 rounded-[12px] border border-line bg-panel p-[22px] text-fg max-[1200px]:gap-3 max-[1200px]:p-[18px] max-[600px]:gap-2 max-[600px]:px-3 max-[600px]:py-3.5";
 const statIconClass =
   "grid size-11 shrink-0 place-items-center rounded-[12px] max-[600px]:hidden";
-const emptyStateClass =
-  "flex min-h-[250px] flex-col items-center justify-center rounded-[12px] border border-dashed border-line-strong p-8 text-center";
 
 function projectCreated(id: string) {
   showCreate.value = false;
@@ -251,45 +258,49 @@ function projectCreated(id: string) {
           :key="n"
           class="flex gap-5 border-b border-line p-7"
         >
-          <span class="size-11 rounded-[12px] bg-hover" />
-          <div class="grid flex-1 gap-2.5">
-            <i class="h-3 w-2/5 rounded bg-hover" /><i
-              class="h-2 w-[65%] rounded bg-hover"
-            />
+          <Skeleton class="size-11 rounded-[12px]" />
+          <div class="grid flex-1 content-start gap-2.5">
+            <Skeleton class="h-3 w-2/5" /><Skeleton class="h-2 w-[65%]" />
           </div>
         </div>
         <span class="visually-hidden">正在加载项目…</span>
       </div>
-      <div v-else-if="error && !rows.length" :class="emptyStateClass">
-        <RefreshCw :size="34" class="mb-2 text-brand" />
-        <h3 class="mt-[1em] mb-0 font-medium">项目暂时无法加载</h3>
-        <p class="my-[1em] leading-[1.7] text-fg-secondary">
-          连接恢复后可以重试。
-        </p>
-        <Button :loading="refreshing" @click="reload">重新加载</Button>
-      </div>
-      <div v-else-if="!rows.length" :class="emptyStateClass">
-        <Folder :size="40" class="mb-2 text-brand" />
-        <h3 class="mt-[1em] mb-0 font-medium">你的第一个项目，从这里开始</h3>
-        <p class="my-[1em] leading-[1.7] text-fg-secondary">
-          选择自由探索，或按照工程流程推进。
-        </p>
-        <Button variant="primary" @click="showCreate = true">新建项目</Button>
-      </div>
-      <div v-else-if="!visibleRows.length" :class="emptyStateClass">
-        <Search :size="34" class="mb-2 text-brand" />
-        <h3 class="mt-[1em] mb-0 font-medium">没有找到匹配的项目</h3>
-        <p class="my-[1em] leading-[1.7] text-fg-secondary">
-          试试其他名称、器件，或调整项目类型。
-        </p>
-        <Button
-          @click="
-            query = '';
-            type = 'all';
-          "
-          >清除筛选</Button
-        >
-      </div>
+      <Empty v-else-if="error && !rows.length" class="min-h-[250px] border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><RefreshCw :size="20" /></EmptyMedia>
+          <EmptyTitle>项目暂时无法加载</EmptyTitle>
+          <EmptyDescription>连接恢复后可以重试。</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button :loading="refreshing" @click="reload">重新加载</Button>
+        </EmptyContent>
+      </Empty>
+      <Empty v-else-if="!rows.length" class="min-h-[250px] border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><Folder :size="20" /></EmptyMedia>
+          <EmptyTitle>你的第一个项目，从这里开始</EmptyTitle>
+          <EmptyDescription>选择自由探索，或按照工程流程推进。</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button variant="primary" @click="showCreate = true">新建项目</Button>
+        </EmptyContent>
+      </Empty>
+      <Empty v-else-if="!visibleRows.length" class="min-h-[250px] border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><Search :size="20" /></EmptyMedia>
+          <EmptyTitle>没有找到匹配的项目</EmptyTitle>
+          <EmptyDescription>试试其他名称、器件，或调整项目类型。</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button
+            @click="
+              query = '';
+              type = 'all';
+            "
+            >清除筛选</Button
+          >
+        </EmptyContent>
+      </Empty>
       <div
         v-else
         class="overflow-hidden rounded-[12px] border border-line bg-panel"
@@ -298,11 +309,11 @@ function projectCreated(id: string) {
           v-for="row in visibleRows"
           :key="row.project.id"
           :to="{ name: 'project', params: { id: row.project.id } }"
-          class="grid grid-cols-[46px_minmax(180px,1.5fr)_minmax(150px,1fr)_128px_18px] items-center gap-[18px] border-b border-line px-6 py-[26px] text-fg transition-colors last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent-subtle)_40%,var(--surface-panel))] hover:text-fg max-[1200px]:grid-cols-[44px_minmax(0,1fr)_155px_18px] max-[1200px]:gap-3.5 max-[1200px]:px-[18px] max-[1200px]:py-[22px] max-[600px]:grid-cols-[38px_minmax(0,1fr)_16px] max-[600px]:gap-3 max-[600px]:px-4 max-[600px]:py-5"
+          class="group grid grid-cols-[46px_minmax(180px,1.5fr)_minmax(150px,1fr)_128px_18px] items-center gap-[18px] border-b border-line px-5 py-4 text-fg transition-colors last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent-subtle)_40%,var(--surface-panel))] hover:text-fg max-[1200px]:grid-cols-[44px_minmax(0,1fr)_155px_18px] max-[1200px]:gap-3.5 max-[1200px]:px-[18px] max-[1200px]:py-[18px] max-[600px]:grid-cols-[38px_minmax(0,1fr)_16px] max-[600px]:gap-3 max-[600px]:px-4 max-[600px]:py-4"
           :aria-label="`进入项目：${row.project.name}`"
         >
           <span
-            class="grid size-11 place-items-center rounded-[12px] border border-line bg-base max-[600px]:h-10 max-[600px]:w-9"
+            class="grid size-10 place-items-center rounded-[10px] border border-line bg-base max-[600px]:h-10 max-[600px]:w-9"
             :class="
               projectType(row.project) === 'free' ? 'text-info' : 'text-brand'
             "
@@ -312,7 +323,7 @@ function projectCreated(id: string) {
           /></span>
           <div class="min-w-0">
             <h3
-              class="m-0 mb-2 truncate text-sm font-[550] max-[600px]:text-[13px] max-[600px]:leading-[1.6] max-[600px]:whitespace-normal"
+              class="m-0 mb-1 truncate text-sm font-[550] max-[600px]:text-[13px] max-[600px]:leading-[1.6] max-[600px]:whitespace-normal"
             >
               {{ row.project.name }}
             </h3>
@@ -365,7 +376,7 @@ function projectCreated(id: string) {
           </div>
           <ArrowRight
             :size="18"
-            class="text-fg-muted max-[600px]:col-start-3 max-[600px]:row-span-2 max-[600px]:row-start-1"
+            class="text-fg-muted transition-transform group-hover:translate-x-0.5 group-hover:text-fg max-[600px]:col-start-3 max-[600px]:row-span-2 max-[600px]:row-start-1"
           />
         </router-link>
       </div>
