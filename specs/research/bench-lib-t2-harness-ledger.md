@@ -57,6 +57,8 @@
 | H29 | GAP | **XSim `$urandom` 跨跑种子不固定**（p23 黄金会话定罪：同一检查点、同一代码路径与边沿序列，两跑读数不同——跨跑用观测值反推相位不可靠）。影响所有基准 TB 编写惯例：随机激励必须用确定性 PRNG 或固定种子 | OBS（会话侧以固定种子诊断跑绕过；长期进 TB 编写规范） |
 | H30 | GAP | **会话证据访问链三重断裂**（p21 黄金会话 8 次读取全拒实证）：① tool-run 结果悬挂 `workspace://job-…/output/…` URI，但 workspace 读工具按 RULE-25 只收 rtl/tb/sim/doc/prj 相对路径 → "invalid workspace path"；② `MAIN_AUTHORIZATION_SCOPE.read_paths` 不含 `sim/**`，与 paths.ts:62"sim/ 放证据引用"的设计注释自相矛盾；③ 证据 API（/jobs/:id/evidence）只面向 REST/admin，会话工具面无对应工具，且探索类 job 无人冻结 → 永远走 worker 内存（叠加 H25 重启即失）。净效应：agent 与用户（H27）双重不可达，只有 infra 操作者能取 | **FIXED（7aeda6b，2026-09-15）**：Core read_paths 加 sim/**；runtime 新增 `synthia_job_evidence` 工具（manifest + 命名内容，二进制拒读并引导引用 uri/sha）；worker bundle 移植 worker.ts 的 jobs-registry.json 快照/恢复（提交/取消/终态落盘，重启非终态重载为 lost）——证据 manifest 得以跨 worker 重启存活 |
 
+| H30 | OPS/ARCH | **worker bundle 仓库/机上双轨漂移**：T1 期 harness 热修（logdigest/sim-fix 等一串）只打在 66 机上从未回流仓库——修复批次从仓库部署 bundle 时把机上补丁全部抹掉（digest 从 evidence 消失，模型失败反馈降级约 1.5h）。**事故+恢复**：靠部署前自做的备份恢复机上版，三补丁在真代码上重打，机上版已回流仓库为 canonical（漂移终结）。教训：热修必须当轮回流；部署前 diff 部署物与运行物 | fixed（canonical 化 + 流程教训） |
+
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
 一次静默窗完成：迁移 0014+0036（含迁移器自注册惯例补齐）→ Core/Runtime/worker 三点部署 → 11 项验证炮组全过（403 映射/僵尸收割/自动开工/.vh/逃逸拒绝/FAIL 模式/updated_at/约束解除）。部署中附带发现：testbench 参数约定为模块名非文件名（H18 探针踩坑记录）；外来未提交修改按标签贮藏（stash@07cfd5c7）。H19 收窄未全证；H25 的 worker 落盘队列与 H27 查看器为移交项。
