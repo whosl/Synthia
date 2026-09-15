@@ -55,6 +55,7 @@
 | H28 | OPS | **worker 主机重启后自启失败**（66 机 09-15 06:30 重启，synthia-worker 任务 ServiceAccount 登录类型对普通用户账户在开机阶段不可靠，任务滞留 Ready）；另记录 Core/runtime 会话状态分裂（Core=awaiting_user vs runtime=running，重启后缓存未对齐，p19 实证）。处置：手动拉起 + 新增 SYSTEM 级 5 分钟看门狗任务（端口不通自动 Start；注意只能覆盖"死亡"，覆盖不了"活着但楔死"——后者仍需人工/监控） | fixed（看门狗）+ open（自启根因改 principal 为 SYSTEM 待观察下次重启） |
 
 | H29 | GAP | **XSim `$urandom` 跨跑种子不固定**（p23 黄金会话定罪：同一检查点、同一代码路径与边沿序列，两跑读数不同——跨跑用观测值反推相位不可靠）。影响所有基准 TB 编写惯例：随机激励必须用确定性 PRNG 或固定种子 | OBS（会话侧以固定种子诊断跑绕过；长期进 TB 编写规范） |
+| H30 | GAP | **会话证据访问链三重断裂**（p21 黄金会话 8 次读取全拒实证）：① tool-run 结果悬挂 `workspace://job-…/output/…` URI，但 workspace 读工具按 RULE-25 只收 rtl/tb/sim/doc/prj 相对路径 → "invalid workspace path"；② `MAIN_AUTHORIZATION_SCOPE.read_paths` 不含 `sim/**`，与 paths.ts:62"sim/ 放证据引用"的设计注释自相矛盾；③ 证据 API（/jobs/:id/evidence）只面向 REST/admin，会话工具面无对应工具，且探索类 job 无人冻结 → 永远走 worker 内存（叠加 H25 重启即失）。净效应：agent 与用户（H27）双重不可达，只有 infra 操作者能取 | **FIXED（7aeda6b，2026-09-15）**：Core read_paths 加 sim/**；runtime 新增 `synthia_job_evidence` 工具（manifest + 命名内容，二进制拒读并引导引用 uri/sha）；worker bundle 移植 worker.ts 的 jobs-registry.json 快照/恢复（提交/取消/终态落盘，重启非终态重载为 lost）——证据 manifest 得以跨 worker 重启存活 |
 
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
