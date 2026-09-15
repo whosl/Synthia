@@ -25,6 +25,7 @@
 | H21 | GAP | **.vh 拒收**：T1 已知（AES 内联绕过），T2 p22 复发（job-56528a73）——规则未显性化给 agent，每轮重新踩 | deferred（技能包或 validate 报错文案显性化） |
 | H22 | GAP | **回合级活性：REST 面缺失但 SSE 面存在**（深核修正）——SSE 流有 delta 事件（模型增量）+ `: hb` 传输心跳，看流可区分活回合/挂死；但 task-status REST 面（status/updatedAt）无此信号，轮询式监控不可区分（双向误判实证：误判挂死×1、真楔死×1）。监控改用 SSE 即可缓解，平台侧可选补 REST 活性字段 | open（监控侧先自救） |
 | H23 | BUG | **迁移漂移**：0014_tool_timing_metrics.sql 在仓库、未应用生产库（schema_migrations 尾部 {0011,0012,0013,0020,0021}） | open（下次迁移窗口对齐或显式豁免记录） |
+| H27 | GAP | **用户侧证据可观测性断裂**（2026-09-15 实证，p22 事件）：UI 的 job 证据面仅一个写死的 sta.rpt 懒加载（ProjectView.vue:1935），stdout.log/仿真日志/logDigest 在产品零展示；API 层 /jobs/:id/evidence 系列存在且有 scope 但 (a) 无 UI 消费（用户不会 curl），(b) worker 退化时挂起（H26）。**净效应：会话向用户要 log、用户在产品内无路径获取、只有 infra 级操作者（SSH/admin）能取——验证闭环的三方里两方（用户、agent）都瞎** | open（建议：UI 通用证据查看器 + 失败时把 logDigest/关键摘录挂到 job 详情；与 H15/H26 联动修复） |
 | H12 | GAP | validate 与 synth 容忍度分歧（xvlog 容忍 `\`timescale` 损坏行、Synth 8-2715 拒收）——validate 假阴性覆盖 | OBS（p17 会话自愈并记录） |
 | H14 | BUG | 提交丢失型僵尸 job。**深核修正**：19:52 那条 simulate 的 idempotency 键为 `p17-simulate-1`——操作者自己脚本的键（非外部调用，"来源不明"撤回）；确证的残余行为：**客户端 30s 超时的 POST 在服务端仍会完成落库**（p17-validate-1 于 19:50:18 在客户端超时后落地）——请求生命周期对调用方不透明。另发现 `ui-run-*` 键族 = Web UI 一键运行按钮的提交指纹（周一卡死 job 即用户 UI 点击，该路径同样暴露于 H25） | open（并入 H25 补偿协议） |
 
