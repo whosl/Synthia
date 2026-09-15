@@ -2,15 +2,16 @@
 /** Project workspace: main conversation, files, approvals, and governed delivery. */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
+import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
-import Button from "../components/ui/Button.vue";
+import Button from "../components/ui/AppButton.vue";
 import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
-import ImplProgressCard from "../components/impl/ImplProgressCard.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
   abortAgent,
+  resolveTaskPermission,
   adoptSideTask,
   approveGateSubmission,
   confirmImportSnapshot,
@@ -40,6 +41,7 @@ import {
   getSideTaskEvents,
   getSideTaskResult,
   getTask,
+  getWorkspaceFile,
   getWorkspaceTree,
   listArtifacts,
   listBitstreams,
@@ -57,8 +59,10 @@ import {
   rejectGateSubmission,
   searchHistoricalMaterials,
   sendMessage,
+  submitJob,
   withdrawChangeRequest,
 } from "../api/index.ts";
+import { deriveJobInputs, operationNeeds, type ImplRunAction } from "../domain/impl-run.ts";
 // ApproveRequest 住在 api/index.ts（请求体形状），不在 api/types.ts（响应体形状）。
 import type {
   ToolSummary, ApproveRequest } from "../api/index.ts";
@@ -110,9 +114,10 @@ import {
   auditToParts,
   conversationEventsToParts,
   type SynthiaPart,
-  type SynthiaTextPart,
+  type SynthiaReasoningPart,
 } from "../domain/parts.ts";
 import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
+import { injectChangeCards, type RevisionChangeInput } from "../domain/change-cards.ts";
 import {
   applyStreamEvent,
   subscribeTaskStream,
@@ -190,8 +195,10 @@ import type {
   TopBarProps,
 } from "./project-view-contract.ts";
 import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
-import Splitter from "../components/ui/Splitter.vue";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
+import { Sheet, SheetContent } from "../components/ui/sheet";
 import TopBar from "../components/layout/TopBar.vue";
+import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import CodeEditor from "../components/editor/CodeEditor.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
@@ -252,9 +259,7 @@ const materialsLoading = ref(false);
 const materialsSearching = ref(false);
 const materialsOperating = ref(false);
 const materialsError = ref<string | null>(null);
-const materialsNotice = ref<string | null>(null);
 let materialsRequestSerial = 0;
-let materialsNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 // ─────────────────────────────────────────────────────────────────────
 // P3 探索任务（按需加载；与主 Agent/SSE/审批状态完全隔离）
@@ -275,10 +280,8 @@ const sideTaskMessaging = ref(false);
 const sideTaskMessageText = ref("");
 const sideTaskMessageError = ref<string | null>(null);
 const sideTasksError = ref<string | null>(null);
-const sideTasksNotice = ref<string | null>(null);
 let sideTasksRequestSerial = 0;
 let sideTaskDetailSerial = 0;
-let sideTasksNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 let sideTaskPoller: Poller | null = null;
 let sideTaskCreateAttempt: SideTaskCreateAttempt | null = null;
 let sideTaskAdoptionAttempt: SideTaskAdoptionAttempt | null = null;
@@ -322,10 +325,8 @@ const readinessSourceOptions = ref<readonly { readonly id: string; readonly labe
 const formalDeliveryLoading = ref(false);
 const formalDeliveryOperating = ref(false);
 const formalDeliveryError = ref<string | null>(null);
-const formalDeliveryNotice = ref<string | null>(null);
 let processProjectionSerial = 0;
 let formalDeliverySerial = 0;
-let formalNoticeTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 interface WriteAttempt<T> {
   readonly signature: string;
@@ -437,14 +438,6 @@ async function refreshOnce(): Promise<void> {
   }
 }
 
-function clearMaterialsNoticeLater(): void {
-  if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
-  materialsNoticeTimer = window.setTimeout(() => {
-    materialsNotice.value = null;
-    materialsNoticeTimer = null;
-  }, 4200);
-}
-
 /** 资料操作没有后台自动重试；错误文案必须给手动重试出口，不能声称正在重试。 */
 function humanizeMaterialsError(err: unknown): string {
   return humanizeDecisionError(err, "资料操作").text;
@@ -524,13 +517,11 @@ async function onImportMaterials(body: CreateImportSnapshotRequest): Promise<voi
   if (materialsOperating.value) return;
   materialsOperating.value = true;
   materialsError.value = null;
-  materialsNotice.value = null;
   try {
     const created = await createImportSnapshot(api, projectId, body, crypto.randomUUID());
     materialSelectedId.value = created.id;
-    materialsNotice.value = "资料已导入，当前处于待确认状态；确认前不会进入 Agent 默认上下文。";
+    toast.success("资料已导入，当前处于待确认状态；确认前不会进入 Agent 默认上下文。", { duration: 4200 });
     await loadMaterials();
-    clearMaterialsNoticeLater();
   } catch (err) {
     materialsError.value = humanizeMaterialsError(err);
   } finally {
@@ -544,9 +535,8 @@ async function onConfirmMaterials(snapshotId: string): Promise<void> {
   materialsError.value = null;
   try {
     await confirmImportSnapshot(api, projectId, snapshotId, crypto.randomUUID());
-    materialsNotice.value = "资料已确认；只有仍有效的文件会进入默认检索。";
+    toast.success("资料已确认；只有仍有效的文件会进入默认检索。", { duration: 4200 });
     await loadMaterials();
-    clearMaterialsNoticeLater();
   } catch (err) {
     materialsError.value = humanizeMaterialsError(err);
   } finally {
@@ -560,9 +550,8 @@ async function onDenyMaterials(snapshotId: string, reason: string): Promise<void
   materialsError.value = null;
   try {
     await denyImportSnapshot(api, projectId, snapshotId, reason ? { reason } : {}, crypto.randomUUID());
-    materialsNotice.value = "资料已否决，不会进入 Agent 默认上下文。";
+    toast.success("资料已否决，不会进入 Agent 默认上下文。", { duration: 4200 });
     await loadMaterials();
-    clearMaterialsNoticeLater();
   } catch (err) {
     materialsError.value = humanizeMaterialsError(err);
   } finally {
@@ -576,10 +565,9 @@ async function onCopyMaterials(snapshotId: string, body: CopyHistoricalMaterialR
   materialsError.value = null;
   try {
     const result = await copyHistoricalMaterial(api, projectId, snapshotId, body, crypto.randomUUID());
-    materialsNotice.value = `已复制 ${result.revisions.length} 个文件为当前项目候选修订；确认状态不会被继承。`;
+    toast.success(`已复制 ${result.revisions.length} 个文件为当前项目候选修订；确认状态不会被继承。`, { duration: 4200 });
     // 候选修订已经改变左栏事实，顺手刷新工作区/产物，但不关闭资料抽屉。
     await refresh();
-    clearMaterialsNoticeLater();
   } catch (err) {
     materialsError.value = humanizeMaterialsError(err);
   } finally {
@@ -596,14 +584,6 @@ const sideTaskParent = computed<TaskAgentSummary | null>(() => {
 const sideTaskBaseCommit = computed<string | null>(() =>
   workspace.value?.head_commit ?? sideTaskParent.value?.base_commit ?? null,
 );
-
-function clearSideTasksNoticeLater(): void {
-  if (sideTasksNoticeTimer !== null) window.clearTimeout(sideTasksNoticeTimer);
-  sideTasksNoticeTimer = window.setTimeout(() => {
-    sideTasksNotice.value = null;
-    sideTasksNoticeTimer = null;
-  }, 5200);
-}
 
 async function loadSideTaskDetail(taskId: string): Promise<boolean> {
   const serial = ++sideTaskDetailSerial;
@@ -749,7 +729,6 @@ async function onCreateSideTask(request: CreateSideTaskRequest): Promise<void> {
   sideTaskCreateAttempt = attempt;
   sideTasksOperating.value = true;
   sideTasksError.value = null;
-  sideTasksNotice.value = null;
   let created: SideTaskSummary;
   try {
     created = await createSideTask(api, projectId, attempt.request, attempt.idempotencyKey);
@@ -764,13 +743,12 @@ async function onCreateSideTask(request: CreateSideTaskRequest): Promise<void> {
   sideTaskCreateAttempt = null;
   activeAgentPane.value = created.task_id;
   sideTasksOpen.value = true;
-  sideTasksNotice.value = "探索任务已在独立副本中创建；运行和结果不会改变主 Agent 或正式阶段。";
+  toast.success("探索任务已在独立副本中创建；运行和结果不会改变主 Agent 或正式阶段。", { duration: 5200 });
   try {
     const refreshed = await loadSideTasks(created.task_id);
     if (!refreshed) {
-      sideTasksNotice.value = "探索任务已创建，但最新状态刷新失败；可点击刷新继续查看，不会重复创建。";
+      toast.warning("探索任务已创建，但最新状态刷新失败；可点击刷新继续查看，不会重复创建。", { duration: 5200 });
     }
-    clearSideTasksNoticeLater();
   } catch {
     sideTasksError.value = "探索任务已创建，但最新状态刷新失败；请手动刷新继续查看。";
   } finally {
@@ -811,7 +789,6 @@ async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
   sideTaskAdoptionAttempt = attempt;
   sideTasksOperating.value = true;
   sideTasksError.value = null;
-  sideTasksNotice.value = null;
   let adopted: SideTaskAdoptionResult;
   try {
     adopted = await adoptSideTask(
@@ -830,7 +807,7 @@ async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
 
   // POST 已明确成功，此后的读取失败不能再表述为“采纳失败”。
   sideTaskAdoptionAttempt = null;
-  sideTasksNotice.value = `已人工采纳 ${adopted.adopted_paths.length} 个文件为候选修订；未选文件仍留在探索结果中。`;
+  toast.success(`已人工采纳 ${adopted.adopted_paths.length} 个文件为候选修订；未选文件仍留在探索结果中。`, { duration: 5200 });
   try {
     // 采纳只刷新 side task、产物与工作区；不触发主任务详情、SSE 或审批同步。
     const [sideRefreshed, artifactsRefresh, workspaceRefreshed] = await Promise.all([
@@ -841,7 +818,6 @@ async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
     if (!sideRefreshed || !artifactsRefresh || !workspaceRefreshed) {
       sideTasksError.value = "采纳已成功，但部分页面数据刷新失败；请手动刷新确认最新候选修订。";
     }
-    clearSideTasksNoticeLater();
   } catch {
     sideTasksError.value = "采纳已成功，但部分页面数据刷新失败；请手动刷新确认最新候选修订。";
   } finally {
@@ -868,11 +844,10 @@ async function onSendSideTaskMessage(textInput: string): Promise<void> {
     await sendMessage(api, projectId, taskId, attempt.text, attempt.key);
     sideTaskMessageAttempt = null;
     sideTaskMessageText.value = "";
-    sideTasksNotice.value = task.status === "awaiting_user"
+    toast.success(task.status === "awaiting_user"
       ? "补充信息已发送，探索任务将继续在隔离副本中运行。"
-      : "纠偏信息已发送给当前探索任务。";
+      : "纠偏信息已发送给当前探索任务。", { duration: 5200 });
     await loadSideTasks(taskId);
-    clearSideTasksNoticeLater();
   } catch (err) {
     sideTaskMessageError.value = humanizeDecisionError(err, "发送").text;
   } finally {
@@ -940,14 +915,6 @@ function formalErrorText(err: unknown): string {
     if (err.status === 403) return "当前账号没有查看或执行正式工程操作的权限。";
   }
   return humanizeLoadError(err);
-}
-
-function clearFormalNoticeLater(): void {
-  if (formalNoticeTimer !== null) window.clearTimeout(formalNoticeTimer);
-  formalNoticeTimer = window.setTimeout(() => {
-    formalDeliveryNotice.value = null;
-    formalNoticeTimer = null;
-  }, 5200);
 }
 
 async function loadProcessProjection(): Promise<boolean> {
@@ -1186,10 +1153,9 @@ async function onPrepareReadiness(input: ReadinessPreparationInput): Promise<voi
   try {
     await createProjectReadiness(api, projectId, attempt.body, attempt.key);
     readinessPrepareAttempt = null;
-    formalDeliveryNotice.value = "G0 准备清单已由 Core 评估；只有全部 hard check 通过才可人工确认。";
+    toast.info("G0 准备清单已由 Core 评估；只有全部 hard check 通过才可人工确认。", { duration: 5200 });
     await loadProcessProjection();
     await loadFormalDelivery(false);
-    clearFormalNoticeLater();
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1224,8 +1190,7 @@ async function onConfirmReadiness(reason: string): Promise<void> {
     // stale pre-confirmation facts until a background poll happens to run.
     await refresh();
     await loadFormalDelivery(false);
-    formalDeliveryNotice.value = `G0 已由当前账号确认；当前阶段为 ${processState.value?.currentGate ?? "后续阶段"}。`;
-    clearFormalNoticeLater();
+    toast.info(`G0 已由当前账号确认；当前阶段为 ${processState.value?.currentGate ?? "后续阶段"}。`, { duration: 5200 });
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1253,7 +1218,7 @@ async function onPreviewFormalInput(): Promise<void> {
     formalPreviewAttempt = null;
     formalApproval.value = null;
     formalApprovalId.value = null;
-    formalDeliveryNotice.value = "预览已生成；请核对每个文件、器件、约束与用途后再确认。";
+    toast.info("预览已生成；请核对每个文件、器件、约束与用途后再确认。", { duration: 5200 });
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1285,12 +1250,11 @@ async function onConfirmFormalInput(): Promise<void> {
     formalApproval.value = await confirmFormalInput(api, projectId, formalConfirmAttempt.body, formalConfirmAttempt.key);
     formalApprovalId.value = approvalId;
     formalConfirmAttempt = null;
-    formalDeliveryNotice.value = "正式输入已人工确认；后续四项正式运行只能消费这份不可变 bundle。";
+    toast.info("正式输入已人工确认；后续四项正式运行只能消费这份不可变 bundle。", { duration: 5200 });
     // Confirmation wakes Runtime. Pull its persisted four-job/G4 projection
     // now so a terminal or paused poller cannot strand the approval card.
     await refresh();
     await loadFormalDelivery(false);
-    clearFormalNoticeLater();
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1371,10 +1335,9 @@ async function onCreateChangeRequest(body: CreateChangeRequestV1): Promise<void>
   try {
     const created = await createChangeRequest(api, projectId, changeRequestAttempt.body, changeRequestAttempt.key);
     changeRequestAttempt = null;
-    formalDeliveryNotice.value = `变更请求已开启，新工作版本将从 ${created.impact_gate} 重新验证；旧 release 保持只读。`;
+    toast.info(`变更请求已开启，新工作版本将从 ${created.impact_gate} 重新验证；旧 release 保持只读。`, { duration: 5200 });
     await loadProcessProjection();
     await loadFormalDelivery(false);
-    clearFormalNoticeLater();
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1400,10 +1363,9 @@ async function onWithdrawChangeRequest(changeRequestId: string, reason: string):
       withdrawChangeRequestAttempt.key,
     );
     withdrawChangeRequestAttempt = null;
-    formalDeliveryNotice.value = "变更请求已撤回；未发布工作版本已废弃，当前视图恢复到最新密封版本。";
+    toast.info("变更请求已撤回；未发布工作版本已废弃，当前视图恢复到最新密封版本。", { duration: 5200 });
     await loadProcessProjection();
     await loadFormalDelivery(false);
-    clearFormalNoticeLater();
   } catch (err) {
     formalDeliveryError.value = formalErrorText(err);
   } finally {
@@ -1446,14 +1408,10 @@ onBeforeUnmount(() => {
   disposed = true;
   poller?.stop();
   poller = null;
+  implSummaryPoller?.stop();
+  implSummaryPoller = null;
   streamHandle?.close();
   streamHandle = null;
-  if (materialsNoticeTimer !== null) window.clearTimeout(materialsNoticeTimer);
-  materialsNoticeTimer = null;
-  if (sideTasksNoticeTimer !== null) window.clearTimeout(sideTasksNoticeTimer);
-  sideTasksNoticeTimer = null;
-  if (formalNoticeTimer !== null) window.clearTimeout(formalNoticeTimer);
-  formalNoticeTimer = null;
   processProjectionSerial += 1;
   formalDeliverySerial += 1;
   stopSideTaskPolling();
@@ -1511,18 +1469,22 @@ const auditParts = computed<readonly SynthiaPart[]>(() => {
     return legacyParts;
   }
   const durableConversation = conversationEventsToParts(mainTaskEvents.value);
+  // Core 0020 起在轮次定稿时同步 assistant_thinking，audit 的 free_agent_thinking
+  // 是同步失败时的兜底副本（runtime/server.ts「UI 兜底展示」）。直接拼接会把整块
+  // 思维链堆到所有工具卡之后（audit 里 thinking 全部晚于 durable 的工具事件），
+  // 定稿后还会与 Core 事件重复一份——按文本指纹去重，已入 Core 的不再从 audit 重放。
+  const durableThinking = new Set(
+    durableConversation
+      .filter((part): part is SynthiaReasoningPart => part.kind === "reasoning")
+      .map((part) => part.text.trim()),
+  );
   return [
     ...durableConversation,
-    ...legacyParts.filter((part) => part.kind !== "text" && part.kind !== "agent_tool"),
+    ...legacyParts.filter((part) =>
+      (part.kind !== "reasoning" || !durableThinking.has(part.text.trim()))
+      && part.kind !== "text" && part.kind !== "agent_tool"),
   ];
 });
-
-/** SSE 打开的流式文本 part（尚未定稿的部分渲染于流尾，见下方 parts 合成）。 */
-const streamingTextParts = computed<readonly SynthiaTextPart[]>(() =>
-  streamFeed.value
-    .filter((p): p is Extract<StreamFeedPart, { kind: "text" }> => p.kind === "text")
-    .map((p) => ({ kind: "text" as const, id: p.id, role: "agent" as const, state: p.state, text: p.text, segments: null })),
-);
 
 /**
  * 一条 SSE 过程 part（思考/工具调用）→ SynthiaPart。
@@ -1564,7 +1526,6 @@ const parts = computed<readonly SynthiaPart[]>(() => {
     if (ids) ids.push(s.id);
     else twinIds.set(key, [s.id]);
   }
-  const liveOnes = streamingTextParts.value.filter((p) => p.state === "streaming");
   // 从后往前认领：流里只有最近若干轮，最新的流 id 属于最新的那条 audit 回复。
   const settled: SynthiaPart[] = [...auditParts.value];
   for (let i = settled.length - 1; i >= 0; i--) {
@@ -1574,21 +1535,80 @@ const parts = computed<readonly SynthiaPart[]>(() => {
     if (twinId) settled[i] = { ...p, id: twinId };
   }
 
+  // 思维链 twin：audit 重放的 reasoning part（r<seq>/core-<id>）与 SSE 实时卡同文本
+  // 时认领流 id（复用 DOM），避免同一段思考渲染两遍。
+  const reasoningTwinIds = new Map<string, string[]>();
+  for (const s of streamFeed.value) {
+    if (s.kind !== "reasoning" || !s.text.trim()) continue;
+    const key = s.text.trim();
+    const ids = reasoningTwinIds.get(key);
+    if (ids) ids.push(s.id);
+    else reasoningTwinIds.set(key, [s.id]);
+  }
+  for (let i = settled.length - 1; i >= 0; i--) {
+    const p = settled[i]!;
+    if (p.kind !== "reasoning") continue;
+    const twinId = reasoningTwinIds.get(p.text.trim())?.pop();
+    if (twinId) settled[i] = { ...p, id: twinId };
+  }
+
   // 过程卡按流内顺序攒堆，遇到已定稿文本就锚定在它之前。
-  // 工具卡两边都有（audit 一条预览 + SSE 一张实时卡，同一个 callId）：位置以 audit
-  // 为准（它带真实 seq，不必靠锚点猜），内容以 SSE 为准（audit 那份是截断预览）。
+  // 工具卡与思维卡两边都有（audit 一条记录 + SSE 一张实时卡；工具同 callId、思维
+  // 在上方按文本指纹认领了同 id）：位置以 audit 为准（它带真实 seq，不必靠锚点
+  // 猜），内容以 SSE 为准（audit 那份是截断预览）。
   const settledIds = new Set(settled.map((p) => p.id));
   const anchored = new Map<string, SynthiaPart[]>();
   let pending: SynthiaPart[] = [];
+  /** 流尾：所有未解析的流 part（未锚定过程卡 + 未定稿文本），按流内真实顺序。 */
+  const unresolved: SynthiaPart[] = [];
+  /** 已被锚点/原地替换消费掉的流尾 part id。 */
+  const resolvedIds = new Set<string>();
   for (const p of streamFeed.value) {
     const processPart = toProcessPart(p);
     if (processPart) {
-      const at = processPart.kind === "agent_tool" ? settled.findIndex((s) => s.id === processPart.id) : -1;
-      if (at >= 0) settled[at] = processPart; // audit 已收录 → 原地换成更全的那份，不再入流
-      else pending.push(processPart);
-    } else if (p.state === "done" && pending.length > 0) {
-      anchored.set(p.id, pending);
-      pending = [];
+      const at = processPart.kind === "agent_tool" || processPart.kind === "reasoning"
+        ? settled.findIndex((s) => s.id === processPart.id)
+        : -1;
+      if (at >= 0) {
+        // audit 已收录 → 原地换成更全的那份，不再入流。这张已定稿的卡同时是
+        // 时序锚点：流里攒在它前面的 pending 过程卡（尚未定稿的思维链等）插到
+        // 它前面——只锚定稿文本的话，长轮次中途的思维链会一直堆在流尾，读起来
+        // 变成「先跑完工具、再思考」的反序。
+        if (pending.length > 0) {
+          for (const consumed of pending) resolvedIds.add(consumed.id);
+          anchored.set(settled[at]!.id, pending.splice(0));
+        }
+        settled[at] = processPart;
+      } else {
+        pending.push(processPart);
+        unresolved.push(processPart);
+      }
+    } else if (p.state === "streaming") {
+      // 轮内多段叙述与正在生成的过程卡按流内顺序混排，不能分桶拼接（先过程卡
+      // 后文本会把最新的思考卡排到更早的叙述气泡前面）。
+      unresolved.push({
+        kind: "text",
+        id: p.id,
+        role: "agent",
+        state: "streaming",
+        text: p.text,
+        segments: null,
+      });
+    } else if (p.kind === "text" && p.state === "done") {
+      // 已定稿但 durable 事件尚未轮询到位的叙述：仍从流渲染（否则它会消失到
+      // 下一次事件轮询才回来）；落库的孪生认领同一 id 后由 settledIds 去重。
+      unresolved.push({
+        kind: "text",
+        id: p.id,
+        role: "agent",
+        state: "done",
+        text: p.text,
+        segments: null,
+      });
+      if (pending.length > 0) {
+        for (const consumed of pending) resolvedIds.add(consumed.id);
+        anchored.set(p.id, pending.splice(0));
+      }
     }
   }
 
@@ -1603,9 +1623,15 @@ const parts = computed<readonly SynthiaPart[]>(() => {
   for (const [id, before] of anchored) {
     if (!settledIds.has(id)) out.push(...before);
   }
-  // pending 是本轮尚未跟上文本的过程卡（正在思考 / 工具正在跑），永远在流尾。
-  out.push(...pending, ...liveOnes);
-  return out;
+  // 流尾按流内顺序：正在思考/运行中的过程卡与未定稿叙述交错，最新的永远在最后。
+  // settledIds 去重：done 叙述的 durable 孪生落地并认领同一流 id 后只渲染一份。
+  out.push(...unresolved.filter((p) => !resolvedIds.has(p.id) && !settledIds.has(p.id)));
+  // 轮末注「本轮改动」汇总卡：末轮仍在进行（流式未收口/运行中）时先不注，
+  // 轮内 doc 卡已在流里，汇总卡等轮次落定再出现。
+  return injectChangeCards(out, {
+    tailOpen: unresolved.length > 0 || detail.value?.status === "running",
+    revisions: revisionChanges.value,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1615,6 +1641,30 @@ const parts = computed<readonly SynthiaPart[]>(() => {
 const fileTreeEntries = computed<FileTreeEntry[]>(() =>
   buildFileTreeEntries(artifacts.value, revisionsByArtifact.value, detail.value?.docs ?? [], workspace.value?.files ?? []),
 );
+
+/**
+ * 「本轮改动」汇总卡的修订输入：版本链上每次登记的平铺列表（带登记时间）。
+ * durable 会话（project agent / 探索任务）没有 governance doc 卡，改动归因
+ * 靠「修订登记时间落在哪一轮用户消息的时间窗内」（见 domain/change-cards.ts）。
+ * 定义在 parts computed 之后但安全：computed 惰性求值，parts 首次被读时
+ * 这里已经完成初始化（同 prevRevisionIdOf 的提升模式）。
+ */
+const revisionChanges = computed<RevisionChangeInput[]>(() => {
+  const out: RevisionChangeInput[] = [];
+  for (const entry of fileTreeEntries.value) {
+    for (const revision of entry.revisions) {
+      out.push({
+        artifactId: entry.artifactId,
+        revisionId: revision.id,
+        version: revision.version,
+        createdAt: revision.created_at,
+        path: entry.path ?? entry.artifactId,
+        prevRevisionId: prevRevisionId(entry, revision.id),
+      });
+    }
+  }
+  return out;
+});
 
 /**
  * 对话流产物卡的「上一版」修订 id：非 null 时卡上出现「查看改动」，点了跳中栏 diff。
@@ -1864,7 +1914,7 @@ const stageEmptyText = computed(() => {
 });
 const projectTypeLabel = computed(() => (project.value ? projectTypeText(projectType(project.value)) : ""));
 const projectProfileLabel = computed(() =>
-  project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : "—",
+  project.value && projectType(project.value) === "engineering" ? processVersionText(project.value) : null,
 );
 const toolSummary = ref<ToolSummary | null>(null);
 
@@ -1884,6 +1934,67 @@ async function refreshToolSummary(): Promise<void> {
 async function loadStaReportText(jobId: string): Promise<string> {
   const evidence = await getJobEvidenceContent(api, projectId, jobId, "sta.rpt");
   return evidence.content;
+}
+
+// ─── 顶栏「运行校验/仿真/…」按钮：工作区推导 → 提交 → 轮询摘要 ──────────
+
+/** 提交中/已提交未被摘要确认的行 key（按钮禁用转圈）。 */
+const implRunPending = ref<Set<string>>(new Set());
+const implRunError = ref<string | null>(null);
+let implSummaryPoller: Poller | null = null;
+
+function setImplRunPending(key: string, pending: boolean): void {
+  const next = new Set(implRunPending.value);
+  if (pending) next.add(key);
+  else next.delete(key);
+  implRunPending.value = next;
+}
+
+/** 有未到终态的工具作业时拉快摘要；全部落定后自停。 */
+function startImplSummaryPolling(): void {
+  implSummaryPoller?.stop();
+  implSummaryPoller = createPoller(() => {
+    void refreshToolSummary().then(() => {
+      const active = toolSummary.value?.stages.some(stage => stage.state === "running" || stage.state === "submitted");
+      if (!active) {
+        implSummaryPoller?.stop();
+        implSummaryPoller = null;
+      }
+    });
+  }, 4000);
+}
+
+async function onRunImplAction(action: ImplRunAction): Promise<void> {
+  if (implRunPending.value.has(action.key)) return;
+  implRunError.value = null;
+  setImplRunPending(action.key, true);
+  try {
+    const needs = operationNeeds(action.operation);
+    const tree = await getWorkspaceTree(api, projectId);
+    const derived = await deriveJobInputs(
+      tree.files,
+      (path) => getWorkspaceFile(api, projectId, path).then(file => file.content),
+      { deriveTop: needs.top, deriveTb: needs.tb },
+    );
+    if (!derived.ok) throw new Error(derived.reason);
+    await submitJob(api, projectId, {
+      operation: action.operation,
+      sources: derived.sources,
+      constraints: derived.constraints,
+      top: derived.top,
+      testbench: derived.testbench,
+      part: project.value?.target_part ?? null,
+      ...(action.operation === "implement" && action.stopBeforeBitstream !== undefined
+        ? { stop_before_bitstream: action.stopBeforeBitstream }
+        : {}),
+    }, `ui-run-${projectId}-${action.key}-${crypto.randomUUID()}`);
+    void refreshToolSummary();
+    startImplSummaryPolling();
+  } catch (err) {
+    implRunError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    setImplRunPending(action.key, false);
+  }
 }
 
 const viewMode = ref<FileTreeViewMode>("path");
@@ -1925,9 +2036,34 @@ const leftCollapsed = computed(() => viewportWidth.value < 1024);
 const rightCollapsed = computed(() => viewportWidth.value < 1280);
 const treeDrawerOpen = ref(false);
 const chatOverlayOpen = ref(false);
+
+/**
+ * 三栏拖拽（ui/resizable，reka Splitter 的 px 模式）：左/右栏像素宽、中栏吃剩余空间，
+ * 与旧 ui/Splitter.vue 语义一致。reka 按面板组合分 key 持久化（autoSaveId），断点
+ * 切换收起某栏不会冲掉另一组布局记忆；这里再读一次旧 Splitter 的 localStorage
+ * px 值作为初始宽，让迁移前拖过的宽度不丢。
+ */
+function readStoredPaneWidth(key: string, min: number, max: number, fallback: number): number {
+  const raw = window.localStorage.getItem(key);
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+const LEFT_PANE_MIN = 180;
+const LEFT_PANE_MAX = 420;
+const RIGHT_PANE_MIN = 280;
+const RIGHT_PANE_MAX = 560;
+const leftPaneDefault = readStoredPaneWidth("synthia.splitter.left", LEFT_PANE_MIN, LEFT_PANE_MAX, 240);
+const rightPaneDefault = readStoredPaneWidth("synthia.splitter.right", RIGHT_PANE_MIN, RIGHT_PANE_MAX, 380);
 function focusConversation(): void {
   chatOverlayOpen.value = true;
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
+}
+
+// 首页示例任务：填入当前草稿并聚焦输入框（与 ChatFeed 空态示例同一 EXAMPLE_TASKS 数据源）。
+function onWelcomeExample(text: string): void {
+  chatDraft.value = text;
+  focusConversation();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1967,6 +2103,7 @@ async function onSend(text: string): Promise<void> {
   if (composerMode.value !== "new-task" && !detail.value) { sendError.value = "对话尚未加载完成，请稍后重试。"; return; }
   const draftKey = chatDraftKey.value;
   sending.value = true;
+  pendingUserText.value = text;
   sendError.value = null;
   try {
     if (composerMode.value === "new-task") {
@@ -1995,12 +2132,14 @@ async function onSend(text: string): Promise<void> {
       : humanizeDecisionError(err, "发送").text;
   } finally {
     sending.value = false;
+    pendingUserText.value = null;
   }
 }
 
 async function onAbort(): Promise<void> {
   if (!currentAgentId.value || sending.value) return;
   sending.value = true;
+  aborting.value = true;
   sendError.value = null;
   try {
     const attempt = prepareTaskAbortAttempt(mainTaskAbortAttempt, currentAgentId.value);
@@ -2012,6 +2151,7 @@ async function onAbort(): Promise<void> {
     sendError.value = humanizeLoadError(err);
   } finally {
     sending.value = false;
+    aborting.value = false;
   }
 }
 
@@ -2300,8 +2440,6 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
 
 const topBarProps = computed<TopBarProps>(() => ({
   projectName: project.value?.name ?? "",
-  stageChain: stageChain.value,
-  stageEmptyText: stageEmptyText.value,
   theme: theme.value,
   treeDrawerOpen: treeDrawerOpen.value,
   chatOverlayOpen: chatOverlayOpen.value,
@@ -2346,7 +2484,58 @@ const chatFeedProps = computed<ChatFeedProps>(() => ({
   sendError: sendError.value,
   exampleTasks: EXAMPLE_TASKS,
   approval: approvalCardProps.value,
+  contextUsage: detail.value?.context_usage
+    ? { promptTokens: detail.value.context_usage.prompt_tokens, contextWindow: detail.value.context_usage.context_window }
+    : null,
+  permissionSkipAll: skipAllOverride.value ?? (detail.value?.permission?.skip_all ?? false),
+  pendingUserText: pendingUserText.value,
+  permissionPending: pendingPermission.value,
+  permissionBusy: permissionOperating.value,
+  aborting: aborting.value,
 }));
+
+// ── 权限交互：流内卡片裁决 + 「跳过所有权限」开关 ─────────────────────────────
+
+const permissionOperating = ref(false);
+
+// ── 乐观更新：本地先行、服务器收口（写操作全部有幂等键，回滚=清本地标志）────
+// 发送文案在 onSend 里赋值；成功路径 refresh() 已把真实事件带回（顶替气泡），
+// 失败路径 ChatFeed 的草稿回填会把文案放回输入框——两路都只需在 finally 清标志。
+const pendingUserText = ref<string | null>(null);
+const pendingPermission = ref<{ callId: string; allow: boolean } | null>(null);
+const skipAllOverride = ref<boolean | null>(null);
+const aborting = ref(false);
+
+async function onResolvePermission(callId: string, allow: boolean): Promise<void> {
+  if (!currentAgentId.value || permissionOperating.value) return;
+  permissionOperating.value = true;
+  pendingPermission.value = { callId, allow };
+  try {
+    await resolveTaskPermission(api, projectId, currentAgentId.value, { callId, allow });
+    await refresh();
+  } catch (err) {
+    sendError.value = humanizeDecisionError(err, "权限裁决").text;
+  } finally {
+    permissionOperating.value = false;
+    pendingPermission.value = null;
+  }
+}
+
+async function onToggleSkipPermissions(skip: boolean): Promise<void> {
+  if (!currentAgentId.value || permissionOperating.value) return;
+  permissionOperating.value = true;
+  skipAllOverride.value = skip; // 开关先翻：成功后 refresh 收口，失败在 finally 回弹
+  try {
+    await resolveTaskPermission(api, projectId, currentAgentId.value, { skipAll: skip });
+    await refresh();
+    skipAllOverride.value = null;
+  } catch (err) {
+    sendError.value = humanizeDecisionError(err, "权限开关").text;
+  } finally {
+    permissionOperating.value = false;
+    skipAllOverride.value = null;
+  }
+}
 
 const recordsPanelProps = computed<RecordsPanelProps>(() => ({
   open: recordsOpen.value,
@@ -2366,7 +2555,6 @@ const historicalMaterialsProps = computed(() => ({
   searching: materialsSearching.value,
   operating: materialsOperating.value,
   error: materialsError.value,
-  notice: materialsNotice.value,
   projectEligible: project.value?.project_type === "engineering",
 }));
 
@@ -2414,82 +2602,109 @@ function onToggleChatOverlay(): void {
 </script>
 
 <template>
-  <div class="project-view">
-    <header class="project-view-topbar">
+  <div class="flex h-dvh min-h-0 flex-col bg-base text-fg">
+    <!-- 摘要 chip 的悬浮面板要盖住下方三栏（z-20）；抽屉走 ui/sheet（z 取自 --z-overlay）仍在其上 -->
+    <header class="relative z-20 h-[var(--topbar-height)] flex-none border-b border-line bg-panel">
       <TopBar
         v-bind="topBarProps"
-        @select-stage="onSelectStage"
         @toggle-theme="onToggleTheme"
         @toggle-tree-drawer="onToggleTreeDrawer"
         @toggle-chat-overlay="onToggleChatOverlay"
         @logout="onLogout"
-      />
+      >
+        <template #progress>
+          <StageStatusChip
+            :type-label="projectTypeLabel"
+            :profile-label="projectProfileLabel"
+            :target-part="project?.target_part ?? null"
+            :stage-chain="stageChain"
+            :empty-text="stageEmptyText"
+            :summary="toolSummary"
+            :load-sta-report="staReportLoader"
+            :pending-keys="[...implRunPending]"
+            :run-error="implRunError"
+            @select-stage="onSelectStage"
+            @run-action="onRunImplAction"
+          />
+        </template>
+      </TopBar>
     </header>
-    <div v-if="project" class="project-view-meta" aria-label="项目类型与流程版本">
+    <!-- 项目类型/流程/器件信息已收入顶栏「项目概览」chip；本行只剩工程项目
+         的正式流程/历史资料入口（自由项目整行不渲染）。 -->
+    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
-      <span>{{ projectTypeLabel }}</span>
-      <span v-if="projectType(project) === 'engineering'">流程：{{ projectProfileLabel }}</span>
-      <span v-if="project.target_part">器件：{{ project.target_part }}</span>
-      <div v-if="formalDeliveryEnabled || sideTasksEnabled || historicalMaterialsEnabled" class="project-view-meta-actions">
+      <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
         <button
           v-if="formalDeliveryEnabled"
           type="button"
-          class="project-view-formal-button"
+          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
           :aria-expanded="formalDeliveryOpen"
           @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
         >
           正式流程
-          <span v-if="processState" class="project-view-materials-count">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
+          <span v-if="processState" class="text-[11px] text-fg-secondary tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
         </button>
         <button
           v-if="historicalMaterialsEnabled"
           type="button"
-          class="project-view-materials-button"
+          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
           :aria-expanded="materialsOpen"
           @click="materialsOpen ? closeMaterials() : openMaterials()"
         >
           历史资料
-          <span v-if="materialSnapshots.length > 0" class="project-view-materials-count">{{ materialSnapshots.length }}</span>
+          <span v-if="materialSnapshots.length > 0" class="text-[11px] text-fg-secondary">{{ materialSnapshots.length }}</span>
         </button>
       </div>
     </div>
 
-    <div v-if="loadErrorText" class="project-view-error" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
-    <div v-if="loading" class="project-loading" role="status">正在准备项目工作区…</div>
+    <div v-if="loadErrorText" class="flex flex-none items-center justify-between gap-3 bg-danger/12 px-4 py-2 text-xs text-danger" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
+    <div v-if="loading" class="grid flex-1 place-items-center text-fg-secondary" role="status">正在准备项目工作区…</div>
 
-    <Splitter
+    <ResizablePanelGroup
       v-else-if="project"
-      class="project-view-body"
-      storage-key="synthia.splitter"
-      :left-collapsed="leftCollapsed"
-      :right-collapsed="rightCollapsed"
+      direction="horizontal"
+      auto-save-id="synthia.splitter"
+      :keyboard-resize-by="1"
+      class="min-h-0 flex-1"
     >
-      <template #left>
-        <FileTree
-          v-bind="fileTreeProps"
-          @update:viewMode="onUpdateViewMode"
-          @open-file="onOpenFile"
-          @close-drawer="onCloseDrawer"
-          @register="onRegister"
-        />
+      <template v-if="!leftCollapsed">
+        <ResizablePanel
+          id="left"
+          :order="1"
+          size-unit="px"
+          :default-size="leftPaneDefault"
+          :min-size="LEFT_PANE_MIN"
+          :max-size="LEFT_PANE_MAX"
+          class="min-h-0 overflow-hidden"
+        >
+          <FileTree
+            v-bind="fileTreeProps"
+            @update:viewMode="onUpdateViewMode"
+            @open-file="onOpenFile"
+            @close-drawer="onCloseDrawer"
+            @register="onRegister"
+          />
+        </ResizablePanel>
+        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
-      <template #center>
+      <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
         <WorkspaceWelcome
           v-if="!openArtifactId"
           :project-name="project.name"
           :engineering="projectType(project) === 'engineering'"
           :has-agent="hasAgent"
           :show-browse="leftCollapsed"
+          :type-label="projectTypeLabel"
+          :profile-label="projectProfileLabel"
+          :process-state="processState"
+          :stage-chain="stageChain"
+          :summary="toolSummary"
+          :example-tasks="EXAMPLE_TASKS"
           @start="focusConversation"
           @browse="treeDrawerOpen = true"
+          @example="onWelcomeExample"
         />
-        <ImplProgressCard
-          v-if="!openArtifactId && toolSummary"
-          class="project-view-impl-card"
-          :summary="toolSummary"
-          :load-sta-report="staReportLoader"
-        />
-        <CodeEditor v-else
+        <CodeEditor v-if="openArtifactId"
           v-bind="codeEditorProps"
           @select-revision="onSelectRevision"
           @compare-revisions="onCompareRevisions"
@@ -2497,9 +2712,19 @@ function onToggleChatOverlay(): void {
           @save="onSave"
           @dirty-change="editorDirty = $event"
         />
-      </template>
-      <template #right>
-        <div class="project-agent-workbench">
+      </ResizablePanel>
+      <template v-if="!rightCollapsed">
+        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizablePanel
+          id="right"
+          :order="3"
+          size-unit="px"
+          :default-size="rightPaneDefault"
+          :min-size="RIGHT_PANE_MIN"
+          :max-size="RIGHT_PANE_MAX"
+          class="min-h-0 overflow-hidden"
+        >
+          <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
           <AgentPaneTabs
             :active-pane="activeAgentPane"
             :side-agents="visibleSideAgents"
@@ -2515,6 +2740,8 @@ function onToggleChatOverlay(): void {
             @close="chatOverlayOpen = false"
             @send="onSend"
             @abort="onAbort"
+            @resolve-permission="onResolvePermission"
+            @toggle-skip-permissions="onToggleSkipPermissions"
             @open-doc="onOpenDoc"
             @open-diff="onOpenDiff"
             @open-records="onOpenRecords"
@@ -2541,7 +2768,6 @@ function onToggleChatOverlay(): void {
             :message-text="sideTaskMessageText"
             :message-error="sideTaskMessageError"
             :error="sideTasksError"
-            :notice="sideTasksNotice"
             @close="closeSideTasks"
             @refresh="loadSideTasks()"
             @select-task="onSelectSideTask"
@@ -2551,30 +2777,28 @@ function onToggleChatOverlay(): void {
             @update:message-text="sideTaskMessageText = $event"
             @send-message="onSendSideTaskMessage"
           />
-        </div>
+          </div>
+        </ResizablePanel>
       </template>
-    </Splitter>
+    </ResizablePanelGroup>
 
-    <!-- <1024px：文件树抽屉化（spec R3），与 Splitter 内的左栏互斥渲染 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="leftCollapsed && treeDrawerOpen" class="project-view-veil" @click.self="onCloseDrawer">
-        <div class="project-view-drawer">
-          <FileTree
-            v-bind="fileTreeProps"
-            @update:viewMode="onUpdateViewMode"
-            @open-file="onOpenFile"
-            @close-drawer="onCloseDrawer"
-            @register="onRegister"
-          />
-        </div>
-      </div>
-    </Transition>
+    <!-- <1024px：文件树抽屉化（spec R3），与 ResizablePanelGroup 内的左栏互斥渲染 -->
+    <Sheet :open="leftCollapsed && treeDrawerOpen" @update:open="(open) => { if (!open) onCloseDrawer(); }">
+      <SheetContent side="left" :show-close-button="false" class="w-[min(320px,86vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <FileTree
+          v-bind="fileTreeProps"
+          @update:viewMode="onUpdateViewMode"
+          @open-file="onOpenFile"
+          @close-drawer="onCloseDrawer"
+          @register="onRegister"
+        />
+      </SheetContent>
+    </Sheet>
 
-    <!-- <1280px：对话栏浮层化（spec R3），与 Splitter 内的右栏互斥渲染 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="rightCollapsed && chatOverlayOpen" class="project-view-veil project-view-veil-end" @click.self="onToggleChatOverlay">
-        <div class="project-view-overlay">
-          <div class="project-agent-workbench">
+    <!-- <1280px：对话栏浮层化（spec R3），与 ResizablePanelGroup 内的右栏互斥渲染 -->
+    <Sheet :open="rightCollapsed && chatOverlayOpen" @update:open="(open) => { if (!open) chatOverlayOpen = false; }">
+      <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
             <AgentPaneTabs
               :active-pane="activeAgentPane"
               :side-agents="visibleSideAgents"
@@ -2590,6 +2814,8 @@ function onToggleChatOverlay(): void {
               @close="chatOverlayOpen = false"
               @send="onSend"
               @abort="onAbort"
+            @resolve-permission="onResolvePermission"
+            @toggle-skip-permissions="onToggleSkipPermissions"
               @open-doc="onOpenDoc"
               @open-diff="onOpenDiff"
               @open-records="onOpenRecords"
@@ -2616,7 +2842,6 @@ function onToggleChatOverlay(): void {
               :message-text="sideTaskMessageText"
               :message-error="sideTaskMessageError"
               :error="sideTasksError"
-              :notice="sideTasksNotice"
               @close="closeSideTasks"
               @refresh="loadSideTasks()"
               @select-task="onSelectSideTask"
@@ -2626,22 +2851,19 @@ function onToggleChatOverlay(): void {
               @update:message-text="sideTaskMessageText = $event"
               @send-message="onSendSideTaskMessage"
             />
-          </div>
         </div>
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
     <!-- 运行记录抽屉：任意视口宽度可开合，不与左右栏的响应式降级绑定 -->
-    <Transition name="project-view-veil-fade">
-      <div v-if="recordsOpen" class="project-view-veil project-view-veil-end" @click.self="onCloseRecords">
-        <div class="project-view-overlay">
-          <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
-        </div>
-      </div>
-    </Transition>
+    <Sheet :open="recordsOpen" @update:open="(open) => { if (!open) onCloseRecords(); }">
+      <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
+      </SheetContent>
+    </Sheet>
 
-    <Transition name="project-view-veil-fade">
-      <div v-if="historicalMaterialsEnabled && materialsOpen" class="project-view-veil project-view-veil-end" @click.self="closeMaterials">
+    <Sheet :open="historicalMaterialsEnabled && materialsOpen" @update:open="(open) => { if (!open) closeMaterials(); }">
+      <SheetContent side="right" :show-close-button="false" class="w-[min(560px,96vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
         <HistoricalMaterialsPanel
           v-bind="historicalMaterialsProps"
           @close="closeMaterials"
@@ -2653,17 +2875,16 @@ function onToggleChatOverlay(): void {
           @deny="onDenyMaterials"
           @copy="onCopyMaterials"
         />
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
-    <Transition name="project-view-veil-fade">
-      <div v-if="formalDeliveryEnabled && formalDeliveryOpen" class="project-view-veil project-view-veil-end" @click.self="closeFormalDelivery">
+    <Sheet :open="formalDeliveryEnabled && formalDeliveryOpen" @update:open="(open) => { if (!open) closeFormalDelivery(); }">
+      <SheetContent side="right" :show-close-button="false" class="w-[min(720px,94vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none max-[720px]:w-screen">
         <FormalDeliveryPanel
           :open="formalDeliveryOpen"
           :loading="formalDeliveryLoading"
           :operating="formalDeliveryOperating"
           :error="formalDeliveryError"
-          :notice="formalDeliveryNotice"
           :profile="processProfile"
           :state="processState"
           :gate-chain="processGateChain"
@@ -2697,153 +2918,16 @@ function onToggleChatOverlay(): void {
           @create-change-request="onCreateChangeRequest"
           @withdraw-change-request="onWithdrawChangeRequest"
         />
-      </div>
-    </Transition>
+      </SheetContent>
+    </Sheet>
 
   </div>
 </template>
 
 <style scoped>
-.project-view {
-  display: flex;
-  flex-direction: column;
-  height: 100dvh;
-  min-height: 0;
-  background: var(--surface-base);
-  color: var(--text-primary);
-}
-
-.project-view-topbar {
-  flex: none;
-  height: var(--topbar-height);
-  background: var(--surface-panel);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.project-view-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-  min-height: 38px;
-  padding: 5px var(--space-4);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.project-view-meta-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-left: auto;
-}
-
-.project-view-materials-button,
-.project-view-formal-button,
-.project-view-side-tasks-button {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-  padding: 2px var(--space-2);
-  font-size: var(--font-size-sm);
-}
-
-.project-view-materials-button:hover,
-.project-view-formal-button:hover,
-.project-view-side-tasks-button:hover {
-  background: var(--accent-subtle);
-}
-
-.project-view-materials-count {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.project-view-error {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex: none;
-  padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--state-danger) 12%, transparent);
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-}
-
-.project-view-body {
+/* 浮层内对话流子组件的内部布局只能走 :deep()。 */
+.project-view-overlay > :deep(.chat-feed) {
   flex: 1;
   min-height: 0;
-}
-
-.project-agent-workbench {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  background: var(--surface-panel);
-}
-
-.project-agent-workbench > :last-child {
-  flex: 1;
-  min-height: 0;
-}
-
-.project-view-veil {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-drawer);
-  display: flex;
-  background: rgba(0, 0, 0, 0.35);
-}
-
-.project-view-veil-end {
-  justify-content: flex-end;
-  z-index: var(--z-overlay);
-}
-
-.project-view-drawer,
-.project-view-overlay {
-  height: 100%;
-  background: var(--surface-panel);
-  box-shadow: 0 0 24px var(--shadow-color);
-  overflow: hidden;
-}
-
-.project-view-drawer {
-  width: min(320px, 86vw);
-}
-
-.project-view-overlay {
-  display: flex;
-  flex-direction: column;
-  width: min(380px, 92vw);
-}
-
-.project-view-veil-fade-enter-active,
-.project-view-veil-fade-leave-active {
-  transition: opacity var(--duration) var(--ease-out);
-}
-
-.project-view-veil-fade-enter-from,
-.project-view-veil-fade-leave-to {
-  opacity: 0;
-}
-</style>
-
-<style scoped>
-.project-loading { flex: 1; display: grid; place-items: center; color: var(--text-secondary); }
-.project-view-overlay > :deep(.chat-feed) { flex: 1; min-height: 0; }
-@media (max-width: 600px) {
-  .project-view-meta { gap: 6px 12px; }
-  .project-view-meta-actions { width: 100%; flex-wrap: wrap; margin-left: 0; padding-bottom: 4px; }
 }
 </style>

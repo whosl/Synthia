@@ -16,6 +16,7 @@ import type {
   TaskAuthorizationScope,
   TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 
 /** JSON Schema 子集（OpenAI tool `parameters` 格式）。 */
 export type ToolParameters = Record<string, unknown>;
@@ -31,6 +32,14 @@ export interface ToolExecContext {
   readonly authorization?: TaskAuthorizationScope;
   /** Narrow isolated-workspace capability. Present for side tasks only. */
   readonly workspace?: TaskWorkspaceClient;
+  /** Task-bound Learned Skill facts. It never carries Distiller/Curator permissions. */
+  readonly evolution?: TaskEvolutionClient;
+  /** Runtime-owned identity for the currently executing model tool call. */
+  readonly toolCallId?: string;
+  /** Durable Project Agent turn id; null/undefined for bounded task execution. */
+  readonly turnId?: string | null;
+  /** Sequence of the tool_call event that Core committed before tool execution. */
+  readonly toolEventSequence?: number;
   /** Core 治理客户端（登记候选制品/快照/门禁）。 */
   readonly governance: GovernanceClient;
   /** Connector（经 Core 提交 Vivado Job）。无可用时为 null（工具须 fail-closed）。 */
@@ -130,14 +139,25 @@ export interface BeforeModelCallHook {
   (messages: readonly AgentMessage[]): { stop: true; reason: string } | undefined;
 }
 
+/** 模型一次调用的用量回执；网关不回报时缺省，水位管理按未知处理。 */
+export interface TurnUsage {
+  /** 本次请求的输入 token 数（即压缩水位的直接量度）。 */
+  readonly promptTokens?: number;
+  readonly completionTokens?: number;
+}
+
 /** 模型一次对话回合：要么纯文本（闲聊/答复/收尾），要么一组工具调用。 */
 export type ChatTurn =
-  | { kind: "text"; content: string }
-  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null };
+  | { kind: "text"; content: string; usage?: TurnUsage }
+  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null; usage?: TurnUsage };
 
 /** 对话式模型原语（多轮 tool-calling）。Slice A 在 model-client.ts 上实现 chat()。 */
 export interface ConversationalModel {
-  chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn>;
+  chat(
+    messages: readonly AgentMessage[],
+    tools: readonly AgentTool[],
+    signal?: AbortSignal,
+  ): Promise<ChatTurn>;
 }
 
 /**
@@ -167,6 +187,8 @@ export interface StreamingConversationalModel {
  * 思维链不落 audit（体量大、非回复内容），只在实时流里可见。
  */
 export interface PromptStreamOptions {
+  /** Runtime-owned durable turn id. Models cannot supply or override it. */
+  turnId?: string;
   /** 第一个文本 delta 到达（text part 创建，state=streaming）。 */
   onTextStart?: (partId: string) => void;
   /** 文本增量（追加到该 part）。 */
@@ -181,7 +203,7 @@ export interface PromptStreamOptions {
     name: string,
     args: string,
     fullArgs?: string,
-  ) => void | Promise<void>;
+  ) => void | number | Promise<void | number>;
   /** 工具执行结束（同一 part 转 done/error）；fullResult 供持久化完整事实。 */
   onToolEnd?: (
     callId: string,
@@ -222,6 +244,31 @@ export interface FreeAgentSession {
   prompt(text: string, opts?: PromptStreamOptions): Promise<string>;
   /** 运行中纠偏；返回的 Promise 完成后已持久化，在模型或完整工具批次边界注入。 */
   steer(text: string): void | Promise<void>;
+  /** 权限交互快照（UI 渲染卡片与「跳过所有权限」开关）。 */
+  permissionState(): {
+    pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+    skipAll: boolean;
+  };
+  /** 用户对挂起权限请求的裁决；无匹配挂起时返回 false。 */
+  resolvePermission(callId: string, allow: boolean): boolean;
+  /** 「跳过所有权限」开关（会话级，内存态）。 */
+  setPermissionSkipAll(skip: boolean): void;
+  /**
+   * 权限/上下文事件监听（server 注入：写 Core 事件 + SSE 上流）。
+   * request 在工具调用挂起时发一次；decision 含 allow 与原因（用户/超时）。
+   */
+  setPermissionListener(
+    listener: (event: {
+      kind: "request" | "decision";
+      callId: string;
+      tool: string;
+      argsPreview: string;
+      allow?: boolean;
+      reason?: string;
+    }) => void,
+  ): void;
+  /** 上下文水位（UI 环形指示）：promptTokens 为最近实测输入规模，null=未回报。 */
+  contextUsage(): { promptTokens: number | null; contextWindow: number };
   /** 立即终止。 */
   abort(reason?: string): void;
 }

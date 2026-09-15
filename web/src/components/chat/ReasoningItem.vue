@@ -39,102 +39,33 @@ const summary = computed(() => {
 </script>
 
 <template>
-  <div class="reasoning-item" :class="{ streaming, expanded }">
+  <div class="rounded-sm border-l-2 border-line-strong bg-hover" :class="streaming ? 'border-l-brand' : ''">
     <div
-      class="reasoning-header"
+      class="flex w-full cursor-pointer items-center gap-1 px-2 py-1 text-left text-xs text-fg-secondary"
       role="button"
       tabindex="0"
       @click="toggle"
       @keydown.enter="toggle"
       @keydown.space.prevent="toggle"
     >
-      <span class="reasoning-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
-      <span class="reasoning-glyph" aria-hidden="true">💭</span>
-      <span class="reasoning-title">{{ streaming ? "思考中…" : "已思考" }}</span>
-      <span v-if="!expanded && summary" class="reasoning-summary">{{ summary }}</span>
+      <span class="w-[10px] flex-none text-fg-muted" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
+      <span class="flex-none" aria-hidden="true">💭</span>
+      <span class="flex-none" :class="streaming ? 'text-brand' : 'text-fg-secondary'">{{ streaming ? "思考中…" : "已思考" }}</span>
+      <span v-if="!expanded && summary" class="min-w-0 flex-1 truncate text-fg-muted">{{ summary }}</span>
     </div>
-    <div v-if="expanded" class="reasoning-body">
-      <pre class="reasoning-text">{{ part.text }}</pre>
-      <span v-if="streaming" class="reasoning-cursor" aria-hidden="true" />
+    <div v-if="expanded" class="px-2 pb-2 pl-[22px]">
+      <!-- 思维链是模型的草稿：等宽、保留换行、不渲染 Markdown（避免半截语法闪烁）。 -->
+      <pre class="reasoning-text m-0 max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words text-fg-muted">{{ part.text }}</pre>
+      <span v-if="streaming" class="reasoning-cursor inline-block h-[1em] w-[6px] bg-brand align-text-bottom [animation:reasoning-cursor-blink_900ms_step-end_infinite]" aria-hidden="true" />
     </div>
   </div>
 </template>
 
 <style scoped>
-.reasoning-item {
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-  border-left: 2px solid var(--border-strong);
-}
-
-.reasoning-item.streaming {
-  border-left-color: var(--accent);
-}
-
-.reasoning-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.reasoning-chevron {
-  flex: none;
-  width: 10px;
-  color: var(--text-muted);
-}
-
-.reasoning-glyph {
-  flex: none;
-}
-
-.reasoning-title {
-  flex: none;
-  color: var(--text-secondary);
-}
-
-.streaming .reasoning-title {
-  color: var(--accent);
-}
-
-.reasoning-summary {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-muted);
-}
-
-.reasoning-body {
-  padding: 0 var(--space-2) var(--space-2) calc(var(--space-2) + 14px);
-}
-
-/* 思维链是模型的草稿：等宽、保留换行、不渲染 Markdown（避免半截语法闪烁）。 */
+/* 未分层全局 pre 规则（font/line-height）优先级高于 Tailwind utilities 层，
+   思维链的 1.4 行高留在 scoped。 */
 .reasoning-text {
-  margin: 0;
-  max-height: 320px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
   line-height: var(--line-height-list);
-  color: var(--text-muted);
-}
-
-.reasoning-cursor {
-  display: inline-block;
-  width: 6px;
-  height: 1em;
-  vertical-align: text-bottom;
-  background: var(--accent);
-  animation: reasoning-cursor-blink 900ms step-end infinite;
 }
 
 @keyframes reasoning-cursor-blink {

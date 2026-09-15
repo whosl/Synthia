@@ -25,14 +25,14 @@ const OPTIONS: ReadonlyArray<{ value: FileTreeViewMode; label: string }> = [
 </script>
 
 <template>
-  <div class="view-switcher" role="tablist" aria-label="文件树视图">
+  <div class="flex gap-[2px] rounded-md bg-hover p-[2px]" role="tablist" aria-label="文件树视图">
     <button
       v-for="opt in OPTIONS"
       :key="opt.value"
       type="button"
       role="tab"
-      class="view-switcher-item"
-      :class="{ 'is-active': modelValue === opt.value }"
+      class="flex-1 cursor-pointer rounded-sm border-0 bg-transparent px-2 py-[3px] text-xs leading-[1.4] whitespace-nowrap transition-[background-color,color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)]"
+      :class="modelValue === opt.value ? 'bg-panel text-fg' : 'text-fg-secondary hover:text-fg'"
       :aria-selected="modelValue === opt.value"
       @click="emit('update:modelValue', opt.value)"
     >
@@ -40,38 +40,3 @@ const OPTIONS: ReadonlyArray<{ value: FileTreeViewMode; label: string }> = [
     </button>
   </div>
 </template>
-
-<style scoped>
-.view-switcher {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--surface-hover);
-  border-radius: var(--radius);
-}
-
-.view-switcher-item {
-  flex: 1;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-list);
-  padding: 3px var(--space-2);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  transition:
-    background-color var(--duration) var(--ease-out),
-    color var(--duration) var(--ease-out);
-}
-
-.view-switcher-item:hover {
-  color: var(--text-primary);
-}
-
-.view-switcher-item.is-active {
-  background: var(--surface-panel);
-  color: var(--text-primary);
-}
-</style>

@@ -1,18 +1,22 @@
 <script setup lang="ts">
 /**
- * Agent 工具调用条（free-agent 自身发起的 tool_calls：「▸ ⚙ read_file 完成」）。
+ * Agent 工具调用条（free-agent 自身发起的 tool_calls：「▸ ⚙ read_file」）。
  *
  * 与 {@link ToolCallItem} 的区别：那个是流水线阶段工具条（validate_sources /
  * simulate / synthesize / implement，来自 audit，有四态与耗时），这个是 Agent
  * 在对话轮里直接调的任意工具，只来自 SSE 实时流，三态（running/done/error）。
  * 同样不落 audit，本轮结束刷新页面不再重放。
  *
+ * 单行密度：状态图标 + 工具名（带 operation 入参时追加具体操作），不带状态
+ * 文字徽章；error 默认展开——工具报错是用户唯一需要立刻看到的一种，藏在折叠
+ * 里等于没报。
+ *
  * 入参与结果由服务端截断至 2000 字符（runtime/free-agent.ts:truncateForStream），
  * 完整内容在会话消息与运行记录里——这条只是「现在正在调什么」的实时可见性。
  */
 import { computed, ref, watch } from "vue";
 import type { SynthiaAgentToolPart } from "../../domain/parts.ts";
-import Badge from "../ui/Badge.vue";
+import { formatToolPayload } from "../../domain/tool-detail.ts";
 
 const props = defineProps<{ part: SynthiaAgentToolPart }>();
 
@@ -20,18 +24,6 @@ const STATE_GLYPH: Record<SynthiaAgentToolPart["state"], string> = {
   running: "◐",
   done: "⚙",
   error: "⚠️",
-};
-
-const STATE_TONE: Record<SynthiaAgentToolPart["state"], "accent" | "ok" | "danger"> = {
-  running: "accent",
-  done: "ok",
-  error: "danger",
-};
-
-const STATE_TEXT: Record<SynthiaAgentToolPart["state"], string> = {
-  running: "运行中",
-  done: "完成",
-  error: "失败",
 };
 
 const touched = ref(false);
@@ -50,123 +42,65 @@ function toggle(): void {
   expanded.value = !expanded.value;
 }
 
-/** 入参美化：能解析成 JSON 就缩进展示，否则原样（服务端截断后可能不是合法 JSON）。 */
-const argsText = computed(() => {
+/** 入参美化：能解析成 JSON 就块样式展示，否则原样（服务端截断后可能不是合法 JSON）。 */
+const argsText = computed(() => formatToolPayload(props.part.args));
+
+/** 结果美化：与入参同一格式化器——工具结果常是（可能双重编码的）JSON 字符串。 */
+const resultText = computed(() => {
+  if (props.part.result === null) return "";
+  return formatToolPayload(props.part.result);
+});
+
+/**
+ * 头部显示名：带 operation 入参的工具（vivado_run/fpga-sim-run 等）追加具体
+ * 操作（「vivado_run: simulate」）。用正则而非 JSON.parse——入参可能被截断，
+ * 不是合法 JSON；截断尾巴里 operation 排在前面，照样提得到。
+ */
+const displayName = computed(() => {
+  const name = props.part.name || "工具调用";
   const raw = props.part.args.trim();
-  if (!raw || raw === "{}") return "";
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
+  if (!raw) return name;
+  const match = raw.match(/"operation"\s*:\s*"([^"]+)"/);
+  return match ? `${name}: ${match[1]}` : name;
 });
 </script>
 
 <template>
-  <div class="agent-tool-item" :class="[`state-${part.state}`, { expanded }]">
+  <div class="rounded-sm bg-hover" :class="part.state === 'done' ? 'opacity-72' : ''">
     <div
-      class="agent-tool-header"
+      class="flex w-full cursor-pointer items-center gap-1.5 px-2 py-1 text-left text-xs leading-[1.2] text-fg-secondary"
       role="button"
       tabindex="0"
       @click="toggle"
       @keydown.enter="toggle"
       @keydown.space.prevent="toggle"
     >
-      <span class="agent-tool-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
-      <span class="agent-tool-glyph" aria-hidden="true">{{ STATE_GLYPH[part.state] }}</span>
-      <span class="agent-tool-name">{{ part.name || "工具调用" }}</span>
-      <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
+      <span class="w-[10px] flex-none text-fg-muted" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
+      <span
+        class="flex-none"
+        :class="part.state === 'running' ? 'inline-block text-brand [animation:agent-tool-spin_1.1s_linear_infinite]' : part.state === 'error' ? 'text-danger' : ''"
+        aria-hidden="true"
+      >{{ STATE_GLYPH[part.state] }}</span>
+      <span class="min-w-0 flex-1 truncate font-mono text-[12.5px]" :class="part.state === 'error' ? 'text-danger' : 'text-fg'">{{ displayName }}</span>
     </div>
-    <div v-if="expanded" class="agent-tool-detail">
+    <div v-if="expanded" class="px-2 pb-2 pl-[22px]">
       <template v-if="argsText">
-        <div class="agent-tool-label">入参</div>
-        <pre class="agent-tool-code">{{ argsText }}</pre>
+        <div class="mb-[2px] text-[11px] text-fg-muted">入参</div>
+        <pre class="agent-tool-code m-0 mb-1 max-h-[240px] overflow-auto whitespace-pre-wrap break-words text-fg-secondary">{{ argsText }}</pre>
       </template>
-      <template v-if="part.result !== null">
-        <div class="agent-tool-label">结果</div>
-        <pre class="agent-tool-code">{{ part.result }}</pre>
+      <template v-if="resultText">
+        <div class="mb-[2px] text-[11px] text-fg-muted">结果</div>
+        <pre class="agent-tool-code m-0 mb-1 max-h-[240px] overflow-auto whitespace-pre-wrap break-words text-fg-secondary">{{ resultText }}</pre>
       </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-.agent-tool-item {
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.state-done {
-  opacity: 0.72;
-}
-
-.agent-tool-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.agent-tool-chevron {
-  flex: none;
-  width: 10px;
-  color: var(--text-muted);
-}
-
-.agent-tool-glyph {
-  flex: none;
-}
-
-.state-running .agent-tool-glyph {
-  color: var(--accent);
-  display: inline-block;
-  animation: agent-tool-spin 1.1s linear infinite;
-}
-
-.state-error .agent-tool-glyph {
-  color: var(--state-danger);
-}
-
-.agent-tool-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
-}
-
-.state-error .agent-tool-name {
-  color: var(--state-danger);
-}
-
-.agent-tool-detail {
-  padding: 0 var(--space-2) var(--space-2) calc(var(--space-2) + 14px);
-}
-
-.agent-tool-label {
-  color: var(--text-muted);
-  font-size: 11px;
-  margin-bottom: 2px;
-}
-
+/* 未分层全局 pre 规则（font/line-height）优先级高于 Tailwind utilities 层，
+   工具负载的 1.4 行高留在 scoped。 */
 .agent-tool-code {
-  margin: 0 0 var(--space-1);
-  max-height: 240px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-code);
   line-height: var(--line-height-list);
-  color: var(--text-secondary);
 }
 
 @keyframes agent-tool-spin {

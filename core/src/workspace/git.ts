@@ -32,6 +32,19 @@ const GIT_ENV: Readonly<Record<string, string>> = {
   GIT_TERMINAL_PROMPT: "0",
 };
 
+/**
+ * 仓库发现天花板：禁止 git 向上爬出工作区目录。
+ *
+ * 工作区目录可能嵌在别的 git 仓库树内（历史上曾放在主仓库的 .synthia/ 下）。若
+ * 工作区尚未 init 自己的 .git，裸 `git` 会一路向上发现**外层仓库**并静默改写它。
+ * 每条命令把 GIT_CEILING_DIRECTORIES 设为 cwd 的父目录：发现只会在 cwd 自身找
+ * .git，找不到就报「不是仓库」，由 initRepo 正常建区。
+ */
+function ceilingEnv(cwd: string): Record<string, string> {
+  const parent = cwd.replace(/\/[^/]+\/?$/, "") || "/";
+  return { GIT_CEILING_DIRECTORIES: parent };
+}
+
 export interface GitResult {
   readonly exitCode: number;
   readonly stdout: Uint8Array;
@@ -57,7 +70,7 @@ async function runGitRaw(
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...GIT_ENV, ...options.env },
+    env: { ...process.env, ...GIT_ENV, ...ceilingEnv(cwd), ...options.env },
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).bytes(),
@@ -249,11 +262,22 @@ export async function recoverWorkspacePublish(dir: string): Promise<void> {
   // states that are provably the old parent version or the new marker version.
   // A third state is new human work, so fail closed and deliberately retain the
   // marker for diagnosis/manual resolution.
+  const restore: string[] = [];
+  const remove: string[] = [];
   for (const path of paths) {
-    await assertWorkspacePathRecoverable(dir, parent, marker, path);
+    (await assertWorkspacePathRecoverable(dir, parent, marker, path) === "delete"
+      ? remove
+      : restore).push(path);
   }
-  if (paths.length > 0) {
-    await git(dir, ["--literal-pathspecs", "checkout", "--quiet", marker, "--", ...paths]);
+  if (restore.length > 0) {
+    await git(dir, ["--literal-pathspecs", "checkout", "--quiet", marker, "--", ...restore]);
+  }
+  if (remove.length > 0) {
+    // 发布批次里删除的路径：恢复 = 把删除落到 index/worktree（幂等，已在删除
+    // 态时 --ignore-unmatch 直接成功）。--force 是必要的：index 相对 HEAD（=marker）
+    // 必然「有变更」（parent 版仍在 index），恢复前的整批校验已证明这批路径仍处于
+    // parent 旧状态，强删不会吞掉任何窗口期人工改动。
+    await git(dir, ["--literal-pathspecs", "rm", "--quiet", "--ignore-unmatch", "--force", "--", ...remove]);
   }
   await git(dir, ["update-ref", "-d", WORKSPACE_PUBLISH_REF, marker]);
 }
@@ -274,12 +298,19 @@ interface WorktreePathState {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * 单路径恢复校验。返回处置：
+ * - "restore"：marker 里存在该路径，恢复 = checkout marker 版本；
+ * - "delete"：发布批次删除了该路径（marker 树里没有），恢复 = rm。
+ * index/worktree 必须仍处于 parent 或 marker 之一可证明的旧状态（或对删除路径
+ * 而言已经处于删除态），第三种状态是恢复窗口里的新人工改动 → fail closed。
+ */
 async function assertWorkspacePathRecoverable(
   dir: string,
   parent: string,
   marker: string,
   path: string,
-): Promise<void> {
+): Promise<"restore" | "delete"> {
   const [parentState, markerState, indexState, worktreeState] = await Promise.all([
     treePathState(dir, parent, path),
     treePathState(dir, marker, path),
@@ -287,11 +318,34 @@ async function assertWorkspacePathRecoverable(
     worktreePathState(dir, path),
   ]);
   if (markerState === null) {
-    throw new WorkspaceError(
-      "WORKSPACE_GIT_FAILED",
-      `workspace publish recovery does not support a deleted path: ${path}`,
-      { cwd: dir, path, parent, marker },
-    );
+    // 删除路径：允许 index/worktree 仍是 parent 版，或已经删除（null）。
+    if (indexState !== null && !sameIndexAndTreeState(indexState, parentState)) {
+      throw new WorkspaceError(
+        "WORKSPACE_FILE_DIRTY",
+        `文件在工作区恢复期间产生了新的暂存改动，拒绝删除：${path}`,
+        {
+          path,
+          layer: "index",
+          parent: describeTreePathState(parentState),
+          marker: null,
+          actual: indexState,
+        },
+      );
+    }
+    if (worktreeState !== null && !sameWorktreeAndTreeState(worktreeState, parentState)) {
+      throw new WorkspaceError(
+        "WORKSPACE_FILE_DIRTY",
+        `文件在工作区恢复期间产生了新的人工改动，拒绝删除：${path}`,
+        {
+          path,
+          layer: "worktree",
+          parent: describeTreePathState(parentState),
+          marker: null,
+          actual: worktreeState === null ? null : { mode: worktreeState.mode, bytes: worktreeState.bytes.byteLength },
+        },
+      );
+    }
+    return "delete";
   }
 
   const allowed = [parentState, markerState];
@@ -324,6 +378,7 @@ async function assertWorkspacePathRecoverable(
       },
     );
   }
+  return "restore";
 }
 
 async function treePathState(dir: string, commit: string, path: string): Promise<TreePathState | null> {

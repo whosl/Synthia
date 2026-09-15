@@ -19,8 +19,8 @@ import {
   type ApprovalMember,
 } from "../../domain/unified.ts";
 import type { ApprovalCardProps } from "../../views/project-view-contract.ts";
-import Badge from "../ui/Badge.vue";
-import Button from "../ui/Button.vue";
+import Badge from "../ui/AppBadge.vue";
+import Button from "../ui/AppButton.vue";
 
 const props = defineProps<ApprovalCardProps>();
 
@@ -67,50 +67,62 @@ function submitReject(): void {
 </script>
 
 <template>
-  <div v-if="state !== 'hidden'" class="approval-card" :class="`state-${state}`">
-    <div class="approval-head">
-      <span class="approval-glyph" aria-hidden="true">◆</span>
-      <span class="approval-title" :title="gate">{{ review }}</span>
+  <!--
+    flex-none —— 卡片在对话栏这个 flex 列里绝不被压缩：它是当前唯一的阻塞点，
+    宁可挤滚动区也不能把按钮挤没。产物多时由成员列表的 max-height 兜住。
+  -->
+  <div
+    v-if="state !== 'hidden'"
+    class="mx-3 mb-2 flex flex-none flex-col gap-2 rounded-md border bg-panel px-3 py-2"
+    :class="[
+      state === 'pending' ? 'border-[color-mix(in_srgb,var(--state-warn)_55%,var(--border-strong))]' : 'border-line-strong',
+      state === 'pending' ? '' : 'opacity-80',
+    ]"
+  >
+    <div class="flex items-center gap-2">
+      <span class="flex-none" :class="state === 'approved' ? 'text-ok' : state === 'rejected' ? 'text-danger' : 'text-warn'" aria-hidden="true">◆</span>
+      <span class="text-[13px] font-semibold text-fg" :title="gate">{{ review }}</span>
       <Badge v-if="state === 'pending'" tone="warn" variant="dot" size="sm">等待批准</Badge>
       <Badge v-else-if="state === 'approved'" tone="ok" variant="dot" size="sm">已通过</Badge>
       <Badge v-else tone="danger" variant="dot" size="sm">被驳回</Badge>
-      <span v-if="state === 'pending' && waitedText" class="approval-waited">{{ waitedText }}</span>
+      <span v-if="state === 'pending' && waitedText" class="ml-auto text-xs text-fg-muted">{{ waitedText }}</span>
     </div>
 
     <!-- 已决态：只留一行结论，不再可操作 -->
-    <p v-if="state === 'approved' && milestoneLine" class="approval-result ok">{{ milestoneLine }}</p>
-    <p v-else-if="state === 'rejected'" class="approval-result danger">
+    <p v-if="state === 'approved' && milestoneLine" class="m-0 text-xs leading-[1.55] text-ok">{{ milestoneLine }}</p>
+    <p v-else-if="state === 'rejected'" class="m-0 text-xs leading-[1.55] text-fg-secondary">
       {{ rejectionReason ? `驳回理由：${rejectionReason}` : "已驳回，agent 已停止。" }}
     </p>
 
     <template v-if="state === 'pending'">
       <!-- 待审产物：点开逐项核对，复用中栏编辑器打开快照当时的版本 -->
-      <button type="button" class="approval-members-toggle" @click="membersOpen = !membersOpen">
-        <span class="approval-chevron" aria-hidden="true">{{ membersOpen ? "▾" : "▸" }}</span>
+      <button type="button" class="flex cursor-pointer items-center gap-1 self-start border-none bg-transparent p-0 text-left text-xs text-fg-secondary hover:text-fg" @click="membersOpen = !membersOpen">
+        <span class="w-[10px] text-fg-muted" aria-hidden="true">{{ membersOpen ? "▾" : "▸" }}</span>
         待审产物 · {{ memberCountText }}
       </button>
-      <div v-if="membersOpen" class="approval-members">
-        <p v-if="membersError" class="approval-members-error">{{ membersError }}</p>
-        <p v-else-if="members === null" class="approval-members-empty">正在读取待审产物…</p>
-        <p v-else-if="members.length === 0" class="approval-members-empty">本次提交没有关联产物。</p>
+      <!-- 快照成员可能几十项，自己滚（max-height），别把对话流挤没 -->
+      <div v-if="membersOpen" class="flex max-h-[180px] flex-col gap-[2px] overflow-y-auto pl-[14px]">
+        <p v-if="membersError" class="m-0 text-xs text-warn">{{ membersError }}</p>
+        <p v-else-if="members === null" class="m-0 text-xs text-fg-muted">正在读取待审产物…</p>
+        <p v-else-if="members.length === 0" class="m-0 text-xs text-fg-muted">本次提交没有关联产物。</p>
         <!-- v-for 不能和 v-else 同元素（Vue 3 里 v-if 优先级更高，会读不到 v-for 作用域），故包一层 template -->
         <template v-else>
           <button
             v-for="member in members"
             :key="member.revisionId"
             type="button"
-            class="approval-member"
-            :class="{ unlinked: !member.artifactId }"
+            class="flex items-center gap-1 rounded-sm border-none bg-transparent px-1 py-[2px] text-left"
+            :class="member.artifactId ? 'cursor-pointer not-disabled:hover:bg-hover' : 'cursor-not-allowed'"
             :disabled="!member.artifactId"
             :title="member.artifactId ? '在编辑器中打开这一版' : '该产物已不可定位'"
             @click="onMemberClick(member)"
           >
-            <span class="approval-member-name">{{ memberLabel(member) }}</span>
+            <span class="truncate text-xs" :class="member.artifactId ? 'text-brand' : 'text-fg-muted'">{{ memberLabel(member) }}</span>
           </button>
         </template>
       </div>
 
-      <div class="approval-actions">
+      <div class="flex flex-wrap gap-2">
         <Button variant="primary" size="sm" :disabled="deciding" :loading="deciding" @click="emit('approve')">
           {{ buttonLabel }}
         </Button>
@@ -119,15 +131,15 @@ function submitReject(): void {
         </Button>
       </div>
 
-      <div v-if="rejectOpen" class="approval-reject">
+      <div v-if="rejectOpen" class="flex flex-col gap-1">
         <textarea
           v-model="rejectDraft"
-          class="approval-reject-input"
+          class="max-h-[120px] min-h-[48px] w-full resize-none overflow-y-auto rounded-md border border-line bg-base p-2 text-xs leading-[1.55] text-fg placeholder:text-fg-muted focus-visible:border-danger focus-visible:outline-none"
           rows="2"
           placeholder="请说明驳回原因，agent 会据此停止本轮（必填）"
           :disabled="deciding"
         />
-        <div class="approval-reject-actions">
+        <div class="flex justify-end gap-1">
           <Button variant="ghost" size="sm" :disabled="deciding" @click="rejectOpen = false">取消</Button>
           <Button variant="danger" size="sm" :disabled="!canReject || deciding" :loading="deciding" @click="submitReject">
             确认驳回
@@ -136,211 +148,9 @@ function submitReject(): void {
       </div>
     </template>
 
-    <div v-if="decisionError" class="approval-error">
-      <p class="approval-error-text">{{ decisionError.text }}</p>
-      <p v-if="decisionError.hint" class="approval-error-hint">{{ decisionError.hint }}</p>
+    <div v-if="decisionError" class="rounded-sm bg-hover p-2">
+      <p class="m-0 text-xs text-danger">{{ decisionError.text }}</p>
+      <p v-if="decisionError.hint" class="m-0 mt-[2px] text-xs text-fg-muted">{{ decisionError.hint }}</p>
     </div>
   </div>
 </template>
-
-<style scoped>
-.approval-card {
-  /* flex: none —— 卡片在 .chat-feed 这个 flex 列里绝不被压缩：它是当前唯一的
-     阻塞点，宁可挤滚动区也不能把按钮挤没。产物多时由下面的 max-height 兜住。 */
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin: 0 var(--space-3) var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface-panel);
-}
-
-.state-pending {
-  border-color: color-mix(in srgb, var(--state-warn) 55%, var(--border-strong));
-}
-
-.state-approved,
-.state-rejected {
-  opacity: 0.8;
-}
-
-.approval-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.approval-glyph {
-  flex: none;
-  color: var(--state-warn);
-}
-
-.state-approved .approval-glyph {
-  color: var(--state-ok);
-}
-
-.state-rejected .approval-glyph {
-  color: var(--state-danger);
-}
-
-.approval-title {
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  font-weight: 600;
-}
-
-.approval-waited {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.approval-result {
-  margin: 0;
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-chat);
-}
-
-.approval-result.ok {
-  color: var(--state-ok);
-}
-
-.approval-result.danger {
-  color: var(--text-secondary);
-}
-
-.approval-members-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  align-self: flex-start;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-}
-
-.approval-members-toggle:hover {
-  color: var(--text-primary);
-}
-
-.approval-chevron {
-  width: 10px;
-  color: var(--text-muted);
-}
-
-.approval-members {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* 快照成员可能几十项，自己滚，别把对话流挤没 */
-  max-height: 180px;
-  overflow-y: auto;
-  padding-left: calc(10px + var(--space-1));
-}
-
-.approval-members-empty,
-.approval-members-error {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.approval-members-error {
-  color: var(--state-warn);
-}
-
-.approval-member {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-1);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--accent);
-  font-size: var(--font-size-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.approval-member:not(:disabled):hover {
-  background: var(--surface-hover);
-}
-
-.approval-member.unlinked {
-  color: var(--text-muted);
-  cursor: not-allowed;
-}
-
-.approval-member-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.approval-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.approval-reject {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.approval-reject-input {
-  width: 100%;
-  min-height: 48px;
-  max-height: 120px;
-  padding: var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-  background: var(--surface-base);
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-chat);
-  resize: none;
-  overflow-y: auto;
-}
-
-.approval-reject-input:focus-visible {
-  border-color: var(--state-danger);
-  outline: none;
-}
-
-.approval-reject-input::placeholder {
-  color: var(--text-muted);
-}
-
-.approval-reject-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-1);
-}
-
-.approval-error {
-  padding: var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-}
-
-.approval-error-text {
-  margin: 0;
-  color: var(--state-danger);
-  font-size: var(--font-size-sm);
-}
-
-.approval-error-hint {
-  margin: 2px 0 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-</style>

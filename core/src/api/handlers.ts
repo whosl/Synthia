@@ -59,6 +59,7 @@ import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
 import { ensureWorkspace, readAtLocationBytes } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
 import type { CoreFeatureFlags } from "./feature-flags.ts";
+import type { EvolutionEvalConnectorPort } from "../services/evolution-eval-connector-port.ts";
 import { requireP4ProjectVisibility } from "./p4-project-access.ts";
 import {
   acquireP4ProjectMutationTransactionLockIfModern,
@@ -85,12 +86,39 @@ export interface RequestContext {
   readonly classification: string;
   /** Connector port for the run/Job slice; undefined when not configured (Job endpoints → 503). */
   readonly connector?: ConnectorPort;
+  /** Dedicated self-evolution execution port; never inferred from generic Job capability. */
+  readonly evolutionEvalConnector?: EvolutionEvalConnectorPort;
   /** Runtime client for the task-workbench slice; undefined when not configured (task endpoints → 503). */
   readonly runtimeClient?: RuntimeClient;
   /** Service actor uid that is allowed to call back for Core-owned Runtime tasks. */
   readonly runtimeActorId: string;
   /** Explicitly resolved Core capabilities. Missing flags are fail-closed. */
   readonly featureFlags?: Readonly<CoreFeatureFlags>;
+  /**
+   * Frozen M4-F deployment identity loaded by the Core launcher.  This is
+   * exposed only through an authenticated read-only readiness route; it never
+   * authorizes an effect and does not replace the dispatcher's per-tick live
+   * certification revalidation.
+   */
+  readonly evolutionEvalReadiness?: EvolutionEvalDeploymentReadiness;
+  /**
+   * Read-only, authenticated live proof used by the bounded M4-F runner just
+   * before its first business mutation. The launcher binds this closure to the
+   * certified canary and RemoteConnectorAdapter revalidation path.
+   */
+  readonly evolutionEvalLiveCertificationProbe?: () => Promise<void>;
+}
+
+export interface EvolutionEvalDeploymentReadiness {
+  readonly gateId: string;
+  readonly certificationHash: string;
+  readonly expiresAt: string;
+  readonly endpointOrigin: string;
+  readonly projectId: string;
+  readonly connectorId: string;
+  readonly workerProcessInstanceId: string;
+  readonly ledgerEpoch: string;
+  readonly activeConfigSha256: string;
 }
 
 export interface HandlerResult {
@@ -1854,6 +1882,9 @@ const JOB_OPERATION_VALUES: Record<string, true> = {
   simulate: true,
   synthesize: true,
   implement: true,
+  // 顶栏「运行 STA」按钮：从源码现场重综合后出 report_timing_summary
+  //（connector 语义是每跑从零开始，无跨作业产物传递，见 vivado.ts scriptFor）。
+  report_sta: true,
 };
 const RUN_CLASS_INTENT_VALUES: Record<string, true> = {
   exploratory: true,

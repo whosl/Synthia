@@ -32,6 +32,7 @@
  *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
  *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
  *   SYNTHIA_FEATURE_HISTORICAL_MATERIALS 1|true 显式开启历史资料上下文 (default off)
+ *   SYNTHIA_FEATURE_SELF_EVOLUTION 1|true 显式开启 Learned Skill 闭环 (default off)
  *   SYNTHIA_CORE_TOKEN / URL        (ordinary Core governance/main connector)
  *   SYNTHIA_TASK_RUNTIME_TOKEN      (singleton-scope task callbacks/side capability)
  *
@@ -69,6 +70,7 @@ import {
   buildCoreApiConnector,
   buildCoreGovernanceClient,
   buildCoreTaskClient,
+  buildCoreTaskEvolutionClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
 import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
@@ -81,6 +83,7 @@ import {
   createFreeAgentSession,
   loadFreeAgentConversation,
   SIDE_TASK_COMPLETION_TOOL,
+  type ContextPolicy,
   type FreeAgentDeps,
 } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
@@ -89,6 +92,8 @@ import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
 import { assembleWordDocumentTool } from "./word-document-tool.ts";
+import { assembleLearnedSkillTools } from "./learned-skill-tools.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import {
   buildContextSnapshotBundle,
   buildHistoricalMaterialReferenceContext,
@@ -108,6 +113,7 @@ import {
   type RuntimeTaskKind,
   type TaskAuthorizationScope,
   type TaskConversationClient,
+  type TaskConversationEventResult,
   type TaskWorkspaceClient,
 } from "./task-workspace-client.ts";
 
@@ -161,6 +167,7 @@ export interface AgentHandle {
   /** Append-only Core callback for every Core-owned main or side task. */
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
   readonly skillPrompts: SkillPrompts;
   readonly toolModelPolicyHash: string;
   // latest persisted state (mirrors disk; updated via onStateChange)
@@ -173,6 +180,7 @@ export interface AgentDeps {
   readonly governance: GovernanceClient;
   readonly taskEvents?: TaskConversationClient;
   readonly taskWorkspace?: TaskWorkspaceClient;
+  readonly evolution?: TaskEvolutionClient;
 }
 
 export type DepsFactory = (opts: {
@@ -197,6 +205,8 @@ export interface ServerConfig {
   readonly port: number;
   /** Default-off rollout gate. Only literal true enables historical context. */
   readonly historicalMaterialsEnabled?: boolean;
+  /** Default-off Learned Skill rollout gate. */
+  readonly selfEvolutionEnabled?: boolean;
 }
 
 export type ConversationalModelFactory = () => ConversationalModel;
@@ -823,6 +833,51 @@ async function readProjectInfo(
   }
 }
 
+/**
+ * 环境变量 → 会话上下文压缩策略。默认启用（200k 窗口兜底）——长会话不设
+ * 防护撞窗口是既成事实的坑；SYNTHIA_MODEL_CONTEXT_WINDOW 用于按网关实际
+ * 窗口校准分母。
+ */
+function contextPolicyFromEnv(
+  env: Record<string, string | undefined>,
+): { contextPolicy: ContextPolicy } {
+  const windowTokens = Number(env.SYNTHIA_MODEL_CONTEXT_WINDOW);
+  const ratio = Number(env.SYNTHIA_MODEL_COMPACT_RATIO);
+  const keep = Number(env.SYNTHIA_MODEL_COMPACT_KEEP_RESULTS);
+  const budget = Number(env.SYNTHIA_MODEL_COMPACT_TOOL_BUDGET);
+  const keepTokens = Number(env.SYNTHIA_MODEL_COMPACT_SUMMARY_KEEP);
+  const summaryOff = env.SYNTHIA_MODEL_COMPACT_SUMMARY === "0" || env.SYNTHIA_MODEL_COMPACT_SUMMARY === "false";
+  return {
+    contextPolicy: {
+      contextWindow: Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 200_000,
+      ...(Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? { compactTriggerRatio: ratio } : {}),
+      ...(Number.isFinite(keep) && keep >= 0 ? { keepToolResults: keep } : {}),
+      ...(Number.isFinite(budget) && budget > 0 ? { toolResultBudgetChars: budget } : {}),
+      ...(summaryOff ? { summaryEnabled: false } : {}),
+      ...(Number.isFinite(keepTokens) && keepTokens > 0 ? { summaryKeepTokens: keepTokens } : {}),
+    },
+  };
+}
+
+/**
+ * 环境变量 → 权限交互配置。SYNTHIA_AGENT_PERMISSION_TOOLS 逗号分隔；
+ * 未配置时默认只把 vivado_run 列为可请求（占用共享 Vivado 资源的操作）。
+ * 红线工具不在此机制内——beforeToolCall 永远硬拦。
+ */
+function permissionDepsFromEnv(
+  env: Record<string, string | undefined>,
+): { permissionTools: readonly string[]; permissionTimeoutMs: number } {
+  const raw = env.SYNTHIA_AGENT_PERMISSION_TOOLS;
+  const tools = raw === undefined
+    ? ["vivado_run"]
+    : raw.split(",").map((t) => t.trim()).filter(Boolean);
+  const timeout = Number(env.SYNTHIA_AGENT_PERMISSION_TIMEOUT_MS);
+  return {
+    permissionTools: tools,
+    permissionTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 600_000,
+  };
+}
+
 function depsFactoryInput(projectId: string, runtime: {
   readonly processInstanceId: string;
   readonly projectType?: string;
@@ -882,6 +937,12 @@ const IDEMPOTENCY_IN_PROGRESS_MESSAGE =
  */
 const AUDIT_TOOL_ARGS_MAX = 400;
 const AUDIT_TOOL_RESULT_MAX = 800;
+
+/**
+ * 思维链 audit 的截断上限。思维链是「过程可见」的记录，体量远大于工具预览，
+ * 给到 32KB；超出部分标注总字数（完整流式内容只在实时会话里有）。
+ */
+const AUDIT_THINKING_MAX = 32_000;
 
 /** 超长截断并标注，`…（共 N 字）` 让前端知道这是预览而非全部。 */
 function clip(s: string, max: number): string {
@@ -944,7 +1005,7 @@ export class RuntimeServer {
   private readonly taskEventChains = new Map<string, Promise<void>>();
   /** Any missing event makes the current Core-owned task ineligible to succeed. */
   private readonly taskEventFailures = new Map<string, unknown>();
-  private server?: Server;
+  private server?: Server<undefined>;
   private monitorTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -1033,6 +1094,10 @@ export class RuntimeServer {
       const abortMatch = path.match(/^\/tasks\/([^/]+)\/abort$/);
       if (method === "POST" && abortMatch)
         return await this.handleAbort(abortMatch[1]!, req);
+
+      const permissionMatch = path.match(/^\/tasks\/([^/]+)\/permission$/);
+      if (method === "POST" && permissionMatch)
+        return await this.handlePermission(permissionMatch[1]!, req);
 
       const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
       if (method === "GET" && taskMatch)
@@ -1378,6 +1443,7 @@ export class RuntimeServer {
         taskEvents: deps.taskEvents ?? deps.taskWorkspace,
       } : {}),
       ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+      ...(deps.evolution ? { evolution: deps.evolution } : {}),
       skillPrompts: this.config.skillPrompts,
       toolModelPolicyHash: this.config.toolModelPolicyHash,
       currentState: agentState,
@@ -1419,6 +1485,10 @@ export class RuntimeServer {
       workspace_id: h.workspaceId ?? null,
       input_hash: h.inputHash ?? null,
       status: h.status,
+      // A conversational turn may still expose its preceding durable status
+      // (for example awaiting_user) while prompt/tool execution is in flight.
+      // The evolution scheduler needs this live fact to prove continuous idle.
+      busy: h.busy || this.activeMessageTurns.has(h.agentId),
       current_stage: h.currentStage,
       awaiting_gate: h.awaitingGate ?? null,
       formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
@@ -1467,7 +1537,54 @@ export class RuntimeServer {
       evidence: h.evidence,
       ...(h.endedReason ? { reason: h.endedReason } : {}),
       ...(h.terminalCause ? { terminal_cause: h.terminalCause } : {}),
+      // 权限交互快照 + 上下文水位（UI 卡片与环形指示）。
+      permission: this.permissionSnapshot(agentId),
+      context_usage: (() => {
+        const session = this.sessions.get(agentId);
+        if (session?.contextUsage) {
+          const usage = session.contextUsage();
+          return { prompt_tokens: usage.promptTokens, context_window: usage.contextWindow };
+        }
+        // 重启后、下一条消息前会话尚未重建：回退到持久化的水位（可能从未
+        // 采样过 = null，UI 显示灰环），窗口用部署配置——环不因重启消失。
+        return {
+          prompt_tokens: h.currentState?.contextPromptTokens ?? null,
+          context_window: contextPolicyFromEnv(process.env).contextPolicy.contextWindow,
+        };
+      })(),
     });
+  }
+
+  private permissionSnapshot(agentId: string): { pending: unknown; skip_all: boolean } | null {
+    const session = this.sessions.get(agentId);
+    if (!session?.permissionState) return null;
+    const state = session.permissionState();
+    return { pending: state.pending, skip_all: state.skipAll };
+  }
+
+  /** POST /tasks/:agentId/permission — {callId, allow} 裁决，或 {skipAll} 开关。 */
+  private async handlePermission(agentId: string, req: Request): Promise<Response> {
+    const session = this.sessions.get(agentId);
+    if (!session?.permissionState) return errorResponse(404, "not_found", `agent ${agentId} not found`);
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return errorResponse(400, "invalid_json", "request body must be a JSON object");
+    }
+    if (typeof body.skipAll === "boolean") {
+      session.setPermissionSkipAll(body.skipAll);
+      this.recordConversationAudit(agentId, "free_agent_permission_skip", body.skipAll ? "on" : "off");
+      const snap = session.permissionState();
+      return json({ ok: true, permission: { pending: snap.pending, skip_all: snap.skipAll } });
+    }
+    const callId = typeof body.callId === "string" ? body.callId : null;
+    const allow = body.allow === true;
+    if (!callId) return errorResponse(400, "invalid_request", "callId (string) or skipAll (boolean) required");
+    const resolved = session.resolvePermission(callId, allow);
+    if (!resolved) return errorResponse(409, "permission_not_pending", `no pending permission request for ${callId}`);
+    const snap = session.permissionState();
+    return json({ ok: true, permission: { pending: snap.pending, skip_all: snap.skipAll } });
   }
 
   // POST /tasks/:agentId/resume
@@ -1836,7 +1953,7 @@ export class RuntimeServer {
         agentId,
         `te-${sha256Hex(`${agentId}\0${turnId}\0status-running`).slice(0, 40)}`,
         "status",
-        { status: "running" },
+        { turn_id: turnId, status: "running" },
       );
     } catch (error) {
       const reason = `Core task event sync failed before model execution: ${error instanceof Error ? error.message : String(error)}`;
@@ -1851,15 +1968,36 @@ export class RuntimeServer {
         this.recordConversationAudit(agentId, "free_agent_reply", reply);
         opts.finalize();
         this.syncHandleFromSession(agentId, session);
+        // 思维链先于回复正文入库，保持会话时序。best-effort：core 同步失败不吞
+        // 回复（audit 里仍有完整副本，UI 兜底展示）。序号延续工具边界已同步的
+        // 部分（nextThinkingSeq），event id 不与中途落库的冲突。
+        for (let i = 0; i < opts.reasoningTexts().length; i++) {
+          const index = opts.nextThinkingSeq();
+          try {
+            await this.appendCoreTaskEvent(
+              agentId,
+              `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
+              "assistant_thinking",
+              { text: opts.reasoningTexts()[i]! },
+            );
+          } catch (error) {
+            process.stderr.write(
+              `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
+        }
         await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0assistant`).slice(0, 40)}`,
           "assistant_message",
-          { text: reply },
+          { turn_id: turnId, text: reply },
         );
 
         const handle = this.registry.get(agentId);
-        let status: string = session.status();
+        let status: string = handle?.agentRole === "project"
+          ? handle.status
+          : session.status();
+        let settlingEvent: TaskConversationEventResult | undefined;
         if (handle?.taskKind === "side" && handle.taskWorkspace) {
           try {
             // Tool callbacks and the assistant message are awaited individually;
@@ -1881,11 +2019,11 @@ export class RuntimeServer {
                 handle.currentState = terminal;
               }
             } else {
-              await this.appendCoreTaskEvent(
+              settlingEvent = await this.appendCoreTaskEvent(
                 agentId,
                 `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user`).slice(0, 40)}`,
                 "status",
-                { status: "awaiting_user" },
+                { turn_id: turnId, status: "awaiting_user" },
               );
               await this.flushCoreTaskEvents(agentId);
               handle.status = "awaiting_user";
@@ -1906,13 +2044,24 @@ export class RuntimeServer {
             await this.failClosedCoreTask(agentId, `result finalization failed: ${reason}`);
           }
         } else {
-          await this.appendCoreTaskEvent(
+          settlingEvent = await this.appendCoreTaskEvent(
             agentId,
             `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
             "status",
-            { status },
+            { turn_id: turnId, status },
           );
           await this.flushCoreTaskEvents(agentId);
+        }
+        if (handle?.agentRole === "project" && settlingEvent) {
+          await this.sealProjectLearningEpisode(
+            handle,
+            turnId,
+            text,
+            reply,
+            status,
+            settlingEvent.sequence,
+            opts.toolEventRange(),
+          );
         }
         hub.emit({ type: "done", reply, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -1929,6 +2078,7 @@ export class RuntimeServer {
         const mustFailClosed = !cancelled && !recoverableProjectTurn
           && !!(handle?.taskEvents ?? handle?.taskWorkspace);
         let status = cancelled ? "cancelled" : mustFailClosed ? "fail_closed" : "failed";
+        let projectSettlingEvent: TaskConversationEventResult | undefined;
         if (recoverableProjectTurn) {
           // A Project Agent is a durable conversation, not a bounded Run. A
           // model/network failure ends only this turn: persist the visible error
@@ -1940,13 +2090,13 @@ export class RuntimeServer {
               agentId,
               `te-${sha256Hex(`${agentId}\0${turnId}\0assistant-error`).slice(0, 40)}`,
               "assistant_message",
-              { text: `[error] ${reason}` },
+              { turn_id: turnId, text: `[error] ${reason}` },
             );
-            await this.appendCoreTaskEvent(
+            projectSettlingEvent = await this.appendCoreTaskEvent(
               agentId,
               `te-${sha256Hex(`${agentId}\0${turnId}\0status-awaiting-user-error`).slice(0, 40)}`,
               "status",
-              { status: "awaiting_user", reason },
+              { turn_id: turnId, status: "awaiting_user", reason },
             );
             await this.flushCoreTaskEvents(agentId);
             if (handle) {
@@ -1969,6 +2119,17 @@ export class RuntimeServer {
               }
             }
             status = "awaiting_user";
+            if (handle && projectSettlingEvent) {
+              await this.sealProjectLearningEpisode(
+                handle,
+                turnId,
+                text,
+                `[error] ${reason}`,
+                status,
+                projectSettlingEvent.sequence,
+                opts.toolEventRange(),
+              );
+            }
           } catch (error) {
             status = "fail_closed";
             await this.failClosedCoreTask(
@@ -2011,6 +2172,12 @@ export class RuntimeServer {
             `模型/传输层错误打断了上一轮（${reason.slice(0, 200)}）。已恢复为待命状态；已完成的工具调用与登记产物有效，请从中断处继续任务。`,
             `turn-error-${turnId}`,
           ).catch(() => undefined);
+          await this.appendCoreTaskEvent(
+            agentId,
+            `te-${sha256Hex(`${agentId}\0${turnId}\0status-${status}`).slice(0, 40)}`,
+            "status",
+            { turn_id: turnId, status, reason },
+          ).catch((error) => this.logTaskSyncFailure(agentId, `${status} status`, error));
         }
         hub.emit({ type: "done", reply: `[error] ${reason}`, status, ts: new Date().toISOString() });
         hub.emit({ type: "status", status, ts: new Date().toISOString() });
@@ -2022,6 +2189,52 @@ export class RuntimeServer {
       });
     this.syncHandleFromSession(agentId, session);
     return json({ accepted: true, status: session.status() });
+  }
+
+  /**
+   * Project Agents have no task terminal. The committed awaiting_user event is
+   * their immutable LearningEpisode boundary. Learning is a recoverable side
+   * effect: failure is logged for idempotent replay and never rewrites the
+   * already-settled primary conversation outcome.
+   */
+  private async sealProjectLearningEpisode(
+    handle: AgentHandle,
+    turnId: string,
+    userText: string,
+    assistantText: string,
+    status: string,
+    endEventSequence: number,
+    toolRange: { readonly start: number | null; readonly end: number | null },
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId || status !== "awaiting_user") return;
+    const observationKey = `turn:${turnId}`;
+    const episodeKey = `${observationKey}:${endEventSequence}`;
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "project-turn-episode.v1",
+      taskId: handle.taskId,
+      turnId,
+      endEventSequence,
+      userText,
+      assistantText,
+      status,
+      toolRange,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: assistantText.slice(0, 2_000),
+        toolEventStartSequence: toolRange.start,
+        toolEventEndSequence: toolRange.end,
+        evidenceRefs: [],
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal project LearningEpisode", error);
+    }
   }
 
   /** Core-owned task terminals are immutable even if a free-agent session remains recoverable. */
@@ -2135,10 +2348,80 @@ export class RuntimeServer {
   ): PromptStreamOptions & {
     finalize: () => void;
     sideTaskCompletionRequested: () => boolean;
+    reasoningTexts: () => readonly string[];
+    nextThinkingSeq: () => number;
+    toolEventRange: () => { readonly start: number | null; readonly end: number | null };
   } {
     const hub = StreamHub.for(agentId);
     /** partId → {kind, 累计文本}；轮次结束统一补 done 定稿事件。 */
     const parts = new Map<string, { kind: "text" | "reasoning"; text: string }>();
+    /** 本轮思维链全文（finalize 时收集未同步的尾部，供同步 core assistant_thinking 事件）。 */
+    const reasoningTexts: string[] = [];
+    /**
+     * 已同步到 Core 的流 cell part id（思维链与叙述）。这两类事件在工具调用
+     * 边界增量落库（见 flushPendingCells），finalize 只补未同步的尾部，避免
+     * 整轮集中写在所有工具事件之后——那会让 Core 日志的 sequence 丢失轮内
+     * 时序，刷新回放变成「先工具后思考/丢中间叙述」。
+     */
+    const flushedCells = new Set<string>();
+    /** 思维链/叙述事件的轮内序号（event id 后缀）。调用边界一致则重放确定。 */
+    let thinkingSeq = 0;
+    let narrationSeq = 0;
+    /**
+     * 把已完结、未同步的流 cell（思维链 + 叙述）按流内顺序同步到 Core。模型
+     * 发起工具调用时，本轮思考和叙述都已完结（块序保证 reasoning/text 先于
+     * tool_use），此时落库 sequence 恰好等于发生序。叙述作为 assistant_message
+     * 落库（最终回复仍由收尾的 assistant 事件单独落，id 不冲突）。best-effort：
+     * 单条失败记日志继续，不吞掉调用方的工具事件。
+     */
+    const flushPendingCells = (): Promise<void> => {
+      let chain = Promise.resolve();
+      for (const [id, cell] of parts) {
+        if (!cell.text.trim() || flushedCells.has(id)) continue;
+        flushedCells.add(id);
+        const text = cell.text;
+        if (cell.kind === "reasoning") {
+          this.recordConversationAudit(agentId, "free_agent_thinking", clip(text, AUDIT_THINKING_MAX));
+          const index = thinkingSeq;
+          thinkingSeq += 1;
+          chain = chain
+            .then(async () => {
+              await this.appendCoreTaskEvent(
+                agentId,
+                `te-${sha256Hex(`${agentId}\0${turnId}\0thinking\0${index}`).slice(0, 40)}`,
+                "assistant_thinking",
+                { text },
+              );
+            })
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `[runtime-server] assistant_thinking sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+        } else {
+          // 轮内叙述：audit 与 Core 双落（legacy 自由 agent 的回放只有 audit 一路；
+          // 与最终回复一致，audit 不截断）。
+          this.recordConversationAudit(agentId, "free_agent_reply", text);
+          const index = narrationSeq;
+          narrationSeq += 1;
+          chain = chain
+            .then(async () => {
+              await this.appendCoreTaskEvent(
+                agentId,
+                `te-${sha256Hex(`${agentId}\0${turnId}\0narration\0${index}`).slice(0, 40)}`,
+                "assistant_message",
+                { text },
+              );
+            })
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `[runtime-server] assistant narration sync failed for ${agentId}#${index}: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+        }
+      }
+      return chain;
+    };
     /**
      * callId → 工具名/入参。onToolEnd 只带 callId（定稿事件整体替换前一条，
      * 前端沿用已有 part 的 name/args），但落 audit 要写一条自足的记录，
@@ -2146,8 +2429,39 @@ export class RuntimeServer {
      */
     const toolCalls = new Map<string, { name: string; args: string }>();
     let sideTaskCompletionRequested = false;
+    /**
+     * 当前仍在接收 delta 的流 cell。模型响应的块序是严格的（reasoning/text
+     * 结束才会有下一块或 tool_use）：新块开启或工具启动即证明上一块已完结。
+     * 在那个时刻就发 done 定稿事件，而不是等整轮 finalize——否则 UI 里每个
+     * 中间叙述都保持 streaming 态，全部挂着闪烁光标、思考卡永远显示「思考中」。
+     */
+    let openPartId: string | null = null;
+    const closeOpenPart = (): void => {
+      if (!openPartId) return;
+      const cell = parts.get(openPartId);
+      if (cell) {
+        hub.emit({
+          type: "part",
+          part: { kind: cell.kind, id: openPartId, state: "done", text: cell.text, ts: new Date().toISOString() },
+        });
+      }
+      openPartId = null;
+      // 块边界即落库：刚定稿的思维链/叙述立刻同步 Core（原来只等工具边界或
+      // finalize）。轮询兜底（刷新重放 stale → reset 的场景）对 thinking 的
+      // 盲区因此从「整轮」缩到「块间」。幂等：flushedCells 防重，工具边界的
+      // 显式 flush 与这里互不冲突。
+      flushPendingCells().catch((error: unknown) => {
+        process.stderr.write(
+          `[runtime-server] boundary cell sync failed for ${agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    };
+    let firstToolEventSequence: number | null = null;
+    let lastToolEventSequence: number | null = null;
     const openText = (partId: string, kind: "text" | "reasoning"): void => {
+      closeOpenPart();
       parts.set(partId, { kind, text: "" });
+      openPartId = partId;
       hub.emit({
         type: "part",
         part: { kind, id: partId, state: "streaming", text: "", ts: new Date().toISOString() },
@@ -2159,22 +2473,33 @@ export class RuntimeServer {
       hub.emit({ type: "delta", partId, text });
     };
     return {
+      turnId,
       onTextStart: (partId) => openText(partId, "text"),
       onDelta: appendText,
       onReasoningStart: (partId) => openText(partId, "reasoning"),
       onReasoningDelta: appendText,
       onToolStart: async (callId, name, args, fullArgs) => {
         toolCalls.set(callId, { name, args });
+        // 工具启动 = 上一块（叙述或思考）已完结：立即定稿，光标/标题就地收口。
+        closeOpenPart();
         hub.emit({
           type: "part",
           part: { kind: "tool", id: callId, state: "running", name, args, result: null, ts: new Date().toISOString() },
         });
-        await this.appendCoreTaskEvent(
+        // 先落本轮已完结的思维链与叙述，再落 tool_call：三者共用 appendCoreTaskEvent
+        // 的串行链，sequence 即发生序（think/narration → tool，而不是 tool 全部先落）。
+        await flushPendingCells();
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-call\0${callId}`).slice(0, 40)}`,
           "tool_call",
-          { tool_call_id: callId, name, args: fullArgs ?? args },
+          { turn_id: turnId, tool_call_id: callId, name, args: fullArgs ?? args },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
+        return event?.sequence;
       },
       onToolEnd: async (callId, ok, result, fullResult) => {
         hub.emit({
@@ -2209,38 +2534,60 @@ export class RuntimeServer {
           }),
           ok ? "ok" : "failed",
         );
-        await this.appendCoreTaskEvent(
+        const event = await this.appendCoreTaskEvent(
           agentId,
           `te-${sha256Hex(`${agentId}\0${turnId}\0tool-result\0${callId}`).slice(0, 40)}`,
           "tool_result",
-          { tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
+          { turn_id: turnId, tool_call_id: callId, name: started?.name ?? "", ok, result: fullResult ?? result },
         );
+        if (event) {
+          firstToolEventSequence ??= event.sequence;
+          lastToolEventSequence = event.sequence;
+        }
       },
       finalize: () => {
         const ts = new Date().toISOString();
         for (const [id, cell] of parts) {
           hub.emit({ type: "part", part: { kind: cell.kind, id, state: "done", text: cell.text, ts } });
+          // 思维链落 audit（free_agent_thinking），刷新页面后由 auditToParts 重放。
+          // 已在工具边界同步过的只剩 hub 定稿；未同步的尾部（回复前的最后一段
+          // 思考）进 reasoningTexts，由收尾循环按延续序号落库。叙述文本不在此处
+          // 处理：中间叙述已在工具边界落库，最终回复由收尾的 assistant 事件落。
+          if (cell.kind === "reasoning" && cell.text.trim() && !flushedCells.has(id)) {
+            reasoningTexts.push(cell.text);
+            this.recordConversationAudit(agentId, "free_agent_thinking", clip(cell.text, AUDIT_THINKING_MAX));
+          }
         }
         parts.clear();
         toolCalls.clear();
+        openPartId = null;
       },
       sideTaskCompletionRequested: () => sideTaskCompletionRequested,
+      reasoningTexts: () => reasoningTexts,
+      /** 收尾循环用的下一个思维链事件序号（延续工具边界已消耗的部分）。 */
+      nextThinkingSeq: () => {
+        const next = thinkingSeq;
+        thinkingSeq += 1;
+        return next;
+      },
+      toolEventRange: () => ({ start: firstToolEventSequence, end: lastToolEventSequence }),
     };
   }
 
-  private appendCoreTaskEvent(
+  private async appendCoreTaskEvent(
     agentId: string,
     eventId: string,
-    type: "assistant_message" | "tool_call" | "tool_result" | "status",
+    type: "assistant_message" | "assistant_thinking" | "tool_call" | "tool_result" | "status" | "permission_request" | "permission_decision",
     payload: Readonly<Record<string, unknown>>,
-  ): Promise<void> {
+  ): Promise<TaskConversationEventResult | undefined> {
     const handle = this.registry.get(agentId);
     const client = handle?.taskEvents ?? handle?.taskWorkspace;
-    if (!client) return Promise.resolve();
+    if (!client) return undefined;
     const previous = this.taskEventChains.get(agentId) ?? Promise.resolve();
+    let result: TaskConversationEventResult | undefined;
     const next = previous
       .catch(() => {})
-      .then(async () => { await client.appendEvent({ eventId, type, payload }); })
+      .then(async () => { result = await client.appendEvent({ eventId, type, payload }); })
       .catch((error) => {
         if (!this.taskEventFailures.has(agentId)) this.taskEventFailures.set(agentId, error);
         throw error;
@@ -2249,7 +2596,8 @@ export class RuntimeServer {
     void next.finally(() => {
       if (this.taskEventChains.get(agentId) === next) this.taskEventChains.delete(agentId);
     }).catch(() => {});
-    return next;
+    await next;
+    return result;
   }
 
   /** Wait until every event queued before result sealing is durably in Core. */
@@ -2277,12 +2625,18 @@ export class RuntimeServer {
     await this.persistTerminal(handle, "fail_closed", reason, cause).catch((error) => {
       this.logTaskSyncFailure(agentId, "persist local fail-closed state", error);
     });
-    await this.appendCoreTaskEvent(
+    const settlingEvent = await this.appendCoreTaskEvent(
       agentId,
       `te-${sha256Hex(`${agentId}\0status-fail-closed\0${reason}`).slice(0, 40)}`,
       "status",
       { status: "fail_closed", reason },
-    ).catch((error) => this.logTaskSyncFailure(agentId, "fail-closed status", error));
+    ).catch((error) => {
+      this.logTaskSyncFailure(agentId, "fail-closed status", error);
+      return undefined;
+    });
+    if (settlingEvent && handle.agentRole !== "project") {
+      await this.sealBoundedLearningEpisode(handle, settlingEvent.sequence);
+    }
   }
 
   private logTaskSyncFailure(agentId: string, action: string, error: unknown): void {
@@ -2672,6 +3026,9 @@ export class RuntimeServer {
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
         assembleVivadoTool(),
         assembleSkillDocTool(),
+        ...(this.config.selfEvolutionEnabled === true && handle?.evolution
+          ? assembleLearnedSkillTools()
+          : []),
         ...(taskKind === "side" ? [assembleSideTaskCompletionTool()] : []),
       ],
       systemPrompt,
@@ -2690,6 +3047,7 @@ export class RuntimeServer {
       ...(workspaceId ? { workspaceId } : {}),
       ...(authorization ? { authorization } : {}),
       ...(taskWorkspace ? { workspace: taskWorkspace } : {}),
+      ...(handle?.evolution ? { evolution: handle.evolution } : {}),
       ...(inputHash ? { inputHash } : {}),
       ...(taskDescriptorHash ? { taskDescriptorHash } : {}),
       ...(initialState ? { initialState } : {}),
@@ -2700,9 +3058,32 @@ export class RuntimeServer {
       processInstanceId,
       ...(initialGateLock ? { initialGateLock } : {}),
       ...(agentsDir ? { agentsDir } : {}),
+      ...permissionDepsFromEnv(process.env),
+      ...contextPolicyFromEnv(process.env),
     };
 
     const session = createFreeAgentSession(agentId, deps);
+    // 权限事件 → Core 会话事件（UI 轮询渲染卡片/裁决留痕）。
+    session.setPermissionListener?.((event) => {
+      const id = `te-${sha256Hex(`${agentId}\0permission\0${event.kind}\0${event.callId}`).slice(0, 40)}`;
+      void this.appendCoreTaskEvent(
+        agentId,
+        id,
+        event.kind === "request" ? "permission_request" : "permission_decision",
+        {
+          tool_call_id: event.callId,
+          tool: event.tool,
+          args_preview: event.argsPreview,
+          ...(event.allow === undefined ? {} : { allow: event.allow }),
+          ...(event.reason ? { reason: event.reason } : {}),
+        },
+      ).catch((error: unknown) => {
+        // 权限事件落库失败不阻塞裁决本身；挂起状态仍可通过 getTask 轮询。
+        process.stderr.write(
+          `[runtime-server] permission event sync failed for ${agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    });
     this.sessions.set(agentId, session);
     return session;
   }
@@ -2876,6 +3257,7 @@ export class RuntimeServer {
   }
 
   private async applyResult(h: AgentHandle, result: LoopResult): Promise<void> {
+    let settlingEvent: TaskConversationEventResult | undefined;
     if (result.awaitingGate) {
       h.status = "awaiting_approval";
       h.awaitingGate = result.awaitingGate;
@@ -2886,7 +3268,7 @@ export class RuntimeServer {
       h.awaitingGate = undefined;
       // Persist terminal state — the loop's finish() doesn't call onStateChange.
       await this.persistTerminal(h, result.status, result.endedReason, result.terminalCause);
-      if (h.currentState) await this.appendAgentStateEvent(h, h.currentState);
+      if (h.currentState) settlingEvent = await this.appendAgentStateEvent(h, h.currentState);
     }
 
     // Merge evidence (deduped by jobId) — evidence is per-executor-instance.
@@ -2895,21 +3277,63 @@ export class RuntimeServer {
         h.evidence.push(ev);
       }
     }
+    if (settlingEvent && h.agentRole === "run") {
+      await this.sealBoundedLearningEpisode(h, settlingEvent.sequence);
+    }
   }
 
-  private async appendAgentStateEvent(h: AgentHandle, state: AgentState): Promise<void> {
+  private async appendAgentStateEvent(
+    h: AgentHandle,
+    state: AgentState,
+  ): Promise<TaskConversationEventResult | undefined> {
     const payload = {
       status: state.status,
       current_stage: state.currentStage,
       ...(state.awaitingGate ? { awaiting_gate: state.awaitingGate } : {}),
       ...(state.endedReason ? { reason: state.endedReason } : {}),
     };
-    await this.appendCoreTaskEvent(
+    return await this.appendCoreTaskEvent(
       h.agentId,
       `te-${sha256Hex(`${h.agentId}\0agent-state\0${state.updatedAt}\0${JSON.stringify(payload)}`).slice(0, 40)}`,
       "status",
       payload,
     );
+  }
+
+  private async sealBoundedLearningEpisode(
+    handle: AgentHandle,
+    endEventSequence: number,
+  ): Promise<void> {
+    if (!handle.evolution || !handle.taskId) return;
+    const terminalStatus = handle.status;
+    if (terminalStatus !== "succeeded" && terminalStatus !== "failed" && terminalStatus !== "fail_closed") return;
+    const observationKey = `task:${handle.taskId}`;
+    const episodeKey = `terminal:${endEventSequence}`;
+    const evidenceRefs = handle.evidence.map(item => item.jobId);
+    const contentHash = sha256Hex(JSON.stringify({
+      schema: "bounded-task-episode.v1",
+      taskId: handle.taskId,
+      endEventSequence,
+      status: terminalStatus,
+      reason: handle.endedReason ?? null,
+      evidenceRefs,
+    }));
+    try {
+      await handle.evolution.createEpisode({
+        observationKey,
+        episodeKey,
+        turnId: null,
+        endEventSequence,
+        contentHash,
+        outcomeClaim: handle.endedReason ?? terminalStatus,
+        toolEventStartSequence: null,
+        toolEventEndSequence: null,
+        evidenceRefs,
+        idempotencyKey: `learning-episode-${sha256Hex(`${handle.taskId}\0${episodeKey}\0${contentHash}`).slice(0, 40)}`,
+      });
+    } catch (error) {
+      this.logTaskSyncFailure(handle.agentId, "seal bounded LearningEpisode", error);
+    }
   }
 
   private async persistTerminal(
@@ -3104,6 +3528,7 @@ export class RuntimeServer {
             taskEvents: deps.taskEvents ?? deps.taskWorkspace,
           } : {}),
           ...(deps.taskWorkspace ? { taskWorkspace: deps.taskWorkspace } : {}),
+          ...(deps.evolution ? { evolution: deps.evolution } : {}),
           skillPrompts: this.config.skillPrompts,
           toolModelPolicyHash: this.config.toolModelPolicyHash,
           currentState: state,
@@ -3219,11 +3644,22 @@ function parseHistoricalMaterialsFeatureFlag(value: string | undefined): boolean
   );
 }
 
+function parseSelfEvolutionFeatureFlag(value: string | undefined): boolean {
+  if (value === undefined || value === "0" || value === "false") return false;
+  if (value === "1" || value === "true") return true;
+  throw new Error(
+    "SYNTHIA_FEATURE_SELF_EVOLUTION must be exactly one of: 0, 1, false, true",
+  );
+}
+
 export async function createServerConfig(
   env: Record<string, string | undefined> = process.env,
 ): Promise<ServerConfig> {
   const historicalMaterialsEnabled = parseHistoricalMaterialsFeatureFlag(
     env.SYNTHIA_FEATURE_HISTORICAL_MATERIALS,
+  );
+  const selfEvolutionEnabled = parseSelfEvolutionFeatureFlag(
+    env.SYNTHIA_FEATURE_SELF_EVOLUTION,
   );
   const loader = new SkillLoader();
   const skillPrompts = await loader.buildPrompts();
@@ -3235,6 +3671,7 @@ export async function createServerConfig(
     gatePollMs: Number(env.SYNTHIA_GATE_POLL_MS ?? 8000),
     port: Number(env.SYNTHIA_RUNTIME_PORT ?? 8790),
     historicalMaterialsEnabled,
+    selfEvolutionEnabled,
   };
 }
 
@@ -3315,6 +3752,9 @@ export function createEnvDepsFactory(
     const taskEvents = taskId
       ? taskWorkspace ?? buildCoreTaskClient(projectId, taskId, env)
       : undefined;
+    const evolution = taskId
+      ? buildCoreTaskEvolutionClient(projectId, taskId, env)
+      : undefined;
 
     return {
       model,
@@ -3322,6 +3762,7 @@ export function createEnvDepsFactory(
       governance,
       ...(taskEvents ? { taskEvents } : {}),
       ...(taskWorkspace ? { taskWorkspace } : {}),
+      ...(evolution ? { evolution } : {}),
     };
   };
 }

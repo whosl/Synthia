@@ -19,7 +19,6 @@
 import type { ArtifactRevision, JobEvidenceContent, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
-import type { ProcessGateView } from "../domain/process-profile.ts";
 import type { StreamPhase } from "../domain/task-stream.ts";
 import type { Theme } from "../domain/theme.ts";
 import type { ApprovalCardState, ApprovalMember, DecisionFailure } from "../domain/unified.ts";
@@ -169,7 +168,7 @@ export const ARTIFACT_DOT_GLYPH: Readonly<Record<ArtifactDotState, string>> = {
 };
 
 /**
- * 状态点 → `ui/Badge.vue` 的语气色。定义在这里而不是各组件里，是因为文件树行、
+ * 状态点 → `ui/AppBadge.vue` 的语气色。定义在这里而不是各组件里，是因为文件树行、
  * 编辑器版本条都要画同一个点，抄三份迟早会各自漂移。
  *
  * `unregistered` 与 `invalidated` 同为 neutral 不是偷懒：两者都是「不在治理链上」，
@@ -184,16 +183,12 @@ export const ARTIFACT_DOT_TONE: Readonly<Record<ArtifactDotState, "ok" | "info" 
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// TopBar（顶栏：项目名 + 阶段条 + 主题 + 用户）
+// TopBar（顶栏：项目名 + 主题 + 用户；G0-G4 阶段条已上移到顶部进度带）
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface TopBarProps {
   /** 项目名称，来自 `GET /projects/:id`.name。 */
   readonly projectName: string;
-  /** Core process-profile.v1 + process-state.v1 的 G0-G4 投影；绝不从任务阶段推导。 */
-  readonly stageChain: readonly ProcessGateView[] | null;
-  /** 项目没有新版工程阶段链时的准确占位文案。 */
-  readonly stageEmptyText: string;
   /** 当前生效主题，驱动 ☀/☾ 图标显示哪一个。 */
   readonly theme: Theme;
   /** <1024px 时文件树抽屉是否已展开（驱动汉堡按钮的开合态）。见 spec R3。 */
@@ -203,11 +198,6 @@ export interface TopBarProps {
 }
 
 export interface TopBarEmits {
-  /**
-   * 点击阶段/门节点：左栏应联动切换到「阶段」视图并定位到该阶段的产物分组
-   * （spec §3.1 末条）。stageId 对齐 `STAGE_CHAIN` 的 node.id（含门节点 G1/G3/G4）。
-   */
-  "select-stage": [stageId: string];
   /** 点击主题切换按钮（☀/☾）。 */
   "toggle-theme": [];
   /** <1024px 汉堡按钮：开合文件树抽屉。 */
@@ -339,7 +329,12 @@ export interface CodeEditorEmits {
   "dirty-change": [dirty: boolean];
   /** 版本下拉选择另一版本查看（revisionId 必须是 file.revisions 中的一个 id）。 */
   "select-revision": [revisionId: string];
-  /** 版本对比：选两版进 diff editor；ProjectView 补齐 baseContent 后回填 diffAgainst。 */
+  /**
+   * 版本对比：选两版进 diff editor；ProjectView 补齐 baseContent 后回填 diffAgainst。
+   * 入口是 VersionBar 行内「对比」按钮（当前查看版本 × 行内版本，base/head 已按
+   * 版本号排序），CodeEditor 只做透传；对话流产物卡的「查看改动」走 ProjectView
+   * 内部同款 compareRevisions，不经过本事件。
+   */
   "compare-revisions": [baseRevisionId: string, headRevisionId: string];
   /** 退出对比模式，回到单文件视图。 */
   "exit-diff": [];
@@ -440,6 +435,26 @@ export interface ChatFeedProps {
    * approve/reject 冒泡上去，自己不解读其中任何字段。
    */
   readonly approval: ApprovalCardProps | null;
+  /** 上下文水位（环形指示）；runtime 未回报或旧会话为 null。 */
+  readonly contextUsage: { readonly promptTokens: number | null; readonly contextWindow: number } | null;
+  /** 「跳过所有权限」开关当前态（红线操作不受它影响）。乐观翻转由 ProjectView 的本地覆盖合成，服务器确认后回落权威值。 */
+  readonly permissionSkipAll: boolean;
+  /**
+   * 乐观上屏的发送中文案：点击发送瞬间以 pending 气泡追加到流尾（生命周期 =
+   * sending 标志，成功后被 refresh 回来的真实事件自然顶替，失败由 ChatFeed 的
+   * 草稿回填机制把文案放回输入框）。null 表示没有进行中的发送。
+   */
+  readonly pendingUserText: string | null;
+  /**
+   * 乐观提交中的权限裁决（点击瞬间进中间态，服务器确认后由 refresh 回来的
+   * decided part 定稿）；null 表示没有进行中的裁决。中间态只说「提交中」，
+   * 不得在确认前显示最终裁决样式——工具是否会跑以服务器为准。
+   */
+  readonly permissionPending: { readonly callId: string; readonly allow: boolean } | null;
+  /** 任一权限操作（流内裁决或跳过开关）进行中；期间冻结所有权限卡按钮与开关，防静默丢失点击。 */
+  readonly permissionBusy: boolean;
+  /** 打断请求进行中：打断按钮转 spinner、状态徽章显示「打断中」。 */
+  readonly aborting: boolean;
 }
 
 export interface ChatFeedEmits {
@@ -453,6 +468,10 @@ export interface ChatFeedEmits {
   send: [text: string];
   /** 点击「⏹ 打断」（`POST .../tasks/:agentId/abort`）；仅 canAbort=true 时应可点击。 */
   abort: [];
+  /** 流内权限卡裁决（允许/拒绝一次挂起的工具调用）。 */
+  "resolve-permission": [callId: string, allow: boolean];
+  /** 「跳过所有权限」开关切换。 */
+  "toggle-skip-permissions": [skip: boolean];
   /**
    * 点击产物卡关联的文档 → 中栏编辑器打开（不再弹抽屉，这是三栏相对 v3 的主要收益）。
    *

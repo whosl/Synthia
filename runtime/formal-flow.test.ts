@@ -6,8 +6,10 @@ import {
   EvaluatedGateOrchestrator,
   FormalFlowOrchestrator,
   parseDeliveryRelease,
+  parseBitstreamResult,
   parseFormalInputApproval,
   parseFormalInputPreview,
+  parseFrozenEvidenceManifest,
   parseFormalJobBinding,
   parseGateEvaluation,
   parseProjectReadinessRecord,
@@ -150,6 +152,7 @@ class FakeFormalFlowClient implements FormalFlowClient {
       entries: [{
         name: `${job.operation}.log`, role: "tool_log", sha256: digest(job.operation), sizeBytes: 1,
         mediaType: "text/plain", storageUri: `content://sha256/${digest(job.operation)}`,
+        artifactClassification: "tool_run_evidence", usageClassification: "run_class_governed",
         completeness: "full", corrupt: false, verdict: null,
       }],
     };
@@ -262,6 +265,54 @@ describe("P4 strict response parsers", () => {
     expect(parseDeliveryRelease(raw, "p1").state).toBe("sealed");
     expect(() => parseDeliveryRelease({ ...raw, confirmed_by: null, confirmed_at: null }, "p1")).toThrow("missing confirmation");
     expect(() => parseDeliveryRelease({ ...raw, state: "released" }, "p1")).toThrow("must be sealed");
+  });
+
+  test("bitstream responses require independent governed classifications", () => {
+    const raw = {
+      id: "bit-1", project_id: "p1", work_version_id: "wv-1", tool_run_id: "run-1",
+      evidence_manifest_id: "manifest-1", evidence_manifest_hash: digest("manifest"),
+      evidence_entry_name: "synthia.bit", class: "formal", formal_input_approval_id: "fia-1",
+      snapshot_id: "snap-1", readiness_id: "ready-1", input_hash: digest("input"),
+      engineering_config_hash: digest("config"), prerequisite_baseline_id: "bl-b1",
+      target_part: "xc7k70tfbv676-1", toolchain_profile_hash: digest("toolchain"),
+      constraint_hash: digest("constraints"), sha256: digest("bitstream"), size_bytes: 16,
+      artifact_classification: "tool_run_evidence", usage_classification: "run_class_governed",
+      storage_uri: `content://sha256/${digest("bitstream")}`, generated_by_type: "system",
+      generated_by: "core", generated_at: NOW, created_at: NOW,
+    };
+    expect(parseBitstreamResult(raw, "p1").artifactClassification).toBe("tool_run_evidence");
+    expect(() => parseBitstreamResult({
+      ...raw,
+      artifact_classification: "experimental/evolution_eval",
+    }, "p1")).toThrow("non-governed evidence authority");
+    expect(() => parseBitstreamResult({
+      ...raw,
+      usage_classification: "evolution_eval_only",
+    }, "p1")).toThrow("non-governed evidence authority");
+  });
+
+  test("formal evidence entries reject eval-only authority classifications", () => {
+    const raw = {
+      schema: "evidence-manifest.v1", id: "ev-1", jobId: "run-1", projectId: "p1",
+      runState: "succeeded", operation: "implement", runClass: "formal",
+      inputHash: digest("input"), toolchainProfileHash: digest("toolchain"),
+      manifestHash: digest("manifest"), frozenAt: NOW, verdicts: {}, entries: [{
+        name: "synthia.bit", role: "bitstream", sha256: digest("bitstream"), sizeBytes: 16,
+        mediaType: "application/octet-stream", storageUri: `content://sha256/${digest("bitstream")}`,
+        artifactClassification: "tool_run_evidence", usageClassification: "run_class_governed",
+        completeness: "full", corrupt: false, verdict: null,
+      }],
+    };
+    expect(parseFrozenEvidenceManifest(raw, "p1").entries[0]?.usageClassification)
+      .toBe("run_class_governed");
+    expect(() => parseFrozenEvidenceManifest({
+      ...raw,
+      entries: [{
+        ...raw.entries[0],
+        artifactClassification: "experimental/evolution_eval",
+        usageClassification: "evolution_eval_only",
+      }],
+    }, "p1")).toThrow("non-governed evidence authority");
   });
 });
 
@@ -484,6 +535,7 @@ describe("CoreGovernanceClient P4 HTTP contract", () => {
           verdicts: { passed: true }, entries: [{
             name: "simulate.log", role: "tool_log", sha256: digest("log"), sizeBytes: 3,
             mediaType: "text/plain", storageUri: `content://sha256/${digest("log")}`,
+            artifactClassification: "tool_run_evidence", usageClassification: "run_class_governed",
             completeness: "full", corrupt: false, verdict: { passed: true },
           }],
         };

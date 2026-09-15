@@ -5,19 +5,30 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:mock": "VITE_MOCK=1 VITE_FEATURE_HISTORICAL_MATERIALS=1 VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 vite",
+    "dev:mock": "VITE_MOCK=1 VITE_FEATURE_HISTORICAL_MATERIALS=1 VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 VITE_FEATURE_SELF_EVOLUTION=1 vite",
     "build": "vite build",
+    "build:golden": "VITE_FEATURE_HISTORICAL_MATERIALS=1 VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 VITE_FEATURE_SELF_EVOLUTION=1 vite build",
     "check": "vue-tsc --noEmit",
     "gen:mock-hashes": "bun run scripts/gen-mock-hashes.ts",
     "test": "bun test"
   },
   "dependencies": {
+    "@lucide/vue": "^1.44.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vueuse/core": "^14.4.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "dompurify": "^3.2.0",
+    "lucide-vue-next": "^1.0.0",
     "marked": "^12.0.0",
     "monaco-editor": "^0.52.0",
     "pinia": "^2.2.6",
+    "reka-ui": "^2.10.4",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
     "vue": "^3.5.13",
-    "vue-router": "^4.4.5"
+    "vue-router": "^4.4.5",
+    "vue-sonner": "^2.0.9"
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",

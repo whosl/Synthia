@@ -119,6 +119,7 @@ export function deriveStageChain(input: StageChainInput): StageChainNode[] {
 
 export const TASK_STATUS_TEXT: Readonly<Record<string, string>> = {
   running: "运行中",
+  awaiting_user: "等待输入",
   awaiting_approval: "等待批准",
   succeeded: "已完成",
   failed: "失败",

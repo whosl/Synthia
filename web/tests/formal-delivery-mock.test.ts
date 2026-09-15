@@ -149,7 +149,12 @@ describe("P4 offline contract backend", () => {
     const evaluation = (await listGateEvaluations(client, projectId, submissions[0]!.id))[0]!;
     expect(evaluation.items).toHaveLength(12);
     expect(evaluation.items.every((item) => item.passed)).toBe(true);
-    expect((await listBitstreams(client, projectId))[0]).toMatchObject({ class: "formal", input_hash: approval.input_hash });
+    expect((await listBitstreams(client, projectId))[0]).toMatchObject({
+      class: "formal",
+      input_hash: approval.input_hash,
+      artifact_classification: "tool_run_evidence",
+      usage_classification: "run_class_governed",
+    });
 
     await approveGateSubmission(client, projectId, submissions[0]!.id, {
       configuration_snapshot_id: submissions[0]!.snapshot_id,

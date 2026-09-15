@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { ArrowRight, Cpu, Sparkles } from "lucide-vue-next";
 import { api } from "../../api/service.ts";
 import {
   createProject,
@@ -16,11 +17,25 @@ import {
   type WriteAttempt,
 } from "../../domain/write-attempt.ts";
 import ErrorNotice from "../ErrorNotice.vue";
-import Button from "../ui/Button.vue";
-import Icon from "../ui/Icon.vue";
+import Button from "../ui/AppButton.vue";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 
 const emit = defineEmits<{ close: []; created: [projectId: string] }>();
-const dialog = ref<HTMLDialogElement | null>(null);
 const name = ref("");
 const type = ref<ProjectType | null>(null);
 const profileId = ref("");
@@ -45,6 +60,11 @@ const disabled = computed(
         !availableIds.value.includes(profileId.value))),
 );
 
+// 单选卡片与表单字段的共享样式
+const typeOptionClass =
+  "relative grid cursor-pointer gap-2 rounded-xl border p-4 transition-colors max-[480px]:p-3.5";
+const fieldClass = "grid gap-2 text-xs";
+
 async function loadVersions() {
   if (versionsLoading.value) return;
   versionsLoading.value = true;
@@ -60,6 +80,11 @@ async function loadVersions() {
 
 function close() {
   if (!creating.value) emit("close");
+}
+
+// Esc / 点击遮罩 / 内建关闭按钮时 Reka 会请求关闭；创建中保持打开（同原生 dialog 的 cancel 守卫）
+function handleOpenChange(open: boolean) {
+  if (!open) close();
 }
 
 async function submit() {
@@ -106,196 +131,144 @@ async function submit() {
 }
 
 onMounted(() => {
-  dialog.value?.showModal();
   void loadVersions();
 });
 </script>
 
 <template>
-  <dialog
-    ref="dialog"
-    class="create-dialog"
-    aria-labelledby="create-title"
-    @cancel.prevent="close"
-    @click="$event.target === dialog && close()"
-  >
-    <form class="create-form" @submit.prevent="submit">
-      <div class="dialog-heading">
+  <Dialog :open="true" @update:open="handleOpenChange">
+    <DialogContent
+      class="max-h-[calc(100dvh-32px)] w-[min(560px,calc(100vw-32px))] gap-0 overflow-y-auto rounded-xl border-line bg-panel p-0 shadow-[0_24px_80px_var(--shadow-color)] sm:max-w-[min(560px,calc(100vw-32px))]"
+    >
+      <form class="grid gap-5 p-7 max-[480px]:p-5" @submit.prevent="submit">
         <div>
-          <p class="eyebrow">NEW PROJECT</p>
-          <h2 id="create-title">从一个新项目开始</h2>
-        </div>
-        <button
-          class="icon-button"
-          type="button"
-          aria-label="关闭新建项目"
-          :disabled="creating"
-          @click="close"
-        >
-          <Icon name="close" />
-        </button>
-      </div>
-      <p class="secondary-text">选择适合的工作方式，接下来交给你和 Agent。</p>
-      <ErrorNotice v-if="error" :error="error" />
-      <fieldset class="project-type-options" :disabled="creating">
-        <legend>项目类型 <span class="secondary-text">· 必选</span></legend>
-        <label :class="{ checked: type === 'free' }"
-          ><input v-model="type" type="radio" value="free" /><Icon
-            name="spark"
-            :size="22"
-          /><strong>自由项目</strong
-          ><span>快速验证想法、排查问题，无固定阶段。</span></label
-        >
-        <label :class="{ checked: type === 'engineering' }"
-          ><input v-model="type" type="radio" value="engineering" /><Icon
-            name="chip"
-            :size="22"
-          /><strong>工程项目</strong
-          ><span>按流程推进，从需求确认到正式交付。</span></label
-        >
-      </fieldset>
-      <label class="form-field"
-        ><span>项目名称 <span class="secondary-text">· 必填</span></span
-        ><input
-          v-model="name"
-          required
-          maxlength="200"
-          placeholder="例如：星载图像处理模块"
-          :disabled="creating"
-      /></label>
-      <template v-if="type === 'engineering'">
-        <p v-if="versionsLoading" class="secondary-text" role="status">
-          正在加载可用流程…
-        </p>
-        <div v-else-if="versionsError">
-          <ErrorNotice :error="versionsError" /><Button
-            :disabled="creating"
-            @click="loadVersions"
-            >重新加载流程</Button
+          <p
+            class="m-0 mb-2.5 text-[11px] font-semibold tracking-[0.08em] text-brand uppercase"
+          >
+            New Project
+          </p>
+          <DialogTitle class="m-0 mt-1 text-2xl leading-normal font-semibold"
+            >从一个新项目开始</DialogTitle
           >
         </div>
-        <p v-else-if="!versions.length" class="form-warning" role="alert">
-          当前没有可用的工程流程，请联系管理员后重试。
-        </p>
-        <label v-else class="form-field"
-          ><span>流程版本 · 必选</span
-          ><select v-model="profileId" required :disabled="creating">
-            <option disabled value="">选择流程版本</option>
-            <option
-              v-for="version in versions"
-              :key="version.id"
-              :value="version.id"
-            >
-              {{ version.name }}
-            </option>
-          </select></label
+        <DialogDescription class="m-0 text-[13px] leading-[1.7] text-fg-secondary"
+          >选择适合的工作方式，接下来交给你和 Agent。</DialogDescription
         >
-      </template>
-      <label class="form-field"
-        ><span>目标器件 <span class="secondary-text">· 可稍后填写</span></span
-        ><input
-          v-model="part"
-          placeholder="例如：xc7a35tcpg236-1"
-          :disabled="creating"
-      /></label>
-      <div class="dialog-footer">
-        <Button :disabled="creating" @click="close">取消</Button
-        ><Button
-          type="submit"
-          variant="primary"
-          :disabled="disabled"
-          :loading="creating"
-          >创建并进入项目<Icon name="arrow" :size="16"
-        /></Button>
-      </div>
-    </form>
-  </dialog>
+        <ErrorNotice v-if="error" :error="error" />
+        <div>
+          <p class="m-0 mb-3 text-xs">
+            项目类型 <span class="leading-[1.7] text-fg-secondary">· 必选</span>
+          </p>
+          <RadioGroup
+            v-model="type"
+            class="grid grid-cols-2 gap-3"
+            :disabled="creating"
+          >
+            <Label
+              for="ptype-free"
+              :class="[
+                typeOptionClass,
+                type === 'free'
+                  ? 'border-brand bg-brand-subtle'
+                  : 'border-line-strong hover:border-fg-muted',
+              ]"
+              ><RadioGroupItem
+                id="ptype-free"
+                value="free"
+                class="absolute top-4 right-4"
+              /><Sparkles :size="22" /><strong>自由项目</strong
+              ><span class="text-xs leading-[1.6] text-fg-secondary"
+                >快速验证想法、排查问题，无固定阶段。</span
+              ></Label
+            >
+            <Label
+              for="ptype-engineering"
+              :class="[
+                typeOptionClass,
+                type === 'engineering'
+                  ? 'border-brand bg-brand-subtle'
+                  : 'border-line-strong hover:border-fg-muted',
+              ]"
+              ><RadioGroupItem
+                id="ptype-engineering"
+                value="engineering"
+                class="absolute top-4 right-4"
+              /><Cpu :size="22" /><strong>工程项目</strong
+              ><span class="text-xs leading-[1.6] text-fg-secondary"
+                >按流程推进，从需求确认到正式交付。</span
+              ></Label
+            >
+          </RadioGroup>
+        </div>
+        <Label :class="fieldClass"
+          ><span
+            >项目名称
+            <span class="leading-[1.7] text-fg-secondary">· 必填</span></span
+          ><Input
+            v-model="name"
+            required
+            maxlength="200"
+            placeholder="例如：星载图像处理模块"
+            :disabled="creating"
+        /></Label>
+        <template v-if="type === 'engineering'">
+          <p
+            v-if="versionsLoading"
+            class="m-0 leading-[1.7] text-fg-secondary"
+            role="status"
+          >
+            正在加载可用流程…
+          </p>
+          <div v-else-if="versionsError">
+            <ErrorNotice :error="versionsError" /><Button
+              :disabled="creating"
+              @click="loadVersions"
+              >重新加载流程</Button
+            >
+          </div>
+          <p v-else-if="!versions.length" class="m-0 leading-[1.6] text-warn" role="alert">
+            当前没有可用的工程流程，请联系管理员后重试。
+          </p>
+          <div v-else :class="fieldClass">
+            <Label for="process-version">流程版本 · 必选</Label>
+            <Select v-model="profileId" :disabled="creating">
+              <SelectTrigger id="process-version" class="w-full">
+                <SelectValue placeholder="选择流程版本" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="version in versions"
+                  :key="version.id"
+                  :value="version.id"
+                >
+                  {{ version.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </template>
+        <Label :class="fieldClass"
+          ><span
+            >目标器件
+            <span class="leading-[1.7] text-fg-secondary">· 可稍后填写</span></span
+          ><Input
+            v-model="part"
+            placeholder="例如：xc7a35tcpg236-1"
+            :disabled="creating"
+        /></Label>
+        <div class="flex justify-end gap-2 pt-2">
+          <Button class="h-[38px]" :disabled="creating" @click="close"
+            >取消</Button
+          ><Button
+            type="submit"
+            variant="primary"
+            class="h-[38px]"
+            :disabled="disabled"
+            :loading="creating"
+            >创建并进入项目<ArrowRight :size="16"
+          /></Button>
+        </div>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>
-
-<style scoped>
-.create-dialog {
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
-  padding: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 20px;
-  background: var(--surface-panel);
-  color: var(--text-primary);
-  box-shadow: 0 24px 80px var(--shadow-color);
-}
-.create-dialog::backdrop {
-  background: #11121680;
-  backdrop-filter: blur(5px);
-}
-.create-form {
-  padding: 28px;
-  display: grid;
-  gap: 20px;
-}
-.dialog-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.dialog-heading h2 {
-  font-size: 24px;
-  margin: 4px 0 0;
-  font-weight: 600;
-}
-.create-form p {
-  margin: 0;
-}
-.project-type-options {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  padding: 0;
-  border: 0;
-  margin: 0;
-}
-.project-type-options legend {
-  margin-bottom: 12px;
-}
-.project-type-options label {
-  position: relative;
-  display: grid;
-  gap: 8px;
-  padding: 18px;
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  cursor: pointer;
-}
-.project-type-options label.checked {
-  border-color: var(--accent);
-  background: var(--accent-subtle);
-}
-.project-type-options input {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  accent-color: var(--accent);
-}
-.project-type-options span {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 8px;
-}
-.dialog-footer :deep(.ui-button) {
-  height: 38px;
-}
-@media (max-width: 480px) {
-  .create-form {
-    padding: 20px;
-  }
-  .project-type-options label {
-    padding: 14px;
-  }
-}
-</style>

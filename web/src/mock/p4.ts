@@ -562,6 +562,8 @@ function completeFormalRuns(state: MockP4ProjectState, approval: FormalInputAppr
     target_part: approval.target_part,
     sha256: digest(bitstreamContent),
     size_bytes: new TextEncoder().encode(bitstreamContent).byteLength,
+    artifact_classification: "tool_run_evidence",
+    usage_classification: "run_class_governed",
     generated_at: now,
   };
   state.bitstreams = [bitstream, ...state.bitstreams.filter((row) => row.work_version_id !== state.activeWorkVersionId)];

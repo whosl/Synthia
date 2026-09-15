@@ -451,7 +451,21 @@ export interface TaskEvidenceSummary {
 }
 
 /** GET /projects/:id/tasks/:agentId 响应 data。 */
+/** 权限交互快照（runtime 注入；旧会话/旧 runtime 无此字段）。 */
+export interface TaskPermissionState {
+  readonly pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+  readonly skip_all: boolean;
+}
+
+/** 上下文水位（runtime 注入；context_window=0 表示策略未配置）。 */
+export interface TaskContextUsage {
+  readonly prompt_tokens: number | null;
+  readonly context_window: number;
+}
+
 export interface TaskAgentDetail extends TaskAgentSummary {
+  readonly permission?: TaskPermissionState | null;
+  readonly context_usage?: TaskContextUsage | null;
   /** 任务指令（Runtime 透传 agent-state.task）。 */
   readonly task?: string;
   readonly docs: readonly TaskDocRef[];
@@ -549,9 +563,12 @@ export interface SideTaskSummary {
 export type SideTaskConversationEventKind =
   | "user_message"
   | "assistant_message"
+  | "assistant_thinking"
   | "tool_call"
   | "tool_result"
-  | "status";
+  | "status"
+  | "permission_request"
+  | "permission_decision";
 
 /** Core-owned append-only conversation fact for a main or side task. */
 export interface SideTaskConversationEvent {
@@ -939,6 +956,8 @@ export interface BitstreamResultV1 {
   readonly target_part: string;
   readonly sha256: string;
   readonly size_bytes: number;
+  readonly artifact_classification: "tool_run_evidence";
+  readonly usage_classification: "run_class_governed";
   readonly generated_at: string;
 }
 
@@ -1065,9 +1084,35 @@ export interface JobEvidenceContent {
   readonly mediaType: string;
 }
 
+/** POST /projects/:id/jobs 的单个内联源文件（路径 + 全文；Core 侧契约同 SourceInput）。 */
+export interface JobSourceInput {
+  readonly path: string;
+  readonly content: string;
+  readonly mediaType?: string;
+}
+
+/** POST /projects/:id/jobs 请求体（探索流；gate_check/formal 走 P4 专用入口）。 */
+export interface SubmitJobRequest {
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
+  readonly sources: readonly JobSourceInput[];
+  readonly constraints?: readonly JobSourceInput[];
+  readonly top?: string | null;
+  readonly testbench?: string | null;
+  readonly part?: string | null;
+  /** 仅 implement 有效；缺省 undefined = 连接器默认（探索流只到路由后检查点）。 */
+  readonly stop_before_bitstream?: boolean;
+}
+
+/** POST /projects/:id/jobs 响应 data（作业已入队）。 */
+export interface SubmitJobResult {
+  readonly jobId: string;
+  readonly runClass: string;
+  readonly state: string;
+}
+
 /** GET /projects/:id/tool-summary — 物理实现进度与时序指标（工程/自由项目通用）。 */
 export interface ToolSummaryStage {
-  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement";
+  readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
   readonly state: string;
   readonly lastJobId: string | null;
   readonly lastAt: string | null;

@@ -58,9 +58,12 @@ export interface TaskWorkspaceWriteResult {
 
 export type TaskConversationEventKind =
   | "assistant_message"
+  | "assistant_thinking"
   | "tool_call"
   | "tool_result"
-  | "status";
+  | "status"
+  | "permission_request"
+  | "permission_decision";
 
 export interface TaskConversationEventResult {
   readonly taskId: string;

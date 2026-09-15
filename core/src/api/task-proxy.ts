@@ -35,6 +35,7 @@ import {
   type TransactionClient,
 } from "../db/repository.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
+import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
 import { headSha } from "../workspace/git.ts";
 import { ensureWorkspace, readTreeAt } from "../workspace/store.ts";
 import {
@@ -178,6 +179,10 @@ export interface RuntimeClient {
   sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown>;
   /** POST /tasks/:agentId/abort — abort the free-agent session. */
   abortTask(agentId: string, idempotencyKey?: string): Promise<unknown>;
+  resolveTaskPermission(
+    agentId: string,
+    body: { callId?: string; allow?: boolean; skipAll?: boolean },
+  ): Promise<unknown>;
   /**
    * GET /tasks/:agentId/stream — open the SSE event stream and return the raw
    * upstream Response (body streamed; Core NEVER buffers it). Rejects with a
@@ -358,6 +363,14 @@ export class HttpRuntimeClient implements RuntimeClient {
       undefined,
       idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : undefined,
     );
+  }
+
+  /** POST /tasks/:agentId/permission — 裁决挂起的权限请求或切换 skip-all。 */
+  async resolveTaskPermission(
+    agentId: string,
+    body: { callId?: string; allow?: boolean; skipAll?: boolean },
+  ): Promise<unknown> {
+    return this.request("POST", `/tasks/${encodeURIComponent(agentId)}/permission`, body);
   }
 
   async streamTask(
@@ -1002,7 +1015,7 @@ async function appendConversationEventRecord(
   eventId: string,
   eventKind: string,
   payload: unknown,
-): Promise<void> {
+): Promise<number> {
   const payloadHash = canonicalRequestHash(payload);
   const inserted = await client.query(
     `WITH locked AS (
@@ -1015,7 +1028,7 @@ async function appendConversationEventRecord(
      INSERT INTO task_conversation_event
        (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id)
      SELECT $3,$2,$1,value,$4,$5::jsonb,$6,$7,$8 FROM next_sequence
-     RETURNING id`,
+     RETURNING sequence`,
     [
       taskId,
       projectId,
@@ -1028,6 +1041,7 @@ async function appendConversationEventRecord(
     ],
   );
   if (inserted.rows.length === 0) throw notFoundError(`task not found: ${taskId}`);
+  return Number((inserted.rows[0] as { sequence: number | string }).sequence);
 }
 
 type RuntimeCreateTaskBody = Parameters<RuntimeClient["createTask"]>[0];
@@ -1476,6 +1490,20 @@ export async function getTaskHandler(ctx: RequestContext): Promise<HandlerResult
         });
       }
     }
+    // 权限交互快照与上下文水位活在 runtime 会话里——Core-owned 任务也要
+    // 合并这两个字段（best-effort：runtime 不可达时缺省，不阻塞 detail）。
+    if (row.runtime_agent_id) {
+      try {
+        const rt = await requireRuntime(ctx).getTask(row.runtime_agent_id);
+        if (rt && typeof rt === "object") {
+          const extra = rt as { permission?: unknown; context_usage?: unknown };
+          if (extra.permission !== undefined) Object.assign(detail, { permission: extra.permission });
+          if (extra.context_usage !== undefined) Object.assign(detail, { context_usage: extra.context_usage });
+        }
+      } catch {
+        // runtime 不可达：detail 仍可返回（持久化事实在 Core 侧是完整的）。
+      }
+    }
     return { status: 200, data: detail };
   }
   const runtime = requireRuntime(ctx);
@@ -1596,6 +1624,36 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
   }
 }
 
+/** POST /projects/:projectId/tasks/:agentId/permission — 权限卡片裁决 / skip-all 开关。 */
+export async function permissionTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
+  const projectId = ctx.params.projectId!;
+  const agentId = ctx.params.agentId!;
+  const runtime = requireRuntime(ctx);
+  const body = asObject(ctx.body);
+  const payload: { callId?: string; allow?: boolean; skipAll?: boolean } = {};
+  if (typeof body.skipAll === "boolean") {
+    payload.skipAll = body.skipAll;
+  } else {
+    if (typeof body.callId !== "string" || !body.callId) {
+      throw validationError("body must contain callId (string) + allow (boolean), or skipAll (boolean)");
+    }
+    payload.callId = body.callId;
+    payload.allow = body.allow === true;
+  }
+
+  // Core-owned 任务用绑定的 runtime agent id；legacy 自由会话直接用 agentId。
+  let runtimeAgentId = agentId;
+  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId).catch(() => null);
+  if (coreTask?.runtime_agent_id) runtimeAgentId = coreTask.runtime_agent_id;
+
+  try {
+    const response = await runtime.resolveTaskPermission(runtimeAgentId, payload);
+    return { status: 200, data: response };
+  } catch (err) {
+    throw mapRuntimeError(err);
+  }
+}
+
 /** POST /projects/:projectId/tasks/:agentId/abort — abort the free-agent session. */
 export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
@@ -1653,7 +1711,7 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
           [current.id, projectId],
         );
         if (cancelled.rows.length > 0) {
-          await appendConversationEventRecord(
+          const terminalSequence = await appendConversationEventRecord(
             tx,
             ctx,
             projectId,
@@ -1662,6 +1720,13 @@ export async function abortTaskHandler(ctx: RequestContext): Promise<HandlerResu
             "status",
             { status: "cancelled" },
           );
+          await sealLearningEpisodeAtStatus(tx, {
+            task: current,
+            sequence: terminalSequence,
+            payload: { status: "cancelled" },
+            actorType: ctx.identity.actorType,
+            actorId: ctx.identity.actorId,
+          });
         }
         return { response };
       },

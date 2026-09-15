@@ -299,9 +299,14 @@ export function parseSideTaskList(value: unknown): SideTaskSummary[] {
 const SIDE_TASK_EVENT_KINDS = new Set<SideTaskConversationEventKind>([
   "user_message",
   "assistant_message",
+  // 0020 起 runtime 在轮次定稿时同步思维链；漏掉它会让含 thinking 的整页事件
+  // 在这里抛「event_kind is not canonical」，刷新后持久化对话整体消失。
+  "assistant_thinking",
   "tool_call",
   "tool_result",
   "status",
+  "permission_request",
+  "permission_decision",
 ]);
 
 /** Strictly parse the Core-owned event page used to resume awaiting_user tasks. */

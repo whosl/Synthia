@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
-const component = readFileSync(new URL("../src/components/formal/FormalDeliveryPanel.vue", import.meta.url), "utf8");
+// 面板按区块拆分为同目录子组件；合约断言覆盖 formal/ 下全部组件源码的合集
+const formalDir = new URL("../src/components/formal/", import.meta.url);
+const component = readdirSync(formalDir)
+  .filter((file) => file.endsWith(".vue"))
+  .map((file) => readFileSync(new URL(file, formalDir), "utf8"))
+  .join("\n");
 const projectView = readFileSync(new URL("../src/views/ProjectView.vue", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
@@ -44,14 +49,15 @@ describe("P4 formal-delivery UI contract", () => {
     expect(packageJson.scripts.dev).not.toContain("VITE_FEATURE_FORMAL_DELIVERY");
     expect(packageJson.scripts.build).not.toContain("VITE_FEATURE_FORMAL_DELIVERY");
     expect(component).toContain("正式能力未就绪");
-    expect(component).toContain("width: 100vw");
-    expect(component).toContain("grid-template-columns: 1fr");
+    // 窄屏占满全屏的宽度类随 Sheet 化迁到 ProjectView 的 SheetContent（原在面板根上）
+    expect(projectView).toContain("max-[720px]:w-screen");
+    expect(component).toContain("max-[720px]:grid-cols-1");
   });
 
   test("narrow formal input and release rows cannot widen the delivery panel", () => {
-    expect(component).toContain(".formal-section {\n  display: grid;\n  gap: var(--space-3);\n  min-width: 0;");
-    expect(component).toContain(".formal-file-row { grid-template-columns: minmax(0, 1fr) auto; }");
-    expect(component).toContain(".formal-file-row .formal-file-path,\n  .formal-file-row .mono { grid-column: 1 / -1; }");
-    expect(component).toContain(".formal-delivery-path { min-width: 0; overflow: hidden; text-overflow: ellipsis;");
+    expect(component).toContain('class="grid min-w-0 gap-3 rounded-lg border border-line bg-base p-4 max-[720px]:p-3"');
+    expect(component).toContain("max-[720px]:grid-cols-[minmax(0,1fr)_auto]");
+    expect(component).toContain("max-[720px]:col-span-full");
+    expect(component).toContain('class="min-w-0 truncate"');
   });
 });

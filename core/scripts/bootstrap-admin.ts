@@ -72,6 +72,33 @@ const IDENTITIES: readonly IdentitySpec[] = [
     scopes: ["core:task-runtime"],
     envVar: "TASK_RUNTIME_TOKEN",
   },
+  {
+    uid: "synthia-evolution-distiller",
+    cn: "Synthia Evolution Distiller",
+    displayName: "Synthia Evolution Distiller Service",
+    mail: "evolution-distiller@synthia.local",
+    actorType: "service",
+    scopes: ["core:evolution-distiller"],
+    envVar: "EVOLUTION_DISTILLER_TOKEN",
+  },
+  {
+    uid: "synthia-evolution-curator",
+    cn: "Synthia Evolution Curator",
+    displayName: "Synthia Evolution Curator Service",
+    mail: "evolution-curator@synthia.local",
+    actorType: "service",
+    scopes: ["core:evolution-curator"],
+    envVar: "EVOLUTION_CURATOR_TOKEN",
+  },
+  {
+    uid: "synthia-evolution-evaluator",
+    cn: "Synthia Evolution Evaluator",
+    displayName: "Synthia Evolution Evaluator Service",
+    mail: "evolution-evaluator@synthia.local",
+    actorType: "service",
+    scopes: ["core:evolution-eval"],
+    envVar: "EVOLUTION_EVALUATOR_TOKEN",
+  },
 ];
 
 async function provisionIdentity(client: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }, spec: IdentitySpec): Promise<string> {

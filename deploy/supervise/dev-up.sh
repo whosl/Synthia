@@ -54,6 +54,7 @@ DATABASE_URL="postgres://synthia_core:syn_core_9f4k2m7q_zj81@127.0.0.1:55432/syn
 PORT=5130 \
 SYNTHIA_CONNECTOR_CONFIG="$HOME/.synthia/certs/worker-66/worker-66.client.json" \
 SYNTHIA_RUNTIME_URL="http://127.0.0.1:8791" \
+SYNTHIA_FEATURE_SELF_EVOLUTION="${SYNTHIA_FEATURE_SELF_EVOLUTION:-1}" \
   nohup sh "$SUP" core "$LOGDIR/synthia-core.log" \
   bun run core/scripts/serve.ts > /dev/null 2>&1 &
 
@@ -63,6 +64,7 @@ SYNTHIA_RUNTIME_PORT=8791 \
 SYNTHIA_CORE_URL="http://127.0.0.1:5130" \
 SYNTHIA_CORE_TOKEN="$SERVICE_TOKEN" \
 SYNTHIA_TASK_RUNTIME_TOKEN="$TASK_RUNTIME_TOKEN" \
+SYNTHIA_FEATURE_SELF_EVOLUTION="${SYNTHIA_FEATURE_SELF_EVOLUTION:-1}" \
 SYNTHIA_MODEL_URL="https://open.bigmodel.cn/api/anthropic" \
 SYNTHIA_MODEL_API="anthropic-messages" \
 SYNTHIA_MODEL_NAME="glm-4.6" \

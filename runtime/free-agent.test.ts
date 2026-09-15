@@ -32,7 +32,12 @@ import {
 import { loadAgentState } from "./agent-state.ts";
 import {
   appendSystemNoteToConversation,
+  buildSummaryPrompt,
+  compactForContextWindow,
   loadFreeAgentConversation,
+  serializeMessagesForSummary,
+  tailSplitIndex,
+  type ContextPolicy,
 } from "./free-agent.ts";
 import type {
   AgentMessage,
@@ -117,6 +122,7 @@ function makeSession(opts: {
   initialGateLock?: { gate: "G1" | "G2" | "G3" | "G4"; submissionId: string };
   processInstanceId?: string;
   referenceContext?: string;
+  contextPolicy?: ContextPolicy;
 }) {
   const agentId = `agent-fa-test-${++idCounter}`;
   const governance = opts.governance ?? new MockGovernanceClient();
@@ -133,6 +139,7 @@ function makeSession(opts: {
     connector: opts.connector ?? null,
     ...(opts.processInstanceId ? { processInstanceId: opts.processInstanceId } : {}),
     ...(opts.initialGateLock ? { initialGateLock: opts.initialGateLock } : {}),
+    ...(opts.contextPolicy ? { contextPolicy: opts.contextPolicy } : {}),
     agentsDir,
   });
   return { session, agentId, governance };
@@ -1149,5 +1156,400 @@ describe("appendSystemNoteToConversation (H7)", () => {
   test("returns false when no sidecar exists (nothing to annotate)", async () => {
     const ok = await appendSystemNoteToConversation("agent-never-existed", "note", "n1");
     expect(ok).toBeFalse();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context watermark + model-view compaction
+// ---------------------------------------------------------------------------
+
+describe("compactForContextWindow (pure projection)", () => {
+  const policy: ContextPolicy = {
+    contextWindow: 1_000,
+    compactTriggerRatio: 0.5,
+    keepToolResults: 1,
+    toolResultBudgetChars: 100,
+  };
+  const long = "L".repeat(500);
+  const base: readonly AgentMessage[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "go" },
+    { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "fpga-intake", args: {} }] },
+    { role: "tool", toolCallId: "t1", name: "fpga-intake", content: long },
+    { role: "assistant", content: null, toolCalls: [{ toolCallId: "t2", name: "fpga-intake", args: {} }] },
+    { role: "tool", toolCallId: "t2", name: "fpga-intake", content: long },
+    { role: "assistant", content: "done" },
+  ];
+
+  test("null watermark and below-threshold watermark are no-ops", () => {
+    expect(compactForContextWindow(base, policy, null)).toBe(base);
+    expect(compactForContextWindow(base, policy, 499)).toBe(base);
+  });
+
+  test("above threshold: old tool body compacted, recent kept, non-tool untouched", () => {
+    const out = compactForContextWindow(base, policy, 600);
+    expect(out).toHaveLength(base.length);
+    const t1 = out[3]!;
+    const t2 = out[5]!;
+    if (t1.role !== "tool" || t2.role !== "tool") throw new Error("expected tool messages");
+    // 旧结果：截头 + 系统标记，配对字段原样。
+    expect(t1.toolCallId).toBe("t1");
+    expect(t1.name).toBe("fpga-intake");
+    expect(t1.content.startsWith("L".repeat(100))).toBeTrue();
+    expect(t1.content).toContain("context-compacted: 400 chars omitted");
+    // 最近一条（keepToolResults=1）保持全文。
+    expect(t2.content).toBe(long);
+    // system/user/assistant 原样。
+    expect(out[0]).toEqual(base[0]);
+    expect(out[1]).toEqual(base[1]);
+    expect(out[6]).toEqual(base[6]);
+  });
+
+  test("idempotent: a second pass leaves the compacted view unchanged", () => {
+    const once = compactForContextWindow(base, policy, 600);
+    const twice = compactForContextWindow(once, policy, 600);
+    expect(twice).toEqual(once);
+  });
+
+  test("short old tool results are left alone even above threshold", () => {
+    const short: readonly AgentMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: null, toolCalls: [{ toolCallId: "s1", name: "t", args: {} }] },
+      { role: "tool", toolCallId: "s1", name: "t", content: "ok" },
+      { role: "assistant", content: "done" },
+    ];
+    expect(compactForContextWindow(short, policy, 900)).toBe(short);
+  });
+});
+
+describe("free-agent: watermark compaction in the model view", () => {
+  test("usage-reported watermark compacts old tool results for the model only", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      // 这轮回报高水位（> 1000×0.5）——下一轮的模型视图应压缩 tc1 的结果。
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt("两份候选已登记。"),
+    ]);
+    const { session, agentId } = makeSession({
+      model,
+      governance: gov,
+      contextPolicy: {
+        contextWindow: 1_000,
+        compactTriggerRatio: 0.5,
+        keepToolResults: 1,
+        toolResultBudgetChars: 60,
+      },
+    });
+
+    await session.prompt("登记两份 intake 文档");
+
+    // 模型视图（第三次调用的入参）：tc1 结果带压缩标记，tc2 保持原文。
+    const lastCall = model.calls[2]!;
+    const toolMsgs = lastCall.messages.filter((m) => m.role === "tool");
+    expect(toolMsgs).toHaveLength(2);
+    const [first, second] = toolMsgs as Extract<AgentMessage, { role: "tool" }>[];
+    expect(first.toolCallId).toBe("tc1");
+    expect(first.content).toContain("context-compacted:");
+    expect(second.toolCallId).toBe("tc2");
+    expect(second.content).not.toContain("context-compacted:");
+
+    // 持久会话保持全文：重载后的对话里 tc1 无压缩痕迹。
+    const persisted = await loadFreeAgentConversation(agentId, agentsDir);
+    const persistedTools = (persisted?.messages ?? []).filter((m) => m.role === "tool");
+    expect(persistedTools[0]?.content).not.toContain("context-compacted:");
+  });
+
+  test("no contextPolicy (default): full replay regardless of reported usage", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 999_999 } },
+      txt("完成。"),
+    ]);
+    const { session } = makeSession({ model, governance: gov });
+
+    await session.prompt("登记两份");
+
+    const lastCall = model.calls[2]!;
+    const toolMsgs = lastCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolMsgs[0]!.content).not.toContain("context-compacted:");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM structured summary compaction
+// ---------------------------------------------------------------------------
+
+describe("summary helpers (pure)", () => {
+  test("serializeMessagesForSummary truncates tool bodies and inline args", () => {
+    const long = "X".repeat(5_000);
+    const text = serializeMessagesForSummary([
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+      { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "fpga-tb-write", args: { content: long } }] },
+      { role: "tool", toolCallId: "t1", name: "fpga-tb-write", content: long },
+    ]);
+    expect(text).toContain("[System]: sys");
+    expect(text).toContain("[User]: go");
+    expect(text).toContain("[Assistant tool call]: fpga-tb-write(");
+    expect(text).toContain("[Tool result fpga-tb-write]:");
+    expect(text).toContain("clipped");
+    // 每行都有界：全文 5000 字符绝不该整段出现。
+    expect(text).not.toContain("X".repeat(3_000));
+  });
+
+  test("buildSummaryPrompt: first pass vs incremental merge", () => {
+    const first = buildSummaryPrompt({ prior: null, region: "[User]: go" });
+    expect(first).toContain("<conversation>");
+    expect(first).not.toContain("<prior-summary>");
+    expect(first).toContain("## Objective");
+    const second = buildSummaryPrompt({ prior: "OLD SUMMARY", region: "[User]: more" });
+    expect(second).toContain("<prior-summary>\nOLD SUMMARY");
+    expect(second).toContain("the conversation wins");
+  });
+
+  test("tailSplitIndex keeps a bounded tail and never crosses the system message", () => {
+    const msgs: AgentMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "u".repeat(400) },
+      { role: "assistant", content: "a".repeat(400) },
+      { role: "user", content: "t".repeat(40) },
+    ];
+    // 只够最后一条（~10 tokens）：切点 = 3。
+    expect(tailSplitIndex(msgs, 20)).toBe(3);
+    // 预算为 0：切点 = 消息长度（尾部为空，全部进摘要区）。
+    expect(tailSplitIndex(msgs, 0)).toBe(4);
+  });
+});
+
+describe("free-agent: LLM summary compaction", () => {
+  const policy: ContextPolicy = {
+    contextWindow: 1_000,
+    compactTriggerRatio: 0.5,
+    keepToolResults: 8,
+    toolResultBudgetChars: 10_000, // 关掉机械层，专测摘要层
+    summaryKeepTokens: 100,
+  };
+
+  test("watermark triggers a summary call; model view = system + summary + raw tail", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      // 第 3 次调用是摘要请求（messagesForModel 发起），回放摘要文本。
+      txt("## Objective\n- 完成两份文档登记"),
+      txt("两份候选已登记。"),
+    ]);
+    const { session, agentId } = makeSession({ model, governance: gov, contextPolicy: policy });
+
+    await session.prompt("登记两份 intake 文档");
+
+    // 摘要请求长这样：单条 user，含模板与旧区序列化。
+    const summaryCall = model.calls[2]!;
+    expect(summaryCall.messages).toHaveLength(1);
+    const summaryPrompt = summaryCall.messages[0]!;
+    if (summaryPrompt.role !== "user") throw new Error("expected user prompt");
+    expect(summaryPrompt.content).toContain("## Objective");
+    expect(summaryPrompt.content).toContain("[User]: 登记两份 intake 文档");
+    expect(summaryPrompt.content).toContain("[Tool result fpga-intake]");
+
+    // 主循环的最终调用：视图 = [system, 摘要 user, 尾部原文]；tc1 已被摘要吃掉。
+    const finalCall = model.calls[3]!;
+    expect(finalCall.messages[0]!.role).toBe("system");
+    const summaryView = finalCall.messages[1]!;
+    if (summaryView.role !== "user") throw new Error("expected summary view message");
+    expect(summaryView.content).toContain("Synthia context summary");
+    expect(summaryView.content).toContain("完成两份文档登记");
+    const toolMsgs = finalCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolMsgs.map((t) => t.toolCallId)).toEqual(["tc2"]);
+
+    // 持久会话保留全部原文。
+    const persisted = await loadFreeAgentConversation(agentId, agentsDir);
+    const persistedTools = (persisted?.messages ?? []).filter((m) => m.role === "tool");
+    expect(persistedTools.map((t) => (t as Extract<AgentMessage, { role: "tool" }>).toolCallId)).toEqual(["tc1", "tc2"]);
+  });
+
+  test("summary failure falls back to mechanical truncation", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt(""), // 摘要调用返回空文本 → 视为失败
+      txt("完成。"),
+    ]);
+    const { session } = makeSession({
+      model,
+      governance: gov,
+      contextPolicy: { ...policy, keepToolResults: 1, toolResultBudgetChars: 60 },
+    });
+
+    await session.prompt("登记两份");
+
+    const finalCall = model.calls[3]!;
+    const toolMsgs = finalCall.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    // 摘要失败 → 机械层接管：旧结果带压缩标记。
+    expect(toolMsgs[0]!.toolCallId).toBe("tc1");
+    expect(toolMsgs[0]!.content).toContain("context-compacted:");
+  });
+
+  test("incremental merge: second trigger includes the prior summary", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt("## Objective\n- 第一版摘要"),
+      call("tc3", "fpga-intake", { content: "# Three", filename: "doc/intake/three.md" }),
+      txt("## Objective\n- 第二版合并摘要"),
+      txt("最终回复"),
+    ]);
+    const { session } = makeSession({ model, governance: gov, contextPolicy: policy });
+
+    await session.prompt("登记三份文档");
+
+    // 第 4 次调用是第二次摘要请求（r3 的 turn 无 usage，水位沿用 900）：包含
+    // <prior-summary> 与旧摘要文本。
+    const secondSummary = model.calls[4]!;
+    const promptText = secondSummary.messages[0]!.content;
+    if (typeof promptText !== "string") throw new Error("expected string content");
+    expect(promptText).toContain("<prior-summary>");
+    expect(promptText).toContain("第一版摘要");
+
+    // 最终视图的摘要消息是第二版。
+    const finalCall = model.calls[5]!;
+    const summaryView = finalCall.messages[1]!;
+    if (summaryView.role !== "user") throw new Error("expected summary view message");
+    expect(summaryView.content).toContain("第二版合并摘要");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permission interaction (UI 卡片裁决)
+// ---------------------------------------------------------------------------
+
+describe("free-agent: permission interaction", () => {
+  const permPolicy = { permissionTools: ["fpga-intake"], permissionTimeoutMs: 60_000 };
+
+  test("allow: pending request surfaces, user allows, tool executes", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/one.md" }),
+      txt("已登记。"),
+    ]);
+    // makeSession 不透传 permissionTools——直接用 createFreeAgentSession 验证协议。
+    const { session: s2 } = (() => {
+      const agentId = `agent-perm-${++idCounter}`;
+      const governance = new MockGovernanceClient();
+      const sess = createFreeAgentSession(agentId, {
+        model,
+        tools: [...assembleSkillTools()],
+        systemPrompt: "sys",
+        projectId: "proj-test",
+        part: "xc7a100tcsg324-1",
+        classification: "internal",
+        governance,
+        connector: null,
+        agentsDir,
+        ...permPolicy,
+      });
+      return { session: sess };
+    })();
+
+    const promptPromise = s2.prompt("登记文档");
+    await new Promise((r) => setTimeout(r, 50));
+    const state = s2.permissionState();
+    expect(state.skipAll).toBeFalse();
+    expect(state.pending?.tool).toBe("fpga-intake");
+    expect(state.pending?.argsPreview).toContain("doc/intake/one.md");
+
+    expect(s2.resolvePermission(state.pending!.callId, true)).toBeTrue();
+    const reply = await promptPromise;
+    expect(reply).toBe("已登记。");
+    expect(s2.permissionState().pending).toBeNull();
+  });
+
+  test("deny: tool gets permission_denied error, model continues", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/x.md" }),
+      txt("好的，跳过登记。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      ...permPolicy,
+    });
+
+    const promptPromise = session.prompt("登记");
+    await new Promise((r) => setTimeout(r, 50));
+    const pending = session.permissionState().pending!;
+    expect(session.resolvePermission(pending.callId, false)).toBeTrue();
+    const reply = await promptPromise;
+    expect(reply).toBe("好的，跳过登记。");
+    // 模型看到了 permission_denied 工具结果。
+    const toolResults = model.calls[1]!.messages.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolResults[0]!.content).toContain("permission_denied");
+  });
+
+  test("skip-all: no pending request, tools run directly; enabling mid-pending allows it", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/y.md" }),
+      txt("完成。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      ...permPolicy,
+    });
+
+    const promptPromise = session.prompt("登记");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(session.permissionState().pending).not.toBeNull();
+    // 打开「跳过所有权限」：挂起请求立即放行。
+    session.setPermissionSkipAll(true);
+    const reply = await promptPromise;
+    expect(reply).toBe("完成。");
+    expect(session.permissionState().skipAll).toBeTrue();
+  });
+
+  test("timeout denies; abort settles pending as denied", async () => {
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/z.md" }),
+      txt("跳过。"),
+    ]);
+    const agentId = `agent-perm-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      permissionTools: ["fpga-intake"],
+      permissionTimeoutMs: 40,
+    });
+
+    const promptPromise = session.prompt("登记");
+    const reply = await promptPromise; // 40ms 超时 → 拒绝 → 模型继续
+    expect(reply).toBe("跳过。");
+    expect(session.permissionState().pending).toBeNull();
   });
 });

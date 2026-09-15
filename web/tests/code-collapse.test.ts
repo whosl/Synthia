@@ -114,10 +114,10 @@ describe("segmentAgentReply：折叠阈值", () => {
     expect(code.code).toContain(`line ${CODE_CARD_LINE_THRESHOLD + 1}`);
   });
 
-  test("未围栏长文本同理折叠；短文本不折叠", () => {
+  test("未围栏长文本不再折叠（全文直显）；短文本不折叠", () => {
     const longSeg = segmentAgentReply(codeOfLines(CODE_CARD_LINE_THRESHOLD + 5))[0]!;
     expect(longSeg.kind).toBe("text");
-    expect(longSeg.collapsible).toBe(true);
+    expect(longSeg.collapsible).toBe(false);
 
     const shortSeg = segmentAgentReply("仿真通过，详见报告。")[0]!;
     expect(shortSeg.kind).toBe("text");
@@ -176,8 +176,8 @@ describe("toggleSetKey：展开/收起交互", () => {
 // ─── makeTextSegment（工具条展开区长文本复用）──────────────────────────
 
 describe("makeTextSegment：工具结果长文本", () => {
-  test("超阈值折叠，短文本不折叠", () => {
-    expect(makeTextSegment("x", codeOfLines(30)).collapsible).toBe(true);
+  test("长文本不再折叠（全文直显），短文本不折叠", () => {
+    expect(makeTextSegment("x", codeOfLines(30)).collapsible).toBe(false);
     expect(makeTextSegment("x", "仿真未能完成，任务已安全停止。").collapsible).toBe(false);
   });
 });

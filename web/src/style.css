@@ -97,7 +97,7 @@
   --duration: 150ms;
   --duration-slow: 180ms;
 
-  /* 三栏骨架尺寸（可被 Splitter 持久化的拖拽宽度覆盖，见 components/ui/Splitter.vue） */
+  /* 三栏骨架尺寸（拖拽调宽由 ui/resizable 持久化，见 views/ProjectView.vue 的 ResizablePanelGroup） */
   --topbar-height: 52px;
   --tree-width: 240px;
   --chat-width: 380px;
@@ -179,21 +179,34 @@ body {
   background-clip: content-box;
 }
 
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
+/* 基础元素规则放进 @layer base：main.ts 先引入本文件再引入 tailwind.css，
+ * 故层叠顺序 base < theme < utilities——Tailwind 工具类（如链接上的 text-fg、
+ * 输入框上的 text-xs、outline-none）得以覆盖这些默认值，而裸元素行为不变。 */
+@layer base {
+  /* Linear 式标题收紧：字距微收让标题读感更笃定精确。
+   * 组件上自带 tracking 工具类的标题（更紧或更宽的 eyebrow）仍由 utilities 层覆盖，不受影响。 */
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
 
-a:hover {
-  color: var(--accent-hover);
-}
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-  color: inherit;
+  a:hover {
+    color: var(--accent-hover);
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
 }
 
 code,
@@ -209,11 +222,14 @@ kbd {
   color: var(--text-primary);
 }
 
-/* 统一焦点态：不用默认蓝色轮廓，走强调色，键盘可达性保留 */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-  border-radius: var(--radius-sm);
+/* 统一焦点态：不用默认蓝色轮廓，走强调色，键盘可达性保留。
+ * 同在 base 层：组件可用 outline-none 等工具类显式收回（如搜索框由容器描边代替）。 */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: var(--radius-sm);
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────

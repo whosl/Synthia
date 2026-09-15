@@ -23,6 +23,7 @@ import { join, dirname } from "node:path";
 
 import { saveAgentState, createAgentState, agentStatePath } from "./agent-state.ts";
 import type { AgentState, GovernanceClient, LoopConnector, GateId } from "./types.ts";
+import type { TaskEvolutionClient } from "./evolution-client.ts";
 import type {
   RuntimeTaskKind,
   TaskAuthorizationScope,
@@ -51,6 +52,155 @@ import type {
 // Fixed exported contract (Slice A — do not change the signatures).
 // ---------------------------------------------------------------------------
 
+/**
+ * 上下文水位与朴素压缩策略（模型视图投影，不动持久会话）。
+ *
+ * 网关每次回报的 promptTokens 就是当前输入的真实大小；超过
+ * `contextWindow × compactTriggerRatio` 时，把「最近 keepToolRounds 轮之外」
+ * 的旧工具结果正文替换为有界摘录（保留头部——jobId/operation/state 通常在
+ * 开头），并留系统标记告知模型原文在会话记录里。压缩只发生在
+ * {@link FreeAgentSessionImpl.messagesForModel} 的投影上：持久对话
+ * （conversation.json / Core 事件）保留全文，下次请求自然按新水位重算。
+ */
+export interface ContextPolicy {
+  /** 模型上下文窗口（token）。分母，断言值——部署侧须与网关实际窗口核对。 */
+  readonly contextWindow: number;
+  /** 触发压缩的水位比（默认 0.7）。 */
+  readonly compactTriggerRatio?: number;
+  /** 保持原样的最近工具结果条数（默认 8）。 */
+  readonly keepToolResults?: number;
+  /** 旧工具结果保留的字符预算（默认 1200）。 */
+  readonly toolResultBudgetChars?: number;
+  /** LLM 结构化摘要（默认开启；false 时退化为纯机械截断）。 */
+  readonly summaryEnabled?: boolean;
+  /** 尾部保留预算（token 估算，默认 8000）。 */
+  readonly summaryKeepTokens?: number;
+}
+
+const DEFAULT_COMPACT_RATIO = 0.7;
+const DEFAULT_KEEP_TOOL_RESULTS = 8;
+const DEFAULT_TOOL_BUDGET_CHARS = 1_200;
+const DEFAULT_SUMMARY_KEEP_TOKENS = 8_000;
+const SUMMARY_TOOL_CONTENT_CAP = 2_000;
+const SUMMARY_TOOL_ARGS_CAP = 500;
+
+/** 摘要模板（移植自 opencode compaction.ts：六节结构 + 事实保全规则）。 */
+const SUMMARY_TEMPLATE = [
+  "Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.",
+  "<template>",
+  "## Objective",
+  "- [one or two brief sentences describing what the user is trying to accomplish]",
+  "",
+  "## Important Details",
+  "- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or \"(none)\"]",
+  "",
+  "## Work State",
+  "### Completed",
+  "- [finished work, verified facts, or changes made; otherwise \"(none)\"]",
+  "",
+  "### Active",
+  "- [current work, partial changes, or investigation state; otherwise \"(none)\"]",
+  "",
+  "### Blocked",
+  "- [blockers, failing commands, or unknowns; otherwise \"(none)\"]",
+  "",
+  "## Next Move",
+  "1. [immediate concrete action, or \"(none)\"]",
+  "2. [next action if known, or \"(none)\"]",
+  "",
+  "## Relevant Files",
+  "- [file or directory path: why it matters, or \"(none)\"]",
+  "</template>",
+  "",
+  "Rules:",
+  "- Keep every section, even when empty.",
+  "- Use terse bullets, not prose paragraphs.",
+  "- Preserve exact file paths, symbols, commands, job ids, error strings, and identifiers when known.",
+  "- Do not mention the summary process or that context was compacted.",
+].join("\n");
+
+const SUMMARY_UPDATE_INSTRUCTIONS = [
+  "The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.",
+  "",
+  "When combining:",
+  "- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.",
+  "- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.",
+  "- Add new progress, decisions, constraints, and context from the conversation.",
+  "- Move completed work from \"Active\" to \"Completed\".",
+  "- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.",
+  "- Update \"Objective\" and \"Next Move\" to reflect the current work state.",
+].join("\n");
+
+/** 模型视图里摘要消息的固定前缀（user 角色，紧随 system）。 */
+const SUMMARY_VIEW_PREFIX = "[Synthia context summary — the earlier conversation was compacted into this summary. Treat it as reliable context; on conflict, recent messages below win.]\n\n";
+
+/** 粗略 token 估算（字符/4）。只用于分区选择与防溢出守卫，水位本身用网关实测。 */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function clipText(value: string, cap: number): string {
+  return value.length <= cap ? value : `${value.slice(0, cap)}\n…[clipped ${value.length - cap} chars]`;
+}
+
+/**
+ * 把消息区序列化为摘要提示词的对话文本（opencode 形态的角色行）。
+ * 工具结果 2000 chars、工具入参 500 chars 截断——内联源码不再全文进摘要请求。
+ */
+export function serializeMessagesForSummary(messages: readonly AgentMessage[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (message.role === "tool") {
+      lines.push(`[Tool result ${message.name}]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    } else if (message.role === "assistant") {
+      if (message.content) lines.push(`[Assistant]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+      for (const call of message.toolCalls ?? []) {
+        lines.push(`[Assistant tool call]: ${call.name}(${clipText(JSON.stringify(call.args ?? {}), SUMMARY_TOOL_ARGS_CAP)})`);
+      }
+    } else if (message.role === "system") {
+      lines.push(`[System]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    } else {
+      lines.push(`[User]: ${clipText(message.content, SUMMARY_TOOL_CONTENT_CAP)}`);
+    }
+  }
+  return lines.join("\n\n");
+}
+
+/** 摘要请求体：无旧摘要=首次生成；有=增量合并（旧摘要作废、对话冲突优先）。 */
+export function buildSummaryPrompt(opts: { prior: string | null; region: string }): string {
+  const conversation = `Here is the conversation so far:\n\n<conversation>\n${opts.region}\n</conversation>`;
+  if (!opts.prior) {
+    return [
+      conversation,
+      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+      SUMMARY_TEMPLATE,
+    ].join("\n\n");
+  }
+  return [
+    conversation,
+    `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${opts.prior}\n</prior-summary>`,
+    SUMMARY_UPDATE_INSTRUCTIONS,
+    SUMMARY_TEMPLATE,
+  ].join("\n\n");
+}
+
+/** 尾部保留区切点：从末尾按估算预算累计（永不越过 index 0 的 system）。 */
+export function tailSplitIndex(messages: readonly AgentMessage[], keepTokens: number): number {
+  let total = 0;
+  let split = messages.length;
+  for (let i = messages.length - 1; i >= 1; i -= 1) {
+    const message = messages[i]!;
+    const size = message.role === "assistant"
+      ? estimateTokens(message.content ?? "") + (message.toolCalls ?? []).reduce(
+        (sum, call) => sum + estimateTokens(JSON.stringify(call.args ?? {})), 0)
+      : estimateTokens(message.content);
+    if (total + size > keepTokens) break;
+    total += size;
+    split = i;
+  }
+  return Math.max(1, split);
+}
+
 export interface FreeAgentDeps {
   model: ConversationalModel;
   tools: readonly AgentTool[];
@@ -67,6 +217,8 @@ export interface FreeAgentDeps {
   workspaceId?: string;
   authorization?: TaskAuthorizationScope;
   workspace?: TaskWorkspaceClient;
+  /** Task-bound Learned Skill facts; injected for Core-owned tasks only. */
+  evolution?: TaskEvolutionClient;
   inputHash?: string;
   taskDescriptorHash?: string;
   /**
@@ -85,6 +237,12 @@ export interface FreeAgentDeps {
   readonly initialGateLock?: { readonly gate: GateId; readonly submissionId: string };
   /** Override for the .runs/ directory (defaults to SYNTHIA_RUNS_DIR or built-in). */
   agentsDir?: string;
+  /** 上下文水位与压缩策略；缺省 = 不压缩（保持既有行为）。 */
+  contextPolicy?: ContextPolicy;
+  /** 需要用户裁决的工具名单（红线工具不在此列——那些由 beforeToolCall 硬拦）。 */
+  permissionTools?: readonly string[];
+  /** 挂起权限请求的裁决等待上限（毫秒）；超时按拒绝处理。默认 600_000。 */
+  permissionTimeoutMs?: number;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -101,6 +259,56 @@ const REFERENCE_DATA_MARKER = "SYNTHIA_UNTRUSTED_REFERENCE_DATA_V1";
  * to side-task sessions by the Runtime server.
  */
 export const SIDE_TASK_COMPLETION_TOOL = "synthia_complete_side_task";
+
+/**
+ * 模型视图的上下文压缩投影：超水位时把旧工具结果正文截为有界摘录。
+ * 纯函数、幂等（摘录长度天然低于预算，二次调用不再改写）；只动 `content`，
+ * role/toolCallId/name 原样保留——工具配对不变式不受影响。
+ */
+export function compactForContextWindow(
+  messages: readonly AgentMessage[],
+  policy: ContextPolicy,
+  lastPromptTokens: number | null,
+): readonly AgentMessage[] {
+  if (lastPromptTokens === null) return messages;
+  const ratio = policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO;
+  const budget = policy.toolResultBudgetChars ?? DEFAULT_TOOL_BUDGET_CHARS;
+  const keep = policy.keepToolResults ?? DEFAULT_KEEP_TOOL_RESULTS;
+  if (policy.contextWindow <= 0 || ratio <= 0 || lastPromptTokens < policy.contextWindow * ratio) {
+    return messages;
+  }
+  // 从尾部数：最近 keep 条工具结果保持原样，更早的且超预算的截头保留。
+  // 含压缩标记的跳过（标记本身会撑过预算长度，不检测就会二次截断）。
+  let toolSeen = 0;
+  let changed = false;
+  const out: AgentMessage[] = [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role !== "tool") {
+      out.unshift(message);
+      continue;
+    }
+    toolSeen += 1;
+    if (
+      toolSeen <= keep
+      || message.content.length <= budget
+      || message.content.includes("[context-compacted:")
+    ) {
+      out.unshift(message);
+      continue;
+    }
+    changed = true;
+    const omitted = message.content.length - budget;
+    out.unshift({
+      ...message,
+      content:
+        `${message.content.slice(0, budget)}\n`
+        + `…[context-compacted: ${omitted} chars omitted from this older tool result; `
+        + "full text remains in the session record]",
+    });
+  }
+  return changed ? out : messages;
+}
 
 export function createFreeAgentSession(agentId: string, deps: FreeAgentDeps): FreeAgentSession {
   return new FreeAgentSessionImpl(agentId, deps);
@@ -304,10 +512,39 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   readonly projectId: string;
 
   private readonly deps: FreeAgentDeps;
+  /** 最近一次模型调用回报的输入 token 数；null = 网关未回报，水位管理停摆。 */
+  private lastPromptTokens: number | null = null;
+  /**
+   * LLM 结构化摘要缓存：text = 当前摘要，coveredUpTo = messages 里已被摘要
+   * 覆盖到的下标（该下标之后的消息仍以原文进模型视图）。仅内存态——runtime
+   * 重启后丢失，下次水位触发会重建（代价一次摘要调用，正确性不受影响）。
+   */
+  private compactionSummary: { text: string; coveredUpTo: number } | null = null;
+  /** 「跳过所有权限」开关（会话级内存态；红线工具不受它影响，仍硬拦）。 */
+  private permissionSkipAll = false;
+  /** 挂起中的权限请求（同一时刻至多一个——工具顺序执行）。 */
+  private pendingPermission: {
+    readonly callId: string;
+    readonly tool: string;
+    readonly argsPreview: string;
+    resolve: (allow: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  /** server 注入的事件监听（Core 事件 + SSE）。 */
+  private permissionListener: ((event: {
+    kind: "request" | "decision";
+    callId: string;
+    tool: string;
+    argsPreview: string;
+    allow?: boolean;
+    reason?: string;
+  }) => void) | null = null;
   private readonly toolMap: ReadonlyMap<string, AgentTool>;
   private readonly messages: AgentMessage[] = [];
 
   private _status: FreeAgentStatus = "idle";
+  /** Durable turn id of the in-flight prompt; null outside a turn. */
+  private currentTurnId: string | null = null;
   private abortFlag = false;
   private abortReason: string | undefined;
   private readonly pendingSteer: string[] = [];
@@ -400,6 +637,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       throw new Error("free-agent: a prompt is already in progress");
     }
 
+    // Current durable turn id, used by tools that seal per-turn facts
+    // (skill applications) into Core.
+    this.currentTurnId = opts.turnId ?? null;
+
     // Reset abort for this prompt round.
     this.abortFlag = false;
     this.abortReason = undefined;
@@ -443,15 +684,119 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   }
 
   abort(reason?: string): void {
+    // 挂起中的权限请求随轮次一起终止（否则要等到超时才放行循环退出）。
+    if (this.pendingPermission) this.settlePermission(false, reason ? `aborted: ${reason}` : "aborted");
     this.abortFlag = true;
     this.abortReason = reason ?? "aborted by caller";
+  }
+
+  // ----- permission interaction (UI 卡片裁决) -----
+
+  private async askPermission(call: AgentToolCall): Promise<boolean> {
+    // 工具顺序执行，理论上不会叠挂；万一有，先按拒绝清场。
+    if (this.pendingPermission) this.settlePermission(false, "superseded");
+    const argsPreview = clipText(JSON.stringify(call.args ?? {}), 800);
+    return await new Promise<boolean>((resolve) => {
+      const timeoutMs = this.deps.permissionTimeoutMs ?? 600_000;
+      const timer = setTimeout(() => {
+        if (this.pendingPermission?.callId === call.toolCallId) {
+          this.settlePermission(false, `timeout after ${timeoutMs}ms`);
+        } else {
+          resolve(false);
+        }
+      }, timeoutMs);
+      this.pendingPermission = { callId: call.toolCallId, tool: call.name, argsPreview, resolve, timer };
+      this.permissionListener?.({ kind: "request", callId: call.toolCallId, tool: call.name, argsPreview });
+    });
+  }
+
+  private settlePermission(allow: boolean, reason?: string): void {
+    const pending = this.pendingPermission;
+    if (!pending) return;
+    this.pendingPermission = null;
+    clearTimeout(pending.timer);
+    this.permissionListener?.({
+      kind: "decision",
+      callId: pending.callId,
+      tool: pending.tool,
+      argsPreview: pending.argsPreview,
+      allow,
+      ...(reason ? { reason } : {}),
+    });
+    pending.resolve(allow);
+  }
+
+  permissionState(): {
+    pending: { readonly callId: string; readonly tool: string; readonly argsPreview: string } | null;
+    skipAll: boolean;
+  } {
+    return {
+      pending: this.pendingPermission
+        ? { callId: this.pendingPermission.callId, tool: this.pendingPermission.tool, argsPreview: this.pendingPermission.argsPreview }
+        : null,
+      skipAll: this.permissionSkipAll,
+    };
+  }
+
+  resolvePermission(callId: string, allow: boolean): boolean {
+    if (this.pendingPermission?.callId !== callId) return false;
+    this.settlePermission(allow, allow ? "user" : "user denied");
+    return true;
+  }
+
+  setPermissionSkipAll(skip: boolean): void {
+    this.permissionSkipAll = skip;
+    // 已挂起的请求按新开关立即裁决：跳过 = 放行。
+    if (skip && this.pendingPermission) this.settlePermission(true, "skip-all enabled");
+  }
+
+  setPermissionListener(
+    listener: (event: {
+      kind: "request" | "decision";
+      callId: string;
+      tool: string;
+      argsPreview: string;
+      allow?: boolean;
+      reason?: string;
+    }) => void,
+  ): void {
+    this.permissionListener = listener;
+  }
+
+  contextUsage(): { promptTokens: number | null; contextWindow: number } {
+    return {
+      promptTokens: this.lastPromptTokens,
+      contextWindow: this.deps.contextPolicy?.contextWindow ?? 0,
+    };
   }
 
   // ----- core loop -----
 
   private async messagesForModel(): Promise<readonly AgentMessage[]> {
+    // 上下文水位管理：只影响发给模型的视图，持久会话保持全文。
+    // 第一层 LLM 结构化摘要（旧区 → 六节摘要 + 尾部原文），第二层机械截断
+    // （尾部内更旧工具结果的有界摘录）。摘要失败/关闭时退化为纯机械截断。
+    let view: readonly AgentMessage[] = this.messages;
+    const policy = this.deps.contextPolicy;
+    if (policy) {
+      await this.maybeCompactBySummary(policy);
+      if (this.compactionSummary && this.messages[0]?.role === "system") {
+        const tail = compactForContextWindow(
+          this.messages.slice(this.compactionSummary.coveredUpTo),
+          policy,
+          this.lastPromptTokens,
+        );
+        view = [
+          this.messages[0]!,
+          { role: "user", content: `${SUMMARY_VIEW_PREFIX}${this.compactionSummary.text}` },
+          ...tail,
+        ];
+      } else {
+        view = compactForContextWindow(this.messages, policy, this.lastPromptTokens);
+      }
+    }
     const loader = this.deps.loadReferenceContext;
-    if (!loader) return this.messages;
+    if (!loader) return view;
     let raw: string | null;
     try {
       raw = await loader();
@@ -461,13 +806,45 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       raw = null;
     }
     const trimmed = raw?.trim();
-    if (!trimmed) return this.messages;
+    if (!trimmed) return view;
     const framed = trimmed.startsWith(REFERENCE_DATA_MARKER)
       ? trimmed
       : `${REFERENCE_DATA_MARKER}\n${trimmed}`;
-    const [system, ...conversation] = this.messages;
-    if (!system || system.role !== "system") return this.messages;
+    const [system, ...conversation] = view;
+    if (!system || system.role !== "system") return view;
     return [system, { role: "user", content: `${framed}\n` }, ...conversation];
+  }
+
+  /**
+   * 水位触发的 LLM 结构化摘要（opencode compaction 形态）：
+   * 旧区序列化（工具结果/入参就地截断）→ 六节模板生成或增量合并 → 缓存。
+   * 防递归：摘要请求自身超窗口预算时放弃（退化为机械截断）；摘要调用的
+   * usage 不回采水位（它量的是摘要提示词，不是主对话）。
+   */
+  private async maybeCompactBySummary(policy: ContextPolicy): Promise<void> {
+    if (policy.summaryEnabled === false) return;
+    const ratio = policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO;
+    if (this.lastPromptTokens === null || this.lastPromptTokens < policy.contextWindow * ratio) return;
+    const split = tailSplitIndex(this.messages, policy.summaryKeepTokens ?? DEFAULT_SUMMARY_KEEP_TOKENS);
+    const covered = this.compactionSummary?.coveredUpTo ?? 1;
+    if (split <= covered) return;
+    const region = serializeMessagesForSummary(this.messages.slice(covered, split));
+    if (!region.trim()) return;
+    const prompt = buildSummaryPrompt({ prior: this.compactionSummary?.text ?? null, region });
+    // 摘要请求也要能装进窗口：超预算直接放弃，机械截断兜底。预留量按窗口
+    // 比例（大窗口 2000、小窗口 20%），避免小窗口下守卫恒真。
+    const reserve = Math.min(2_000, Math.floor(policy.contextWindow * 0.2));
+    if (estimateTokens(prompt) > policy.contextWindow - reserve) return;
+    try {
+      const turn = await this.deps.model.chat([{ role: "user", content: prompt }], []);
+      const text = turn.kind === "text" ? turn.content.trim() : "";
+      if (!text) return;
+      this.compactionSummary = { text, coveredUpTo: split };
+    } catch (error) {
+      process.stderr.write(
+        `[free-agent] summary compaction failed for ${this.agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
   }
 
   /**
@@ -524,6 +901,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
             },
           })
         : await this.deps.model.chat(modelMessages, this.deps.tools);
+
+      // 水位采样：promptTokens 即本次请求的真实输入规模，下一次
+      // messagesForModel 按它决定是否压缩旧工具结果。
+      if (typeof turn.usage?.promptTokens === "number" && turn.usage.promptTokens > 0) {
+        this.lastPromptTokens = turn.usage.promptTokens;
+      }
 
       // An abort can arrive while the model request itself is in flight. Check
       // again before accepting any returned text or tool calls so the request
@@ -629,13 +1012,13 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // 工具执行期间（Vivado 一轮可达数分钟）流里必须有东西，否则前端只看得到
         // 一段死寂。开 part → 执行 → 同 id 转 done/error。
         const fullArgs = JSON.stringify(call.args ?? {});
-        await opts.onToolStart?.(
+        const toolEventSequence = await opts.onToolStart?.(
           call.toolCallId,
           call.name,
           truncateForStream(fullArgs),
           fullArgs,
         );
-        const result = await this.executeToolCall(call);
+        const result = await this.executeToolCall(call, toolEventSequence ?? undefined);
         await opts.onToolEnd?.(
           call.toolCallId,
           !result.isError,
@@ -692,7 +1075,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
    * Returns an error-shaped result on block / unknown tool / execution failure
    * so the model can self-correct.
    */
-  private async executeToolCall(call: AgentToolCall): Promise<AgentToolResult> {
+  private async executeToolCall(call: AgentToolCall, toolEventSequence?: number): Promise<AgentToolResult> {
     const ctx: ToolExecContext = {
       projectId: this.deps.projectId,
       ...(this.deps.taskId ? { taskId: this.deps.taskId } : {}),
@@ -701,6 +1084,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...(this.deps.workspaceId ? { workspaceId: this.deps.workspaceId } : {}),
       ...(this.deps.authorization ? { authorization: this.deps.authorization } : {}),
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
+      ...(this.deps.evolution ? { evolution: this.deps.evolution } : {}),
+      toolCallId: call.toolCallId,
+      turnId: this.currentTurnId,
+      ...(toolEventSequence !== undefined ? { toolEventSequence } : {}),
       governance: this.deps.governance,
       connector: this.deps.connector,
       part: this.deps.part,
@@ -731,6 +1118,18 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     const block = this.beforeToolCallHook(call, ctx);
     if (block?.block) {
       return { content: JSON.stringify({ error: "blocked", reason: block.reason }), isError: true };
+    }
+
+    // 权限门：可请求名单内的操作挂起等待用户在 UI 卡片上裁决。
+    // 「跳过所有权限」开着时直接放行；红线工具永远到不了这里（上方硬拦）。
+    if (!this.permissionSkipAll && (this.deps.permissionTools ?? []).includes(call.name)) {
+      const allowed = await this.askPermission(call);
+      if (!allowed) {
+        return {
+          content: JSON.stringify({ error: "permission_denied", reason: "用户拒绝了本次工具调用。" }),
+          isError: true,
+        };
+      }
     }
 
     // Resolve the tool.
@@ -852,6 +1251,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.agentState = {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
+      contextPromptTokens: this.lastPromptTokens,
       status,
       ...(endedReason ? { endedReason } : {}),
       ...(locked

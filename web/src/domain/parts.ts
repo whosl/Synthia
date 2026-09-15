@@ -61,6 +61,12 @@ export interface SynthiaTextPart {
   readonly text: string;
   /** Agent 叙述分段（>15 行代码块折叠为代码卡）；user 气泡为 null。 */
   readonly segments: readonly ReplySegment[] | null;
+  /**
+   * 消息时间（ISO）：目前只有 `conversationEventsToParts` 的 user_message 会填
+   * （event.created_at），供 ChatFeed 回合分隔线显示相对时间；其余构造路径
+   * （audit 物化、SSE 流式）不填 → 分隔线退化为纯细线。
+   */
+  readonly ts?: string | null;
 }
 
 export type GatePartState = "evaluating" | "awaiting" | "passed" | "failed";
@@ -194,6 +200,38 @@ export interface SynthiaAgentToolPart {
   readonly result: string | null;
 }
 
+/** 权限请求/裁决卡（可请求名单内的工具调用由用户在流内裁决）。 */
+export interface SynthiaPermissionPart {
+  readonly kind: "permission";
+  readonly id: string;
+  readonly callId: string;
+  readonly tool: string;
+  readonly argsPreview: string;
+  readonly state: "pending" | "allowed" | "denied";
+  readonly reason: string | null;
+}
+
+/** 「本轮改动」汇总卡的一行：一个产物的一版修订。 */
+export interface SynthiaChangeItem {
+  readonly artifactId: string;
+  readonly revisionId: string;
+  /** 非 null 时可「查看改动」（中栏 Monaco diff）；null = 首版（新文件），只能打开。 */
+  readonly prevRevisionId: string | null;
+  readonly path: string;
+  readonly title: string;
+}
+
+/**
+ * 轮末「本轮改动」汇总卡：由 ProjectView 在合并后的 parts 上按轮归集 doc part
+ * 注入（见 domain/change-cards.ts），audit/事件流里没有这个 part。
+ */
+export interface SynthiaChangesPart {
+  readonly kind: "changes";
+  readonly id: string;
+  readonly ts: string | null;
+  readonly items: readonly SynthiaChangeItem[];
+}
+
 export type SynthiaPart =
   | SynthiaToolPart
   | SynthiaTextPart
@@ -205,7 +243,9 @@ export type SynthiaPart =
   | SynthiaNotePart
   | SynthiaInterruptPart
   | SynthiaReasoningPart
-  | SynthiaAgentToolPart;
+  | SynthiaAgentToolPart
+  | SynthiaPermissionPart
+  | SynthiaChangesPart;
 
 // ─── 工具条状态文案（四态，主页面中文）────────────────────────────────
 
@@ -243,7 +283,15 @@ export function conversationEventsToParts(
         state: "done",
         text,
         segments: role === "agent" ? segmentAgentReply(text) : null,
+        ts: role === "user" ? event.created_at : null,
       });
+      continue;
+    }
+    if (event.event_kind === "assistant_thinking") {
+      // 思维链（runtime 在轮次 finalize 时同步，0020 迁移起 core 持久化）。
+      const text = conversationPayloadText(event.payload.text).trim();
+      if (!text) continue;
+      parts.push({ kind: "reasoning", id: `core-${event.id}`, state: "done", text });
       continue;
     }
     if (event.event_kind === "tool_call") {
@@ -255,11 +303,30 @@ export function conversationEventsToParts(
         id: callId,
         state: "running",
         name: typeof event.payload.name === "string" ? event.payload.name : "tool",
-        args: conversationPayloadText(event.payload.args, 400),
+        args: conversationPayloadText(event.payload.args, 32_000),
         result: null,
       };
       tools.set(callId, parts.length);
       parts.push(part);
+      continue;
+    }
+    if (event.event_kind === "permission_request" || event.event_kind === "permission_decision") {
+      const callId = typeof event.payload.tool_call_id === "string" ? event.payload.tool_call_id : event.id;
+      const tool = typeof event.payload.tool === "string" ? event.payload.tool : "tool";
+      const argsPreview = conversationPayloadText(event.payload.args_preview, 2_000);
+      const decided = event.event_kind === "permission_decision";
+      const at = parts.findIndex((p) => p.kind === "permission" && p.callId === callId);
+      const part: SynthiaPermissionPart = {
+        kind: "permission",
+        id: `perm-${callId}`,
+        callId,
+        tool,
+        argsPreview,
+        state: decided ? (event.payload.allow === true ? "allowed" : "denied") : "pending",
+        reason: decided && typeof event.payload.reason === "string" ? event.payload.reason : null,
+      };
+      if (at === -1) parts.push(part);
+      else parts[at] = part;
       continue;
     }
     if (event.event_kind === "tool_result") {
@@ -278,7 +345,7 @@ export function conversationEventsToParts(
             ? previous.name
             : "tool",
         args: previous?.kind === "agent_tool" ? previous.args : "",
-        result: conversationPayloadText(event.payload.result, 800),
+        result: conversationPayloadText(event.payload.result, 32_000),
       };
       if (at === undefined) parts.push(completed);
       else parts[at] = completed;
@@ -527,6 +594,13 @@ export function auditToParts(detail: TaskAgentDetail): SynthiaPart[] {
           // text fingerprint instead of id, or the reply renders twice
           // (once streamed, once from audit).
           appendAgentText(event.seq, event.detail ?? "");
+          break;
+        }
+        if (event.action === "free_agent_thinking") {
+          // 思维链（runtime finalize 时落 audit）。重放为已定稿 reasoning part；
+          // 与 SSE 实时卡的文本指纹去重在 ProjectView 的 parts 合成里做。
+          const text = event.detail?.trim();
+          if (text) push({ kind: "reasoning", id: `r${event.seq}`, state: "done", text });
           break;
         }
         if (event.action === "free_agent_steer") {
