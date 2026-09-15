@@ -12,3 +12,5 @@
 
 ALTER TABLE task_conversation_event
   DROP CONSTRAINT IF EXISTS task_conversation_event_event_kind_check;
+
+INSERT INTO schema_migrations(version) VALUES ('0036_relax_event_kind_constraint') ON CONFLICT (version) DO NOTHING;
