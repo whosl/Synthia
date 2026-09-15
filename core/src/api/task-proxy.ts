@@ -1400,6 +1400,18 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
     return { agentId: response.agent_id };
   });
 
+  // Auto-kickoff (harness ledger H18): the task text is the operator's
+  // opening instruction, not a dormant label — every caller so far had to
+  // send a redundant "开始执行" message to actually start the agent. Deliver
+  // the task text as the first user message right after creation. A kickoff
+  // failure never fails the create: the task exists and is fully usable via
+  // an explicit message.
+  try {
+    await runtime.sendMessage(result.agentId, task, `create-kickoff-${result.agentId}`);
+  } catch {
+    // intentional: creation succeeded; kickoff is best-effort
+  }
+
   return { status: 201, data: result };
 }
 

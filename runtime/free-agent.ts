@@ -601,6 +601,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         this.artifactList.push(artifact);
       }
       for (const [id, members] of restored.snapshots ?? []) this.snapshotsById.set(id, members);
+      if (typeof restored.permissionSkipAll === "boolean") {
+        this.permissionSkipAll = restored.permissionSkipAll;
+      }
     }
 
     this.agentState = deps.initialState
@@ -1281,6 +1284,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       pendingSteer: this.pendingSteer,
       artifacts: this.artifactList,
       snapshots: [...this.snapshotsById],
+      // Permission policy must survive restarts: losing it re-gates every
+      // tool call on a permission card after each deploy (harness ledger H20).
+      permissionSkipAll: this.permissionSkipAll,
       ...(this.claimChecks.length > 0 ? { claimChecks: this.claimChecks } : {}),
     }, null, 2) + "\n";
     const write = this.conversationWrite.then(async () => {
@@ -1353,6 +1359,8 @@ export interface LoadedFreeAgentConversation {
   readonly snapshots?: readonly (readonly [string, readonly string[]])[];
   /** claim-check 审计记录（无命中时缺失；向后兼容旧 sidecar）。 */
   readonly claimChecks?: readonly ClaimCheckRecord[];
+  /** 权限 skip-all 开关（旧 sidecar 缺失 = false；H20 持久化）。 */
+  readonly permissionSkipAll?: boolean;
 }
 
 /**

@@ -388,7 +388,7 @@ function isPlainObject(value) {
 var VERILOG_MEDIA_TYPES = { "text/verilog": true, "text/x-verilog": true, "text/systemverilog": true, "application/systemverilog": true };
 function assertSourceLanguage(source) {
   const lower = source.path.toLowerCase();
-  const extOk = lower.endsWith(".v") || lower.endsWith(".sv");
+  const extOk = lower.endsWith(".v") || lower.endsWith(".sv") || lower.endsWith(".vh") || lower.endsWith(".svh");
   const mediaOk = source.mediaType === undefined || VERILOG_MEDIA_TYPES[source.mediaType] === true;
   if (!extOk || !mediaOk)
     reject("UNSUPPORTED_SOURCE_LANGUAGE");
@@ -683,9 +683,15 @@ function scriptFor(request, inputDir, outputDir) {
 puts [join [get_parts *] \\"\\n\\"]`;
   if (request.operation === "query_parts")
     return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
-  if (request.operation === "validate_sources")
+  if (request.operation === "validate_sources") {
+    for (const src of "sources" in request ? request.sources : []) {
+      const m = src.content.match(/^\s*\\/m) || src.content.match(/\\`/);
+      if (m)
+        reject(`SUSPICIOUS_ESCAPE_ARTIFACT:${src.path}: leading backslash or escaped backtick — shell-escaping artifact that xvlog tolerates but synthesis rejects`);
+    }
     return `${sources}
 puts SOURCE_VALIDATION_OK`;
+  }
   if (request.operation === "simulate") {
     const designPaths = [];
     const simPaths = [];
@@ -849,7 +855,7 @@ function parseSimulatePhases(text) {
 }
 function judgeSimulation(simulatorStdout, phaseExitCode, exitCode) {
   const region = simulatorStdout ?? "";
-  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region))
+  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region) || /^\s*\[\s*FAIL\s*\]/m.test(region) || /\bFAIL\s*\(/m.test(region))
     return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
   if ((phaseExitCode ?? exitCode) !== 0 || exitCode !== 0)
     return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
