@@ -21,7 +21,7 @@
 | H16 | BUG | **PROJECT_NOT_ALLOWED → 503+retryable:true**（源码实证：worker 本报 403，Core `mapConnectorError` 把所有非 404 类 ConnectorError 统一重包 `capabilityUnavailableError`）——配置错被伪装成可重试的暂态故障，误导排障方向 | fixed（403 实测：authorization/PROJECT_NOT_ALLOWED/retryable:false） |
 | H18 | GAP | **createTask 的 task 文本不触发执行**：说明书还是指令语义不明，5 个会话全靠追加 message 才开工 | fixed（创建即开工实测：25 秒完成回合，零追加消息） |
 | H19 | BUG | **abort 端点**：深核实测——idle 会话 200 且优雅降级（`{"aborted":false,"reason":"no active free-agent session"}`）；400 仅见于 running 态会话，根因待安全窗口复现（不能在 p22 盲测上试） | narrowed（idle 200 实测；running 400 未复现——草稿会话机制已具备） |
-| H20 | GAP | **permission skipAll 无法预配置**：idle 会话 404，须"激活→再设"两步舞；重启后疑似不保持（周一全量重设） | fixed（序列化+恢复+类型三处；字段入盘实证，随回合持久化属设计内） |
+| H20 | GAP | **permission skipAll 双缺口**：①持久化已修（修复批次）；②**预配置仍不可能**——idle 会话 404，须"激活→再设"两步舞；且修复部署本身会清掉修复前未持久化的存量开关（2026-09-15 10:30 部署实证：三会话 vivado_run 全部 permission_denied，静默卡 2-3 小时） | open（两步舞已固化为惯例；根治=permission 策略落注册表层） |
 | H21 | GAP | **.vh 拒收**：T1 已知（AES 内联绕过），T2 p22 复发（job-56528a73）——规则未显性化给 agent，每轮重新踩 | fixed（.vh validate 实测通过） |
 | H22 | GAP | **回合级活性：REST 面缺失但 SSE 面存在**（深核修正）——SSE 流有 delta 事件（模型增量）+ `: hb` 传输心跳，看流可区分活回合/挂死；但 task-status REST 面（status/updatedAt）无此信号，轮询式监控不可区分（双向误判实证：误判挂死×1、真楔死×1）。监控改用 SSE 即可缓解，平台侧可选补 REST 活性字段 | fixed（/tasks updated_at 实测返回） |
 | H23 | BUG | **迁移漂移**：0014_tool_timing_metrics.sql 在仓库、未应用生产库（schema_migrations 尾部 {0011,0012,0013,0020,0021}） | fixed（0014+0036 已应用并注册；迁移器自注册惯例补齐） |
