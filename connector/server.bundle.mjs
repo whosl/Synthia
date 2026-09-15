@@ -88,7 +88,10 @@ class WorkerRuntime {
   }
   async writeSnapshot() {
     try {
-      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: [...this.jobs.values()], bindings: [...this.jobBindings.entries()] };
+      const recent = [...this.jobs.values()].slice(-512);
+      const recentIds = new Set(recent.map((j) => j.id));
+      const bindings = [...this.jobBindings.entries()].filter(([id]) => recentIds.has(id));
+      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: recent, bindings };
       await mkdir(this.root, { recursive: true });
       await writeFile(this.registryPath(), JSON.stringify(snapshot), "utf8");
     } catch { /* best-effort persistence */ }

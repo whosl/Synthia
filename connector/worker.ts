@@ -1738,7 +1738,15 @@ export class WorkerRuntime {
   }
   private async writeSnapshot(): Promise<void> {
     try {
-      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: [...this.jobs.values()], bindings: [...this.jobBindings.entries()] };
+      // Bounded snapshot: full requests (inline sources included) make single
+      // entries bulky, and the monolithic file is rewritten on every submit —
+      // cap to the most recent 512 jobs so the registry stays a bounded file.
+      // Older jobs degrade to JOB_NOT_FOUND; freeze at Core remains the
+      // durable path for evidence that must outlive the cap.
+      const recent = [...this.jobs.values()].slice(-512);
+      const recentIds = new Set(recent.map((job) => job.id));
+      const bindings = [...this.jobBindings.entries()].filter(([id]) => recentIds.has(id));
+      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: recent, bindings };
       await mkdir(this.root, { recursive: true });
       await writeFile(this.registryPath(), JSON.stringify(snapshot), "utf8");
     } catch { /* best-effort persistence */ }
