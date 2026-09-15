@@ -1493,6 +1493,10 @@ export class RuntimeServer {
       awaiting_gate: h.awaitingGate ?? null,
       formal_input: serializeTaskFormalInput(h.currentState?.formalFlow),
       created_at: h.createdAt,
+      // Liveness for pollers (harness ledger H22): `busy` says a turn is in
+      // flight, `updated_at` lets a watcher tell a long turn from a wedged
+      // one without opening the SSE stream.
+      updated_at: h.currentState?.updatedAt ?? null,
     }));
     return json({ agents });
   }

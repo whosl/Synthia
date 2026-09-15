@@ -1970,6 +1970,12 @@ export function mapConnectorError(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
   if (err instanceof ConnectorError) {
     if (err.code in CONNECTOR_NOT_FOUND_CODES) return notFoundError(`connector: ${err.code}`);
+    // Scope rejections are configuration errors, not transient outages. Mapping
+    // them to 503/retryable sent callers chasing connectivity instead of the
+    // allowlist (harness ledger H16).
+    if (err.code === "PROJECT_NOT_ALLOWED" || err.code === "CLASSIFICATION_NOT_ALLOWED") {
+      return forbiddenError(`connector: ${err.code}`, { code: err.code });
+    }
     return capabilityUnavailableError(`connector: ${err.code}`, { code: err.code });
   }
   return internalError(err instanceof Error ? err.message : "connector error");
@@ -2106,29 +2112,43 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
       jobId, projectId, operation, runClass, state: "submitted",
     });
 
-    // Submit to the Connector inside the transaction: a rejection rolls back the
-    // row + event + idempotency slot so the caller can retry with the same key.
-    // `approval` carries the authorization context the remote client needs for
-    // gate_check/formal runs; exploratory omits it.
-    try {
-      await connector.submitJob({
-        jobId,
-        projectId,
-        operation,
-        runClass,
-        idempotencyKey: ctx.idempotencyKey!,
-        correlationId: ctx.correlationId,
-        inputHash: inputManifestHash,
-        toolchainProfileHash: exploratoryToolchainHash ?? undefined,
-        actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
-        parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, stopBeforeBitstream, timeoutMs },
-        approval: Object.keys(authorizationContext).length > 0 ? authorizationContext : undefined,
-      });
-    } catch (err) {
-      throw mapConnectorError(err);
-    }
-    return { jobId, runClass, state: "submitted" };
+    return { jobId, runClass, state: "submitted", toolchainProfileHash: exploratoryToolchainHash };
   });
+
+  // Connector dispatch happens AFTER the transaction commits (harness ledger
+  // H26): holding the DB transaction open across the worker round-trip let a
+  // slow/hung worker wedge the whole submission path and pin connections.
+  // Failure semantics changed accordingly: a connector rejection no longer
+  // rolls the row back — the committed row is compensated to `failed` below,
+  // and the idempotency slot keeps replaying the submitted response (callers
+  // observe the true state via GET /jobs/:id).
+  // `approval` carries the authorization context the remote client needs for
+  // gate_check/formal runs; exploratory omits it.
+  const dispatchAuthorizationContext = buildAuthorizationContext(body);
+  try {
+    await connector.submitJob({
+      jobId: result.jobId,
+      projectId,
+      operation,
+      runClass: result.runClass,
+      idempotencyKey: ctx.idempotencyKey!,
+      correlationId: ctx.correlationId,
+      inputHash: canonicalRequestHash(ctx.body),
+      toolchainProfileHash: result.toolchainProfileHash ?? undefined,
+      actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
+      parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, stopBeforeBitstream, timeoutMs },
+      approval: Object.keys(dispatchAuthorizationContext).length > 0 ? dispatchAuthorizationContext : undefined,
+    });
+  } catch (err) {
+    const mapped = mapConnectorError(err);
+    await ctx.pool.query(
+      `UPDATE tool_run
+          SET state = 'failed', error_code = $1, end_time = now()
+        WHERE id = $2 AND project_id = $3 AND state = 'submitted'`,
+      [mapped.code, result.jobId, projectId],
+    );
+    throw mapped;
+  }
 
   return { status: 201, data: result };
 }
@@ -2195,13 +2215,39 @@ export async function getJobStatusHandler(ctx: RequestContext): Promise<HandlerR
   const jobId = ctx.params.jobId!;
   const connector = requireConnector(ctx);
 
-  const found = await ctx.pool.query("SELECT 1 FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
+  const found = await ctx.pool.query(
+    "SELECT state, created_at FROM tool_run WHERE id = $1 AND project_id = $2",
+    [jobId, projectId],
+  );
   if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
+  const row = found.rows[0] as { state: string; created_at: Date };
 
   let snapshot;
   try {
     snapshot = await connector.queryStatus(projectId, jobId);
   } catch (err) {
+    // Orphan reaper (harness ledger H14/H25): the worker keeps job state in
+    // memory only, so a worker restart loses every queued job while the row
+    // here stays "submitted" forever. When the worker definitively reports
+    // JOB_NOT_FOUND for a non-terminal row older than the submission race
+    // window, retire it as failed instead of 404-ing forever.
+    if (
+      err instanceof ConnectorError
+      && err.code === "JOB_NOT_FOUND"
+      && !(row.state in TOOL_RUN_TERMINAL_STATES)
+      && Date.now() - new Date(row.created_at).getTime() > 10 * 60 * 1000
+    ) {
+      await ctx.pool.query(
+        `UPDATE tool_run
+            SET state = 'failed', error_code = 'WORKER_JOB_LOST', end_time = now()
+          WHERE id = $1 AND project_id = $2 AND state NOT IN ('succeeded','failed','cancelled')`,
+        [jobId, projectId],
+      );
+      return {
+        status: 200,
+        data: { jobId, state: "failed", errorCode: "WORKER_JOB_LOST", orphanReaped: true },
+      };
+    }
     throw mapConnectorError(err);
   }
 
