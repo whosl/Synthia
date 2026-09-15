@@ -23,6 +23,8 @@ const props = defineProps<{
   /** 仅 mode==="steer" 时可能为 true（判定权在 ProjectView，本组件照单渲染）。 */
   canAbort: boolean;
   sending: boolean;
+  /** 打断请求进行中：打断按钮转 spinner + 「打断中」，发送按钮不重复显示 loading。 */
+  aborting?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -89,10 +91,10 @@ function onKeydown(ev: KeyboardEvent): void {
       <div class="flex items-center justify-between gap-2 px-1.5 pb-1.5 pt-0.5">
         <span class="flex min-w-0 items-center gap-1.5"><slot name="controls" /></span>
         <span class="flex flex-none gap-1">
-          <Button v-if="canAbort" variant="danger" size="sm" :disabled="sending" title="打断当前回复" @click="emit('abort')">
-            ⏹ 打断
+          <Button v-if="canAbort" variant="danger" size="sm" :disabled="sending" :loading="aborting" :title="aborting ? '正在打断当前回复' : '打断当前回复'" @click="emit('abort')">
+            {{ aborting ? "打断中" : "⏹ 打断" }}
           </Button>
-          <Button variant="primary" size="sm" :disabled="!sendEnabled" :loading="sending" @click="submit">↑ 发送</Button>
+          <Button variant="primary" size="sm" :disabled="!sendEnabled" :loading="sending && !aborting" @click="submit">↑ 发送</Button>
         </span>
       </div>
     </div>

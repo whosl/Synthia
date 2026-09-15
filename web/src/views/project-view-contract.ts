@@ -437,8 +437,24 @@ export interface ChatFeedProps {
   readonly approval: ApprovalCardProps | null;
   /** 上下文水位（环形指示）；runtime 未回报或旧会话为 null。 */
   readonly contextUsage: { readonly promptTokens: number | null; readonly contextWindow: number } | null;
-  /** 「跳过所有权限」开关当前态（红线操作不受它影响）。 */
+  /** 「跳过所有权限」开关当前态（红线操作不受它影响）。乐观翻转由 ProjectView 的本地覆盖合成，服务器确认后回落权威值。 */
   readonly permissionSkipAll: boolean;
+  /**
+   * 乐观上屏的发送中文案：点击发送瞬间以 pending 气泡追加到流尾（生命周期 =
+   * sending 标志，成功后被 refresh 回来的真实事件自然顶替，失败由 ChatFeed 的
+   * 草稿回填机制把文案放回输入框）。null 表示没有进行中的发送。
+   */
+  readonly pendingUserText: string | null;
+  /**
+   * 乐观提交中的权限裁决（点击瞬间进中间态，服务器确认后由 refresh 回来的
+   * decided part 定稿）；null 表示没有进行中的裁决。中间态只说「提交中」，
+   * 不得在确认前显示最终裁决样式——工具是否会跑以服务器为准。
+   */
+  readonly permissionPending: { readonly callId: string; readonly allow: boolean } | null;
+  /** 任一权限操作（流内裁决或跳过开关）进行中；期间冻结所有权限卡按钮与开关，防静默丢失点击。 */
+  readonly permissionBusy: boolean;
+  /** 打断请求进行中：打断按钮转 spinner、状态徽章显示「打断中」。 */
+  readonly aborting: boolean;
 }
 
 export interface ChatFeedEmits {

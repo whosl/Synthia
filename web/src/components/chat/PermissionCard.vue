@@ -3,13 +3,23 @@
  * 权限请求卡（Agent 调用可请求名单内的工具时挂起，等待用户裁决）。
  *
  * pending 态给「允许 / 拒绝」；裁决后原地定稿（已允许/已拒绝 + 原因），留痕在
- * 流里。红线操作不会走到这张卡——那些由 runtime 硬拦，与用户意愿无关。
+ * 流里。提交中有乐观中间态（`pending` prop）：点击瞬间进「提交中」，只表诉
+ * 正在提交、不提前声称裁决结果——工具是否会跑以服务器确认为准。`locked` 是
+ * 别的卡片/开关在提交中（按钮冻结，防点击被 ProjectView 静默吞掉）。红线操作
+ * 不会走到这张卡——那些由 runtime 硬拦，与用户意愿无关。
  */
 import { computed } from "vue";
+import { LoaderCircle } from "lucide-vue-next";
 import type { SynthiaPermissionPart } from "../../domain/parts.ts";
 import Badge from "../ui/AppBadge.vue";
 
-const props = defineProps<{ part: SynthiaPermissionPart }>();
+const props = defineProps<{
+  part: SynthiaPermissionPart;
+  /** 本卡的裁决正在提交（乐观中间态）。 */
+  pending?: boolean;
+  /** 其他权限操作进行中——冻结本卡按钮。 */
+  locked?: boolean;
+}>();
 
 const emit = defineEmits<{
   resolve: [callId: string, allow: boolean];
@@ -26,6 +36,10 @@ const STATE_TONE: Record<SynthiaPermissionPart["state"], "accent" | "ok" | "dang
   allowed: "ok",
   denied: "danger",
 };
+
+/** 徽章文案：提交中的乐观中间态优先于 part 自身状态。 */
+const badgeText = computed(() => (props.pending ? "提交中" : STATE_TEXT[props.part.state]));
+const badgeTone = computed(() => (props.pending ? "warn" : STATE_TONE[props.part.state]));
 
 /** 入参预览能解析成 JSON 就缩进展示（runtime 侧已截 800 字符）。 */
 const argsText = computed(() => {
@@ -51,18 +65,21 @@ const argsText = computed(() => {
       <span>
         {{ part.state === "pending" ? "权限请求" : "权限裁决" }}：<code>{{ part.tool }}</code>
       </span>
-      <Badge :tone="STATE_TONE[part.state]" variant="dot" size="sm">{{ STATE_TEXT[part.state] }}</Badge>
+      <Badge :tone="badgeTone" variant="dot" size="sm">{{ badgeText }}</Badge>
     </div>
     <pre v-if="argsText" class="my-2 max-h-[180px] overflow-auto break-words whitespace-pre-wrap text-fg-secondary">{{ argsText }}</pre>
-    <div v-if="part.state === 'pending'" class="flex gap-2">
+    <span v-if="pending" class="flex items-center gap-1.5 text-xs text-fg-muted"><LoaderCircle :size="12" class="animate-spin" aria-hidden="true" />正在提交裁决…</span>
+    <div v-else-if="part.state === 'pending'" class="flex gap-2">
       <button
         type="button"
-        class="cursor-pointer rounded-sm border border-brand bg-transparent px-3.5 py-1 text-xs text-brand"
+        :disabled="locked"
+        class="cursor-pointer rounded-sm border border-brand bg-transparent px-3.5 py-1 text-xs text-brand disabled:cursor-not-allowed disabled:opacity-50"
         @click="emit('resolve', part.callId, true)"
       >允许</button>
       <button
         type="button"
-        class="cursor-pointer rounded-sm border border-line bg-transparent px-3.5 py-1 text-xs text-danger"
+        :disabled="locked"
+        class="cursor-pointer rounded-sm border border-line bg-transparent px-3.5 py-1 text-xs text-danger disabled:cursor-not-allowed disabled:opacity-50"
         @click="emit('resolve', part.callId, false)"
       >拒绝</button>
     </div>

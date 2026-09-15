@@ -2103,6 +2103,7 @@ async function onSend(text: string): Promise<void> {
   if (composerMode.value !== "new-task" && !detail.value) { sendError.value = "对话尚未加载完成，请稍后重试。"; return; }
   const draftKey = chatDraftKey.value;
   sending.value = true;
+  pendingUserText.value = text;
   sendError.value = null;
   try {
     if (composerMode.value === "new-task") {
@@ -2131,12 +2132,14 @@ async function onSend(text: string): Promise<void> {
       : humanizeDecisionError(err, "发送").text;
   } finally {
     sending.value = false;
+    pendingUserText.value = null;
   }
 }
 
 async function onAbort(): Promise<void> {
   if (!currentAgentId.value || sending.value) return;
   sending.value = true;
+  aborting.value = true;
   sendError.value = null;
   try {
     const attempt = prepareTaskAbortAttempt(mainTaskAbortAttempt, currentAgentId.value);
@@ -2148,6 +2151,7 @@ async function onAbort(): Promise<void> {
     sendError.value = humanizeLoadError(err);
   } finally {
     sending.value = false;
+    aborting.value = false;
   }
 }
 
@@ -2483,16 +2487,29 @@ const chatFeedProps = computed<ChatFeedProps>(() => ({
   contextUsage: detail.value?.context_usage
     ? { promptTokens: detail.value.context_usage.prompt_tokens, contextWindow: detail.value.context_usage.context_window }
     : null,
-  permissionSkipAll: detail.value?.permission?.skip_all ?? false,
+  permissionSkipAll: skipAllOverride.value ?? (detail.value?.permission?.skip_all ?? false),
+  pendingUserText: pendingUserText.value,
+  permissionPending: pendingPermission.value,
+  permissionBusy: permissionOperating.value,
+  aborting: aborting.value,
 }));
 
 // ── 权限交互：流内卡片裁决 + 「跳过所有权限」开关 ─────────────────────────────
 
 const permissionOperating = ref(false);
 
+// ── 乐观更新：本地先行、服务器收口（写操作全部有幂等键，回滚=清本地标志）────
+// 发送文案在 onSend 里赋值；成功路径 refresh() 已把真实事件带回（顶替气泡），
+// 失败路径 ChatFeed 的草稿回填会把文案放回输入框——两路都只需在 finally 清标志。
+const pendingUserText = ref<string | null>(null);
+const pendingPermission = ref<{ callId: string; allow: boolean } | null>(null);
+const skipAllOverride = ref<boolean | null>(null);
+const aborting = ref(false);
+
 async function onResolvePermission(callId: string, allow: boolean): Promise<void> {
   if (!currentAgentId.value || permissionOperating.value) return;
   permissionOperating.value = true;
+  pendingPermission.value = { callId, allow };
   try {
     await resolveTaskPermission(api, projectId, currentAgentId.value, { callId, allow });
     await refresh();
@@ -2500,19 +2517,23 @@ async function onResolvePermission(callId: string, allow: boolean): Promise<void
     sendError.value = humanizeDecisionError(err, "权限裁决").text;
   } finally {
     permissionOperating.value = false;
+    pendingPermission.value = null;
   }
 }
 
 async function onToggleSkipPermissions(skip: boolean): Promise<void> {
   if (!currentAgentId.value || permissionOperating.value) return;
   permissionOperating.value = true;
+  skipAllOverride.value = skip; // 开关先翻：成功后 refresh 收口，失败在 finally 回弹
   try {
     await resolveTaskPermission(api, projectId, currentAgentId.value, { skipAll: skip });
     await refresh();
+    skipAllOverride.value = null;
   } catch (err) {
     sendError.value = humanizeDecisionError(err, "权限开关").text;
   } finally {
     permissionOperating.value = false;
+    skipAllOverride.value = null;
   }
 }
 

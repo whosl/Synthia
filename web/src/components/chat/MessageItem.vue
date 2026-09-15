@@ -5,7 +5,8 @@
  * - role="user"：右侧气泡，纯文本（保留换行，不解析 Markdown，避免用户输入被
  *   当作 HTML/Markdown 注入渲染）；`steer=true` 时带 `↗ 纠偏` 标记
  *   （spec §3.5 D21，标记来自 `domain/composer.ts:buildChatRenderItems` 的配对
- *   识别，本组件只管渲染，不做识别）。
+ *   识别，本组件只管渲染，不做识别）；`pending=true` 为乐观上屏的发送中
+ *   气泡（半透明 + 发送中 spinner，定稿后由真实事件顶替）。
  * - role="agent" 且 state="streaming"：走 `domain/markdown-stream.ts:project`
  *   做增量块投影，token 级追加渲染，不整量重渲染；
  * - role="agent" 且 state="done"：走 `domain/reply-segments.ts:segmentAgentReply`
@@ -14,6 +15,7 @@
  *   Markdown 渲染。
  */
 import { computed, ref, watch } from "vue";
+import { LoaderCircle } from "lucide-vue-next";
 import { renderMarkdown } from "../../domain/markdown.ts";
 import { project, type Projection } from "../../domain/markdown-stream.ts";
 import { segmentAgentReply, type ReplyCodeSegment } from "../../domain/reply-segments.ts";
@@ -26,6 +28,8 @@ const props = defineProps<{
   part: SynthiaTextPart;
   /** 是否为插话（steer）发出的用户消息；非 user 消息恒为 false。 */
   steer?: boolean;
+  /** 乐观上屏的发送中气泡（ChatFeed 追加的合成 part）；真实事件落地后消失。 */
+  pending?: boolean;
 }>();
 
 // ─── 流式：增量 Markdown 块投影（token 级追加，不整量重渲染）───────────
@@ -62,10 +66,11 @@ function codeCardTitle(seg: ReplyCodeSegment): string {
       （定值）为基准，无环。
     -->
     <div class="message-body flex min-w-0 flex-col gap-2" :class="part.role === 'user' ? 'max-w-[88%] items-end' : 'max-w-full'">
-      <div v-if="part.role === 'user'" class="flex max-w-full flex-col gap-1 rounded-md bg-brand-subtle px-3 py-2">
+      <div v-if="part.role === 'user'" class="flex max-w-full flex-col gap-1 rounded-md bg-brand-subtle px-3 py-2" :class="pending ? 'opacity-70' : ''">
         <Badge v-if="steer" tone="info" variant="soft" size="sm" class="self-start">{{ STEER_BADGE_TEXT }}</Badge>
         <p class="m-0 whitespace-pre-wrap break-words leading-[1.55] text-fg">{{ part.text }}</p>
       </div>
+      <span v-if="pending" class="flex items-center gap-1 self-end text-[11px] leading-none text-fg-muted"><LoaderCircle :size="12" class="animate-spin" aria-hidden="true" />发送中…</span>
 
       <template v-else>
         <template v-if="part.state === 'streaming'">

@@ -16,9 +16,9 @@
  */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ScrollText, Shield, ShieldOff, Sparkles, X } from "lucide-vue-next";
-import { buildChatRenderItems, restoreFailedSendDraft } from "../../domain/composer.ts";
+import { buildChatRenderItems, restoreFailedSendDraft, type ChatRenderItem } from "../../domain/composer.ts";
 import { formatRelativeTime, groupToolActivity } from "../../domain/chat-groups.ts";
-import type { GatePartState, SynthiaPart } from "../../domain/parts.ts";
+import type { GatePartState, SynthiaPart, SynthiaTextPart } from "../../domain/parts.ts";
 import type { ChatFeedEmits, ChatFeedProps } from "../../views/project-view-contract.ts";
 import { TASK_STATUS_TEXT } from "../../domain/tasks.ts";
 import Button from "../ui/AppButton.vue";
@@ -41,8 +41,40 @@ const emit = defineEmits<ChatFeedEmits>();
 /** 插话消息配对识别（steer 打标），不改变 parts 顺序（见 domain/composer.ts）。 */
 const renderItems = computed(() => buildChatRenderItems(props.parts));
 
+/**
+ * 乐观上屏的发送中气泡：追加在权威流尾部，id 固定（MessageItem 据此渲染
+ * pending 态）。SSE 健康时真实 user_message 几乎立即经事件流到达——此时按
+ * 文本匹配撤掉 pending 气泡，避免同文重复；SSE 降级/服务端慢时气泡持续到
+ * sending 复位（成功被 refresh 回来的真实事件顶替，失败文案已由草稿回填
+ * 放回输入框）。
+ */
+const PENDING_SEND_ID = "__pending-send__";
+
+const displayItems = computed<ChatRenderItem[]>(() => {
+  const items = renderItems.value;
+  const text = props.pendingUserText?.trim();
+  if (!text) return items;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]!;
+    if (item.part.kind !== "text" || item.part.role !== "user") continue;
+    // 最新一条用户消息已经就是这条文案 → 真实事件已落地，不再显示乐观气泡
+    if (item.part.text.trim() === text) return items;
+    break; // 只看最后一条用户消息
+  }
+  const pendingPart: SynthiaTextPart = {
+    kind: "text",
+    id: PENDING_SEND_ID,
+    role: "user",
+    state: "done",
+    text: props.pendingUserText!,
+    segments: null,
+    ts: null,
+  };
+  return [...items, { part: pendingPart, steer: props.composerMode === "steer" }];
+});
+
 /** 显示层折叠：极大连续工具条目段收成活动组（顺序不变，见 domain/chat-groups.ts）。 */
-const feedRows = computed(() => groupToolActivity(renderItems.value));
+const feedRows = computed(() => groupToolActivity(displayItems.value));
 
 /** 回合分隔线：每条 user 消息（含插话）前一条细线，流首条目不画。 */
 function isTurnStart(part: SynthiaPart, rowIndex: number): boolean {
@@ -140,7 +172,7 @@ onMounted(() => void nextTick(scrollToBottom));
 
 <template>
   <div class="chat-feed flex h-full min-h-0 flex-col bg-panel">
-    <div class="flex min-h-10 items-center justify-between gap-3 border-b border-line px-4 py-2"><span class="flex items-center gap-2 text-xs font-[550]"><Sparkles :size="16" class="text-brand" aria-hidden="true" />主 Agent</span><span class="flex items-center gap-1.5"><Button variant="ghost" size="sm" class="gap-1 text-xs text-fg-secondary" aria-label="打开运行记录" title="运行记录" @click="emit('open-records', null)"><ScrollText :size="14" aria-hidden="true" />运行记录</Button><Badge v-if="agentStatus" :tone="agentStatus === 'running' ? 'accent' : 'neutral'" variant="dot" size="sm">{{ TASK_STATUS_TEXT[agentStatus] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><X :size="16" /></Button></span></div>
+    <div class="flex min-h-10 items-center justify-between gap-3 border-b border-line px-4 py-2"><span class="flex items-center gap-2 text-xs font-[550]"><Sparkles :size="16" class="text-brand" aria-hidden="true" />主 Agent</span><span class="flex items-center gap-1.5"><Button variant="ghost" size="sm" class="gap-1 text-xs text-fg-secondary" aria-label="打开运行记录" title="运行记录" @click="emit('open-records', null)"><ScrollText :size="14" aria-hidden="true" />运行记录</Button><Badge v-if="agentStatus || aborting" :tone="aborting ? 'warn' : agentStatus === 'running' ? 'accent' : 'neutral'" variant="dot" size="sm">{{ aborting ? "打断中" : TASK_STATUS_TEXT[agentStatus!] ?? agentStatus }}</Badge><Button v-if="closable" variant="ghost" size="sm" aria-label="关闭对话栏" @click="emit('close')"><X :size="16" /></Button></span></div>
     <div v-if="streamPhase === 'degraded'" class="flex-none bg-warn/14 px-3 py-1 text-center text-xs text-warn">实时连接中断，已切换定时刷新</div>
     <div v-else-if="streamPhase === 'connecting' && parts.length > 0" class="flex-none bg-hover px-3 py-1 text-center text-xs text-fg-muted">正在连接实时更新…</div>
 
@@ -151,7 +183,7 @@ onMounted(() => void nextTick(scrollToBottom));
         min-h-full 保证内容不足一屏时空态仍能 my-auto 垂直居中。
       -->
       <div class="mx-auto flex min-h-full w-full max-w-[720px] flex-col gap-3 p-3">
-        <div v-if="renderItems.length === 0" class="my-auto flex flex-col items-center gap-2 px-4 py-6 text-center">
+        <div v-if="displayItems.length === 0" class="my-auto flex flex-col items-center gap-2 px-4 py-6 text-center">
           <template v-if="composerMode === 'new-task'">
             <p class="m-0 text-[13px] font-semibold text-fg">开始你的第一个任务</p>
             <p class="m-0 max-w-[280px] text-xs leading-[1.4] text-fg-muted">描述要做什么，Agent 会从需求一路推进到产物；也可以直接点一个示例任务填入输入框</p>
@@ -186,7 +218,7 @@ onMounted(() => void nextTick(scrollToBottom));
                 </template>
               </div>
 
-              <MessageItem v-if="row.item.part.kind === 'text'" :part="row.item.part" :steer="row.item.steer" />
+              <MessageItem v-if="row.item.part.kind === 'text'" :part="row.item.part" :steer="row.item.steer" :pending="row.item.part.id === PENDING_SEND_ID" />
 
               <ToolCallItem v-else-if="row.item.part.kind === 'tool'" :part="row.item.part" @open-records="emit('open-records', $event)" />
 
@@ -197,6 +229,8 @@ onMounted(() => void nextTick(scrollToBottom));
               <PermissionCard
                 v-else-if="row.item.part.kind === 'permission'"
                 :part="row.item.part"
+                :pending="permissionPending?.callId === row.item.part.callId"
+                :locked="permissionBusy && permissionPending?.callId !== row.item.part.callId"
                 @resolve="(callId, allow) => emit('resolve-permission', callId, allow)"
               />
 
@@ -255,7 +289,7 @@ onMounted(() => void nextTick(scrollToBottom));
     </div>
 
     <Transition name="chat-feed-jump-fade">
-      <div v-if="!stickToBottom && renderItems.length > 0" class="flex flex-none justify-center pb-2">
+      <div v-if="!stickToBottom && displayItems.length > 0" class="flex flex-none justify-center pb-2">
         <button type="button" class="cursor-pointer rounded-full border border-line-strong bg-raised px-3 py-1 text-xs text-fg-secondary shadow-[0_4px_12px_var(--shadow-color)] hover:bg-hover hover:text-fg" @click="scrollToBottom">回到最新 ↓</button>
       </div>
     </Transition>
@@ -274,9 +308,9 @@ onMounted(() => void nextTick(scrollToBottom));
 
     <div v-if="sendError" class="flex-none bg-danger/10 px-3 py-2 text-xs text-danger">{{ sendError }}</div>
 
-    <ChatComposer v-model="draft" :mode="composerMode" :can-abort="canAbort" :sending="sending" @send="onComposerSend" @abort="emit('abort')">
+    <ChatComposer v-model="draft" :mode="composerMode" :can-abort="canAbort" :sending="sending" :aborting="aborting" @send="onComposerSend" @abort="emit('abort')">
       <template #controls>
-        <Button v-if="agentStatus" variant="ghost" size="sm" :title="permissionSkipAll ? '权限卡已全局跳过（红线操作仍受治理拦截）' : '点击后本会话不再弹出权限卡'" @click="emit('toggle-skip-permissions', !permissionSkipAll)"><ShieldOff v-if="permissionSkipAll" :size="14" class="text-warn" aria-hidden="true" /><Shield v-else :size="14" aria-hidden="true" />{{ permissionSkipAll ? "跳过权限·开" : "跳过权限·关" }}</Button>
+        <Button v-if="agentStatus" variant="ghost" size="sm" :disabled="permissionBusy" :title="permissionSkipAll ? '权限卡已全局跳过（红线操作仍受治理拦截）' : '点击后本会话不再弹出权限卡'" @click="emit('toggle-skip-permissions', !permissionSkipAll)"><ShieldOff v-if="permissionSkipAll" :size="14" class="text-warn" aria-hidden="true" /><Shield v-else :size="14" aria-hidden="true" />{{ permissionSkipAll ? "跳过权限·开" : "跳过权限·关" }}</Button>
         <ContextRing v-if="contextUsage" :prompt-tokens="contextUsage.promptTokens" :context-window="contextUsage.contextWindow" />
       </template>
     </ChatComposer>
