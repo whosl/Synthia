@@ -141,6 +141,13 @@ export interface EvolutionServiceFactoryOverrides {
   ) => EvolutionCuratorScheduleEnqueuer;
   readonly fetchImpl?: EvolutionServiceFetch;
   readonly modelPost?: ChatPoster;
+  /**
+   * Deployment seam: a fully built adapter for model wires the default
+   * ModelClient cannot speak (e.g. an Anthropic-protocol endpoint). When set,
+   * the SYNTHIA_EVOLUTION_MODEL_* env still names the model but the default
+   * client is never constructed.
+   */
+  readonly model?: EvolutionModelAdapter;
   readonly clock?: EvolutionSchedulerClock;
   readonly timer?: EvolutionServiceTimer;
   readonly stateStore?: EvolutionServiceStateStore;
@@ -606,7 +613,7 @@ export function createEvolutionServiceFromEnv(
     fetchImpl: fetchImpl as typeof fetch,
     requestTimeoutMs: ioTimeoutMs,
   });
-  const model = new EvolutionModelAdapter(new ModelClient({
+  const model = overrides.model ?? new EvolutionModelAdapter(new ModelClient({
     baseUrl: absoluteHttpUrl(modelUrl, "SYNTHIA_EVOLUTION_MODEL_URL"),
     apiKey: modelKey,
     model: modelId,
