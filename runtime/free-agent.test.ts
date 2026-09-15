@@ -1428,7 +1428,7 @@ describe("free-agent: LLM summary compaction", () => {
 // ---------------------------------------------------------------------------
 
 describe("free-agent: permission interaction", () => {
-  const permPolicy = { permissionTools: ["fpga-intake"], permissionTimeoutMs: 60_000 };
+  const permPolicy = { permissionTools: ["fpga-intake"] };
 
   test("allow: pending request surfaces, user allows, tool executes", async () => {
     const gov = new MockGovernanceClient();
@@ -1527,7 +1527,7 @@ describe("free-agent: permission interaction", () => {
     expect(session.permissionState().skipAll).toBeTrue();
   });
 
-  test("timeout denies; abort settles pending as denied", async () => {
+  test("no timeout: pending stays until abort settles it as denied", async () => {
     const model = new ScriptedModel([
       call("tc1", "fpga-intake", { content: "# Doc", filename: "doc/intake/z.md" }),
       txt("跳过。"),
@@ -1544,12 +1544,17 @@ describe("free-agent: permission interaction", () => {
       connector: null,
       agentsDir,
       permissionTools: ["fpga-intake"],
-      permissionTimeoutMs: 40,
     });
 
     const promptPromise = session.prompt("登记");
-    const reply = await promptPromise; // 40ms 超时 → 拒绝 → 模型继续
-    expect(reply).toBe("跳过。");
+    // 无超时：挂起跨任意时长保持（此处 150ms 远超旧 40ms 超时）。
+    await new Promise((r) => setTimeout(r, 150));
+    expect(session.permissionState().pending?.tool).toBe("fpga-intake");
+    // abort 是三条出路之一：挂起按拒绝 settle，轮次以取消终态收场（模型的
+    // 兜底文本轮不再执行——FreeAgentAbortedError 直接上抛）。
+    session.abort("user aborted");
+    await promptPromise.catch(() => null); // prompt 以 FreeAgentAbortedError 拒绝
+    expect(session.status()).toBe("cancelled");
     expect(session.permissionState().pending).toBeNull();
   });
 });

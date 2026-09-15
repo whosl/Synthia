@@ -863,20 +863,17 @@ function contextPolicyFromEnv(
 /**
  * 环境变量 → 权限交互配置。SYNTHIA_AGENT_PERMISSION_TOOLS 逗号分隔；
  * 未配置时默认只把 vivado_run 列为可请求（占用共享 Vivado 资源的操作）。
- * 红线工具不在此机制内——beforeToolCall 永远硬拦。
+ * 挂起的权限请求无超时，一直挂到用户裁决；红线工具不在此机制内——
+ * beforeToolCall 永远硬拦。
  */
 function permissionDepsFromEnv(
   env: Record<string, string | undefined>,
-): { permissionTools: readonly string[]; permissionTimeoutMs: number } {
+): { permissionTools: readonly string[] } {
   const raw = env.SYNTHIA_AGENT_PERMISSION_TOOLS;
   const tools = raw === undefined
     ? ["vivado_run"]
     : raw.split(",").map((t) => t.trim()).filter(Boolean);
-  const timeout = Number(env.SYNTHIA_AGENT_PERMISSION_TIMEOUT_MS);
-  return {
-    permissionTools: tools,
-    permissionTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 600_000,
-  };
+  return { permissionTools: tools };
 }
 
 function depsFactoryInput(projectId: string, runtime: {
