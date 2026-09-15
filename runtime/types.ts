@@ -200,6 +200,9 @@ export interface LoopConnector {
   submit(request: VivadoSubmission): Promise<VivadoResult>;
   /** Fetch the decoded content of a named evidence artifact for a terminal job. */
   fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent>;
+  /** Fetch the evidence manifest (entry list) for a terminal job. Optional so
+   *  in-memory fakes can omit it; production adapters implement it. */
+  fetchEvidenceManifest?(jobId: string): Promise<EvidenceManifest>;
 }
 
 // ---------------------------------------------------------------------------

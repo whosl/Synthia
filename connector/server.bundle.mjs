@@ -68,6 +68,8 @@ class WorkerRuntime {
   jobBindings = new Map;
   keys = new Map;
   pending = [];
+  restorePromise;
+  snapshotChain = Promise.resolve();
   constructor(o) {
     this.endpoint = copy(o.endpoint);
     this.root = o.workspaceRoot;
@@ -75,6 +77,41 @@ class WorkerRuntime {
     this.clock = o.now ?? (() => new Date);
     if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1)
       throw new Error("CONFIG_INVALID");
+    this.restorePromise = this.restoreRegistry();
+  }
+  registryPath() {
+    return join(this.root, "jobs-registry.json");
+  }
+  snapshotRegistry() {
+    this.snapshotChain = this.snapshotChain.then(() => this.writeSnapshot());
+    return this.snapshotChain;
+  }
+  async writeSnapshot() {
+    try {
+      const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: [...this.jobs.values()], bindings: [...this.jobBindings.entries()] };
+      await mkdir(this.root, { recursive: true });
+      await writeFile(this.registryPath(), JSON.stringify(snapshot), "utf8");
+    } catch { /* best-effort persistence */ }
+  }
+  async restoreRegistry() {
+    try {
+      const raw = await readFile(this.registryPath(), "utf8");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed.jobs) || !Array.isArray(parsed.bindings))
+        return;
+      for (const job of parsed.jobs) {
+        if (!job || typeof job !== "object" || typeof job.id !== "string")
+          continue;
+        const restored = copy(job);
+        if (!terminal.has(restored.state))
+          restored.state = "lost";
+        this.jobs.set(restored.id, restored);
+      }
+      for (const [id, binding] of parsed.bindings) {
+        if (typeof id === "string" && binding && typeof binding === "object" && typeof binding.projectId === "string")
+          this.jobBindings.set(id, binding);
+      }
+    } catch { /* missing/corrupt snapshot → fresh registry */ }
   }
   discoveryReady() {
     return this.discovery?.license_status === "available" && this.discovery.capabilities.length > 0 && this.discovery.unsupported?.length === undefined;
@@ -83,6 +120,7 @@ class WorkerRuntime {
     return discovery.connector_protocol_version !== this.endpoint.protocol_version || discovery.toolchain_profile_hash !== this.endpoint.toolchain_profile_hash || this.endpoint.expected_capability_map_version !== undefined && discovery.capability_map_version !== this.endpoint.expected_capability_map_version || this.endpoint.expected_part_catalog_hash !== undefined && discovery.part_catalog_hash !== this.endpoint.expected_part_catalog_hash || this.endpoint.expected_sdk_worker_build_hash !== undefined && discovery.sdk_worker_build_hash !== this.endpoint.expected_sdk_worker_build_hash || discovery.license_status !== "available";
   }
   async handle(request) {
+    await this.restorePromise;
     if (request.method !== "POST")
       return responseError("METHOD_NOT_ALLOWED", "POST required", 405);
     const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
@@ -173,8 +211,10 @@ class WorkerRuntime {
     if (path === "/jobs/status")
       return { status: 200, body: this.envelope(e, copy(job)) };
     if (path === "/jobs/cancel") {
-      if (!terminal.has(job.state))
+      if (!terminal.has(job.state)) {
         job.state = "cancelled";
+        void this.snapshotRegistry();
+      }
       return { status: 200, body: this.envelope(e, copy(job)) };
     }
     if (path === "/jobs/evidence") {
@@ -222,6 +262,7 @@ class WorkerRuntime {
     this.jobs.set(jobId, job);
     this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification });
     this.pending.push(jobId);
+    void this.snapshotRegistry();
     this.pump();
     return { status: 202, body: this.envelope(e, copy(job)) };
   }
@@ -260,6 +301,7 @@ class WorkerRuntime {
         job.evidence = { jobId: job.id, entries: [...result.evidence?.entries ?? [], outputEntry] };
       } else if (result.evidence)
         job.evidence = result.evidence;
+      await this.snapshotRegistry();
     } catch {
       if (this.jobs.get(job.id)?.state === "cancelled")
         return;

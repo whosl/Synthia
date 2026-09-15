@@ -752,7 +752,9 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
 const MAIN_AUTHORIZATION_SCOPE = Object.freeze({
   schema: "task-scope.v1",
   workspace: "project",
-  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+  // sim/** is read-only: RULE-25 reserves it for platform-written evidence
+  // references. Sessions may read them back but never write there.
+  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**", "sim/**"],
   write_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
   run_classes: ["exploratory", "gate_check", "formal"],
   can_submit_gates: true,

@@ -123,6 +123,19 @@ export class RemoteVivadoConnector implements LoopConnector {
     }
   }
 
+  async fetchEvidenceManifest(jobId: string): Promise<EvidenceManifest> {
+    await this.ensureReady();
+    try {
+      return await this.client.evidence(jobId);
+    } catch (e) {
+      if (isLeaseExpired(e)) {
+        await this.reconnect("lease expired during fetchEvidenceManifest");
+        return await this.client.evidence(jobId);
+      }
+      throw e;
+    }
+  }
+
   // ----- internals -----
 
   private async doSubmit(submission: VivadoSubmission): Promise<VivadoResult> {

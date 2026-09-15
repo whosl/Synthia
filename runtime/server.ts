@@ -88,6 +88,7 @@ import {
 } from "./free-agent.ts";
 import { assembleSkillTools } from "./skill-tools.ts";
 import { assembleGateTools } from "./gate-tools.ts";
+import { assembleJobEvidenceTool } from "./job-evidence-tool.ts";
 import { assembleVivadoTool } from "./vivado-tool.ts";
 import { assembleSkillDocTool } from "./skill-doc-tool.ts";
 import { assembleWorkspaceReadTool } from "./workspace-read-tool.ts";
@@ -3025,6 +3026,7 @@ export class RuntimeServer {
       model,
       tools: [
         assembleWorkspaceReadTool(),
+        assembleJobEvidenceTool(),
         assembleWordDocumentTool(),
         ...await assembleSkillTools(),
         ...(executionMode === "engineering" ? await assembleGateTools() : []),
