@@ -666,90 +666,13 @@ function evidenceProjection(refs: unknown[], visible: boolean): {
 }
 
 async function evalJobTraceProjection(
-  ctx: RequestContext,
-  applicationId: string,
   refsValue: unknown,
-  visible: boolean,
 ): Promise<Record<string, unknown>[]> {
-  const refs = Array.isArray(refsValue) ? refsValue : [];
-  const ids = refs.flatMap((value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-    const ref = value as Row;
-    return typeof ref.eval_job_id === "string" ? [ref.eval_job_id] : [];
-  });
-  if (ids.length === 0) return [];
-  const result = await ctx.pool.query(
-    `SELECT job.id,job.tool_run_id,job.operation,job.input_manifest_hash,
-            tool.state::text,revision.manifest_hash AS workspace_manifest_hash,
-            dispatch.dispatch_request_hash,
-            COALESCE(array_agg(fact.fact_type ORDER BY fact.created_at,fact.id)
-              FILTER (WHERE fact.id IS NOT NULL),'{}'::text[]) AS evidence_facts,
-            max(fact.id) FILTER (WHERE fact.fact_type='frozen') AS frozen_fact_id,
-            max(fact.manifest_hash) FILTER (WHERE fact.fact_type='frozen') AS evidence_manifest_hash
-       FROM evolution_eval_job job
-       JOIN tool_run tool ON tool.id=job.tool_run_id
-       JOIN evolution_eval_workspace_projection projection ON projection.workspace_id=job.workspace_id
-       JOIN evolution_eval_workspace_revision revision
-         ON revision.workspace_id=job.workspace_id AND revision.revision=projection.current_revision
-       LEFT JOIN evolution_eval_dispatch dispatch ON dispatch.eval_job_id=job.id
-       LEFT JOIN evolution_eval_evidence_fact fact ON fact.eval_job_id=job.id
-      WHERE job.application_id=$1 AND job.id=ANY($2::text[])
-      GROUP BY job.id,tool.state,revision.manifest_hash,dispatch.dispatch_request_hash
-      ORDER BY job.ordinal`,
-    [applicationId, ids],
-  );
-  const rows = result.rows as Row[];
-  const traces: Record<string, unknown>[] = [];
-  for (const job of rows) {
-    const facts = new Set((job.evidence_facts as string[] | undefined) ?? []);
-    const evidenceState = facts.has("frozen")
-      ? "frozen"
-      : facts.has("corrupt")
-      ? "corrupt"
-      : facts.has("unavailable_at_deadline")
-      ? "unavailable_at_deadline"
-      : "none";
-    const retention = facts.has("expired")
-      ? "expired"
-      : facts.has("quarantine_pending")
-      ? "quarantine_pending"
-      : facts.has("acknowledged")
-      ? "acknowledged"
-      : facts.has("ack_pending")
-      ? "pending_ack"
-      : "not_applicable";
-    const entriesResult = job.frozen_fact_id === null
-      ? { rows: [] as Row[] }
-      : await ctx.pool.query(
-          `SELECT name,sha256,size_bytes,media_type,artifact_classification,usage_classification
-             FROM evolution_eval_evidence_entry WHERE evidence_fact_id=$1
-            ORDER BY name COLLATE "C"`,
-          [job.frozen_fact_id],
-        );
-    traces.push({
-      eval_job_ref: visible ? job.id : "redacted",
-      tool_run_ref: visible ? job.tool_run_id : "redacted",
-      operation: job.operation,
-      state: job.state,
-      input_manifest_hash: job.input_manifest_hash,
-      workspace_manifest_hash: job.workspace_manifest_hash ?? null,
-      dispatch_request_hash: job.dispatch_request_hash ?? null,
-      evidence_manifest_hash: job.evidence_manifest_hash ?? null,
-      evidence_state: evidenceState,
-      retention_state: retention,
-      evidence_entries: (entriesResult.rows as Row[]).map((entry) => ({
-        name: visible ? entry.name : "redacted",
-        sha256: entry.sha256,
-        size_bytes: Number(entry.size_bytes),
-        media_type: entry.media_type,
-        artifact_classification: entry.artifact_classification,
-        usage_classification: entry.usage_classification,
-      })),
-    });
-  }
-  return traces;
+  // Eval-job trace enrichment died with the M4F ablation (0035 dropped the
+  // evolution_eval_* tables this projection queried). Stored refs are legacy;
+  // every row written since — and all of history — carries an empty array.
+  return Array.isArray(refsValue) ? (refsValue as Record<string, unknown>[]) : [];
 }
-
 async function applicationDetail(ctx: RequestContext, applicationId: string): Promise<Record<string, unknown>> {
   const result = await ctx.pool.query("SELECT * FROM skill_application WHERE id=$1", [applicationId]);
   const row = result.rows[0] as Row | undefined;
@@ -813,12 +736,7 @@ async function applicationDetail(ctx: RequestContext, applicationId: string): Pr
         supersedes_id: evaluation.supersedes_id ?? null,
         evaluator_type: evaluation.evaluator_type,
         evaluator_version: evaluation.evaluator_version,
-        eval_job_refs: await evalJobTraceProjection(
-          ctx,
-          applicationId,
-          evaluation.eval_job_refs,
-          visible,
-        ),
+        eval_job_refs: await evalJobTraceProjection(evaluation.eval_job_refs),
         created_at: iso(evaluation.created_at),
       };
     })),
@@ -2379,18 +2297,8 @@ async function failLeasedRun(
       if (!updated) throw conflictApiError("EVOLUTION_LEASE_CONFLICT");
       if (table === "curator_run" && !retryable) {
         await tx.query(
-          `UPDATE evolution_eval_run SET completed_at=COALESCE(completed_at,clock_timestamp())
-            WHERE curator_run_id=$1`,
-          [runId],
-        );
-        await tx.query(
           `DELETE FROM curator_application_reservation reservation
-            WHERE reservation.curator_run_id=$1
-              AND NOT EXISTS (
-                SELECT 1 FROM evolution_eval_job job
-                 WHERE job.curator_run_id=reservation.curator_run_id
-                   AND job.application_id=reservation.application_id
-              )`,
+            WHERE reservation.curator_run_id=$1`,
           [runId],
         );
       }
@@ -2739,12 +2647,7 @@ async function claimCuratorRun(
         `DELETE FROM curator_application_reservation r
           USING curator_run stale
           WHERE stale.id=r.curator_run_id
-            AND stale.state IN ('completed','dry_run_complete','failed')
-            AND NOT EXISTS (
-              SELECT 1 FROM evolution_eval_job job
-               WHERE job.curator_run_id=r.curator_run_id
-                 AND job.application_id=r.application_id
-            )`,
+            AND stale.state IN ('completed','dry_run_complete','failed')`,
       );
       const existing = await tx.query(
         "SELECT count(*)::int AS count FROM curator_application_reservation WHERE curator_run_id=$1",
@@ -3530,21 +3433,9 @@ export async function completeCuratorRunHandler(ctx: RequestContext): Promise<Ha
           WHERE id=$1`,
         [runId, terminal.state, requestHash, JSON.stringify(terminal)],
       );
-      if (run.mode === "run") {
-        await tx.query(
-          `UPDATE evolution_eval_run SET completed_at=COALESCE(completed_at,clock_timestamp())
-            WHERE curator_run_id=$1`,
-          [runId],
-        );
-      }
       await tx.query(
         `DELETE FROM curator_application_reservation reservation
-          WHERE reservation.curator_run_id=$1
-            AND NOT EXISTS (
-              SELECT 1 FROM evolution_eval_job job
-               WHERE job.curator_run_id=reservation.curator_run_id
-                 AND job.application_id=reservation.application_id
-            )`,
+          WHERE reservation.curator_run_id=$1`,
         [runId],
       );
       if (run.mode === "run") {
