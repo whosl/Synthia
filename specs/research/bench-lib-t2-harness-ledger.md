@@ -54,6 +54,8 @@
 
 | H28 | OPS | **worker 主机重启后自启失败**（66 机 09-15 06:30 重启，synthia-worker 任务 ServiceAccount 登录类型对普通用户账户在开机阶段不可靠，任务滞留 Ready）；另记录 Core/runtime 会话状态分裂（Core=awaiting_user vs runtime=running，重启后缓存未对齐，p19 实证）。处置：手动拉起 + 新增 SYSTEM 级 5 分钟看门狗任务（端口不通自动 Start；注意只能覆盖"死亡"，覆盖不了"活着但楔死"——后者仍需人工/监控） | fixed（看门狗）+ open（自启根因改 principal 为 SYSTEM 待观察下次重启） |
 
+| H29 | GAP | **XSim `$urandom` 跨跑种子不固定**（p23 黄金会话定罪：同一检查点、同一代码路径与边沿序列，两跑读数不同——跨跑用观测值反推相位不可靠）。影响所有基准 TB 编写惯例：随机激励必须用确定性 PRNG 或固定种子 | OBS（会话侧以固定种子诊断跑绕过；长期进 TB 编写规范） |
+
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
 一次静默窗完成：迁移 0014+0036（含迁移器自注册惯例补齐）→ Core/Runtime/worker 三点部署 → 11 项验证炮组全过（403 映射/僵尸收割/自动开工/.vh/逃逸拒绝/FAIL 模式/updated_at/约束解除）。部署中附带发现：testbench 参数约定为模块名非文件名（H18 探针踩坑记录）；外来未提交修改按标签贮藏（stash@07cfd5c7）。H19 收窄未全证；H25 的 worker 落盘队列与 H27 查看器为移交项。
