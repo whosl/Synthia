@@ -135,6 +135,7 @@ async function main(): Promise<void> {
   process.stdout.write(`[scenario:${scenario}] project=${spec.name} task=${taskId}\n`);
 
   const created = await api("/api/v1/projects", "POST", {
+    id: spec.name,
     name: spec.name,
     project_type: "free",
     target_part: "xc7k70tfbv676-1",
@@ -143,9 +144,7 @@ async function main(): Promise<void> {
   if (created.status !== 201 && created.status !== 200 && created.status !== 409) {
     throw new Error(`project create failed: ${created.status} ${JSON.stringify(created.json).slice(0, 200)}`);
   }
-  const projectId = created.status === 409
-    ? String((created.json.data as Record<string, unknown> | undefined)?.id ?? spec.name)
-    : String((created.json.data as Record<string, unknown>).id);
+  const projectId = spec.name;
   process.stdout.write(`[scenario:${scenario}] project=${projectId} (${created.status})\n`);
 
   const task = await api(`/api/v1/projects/${projectId}/tasks`, "POST", {
@@ -154,7 +153,7 @@ async function main(): Promise<void> {
     execution_intent: "project_agent",
     authorization_scope: AUTHORIZATION_SCOPE,
     task_id: taskId,
-  }, `selfevo-${scenario}-task`);
+  }, `selfevo-${scenario}-task-${taskId}`);
   process.stdout.write(`[scenario:${scenario}] task create (auto register/bind/start): ${task.status} ${JSON.stringify(task.json).slice(0, 160)}\n`);
 
   const status = await waitTerminal(projectId, taskId, scenario === "inconclusive" ? 120_000 : 900_000);
@@ -162,7 +161,7 @@ async function main(): Promise<void> {
 
   for (const [i, text] of spec.followUps.entries()) {
     if (!status.includes("awaiting_user")) break;
-    const sent = await api(`/api/v1/projects/${projectId}/tasks/${taskId}/message`, "POST", { text }, `selfevo-${scenario}-msg-${i}`);
+    const sent = await api(`/api/v1/projects/${projectId}/tasks/${taskId}/message`, "POST", { text }, `selfevo-${scenario}-msg-${taskId}-${i}`);
     process.stdout.write(`[scenario:${scenario}] follow-up ${i}: ${sent.status}\n`);
     const next = await waitTerminal(projectId, taskId, 900_000);
     process.stdout.write(`[scenario:${scenario}] status after follow-up ${i}: ${next}\n`);

@@ -11,8 +11,7 @@ import { WorkerRuntime, type WorkerExecution, type WorkerRuntimeOptions, type Wo
 import { createVivadoProcessGuardian, VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest } from "./vivado.ts";
 import type { JobRequest } from "./index.ts";
 import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot } from "./remote.ts";
-import { FileEvolutionEvalLedger } from "./evolution-eval-ledger.ts";
-import { canonicalEvolutionEvalHash, EVOLUTION_EVAL_HTTP_BODY_MAX_BYTES } from "./evolution-eval.ts";
+import { canonicalRequestHash } from "../core/src/hashing.ts";
 import { buildFullTreeManifest, finalizeVivadoToolchainAttestation, loadVivadoToolchainAttestation, type VivadoToolchainAttestationV1 } from "./toolchain-attestation.ts";
 
 // The discovery wire contract is the three-key ConnectorCapability shape;
@@ -401,55 +400,6 @@ async function loadExecutionConfig(path: string, verifyToolchain = false): Promi
   return loaded;
 }
 
-function assertEvolutionLedgerReady(ledger: FileEvolutionEvalLedger): void {
-  // FileEvolutionEvalLedger deliberately turns initialization I/O failures into
-  // durable query states. Production startup must additionally fail closed so
-  // an operator cannot mistake a listening HTTPS server for a healthy ledger.
-  const error = (ledger as unknown as { readonly initializationError?: string }).initializationError;
-  if (error !== undefined) throw new Error(`CONFIG_INVALID:evolution_eval_ledger:${error}`);
-}
-
-async function openEvolutionEvalLedger(config: WorkerConfig): Promise<FileEvolutionEvalLedger> {
-  const ledgerOptions = {
-    root: required(config.evolution_eval_ledger_root, "evolution_eval_ledger_root"),
-    ledgerEpoch: required(config.evolution_eval_ledger_epoch, "evolution_eval_ledger_epoch"),
-  };
-  const ledger = config.evolution_eval_ledger_mode === "initialize"
-    ? await FileEvolutionEvalLedger.initialize(ledgerOptions)
-    : await FileEvolutionEvalLedger.reopen(ledgerOptions);
-  assertEvolutionLedgerReady(ledger);
-  return ledger;
-}
-
-export async function verifyConfiguredBundleIdentity(
-  config: WorkerConfig,
-  bundlePath: string,
-): Promise<string> {
-  const digest = createHash("sha256").update(await readFile(bundlePath)).digest("hex");
-  if (config.sdk_worker_build_hash !== digest) throw new Error("CONFIG_INVALID:sdk_worker_build_hash");
-  return digest;
-}
-
-export async function initializeEvolutionEvalLedgerFromConfig(configPath: string): Promise<string> {
-  const { config } = await loadExecutionConfig(configPath);
-  if (config.evolution_eval_enabled !== true || config.evolution_eval_ledger_mode !== "initialize") {
-    throw new Error("CONFIG_INVALID:evolution_eval_initialize_ceremony");
-  }
-  await verifyConfiguredBundleIdentity(config, process.argv[1] ?? "");
-  await openEvolutionEvalLedger(config);
-  return required(config.evolution_eval_ledger_epoch, "evolution_eval_ledger_epoch");
-}
-
-export async function verifyEvolutionEvalLedgerFromConfig(configPath: string): Promise<string> {
-  const { config } = await loadExecutionConfig(configPath);
-  if (config.evolution_eval_enabled !== true || config.evolution_eval_ledger_mode !== "reopen") {
-    throw new Error("CONFIG_INVALID:evolution_eval_reopen_ceremony");
-  }
-  await verifyConfiguredBundleIdentity(config, process.argv[1] ?? "");
-  await openEvolutionEvalLedger(config);
-  return required(config.evolution_eval_ledger_epoch, "evolution_eval_ledger_epoch");
-}
-
 export async function verifyWorkerReleaseManifest(path: string): Promise<string> {
   const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
   const plain = (candidate: unknown): candidate is Record<string, unknown> => (
@@ -557,7 +507,7 @@ export async function verifyWorkerReleaseManifest(path: string): Promise<string>
   }
   const body = { ...value };
   delete body.manifest_hash;
-  if (canonicalEvolutionEvalHash(body) !== manifestHash) {
+  if (canonicalRequestHash(body) !== manifestHash) {
     throw new Error("RELEASE_MANIFEST_INVALID:canonical_hash");
   }
   return manifestHash;
@@ -664,113 +614,12 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
   const loaded = await loadExecutionConfig(resolvedConfigPath, true);
   const config = loaded.config;
   const workerProcessInstanceId = randomUUID();
-  if (config.evolution_eval_enabled === true || process.env.SYNTHIA_WORKER_VERIFY_BUNDLE === "1") {
+  if (process.env.SYNTHIA_WORKER_VERIFY_BUNDLE === "1") {
     await verifyConfiguredBundleIdentity(config, process.argv[1] ?? "");
   }
   const privateKey = config.server_private_key_path.toLowerCase().endsWith(".pfx") || config.server_private_key_path.toLowerCase().endsWith(".p12");
   const tls = privateKey ? { pfx: await readFile(config.server_private_key_path), passphrase: required(process.env.SYNTHIA_WORKER_PFX_PASSWORD, "SYNTHIA_WORKER_PFX_PASSWORD"), ca: await readFile(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true } : { cert: await readFile(config.server_certificate_path), key: await readFile(config.server_private_key_path), ca: await readFile(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true };
   let backingLock: ChildProcess | undefined;
-  let evolutionEval: WorkerRuntimeOptions["evolutionEval"];
-  if (config.evolution_eval_enabled === true) {
-    if (config.evolution_eval_ledger_mode !== "reopen") {
-      throw new Error("CONFIG_INVALID:evolution_eval_initialize_requires_admin");
-    }
-    const ledger = await openEvolutionEvalLedger(config);
-    const adapter = new VivadoBatchAdapter({
-      workspaceRoot: required(config.evolution_eval_spool_root, "evolution_eval_spool_root"),
-      binary: config.vivado_binary,
-      part: config.vivado_part,
-      profileHash: config.toolchain_profile_hash,
-    });
-    evolutionEval = {
-      ledger,
-      spoolRoot: required(config.evolution_eval_spool_root, "evolution_eval_spool_root"),
-      toolchainProfileHash: config.toolchain_profile_hash,
-      assertNewEffectReady: async () => { await assertCurrentVivadoToolchain(config, backingLock); },
-      execution: {
-        async prepare({ workspace }) {
-          let launchGate: (() => Promise<boolean>) | undefined;
-          const guardian = await createVivadoProcessGuardian(
-            workspace,
-            undefined,
-            undefined,
-            undefined,
-            () => launchGate?.() ?? false,
-          );
-          return {
-            identity: guardian.identity,
-            async execute({ binding, sealedInput, timeoutMs, signal, onBeforeLaunch }) {
-              try {
-          launchGate = onBeforeLaunch;
-          const files = new Map(sealedInput.files.map((file) => [file.path, file]));
-          const parameters = binding.dispatch.parameters;
-          const sources = parameters.source_paths.map((path) => {
-            const file = files.get(path);
-            if (!file) throw new Error("EVOLUTION_EVAL_BINDING_CONFLICT");
-            return { path, content: file.content, mediaType: file.media_type };
-          });
-          const common = {
-            schema: "evolution-eval-vivado-request.v1" as const,
-            evalJobId: binding.dispatch.eval_job_id,
-            jobId: binding.dispatch.connector_job_id,
-            projectId: binding.project_id,
-            runClass: "evolution_eval" as const,
-            dispatchRequestHash: binding.dispatch_request_hash,
-            workspaceManifestHash: binding.dispatch.workspace_manifest_hash,
-            sealedInputProjectionHash: binding.dispatch.sealed_input_projection_hash,
-            toolchainProfileHash: binding.dispatch.toolchain_profile_hash,
-            deadlineAt: binding.dispatch.deadline_at,
-            timeoutMs,
-          };
-          const request = parameters.operation === "validate_sources"
-            ? { ...common, operation: parameters.operation, sources, top: parameters.top }
-            : parameters.operation === "simulate"
-              ? { ...common, operation: parameters.operation, sources, top: parameters.top, testbench: parameters.testbench }
-              : parameters.operation === "synthesize"
-                ? { ...common, operation: parameters.operation, sources, top: parameters.top, part: parameters.part }
-                : {
-                    ...common,
-                    operation: parameters.operation,
-                    sources,
-                    top: parameters.top,
-                    part: parameters.part,
-                    generateTrialBitstream: parameters.generate_trial_bitstream,
-                    constraints: parameters.constraint_paths.map((path) => {
-                      const file = files.get(path);
-                      if (!file) throw new Error("EVOLUTION_EVAL_BINDING_CONFLICT");
-                      return { path, content: file.content, mediaType: file.media_type };
-                    }),
-                  };
-          const result = await adapter.executeEvolutionEval(request, signal, undefined, workspace, guardian.run);
-          for (const entry of result.evidence.entries) {
-            // Windows FlushFileBuffers rejects a read-only handle.
-            const handle = await open(join(result.workspace, "output", entry.name), "r+");
-            try { await handle.sync(); } finally { await handle.close(); }
-          }
-          if (process.platform === "win32") {
-            if (!(await stat(join(result.workspace, "output"))).isDirectory()) throw new Error("EVOLUTION_EVAL_OUTPUT_UNAVAILABLE");
-          } else {
-            const outputDirectory = await open(join(result.workspace, "output"), "r");
-            try { await outputDirectory.sync(); } finally { await outputDirectory.close(); }
-          }
-          return {
-            terminalState: result.status === "succeeded" ? "succeeded" as const
-              : result.status === "timeout" ? "timeout" as const : "failed" as const,
-            errorCode: result.status === "timeout" ? "EVOLUTION_EVAL_DEADLINE_EXCEEDED"
-              : result.errorCode ?? (result.status === "unsupported" ? `VIVADO_${result.unsupportedReason}` : null),
-            evidence: result.evidence,
-          };
-              } finally {
-                await guardian.close();
-              }
-            },
-            close: () => guardian.close(),
-          };
-        },
-        async execute() { throw new Error("EVOLUTION_EVAL_PREPARED_EXECUTION_REQUIRED"); },
-      },
-    };
-  }
   backingLock = loaded.toolchain ? await holdProtectedVhdxBacking(loaded.toolchain.attestation) : undefined;
   try {
     if (loaded.toolchain) {
@@ -790,29 +639,15 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
       toolchain: loaded.toolchain,
       backingLock,
     }),
-    evolutionEval,
   };
   const runtime = new WorkerRuntime(options);
   const handler = runtime.handle.bind(runtime);
   const server = createServer(tls, async (req, res) => {
     const chunks: Buffer[] = [];
     let received = 0;
-    const evalRoute = (req.url ?? "").startsWith("/evolution-eval/");
-    const declared = req.headers["content-length"];
-    if (evalRoute && declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > EVOLUTION_EVAL_HTTP_BODY_MAX_BYTES)) {
-      res.writeHead(413, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error_code: "EVOLUTION_EVAL_RESOURCE_LIMIT" }));
-      return;
-    }
     for await (const chunk of req) {
       const bytes = Buffer.from(chunk);
       received += bytes.byteLength;
-      if (evalRoute && received > EVOLUTION_EVAL_HTTP_BODY_MAX_BYTES) {
-        res.writeHead(413, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error_code: "EVOLUTION_EVAL_RESOURCE_LIMIT" }));
-        req.destroy();
-        return;
-      }
       chunks.push(bytes);
     }
     const request = new Request(`https://${req.headers.host ?? `${config.listen_host}:${config.listen_port}`}${req.url ?? "/"}`, { method: req.method, headers: Object.entries(req.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string"), body: chunks.length ? Buffer.concat(chunks) : undefined });
@@ -831,13 +666,7 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
 
 if (import.meta.main) {
   const [command, configPath, outputPath] = process.argv.slice(2);
-  const run = command === "--initialize-evolution-ledger"
-    ? initializeEvolutionEvalLedgerFromConfig(configPath ?? process.env.SYNTHIA_WORKER_CONFIG ?? "")
-        .then((epoch) => console.log(`synthia-worker evolution ledger initialized epoch=${epoch}`))
-    : command === "--verify-evolution-ledger"
-      ? verifyEvolutionEvalLedgerFromConfig(configPath ?? process.env.SYNTHIA_WORKER_CONFIG ?? "")
-          .then((epoch) => console.log(`synthia-worker evolution ledger verified epoch=${epoch}`))
-    : command === "--verify-release-manifest"
+  const run = command === "--verify-release-manifest"
       ? verifyWorkerReleaseManifest(configPath ?? "")
           .then((hash) => console.log(`synthia-worker release manifest verified hash=${hash}`))
     : command === "--verify-vivado-toolchain-attestation"

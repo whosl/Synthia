@@ -346,19 +346,6 @@ describe("EvolutionService feature and credential boundary", () => {
     })).not.toThrow();
   });
 
-  test("keeps the evaluator lane default-off and requires its singleton token only when explicitly enabled", () => {
-    expect(() => createEvolutionServiceFromEnv(ENABLED_ENV, factorySeams())).not.toThrow();
-    expect(() => createEvolutionServiceFromEnv({
-      ...ENABLED_ENV,
-      SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION: "true",
-    }, factorySeams())).toThrow("SYNTHIA_EVOLUTION_EVALUATOR_TOKEN");
-    expect(() => createEvolutionServiceFromEnv({
-      ...ENABLED_ENV,
-      SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION: "true",
-      SYNTHIA_EVOLUTION_EVALUATOR_TOKEN: "evaluator-secret-only",
-    }, factorySeams())).not.toThrow();
-  });
-
   test("exposes no Connector, governance, workspace, or project-write capability", () => {
     const service = createEvolutionServiceFromEnv({}, {
       stateStore: new MemoryStateStore(),
