@@ -26,6 +26,7 @@ import {
   type EvolutionSchedulerTickResult,
   type EvolutionSchedulerWorker,
 } from "./evolution-scheduler.ts";
+import { EvolutionModelAdapter } from "./evolution-model-adapter.ts";
 
 const HOUR = 60 * 60 * 1_000;
 const DAY = 24 * HOUR;
@@ -344,6 +345,32 @@ describe("EvolutionService feature and credential boundary", () => {
       stateStore: new MemoryStateStore(),
       timer: new FakeTimer(),
     })).not.toThrow();
+  });
+
+  test("model override reaches the lanes verbatim and still demands dedicated credentials", () => {
+    const model = new EvolutionModelAdapter({
+      async chat() {
+        throw new Error("deployment wire must be exercised, not the test stub");
+      },
+    }, "anthropic-wire-model");
+    const seen: unknown[] = [];
+    expect(() => createEvolutionServiceFromEnv(ENABLED_ENV, {
+      model,
+      stateStore: new MemoryStateStore(),
+      timer: new FakeTimer(),
+      manualCuratorWorkerFactory: (context) => {
+        seen.push(context.model);
+        return new ScriptedWorker();
+      },
+    })).not.toThrow();
+    expect(seen[0]).toBe(model);
+    const missingKey: Record<string, string> = { ...ENABLED_ENV };
+    delete missingKey.SYNTHIA_EVOLUTION_MODEL_KEY;
+    expect(() => createEvolutionServiceFromEnv(missingKey, {
+      model,
+      stateStore: new MemoryStateStore(),
+      timer: new FakeTimer(),
+    })).toThrow("SYNTHIA_EVOLUTION_MODEL_KEY");
   });
 
   test("exposes no Connector, governance, workspace, or project-write capability", () => {

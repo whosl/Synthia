@@ -665,6 +665,14 @@ function evidenceProjection(refs: unknown[], visible: boolean): {
   };
 }
 
+async function evalJobTraceProjection(
+  refsValue: unknown,
+): Promise<Record<string, unknown>[]> {
+  // Eval-job trace enrichment died with the M4F ablation (0035 dropped the
+  // evolution_eval_* tables this projection queried). Stored refs are legacy;
+  // every row written since — and all of history — carries an empty array.
+  return Array.isArray(refsValue) ? (refsValue as Record<string, unknown>[]) : [];
+}
 async function applicationDetail(ctx: RequestContext, applicationId: string): Promise<Record<string, unknown>> {
   const result = await ctx.pool.query("SELECT * FROM skill_application WHERE id=$1", [applicationId]);
   const row = result.rows[0] as Row | undefined;
@@ -728,6 +736,7 @@ async function applicationDetail(ctx: RequestContext, applicationId: string): Pr
         supersedes_id: evaluation.supersedes_id ?? null,
         evaluator_type: evaluation.evaluator_type,
         evaluator_version: evaluation.evaluator_version,
+        eval_job_refs: await evalJobTraceProjection(evaluation.eval_job_refs),
         created_at: iso(evaluation.created_at),
       };
     })),
@@ -2286,6 +2295,13 @@ async function failLeasedRun(
       );
       const updated = result.rows[0] as Row | undefined;
       if (!updated) throw conflictApiError("EVOLUTION_LEASE_CONFLICT");
+      if (table === "curator_run" && !retryable) {
+        await tx.query(
+          `DELETE FROM curator_application_reservation reservation
+            WHERE reservation.curator_run_id=$1`,
+          [runId],
+        );
+      }
       return updated;
     });
   } finally {
@@ -3418,7 +3434,8 @@ export async function completeCuratorRunHandler(ctx: RequestContext): Promise<Ha
         [runId, terminal.state, requestHash, JSON.stringify(terminal)],
       );
       await tx.query(
-        "DELETE FROM curator_application_reservation WHERE curator_run_id=$1",
+        `DELETE FROM curator_application_reservation reservation
+          WHERE reservation.curator_run_id=$1`,
         [runId],
       );
       if (run.mode === "run") {

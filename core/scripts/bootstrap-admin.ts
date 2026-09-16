@@ -91,6 +91,15 @@ const IDENTITIES: readonly IdentitySpec[] = [
     envVar: "EVOLUTION_CURATOR_TOKEN",
   },
   {
+    uid: "synthia-evolution-scheduler",
+    cn: "Synthia Evolution Scheduler",
+    displayName: "Synthia Evolution Scheduler Service",
+    mail: "evolution-scheduler@synthia.local",
+    actorType: "service",
+    scopes: ["core:evolution-scheduler"],
+    envVar: "EVOLUTION_SCHEDULER_TOKEN",
+  },
+  {
     uid: "synthia-evolution-evaluator",
     cn: "Synthia Evolution Evaluator",
     displayName: "Synthia Evolution Evaluator Service",
