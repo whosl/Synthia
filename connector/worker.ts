@@ -137,7 +137,6 @@ export class WorkerRuntime {
     if (path === "/discover") { this.discovery = await this.execution.discover(); return { status: 200, body: this.envelope(e, this.discovery) }; }
     if (path === "/heartbeat") { if (!this.registration) throw new Error("NOT_REGISTERED"); if (this.endpoint.registration_state === "revoked") throw new Error("ENDPOINT_REVOKED"); this.discovery = await this.execution.discover(); const now = this.clock(); const drift = this.hasDrift(this.discovery); const ready = this.discoveryReady() && !drift; this.leaseExpiresAt = now.getTime() + this.endpoint.lease_seconds * 1000; this.registration = { ...this.registration, registration_state: ready ? "ready" : "degraded", discovered: copy(this.discovery), last_heartbeat_at: now.toISOString(), lease_expires_at: new Date(this.leaseExpiresAt).toISOString(), capability_drift: drift }; return { status: 200, body: this.envelope(e, this.registration) }; }
     if (path === "/jobs/submit") {
-      if (p.request?.runClass === "evolution_eval") throw new Error("EVOLUTION_EVAL_DEDICATED_ROUTE_REQUIRED");
       if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) { this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration; throw new Error("LEASE_EXPIRED"); }
       return this.submit(e, p.request as JobRequest, p.approval as Record<string, unknown> | undefined);
     }

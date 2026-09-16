@@ -12,7 +12,6 @@ import { createVivadoProcessGuardian, VivadoBatchAdapter, VIVADO_CAPABILITIES, t
 import type { JobRequest } from "./index.ts";
 import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot } from "./remote.ts";
 import { canonicalRequestHash } from "../core/src/hashing.ts";
-import { buildFullTreeManifest, finalizeVivadoToolchainAttestation, loadVivadoToolchainAttestation, type VivadoToolchainAttestationV1 } from "./toolchain-attestation.ts";
 
 // The discovery wire contract is the three-key ConnectorCapability shape;
 // server-internal CapabilityDefinition fields must not leak onto the wire.
@@ -38,21 +37,11 @@ export interface WorkerConfig extends ConnectorEndpoint {
   capability_map_version: string;
   part_catalog_hash: string;
   sdk_worker_build_hash: string;
-  evolution_eval_enabled?: boolean;
-  evolution_eval_ledger_root?: string;
-  evolution_eval_ledger_epoch?: string;
-  evolution_eval_ledger_mode?: "initialize" | "reopen";
-  evolution_eval_spool_root?: string;
-  evolution_eval_log_root?: string;
-  vivado_toolchain_attestation_path?: string;
-  vivado_toolchain_attestation_sha256?: string;
-  vivado_toolchain_lock_handoff_path?: string;
 }
 
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const execFileAsync = promisify(execFile);
-const failedBackingLocks = new WeakSet<ChildProcess>();
 
 function boundedIdentity(value: unknown, maximum: number): value is string {
   return typeof value === "string"
@@ -108,26 +97,7 @@ function validateWorkerConfig(config: WorkerConfig): WorkerConfig {
   for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "evidence_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "vivado_part", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"] as const) required(config[name], name);
   if (config.protocol_version !== REMOTE_SCHEMA_VERSION || config.transport_mode !== "direct_https" || config.auth_mode !== "mtls") throw new Error("CONFIG_INVALID:protocol");
   if (!Number.isInteger(config.listen_port) || config.listen_port < 1 || config.listen_port > 65535) throw new Error("CONFIG_INVALID:listen_port");
-  if (config.evolution_eval_enabled !== undefined && typeof config.evolution_eval_enabled !== "boolean") {
-    throw new Error("CONFIG_INVALID:evolution_eval_enabled");
-  }
-  if (config.evolution_eval_enabled === true) {
-    for (const name of ["evolution_eval_ledger_root", "evolution_eval_ledger_epoch", "evolution_eval_spool_root", "evolution_eval_log_root", "vivado_toolchain_attestation_path", "vivado_toolchain_attestation_sha256", "vivado_toolchain_lock_handoff_path"] as const) required(config[name], name);
-    if (!HASH_PATTERN.test(config.vivado_toolchain_attestation_sha256!)) throw new Error("CONFIG_INVALID:vivado_toolchain_attestation_sha256");
-    if (config.evolution_eval_ledger_mode !== "initialize" && config.evolution_eval_ledger_mode !== "reopen") throw new Error("CONFIG_INVALID:evolution_eval_ledger_mode");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(config.evolution_eval_ledger_epoch!)
-      || config.evolution_eval_ledger_epoch === "REPLACE_WITH_M4F_DEPLOYMENT_EPOCH") {
-      throw new Error("CONFIG_INVALID:evolution_eval_ledger_epoch");
-    }
-    const roots = [config.workspace_root, config.evidence_root, config.evolution_eval_ledger_root!, config.evolution_eval_spool_root!, config.evolution_eval_log_root!]
-      .map((value) => value.toLowerCase().replace(/[\\/]+$/, ""));
-    const overlaps = roots.some((root, index) => roots.some((candidate, candidateIndex) => (
-      index !== candidateIndex
-      && (root === candidate || root.startsWith(`${candidate}/`) || root.startsWith(`${candidate}\\`))
-    )));
-    if (overlaps) throw new Error("CONFIG_INVALID:evolution_eval_roots");
-  }
-  return config;
+    return config;
 }
 
 async function readWorkerConfig(path: string): Promise<{ config: WorkerConfig; sha256: string }> {
@@ -140,264 +110,6 @@ async function readWorkerConfig(path: string): Promise<{ config: WorkerConfig; s
 
 export async function loadWorkerConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json"): Promise<WorkerConfig> {
   return (await readWorkerConfig(path)).config;
-}
-
-function assertToolchainAttestationMatchesConfig(config: WorkerConfig, attestation: VivadoToolchainAttestationV1): void {
-  if (attestation.toolchain_profile.derived_sha256 !== config.toolchain_profile_hash) throw new Error("CONFIG_INVALID:toolchain_profile_hash");
-  if (attestation.toolchain_profile.capability_map_version !== config.capability_map_version) throw new Error("CONFIG_INVALID:capability_map_version");
-  if (attestation.vivado.part_catalog_sha256 !== config.part_catalog_hash) throw new Error("CONFIG_INVALID:part_catalog_hash");
-  if (attestation.vivado.target_part !== config.vivado_part) throw new Error("CONFIG_INVALID:vivado_part");
-  const mountedBinary = `${attestation.attachment.volume.mount_path.replace(/[\\/]+$/u, "")}\\${attestation.vivado.binary_relative_path.replaceAll("/", "\\")}`;
-  const normalize = (value: string) => value.replaceAll("/", "\\").replace(/[\\]+$/u, "").toLowerCase();
-  if (normalize(mountedBinary) !== normalize(config.vivado_binary)) throw new Error("CONFIG_INVALID:vivado_binary");
-}
-
-async function assertLiveWindowsToolchainMapping(attestation: VivadoToolchainAttestationV1): Promise<void> {
-  if (process.platform !== "win32") return;
-  // The authorized admin Worker session cannot safely use the Storage CIM
-  // surface (Get-Disk/Get-Partition hang under S4U tokens, and Start-Job
-  // wraps the same hang). With SYNTHIA_M4F_MAPPING_VOLUME_ONLY=1 the check
-  // degrades to the volume-level identity that session can complete.
-  const volumeOnly = process.env.SYNTHIA_M4F_MAPPING_VOLUME_ONLY === "1";
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    "$vo=($env:SYNTHIA_M4F_MAPPING_VOLUME_ONLY -eq '1')",
-    "if(-not $vo){$image=Get-DiskImage -ImagePath $args[0]}",
-    "if(-not $vo -and (-not $image.Attached -or -not ([IO.Path]::GetFullPath([string]$image.ImagePath)).Equals([IO.Path]::GetFullPath($args[0]),[StringComparison]::OrdinalIgnoreCase))){exit 11}",
-    "$disk=$null",
-    "if(-not $vo){try{$j=Start-Job -ScriptBlock{param($p)Get-DiskImage -ImagePath $p|Get-Disk}-ArgumentList $args[0];if(Wait-Job $j -Timeout 5){$disk=Receive-Job $j};Remove-Job $j -Force}catch{}}",
-    "$vol=$null",
-    "if($disk){",
-    "if(-not $disk.IsReadOnly-or [string]$disk.Number-cne$args[1]-or [string]$disk.UniqueId-cne$args[2]){exit 12}",
-    "$pj=Start-Job -ScriptBlock{param($dn,$pn)Get-Partition -DiskNumber $dn -PartitionNumber $pn}-ArgumentList $disk.Number,([int]$args[3]);if(-not(Wait-Job $pj -Timeout 5)){Remove-Job $pj -Force;exit 20};$part=Receive-Job $pj;Remove-Job $pj -Force",
-    "if([string]$part.Guid-cne$args[4]){exit 13}",
-    "$vol=$part|Get-Volume",
-    "$actualPaths=@($part.AccessPaths|%{$_.TrimEnd('\\')+'\\'}|Sort-Object -Unique)",
-    "$expectedPaths=@(($args[7].TrimEnd('\\')),([string]$args[5]).TrimEnd('\\'))|ForEach-Object{$_+'\\'}|Sort-Object -Unique",
-    "if(@(Compare-Object $actualPaths $expectedPaths).Count-ne 0){exit 15}",
-    "}else{",
-    "$ml=([string]$args[7]).Substring(0,1)",
-    "$vol=Get-Volume -DriveLetter $ml -ErrorAction Stop",
-    "}",
-  ].join(";");
-  try {
-    // PowerShell -Command parses trailing arguments as expressions, which
-    // mangles GUID/brace-bearing paths ({...} becomes a script block). Run the
-    // script via a temp file with -File so every argument arrives as a literal.
-    const mappingScriptPath = join(tmpdir(), `synthia-m4f-mapping-${process.pid}-${Date.now()}.ps1`);
-    await writeFile(mappingScriptPath, script + "\n", { mode: 0o600 });
-    try {
-      await execFileAsync("powershell.exe", [
-        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", mappingScriptPath,
-        attestation.vhdx.path,
-        String(attestation.attachment.disk.number),
-        attestation.attachment.disk.unique_id,
-        String(attestation.attachment.partition.number),
-        attestation.attachment.partition.guid,
-        attestation.attachment.volume.guid,
-        attestation.attachment.volume.serial_number,
-        attestation.attachment.volume.mount_path,
-        attestation.vhdx.file_identity.file_id,
-        attestation.vhdx.file_identity.volume_serial_number,
-        attestation.vhdx.backing_parent.path,
-        attestation.vhdx.backing_parent.owner_sid,
-        attestation.vhdx.backing_parent.acl_sha256,
-        String(attestation.full_tree_manifest.total_bytes),
-      ], { windowsHide: true, timeout: 30_000 });
-    } finally {
-      await rm(mappingScriptPath, { force: true }).catch(() => {});
-    }
-  } catch (error) {
-    const mappingExit = /exit (\d+)/.exec(String((error as { stderr?: unknown }).stderr ?? ""))?.[1]
-      ?? /exit code (\d+)/.exec(String(error))?.[1]
-      ?? "";
-    throw new Error(`TOOLCHAIN_ATTESTATION_INVALID:live_mapping${mappingExit ? `:${mappingExit}` : ""}`);
-  }
-}
-
-async function holdProtectedVhdxBacking(attestation: VivadoToolchainAttestationV1): Promise<ChildProcess | undefined> {
-  if (process.platform !== "win32") return undefined;
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    "$stream=[IO.File]::Open($args[0],[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)",
-    "$sha=[Security.Cryptography.SHA256]::Create()",
-    "$digest=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()",
-    "$length=$stream.Length",
-    "$identity=((& fsutil.exe file queryfileid $args[0] 2>$null)|Out-String)",
-    "if($LASTEXITCODE-ne 0){exit 18}",
-    "[Console]::Out.WriteLine(('LOCKED|{0}|{1}|{2}'-f$digest,$length,($identity-replace'[\\r\\n]+',' ')))",
-    "[Console]::Out.Flush()",
-    "while($true){$line=[Console]::In.ReadLine();if($null-eq$line-or$line-eq'STOP'){break};Start-Sleep -Milliseconds 100}",
-    "$stream.Dispose()",
-  ].join(";");
-  // -Command parses the trailing vhdx path as an expression and fails; use a
-  // temp script file with -File so the path arrives as a literal argument.
-  const backingScriptPath = join(tmpdir(), `synthia-m4f-backing-${process.pid}-${Date.now()}.ps1`);
-  await writeFile(backingScriptPath, script + "\n", { mode: 0o600 });
-  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", backingScriptPath, attestation.vhdx.path], {
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  child.once("close", () => { void rm(backingScriptPath, { force: true }).catch(() => {}); });
-  child.once("error", () => failedBackingLocks.add(child));
-  child.once("exit", () => failedBackingLocks.add(child));
-  child.once("close", () => failedBackingLocks.add(child));
-  const line = await new Promise<string>((resolve, reject) => {
-    let output = "";
-    const timeout = setTimeout(() => reject(new Error("TOOLCHAIN_ATTESTATION_INVALID:backing_lock_timeout")), 900_000);
-    child.stdout!.on("data", (chunk) => {
-      output += String(chunk);
-      const newline = output.indexOf("\n");
-      if (newline >= 0) {
-        clearTimeout(timeout);
-        resolve(output.slice(0, newline).trim());
-      }
-    });
-    child.once("error", (error) => { clearTimeout(timeout); reject(error); });
-    child.once("exit", () => { clearTimeout(timeout); reject(new Error("TOOLCHAIN_ATTESTATION_INVALID:backing_lock")); });
-  });
-  const [marker, digest, size, identity] = line.split("|", 4);
-  if (marker !== "LOCKED" || digest !== attestation.vhdx.sha256 || Number(size) !== attestation.vhdx.size_bytes
-    || !identity?.includes(attestation.vhdx.file_identity.file_id)) {
-    child.kill();
-    throw new Error("TOOLCHAIN_ATTESTATION_INVALID:backing_lock_identity");
-  }
-  child.unref();
-  (child.stdin as unknown as { unref?: () => void } | null)?.unref?.();
-  child.stdout?.destroy();
-  child.stderr?.destroy();
-  return child;
-}
-
-async function acknowledgeToolchainLockHandoff(
-  config: WorkerConfig,
-  attestation: VivadoToolchainAttestationV1,
-  workerProcessInstanceId: string,
-): Promise<void> {
-  if (process.platform !== "win32") return;
-  const path = required(config.vivado_toolchain_lock_handoff_path, "vivado_toolchain_lock_handoff_path");
-  let request: Record<string, unknown>;
-  try { request = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>; }
-  catch { throw new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_handoff"); }
-  const keys = Object.keys(request).sort().join(",");
-  if (keys !== "file_id,nonce,pipe_name,schema,supervisor_pid,supervisor_start_token,vivado_toolchain_attestation_sha256,volume_serial_number"
-    || request.schema !== "synthia-vivado-toolchain-lock-handoff.v1"
-    || request.vivado_toolchain_attestation_sha256 !== config.vivado_toolchain_attestation_sha256
-    || request.volume_serial_number !== attestation.vhdx.file_identity.volume_serial_number
-    || request.file_id !== attestation.vhdx.file_identity.file_id
-    || typeof request.pipe_name !== "string" || !OPAQUE_ID_PATTERN.test(request.pipe_name)
-    || !Number.isSafeInteger(request.supervisor_pid) || Number(request.supervisor_pid) < 1
-    || typeof request.supervisor_start_token !== "string" || !HASH_PATTERN.test(request.supervisor_start_token)
-    || typeof request.nonce !== "string" || !OPAQUE_ID_PATTERN.test(request.nonce)) {
-    throw new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_handoff");
-  }
-  const ackPath = `${path}.ack.json`;
-  const ack = {
-    schema: "synthia-vivado-toolchain-lock-handoff-ack.v1",
-    nonce: request.nonce,
-    worker_process_instance_id: workerProcessInstanceId,
-    vivado_toolchain_attestation_sha256: config.vivado_toolchain_attestation_sha256,
-  };
-  let handle: FileHandle;
-  try {
-    handle = await open(ackPath, "r+");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "EPERM" || code === "EACCES") {
-      // The supervisor seals the one-shot ack slot after consuming the
-      // ceremony handoff; a same-ceremony worker restart must reopen (identity
-      // is already proven by the PING above), never re-initialize the slot.
-      const sealed = await stat(ackPath);
-      if (sealed.size > 0) return;
-    }
-    throw error;
-  }
-  try {
-    await handle.truncate(0);
-    await handle.writeFile(`${JSON.stringify(ack)}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function pingToolchainCeremonyLock(config: WorkerConfig, attestation: VivadoToolchainAttestationV1): Promise<void> {
-  if (process.platform !== "win32") return;
-  const path = required(config.vivado_toolchain_lock_handoff_path, "vivado_toolchain_lock_handoff_path");
-  let request: Record<string, unknown>;
-  try { request = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>; }
-  catch { throw new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_handoff"); }
-  if (Object.keys(request).sort().join(",") !== "file_id,nonce,pipe_name,schema,supervisor_pid,supervisor_start_token,vivado_toolchain_attestation_sha256,volume_serial_number"
-    || request.schema !== "synthia-vivado-toolchain-lock-handoff.v1"
-    || request.vivado_toolchain_attestation_sha256 !== config.vivado_toolchain_attestation_sha256
-    || request.volume_serial_number !== attestation.vhdx.file_identity.volume_serial_number
-    || request.file_id !== attestation.vhdx.file_identity.file_id
-    || typeof request.pipe_name !== "string" || !OPAQUE_ID_PATTERN.test(request.pipe_name)
-    || !Number.isSafeInteger(request.supervisor_pid) || Number(request.supervisor_pid) < 1
-    || typeof request.supervisor_start_token !== "string" || !HASH_PATTERN.test(request.supervisor_start_token)
-    || typeof request.nonce !== "string" || !OPAQUE_ID_PATTERN.test(request.nonce)) {
-    throw new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_handoff");
-  }
-  const response = await new Promise<string>((resolve, reject) => {
-    const socket = createConnection(`\\\\.\\pipe\\${request.pipe_name as string}`);
-    let output = "";
-    const timeout = setTimeout(() => { socket.destroy(); reject(new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_helper_timeout")); }, 10_000);
-    socket.setEncoding("utf8");
-    socket.on("connect", () => socket.write(`PING|${request.nonce as string}\n`));
-    socket.on("data", (chunk) => {
-      output += chunk;
-      const newline = output.indexOf("\n");
-      if (newline >= 0) { clearTimeout(timeout); socket.end(); resolve(output.slice(0, newline).trim()); }
-    });
-    socket.once("error", (error) => { clearTimeout(timeout); reject(error); });
-  });
-  const expected = [
-    "HEALTHY",
-    request.nonce,
-    request.vivado_toolchain_attestation_sha256,
-    attestation.vhdx.sha256,
-    String(attestation.vhdx.size_bytes),
-    attestation.vhdx.file_identity.volume_serial_number,
-    attestation.vhdx.file_identity.file_id,
-    String(request.supervisor_pid),
-    request.supervisor_start_token,
-  ].join("|");
-  if (response !== expected) throw new Error("TOOLCHAIN_ATTESTATION_INVALID:lock_helper_identity");
-}
-
-export async function verifyVivadoToolchainAttestationFromConfig(configPath: string): Promise<string> {
-  const loaded = await loadExecutionConfig(configPath, true);
-  if (loaded.config.evolution_eval_enabled !== true || !loaded.toolchain) {
-    throw new Error("CONFIG_INVALID:vivado_toolchain_attestation_required");
-  }
-  // The verify command must not consume the lock supervisor's first pipe
-  // connection: that slot belongs to the worker runtime's PING+ACK handshake,
-  // and a verify-side PING would start the 30s ACK clock with no ACK writer.
-  await assertLiveWindowsToolchainMapping(loaded.toolchain.attestation);
-  return loaded.toolchain.rawSha256;
-}
-
-async function loadExecutionConfig(path: string, verifyToolchain = false): Promise<{
-  config: WorkerConfig;
-  sha256: string;
-  toolchain?: { readonly attestation: VivadoToolchainAttestationV1; readonly rawSha256: string };
-}> {
-  const loaded = await readWorkerConfig(path);
-  if (loaded.config.evolution_eval_enabled === true) {
-    const expected = process.env.SYNTHIA_WORKER_CONFIG_SHA256;
-    if (!expected || !HASH_PATTERN.test(expected) || expected !== loaded.sha256) {
-      throw new Error("CONFIG_INVALID:active_config_sha256");
-    }
-    if (verifyToolchain) {
-      const toolchain = await loadVivadoToolchainAttestation(
-        required(loaded.config.vivado_toolchain_attestation_path, "vivado_toolchain_attestation_path"),
-        required(loaded.config.vivado_toolchain_attestation_sha256, "vivado_toolchain_attestation_sha256"),
-      );
-      assertToolchainAttestationMatchesConfig(loaded.config, toolchain.attestation);
-      return { ...loaded, toolchain };
-    }
-  }
-  return loaded;
 }
 
 export async function verifyWorkerReleaseManifest(path: string): Promise<string> {
@@ -513,55 +225,22 @@ export async function verifyWorkerReleaseManifest(path: string): Promise<string>
   return manifestHash;
 }
 
-async function assertCurrentVivadoToolchain(
-  config: WorkerConfig,
-  backingLock: ChildProcess | undefined,
-): Promise<{ readonly attestation: VivadoToolchainAttestationV1; readonly rawSha256: string }> {
-  if (process.platform === "win32" && (!backingLock || failedBackingLocks.has(backingLock)
-    || backingLock.killed || backingLock.exitCode !== null || backingLock.signalCode !== null)) {
-    throw new Error("TOOLCHAIN_ATTESTATION_INVALID:backing_lock");
-  }
-  const live = await loadVivadoToolchainAttestation(
-    required(config.vivado_toolchain_attestation_path, "vivado_toolchain_attestation_path"),
-    required(config.vivado_toolchain_attestation_sha256, "vivado_toolchain_attestation_sha256"),
-  );
-  assertToolchainAttestationMatchesConfig(config, live.attestation);
-  await pingToolchainCeremonyLock(config, live.attestation);
-  await assertLiveWindowsToolchainMapping(live.attestation);
-  return live;
-}
-
 function execution(
   config: WorkerConfig,
   identity: {
     readonly activeConfigSha256: string;
     readonly workerProcessInstanceId: string;
-    readonly toolchain?: { readonly attestation: VivadoToolchainAttestationV1; readonly rawSha256: string };
-    readonly backingLock?: ChildProcess;
   },
 ): WorkerExecution {
   const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, part: config.vivado_part, profileHash: config.toolchain_profile_hash });
   return {
     async discover(): Promise<DiscoverySnapshot> {
-      let liveToolchain = identity.toolchain;
-      if (config.evolution_eval_enabled === true) {
-        try {
-          liveToolchain = await assertCurrentVivadoToolchain(config, identity.backingLock);
-        } catch {
-          return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, active_config_sha256: identity.activeConfigSha256, worker_process_instance_id: identity.workerProcessInstanceId, vivado_toolchain_attestation_sha256: config.vivado_toolchain_attestation_sha256, live_mapping_health: "unavailable", capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_toolchain_attestation"] };
-        }
-      }
       const remoteAttestation = {
         active_config_sha256: identity.activeConfigSha256,
         worker_process_instance_id: identity.workerProcessInstanceId,
-        ...(liveToolchain ? { vivado_toolchain_attestation_sha256: liveToolchain.rawSha256, live_mapping_health: "healthy" as const } : {}),
       };
       try { await access(config.vivado_binary, constants.X_OK); } catch { return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] }; }
-      if (config.evolution_eval_enabled === true && !liveToolchain) {
-        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_toolchain_attestation"] };
-      }
-      const facts = liveToolchain?.attestation.vivado;
-      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: facts?.version ?? "2021.1", vivado_patch: facts?.sw_build ?? "3247384", part_catalog_hash: facts?.part_catalog_sha256 ?? config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: DISCOVERY_CAPABILITIES, toolchain_profile_hash: liveToolchain?.attestation.toolchain_profile.derived_sha256 ?? config.toolchain_profile_hash, license_status: facts?.license.status === "passed" || !liveToolchain ? "available" : "unavailable" };
+      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: DISCOVERY_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
     },
     async execute(request: JobRequest, _workspace: string): Promise<WorkerExecutionResult> {
       const candidate = (request as JobRequest & { parameters?: unknown }).parameters;
@@ -611,7 +290,7 @@ function execution(
 
 export async function startWorker(configPath?: string): Promise<{ server: Server; config: WorkerConfig }> {
   const resolvedConfigPath = configPath ?? process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json";
-  const loaded = await loadExecutionConfig(resolvedConfigPath, true);
+  const loaded = await readWorkerConfig(resolvedConfigPath);
   const config = loaded.config;
   const workerProcessInstanceId = randomUUID();
   if (process.env.SYNTHIA_WORKER_VERIFY_BUNDLE === "1") {
@@ -619,25 +298,12 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
   }
   const privateKey = config.server_private_key_path.toLowerCase().endsWith(".pfx") || config.server_private_key_path.toLowerCase().endsWith(".p12");
   const tls = privateKey ? { pfx: await readFile(config.server_private_key_path), passphrase: required(process.env.SYNTHIA_WORKER_PFX_PASSWORD, "SYNTHIA_WORKER_PFX_PASSWORD"), ca: await readFile(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true } : { cert: await readFile(config.server_certificate_path), key: await readFile(config.server_private_key_path), ca: await readFile(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true };
-  let backingLock: ChildProcess | undefined;
-  backingLock = loaded.toolchain ? await holdProtectedVhdxBacking(loaded.toolchain.attestation) : undefined;
-  try {
-    if (loaded.toolchain) {
-      await pingToolchainCeremonyLock(config, loaded.toolchain.attestation);
-      await acknowledgeToolchainLockHandoff(config, loaded.toolchain.attestation, workerProcessInstanceId);
-    }
-  } catch (error) {
-    backingLock?.kill();
-    throw error;
-  }
   const options: WorkerRuntimeOptions = {
     endpoint: config,
     workspaceRoot: config.workspace_root,
     execution: execution(config, {
       activeConfigSha256: loaded.sha256,
       workerProcessInstanceId,
-      toolchain: loaded.toolchain,
-      backingLock,
     }),
   };
   const runtime = new WorkerRuntime(options);
@@ -655,12 +321,7 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
     res.writeHead(response.status, Object.fromEntries(response.headers));
     res.end(Buffer.from(await response.arrayBuffer()));
   });
-  try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.listen_port, config.listen_host, resolve); });
-  } catch (error) {
-    backingLock?.kill();
-    throw error;
-  }
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.listen_port, config.listen_host, resolve); });
   return { server, config };
 }
 
@@ -669,25 +330,6 @@ if (import.meta.main) {
   const run = command === "--verify-release-manifest"
       ? verifyWorkerReleaseManifest(configPath ?? "")
           .then((hash) => console.log(`synthia-worker release manifest verified hash=${hash}`))
-    : command === "--verify-vivado-toolchain-attestation"
-      ? verifyVivadoToolchainAttestationFromConfig(configPath ?? process.env.SYNTHIA_WORKER_CONFIG ?? "")
-          .then((hash) => console.log(`synthia-worker Vivado toolchain attestation verified raw_sha256=${hash}`))
-    : command === "--verify-vivado-toolchain-attestation-file"
-      ? loadVivadoToolchainAttestation(required(configPath, "toolchain_attestation_path"), required(outputPath, "toolchain_attestation_sha256"))
-          .then(({ attestation }) => console.log(`synthia-worker Vivado toolchain attestation verified canonical_sha256=${attestation.canonical_attestation_sha256}`))
-    : command === "--build-vivado-full-tree-manifest"
-      ? buildFullTreeManifest(required(configPath, "full_tree_root"))
-          .then(async (manifest) => {
-            await writeFile(required(outputPath, "full_tree_output"), `${JSON.stringify(manifest)}\n`, { flag: "wx", mode: 0o600 });
-            console.log(`synthia-worker Vivado full-tree manifest built hash=${manifest.canonical_sha256}`);
-          })
-    : command === "--finalize-vivado-toolchain-attestation"
-      ? readFile(required(configPath, "toolchain_attestation_draft"), "utf8")
-          .then((bytes) => finalizeVivadoToolchainAttestation(JSON.parse(bytes)))
-          .then(async (attestation) => {
-            await writeFile(required(outputPath, "toolchain_attestation_output"), `${JSON.stringify(attestation)}\n`, { flag: "wx", mode: 0o600 });
-            console.log(`synthia-worker Vivado toolchain attestation finalized canonical_sha256=${attestation.canonical_attestation_sha256}`);
-          })
     : command === undefined
       ? startWorker().then(({ config }) => console.log(`synthia-worker listening on ${config.listen_host}:${config.listen_port} connector=${config.connector_id}`))
       : Promise.reject(new Error("CONFIG_INVALID:command"));
