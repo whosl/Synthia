@@ -80,18 +80,6 @@ export function evolutionScopeForbiddenError(): ApiError {
   );
 }
 
-export type EvolutionEvalApiErrorCode = Extract<ApiErrorCode, `EVOLUTION_${string}`>;
-
-/** Frozen Appendix-B error envelope for the dedicated evolution-eval surface. */
-export function evolutionEvalApiError(
-  code: EvolutionEvalApiErrorCode,
-  httpStatus: number,
-  retryable = false,
-  details: unknown = null,
-): ApiError {
-  return new ApiError(code, httpStatus, code, retryable, details);
-}
-
 export function conflictApiError(message: string, details?: unknown, retryable = false): ApiError {
   return new ApiError("conflict", 409, message, retryable, details);
 }

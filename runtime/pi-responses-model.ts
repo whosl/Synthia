@@ -45,7 +45,7 @@ import type {
   XdcGeneration,
 } from "./types.ts";
 
-export type ModelApiMode = "chat-completions" | "responses" | "anthropic-messages";
+export type ModelApiMode = "chat-completions" | "anthropic-messages";
 export type RuntimeModel = LoopModel & ConversationalModel;
 
 type PiResponsesModel = Model<"openai-responses">;
@@ -60,11 +60,6 @@ type PiStream = (
   options?: ProviderStreamOptions,
 ) => AssistantMessageEventStream;
 
-export interface PiResponsesDeps {
-  readonly complete?: PiComplete;
-  readonly stream?: PiStream;
-  readonly now?: () => number;
-}
 
 interface ChatWireToolCall {
   readonly id?: string;
@@ -358,224 +353,6 @@ function reasoningEffort(value: string | undefined): "minimal" | "low" | "medium
     : undefined;
 }
 
-export class PiResponsesRuntimeModel implements RuntimeModel {
-  private readonly piModel: PiResponsesModel;
-  private readonly completeFn: PiComplete;
-  private readonly streamFn: PiStream;
-  private readonly now: () => number;
-  private readonly actionClient: ModelClient;
-
-  constructor(private readonly config: ModelClientConfig, deps: PiResponsesDeps = {}) {
-    this.completeFn = deps.complete ?? piComplete;
-    this.streamFn = deps.stream ?? piStream;
-    this.now = deps.now ?? Date.now;
-    const maxTokens = Math.max(
-      config.chatMaxTokens ?? 16_384,
-      config.docMaxTokens ?? 8192,
-      config.toolMaxTokens ?? 4096,
-    );
-    this.piModel = {
-      id: config.model,
-      name: config.model,
-      api: "openai-responses",
-      // A custom provider makes pi-ai omit provider-owned output-item ids on
-      // replay. Synthia persists stable call_ids but intentionally not opaque
-      // reasoning signatures or provider item ids.
-      provider: "synthia-openai-responses",
-      baseUrl: config.baseUrl,
-      reasoning: reasoningEffort(config.reasoningEffort) !== undefined,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200_000,
-      maxTokens,
-      compat: {
-        sendSessionIdHeader: false,
-        supportsLongCacheRetention: false,
-      },
-    };
-    const poster: ChatPoster = (input) => this.postChatCompletion(input.body, input.timeoutMs);
-    this.actionClient = new ModelClient({
-      ...config,
-      // pi-ai/OpenAI SDK owns wire-level retries. Keep ModelClient's parse
-      // retries, but do not multiply network retry budgets.
-      networkRetries: 0,
-      post: poster,
-    });
-  }
-
-  private options(maxTokens: number, extra: ProviderStreamOptions = {}): ProviderStreamOptions {
-    const effort = reasoningEffort(this.config.reasoningEffort);
-    return {
-      apiKey: this.config.apiKey,
-      maxTokens,
-      cacheRetention: "none",
-      timeoutMs: this.config.timeoutMs ?? 120_000,
-      maxRetries: Math.max(0, this.config.networkRetries ?? 2),
-      ...(effort ? { reasoningEffort: effort, reasoningSummary: "auto" } : {}),
-      ...extra,
-    };
-  }
-
-  private async requireSuccess(promise: Promise<AssistantMessage>): Promise<AssistantMessage> {
-    const message = await promise;
-    if (message.stopReason === "error" || message.stopReason === "aborted") {
-      throw new Error(message.errorMessage ?? `pi-responses stopped: ${message.stopReason}`);
-    }
-    return message;
-  }
-
-  private async postChatCompletion(body: string, timeoutMs: number): Promise<ChatCompletionResponse> {
-    let request: ChatWireRequest;
-    try {
-      request = JSON.parse(body) as ChatWireRequest;
-    } catch {
-      return { status: 400, json: { error: "invalid request JSON" }, text: "invalid request JSON" };
-    }
-    const context = wireRequestToContext(request, this.piModel, this.now);
-    const maxTokens = positiveInteger(
-      request.max_completion_tokens ?? request.max_tokens,
-      this.config.toolMaxTokens ?? 4096,
-    );
-    try {
-      const message = await this.requireSuccess(this.completeFn(
-        this.piModel,
-        context,
-        this.options(maxTokens, {
-          timeoutMs,
-          onPayload: responsePayloadOverride(request),
-        }),
-      ));
-      return assistantToChatCompletion(message);
-    } catch (error) {
-      const status = statusFromError(error);
-      if (status) {
-        const text = error instanceof Error ? error.message : String(error);
-        return { status, json: { error: text }, text };
-      }
-      throw error;
-    }
-  }
-
-  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
-    const context = agentMessagesToContext(messages, tools, this.piModel, this.now);
-    const message = await this.requireSuccess(this.completeFn(
-      this.piModel,
-      context,
-      this.options(this.config.chatMaxTokens ?? 16_384),
-    ));
-    return assistantToChatTurn(message);
-  }
-
-  async chatStream(
-    messages: readonly AgentMessage[],
-    tools: readonly AgentTool[],
-    opts: {
-      onTextStart?: () => void;
-      onDelta?: (text: string) => void;
-      onReasoningStart?: () => void;
-      onReasoning?: (text: string) => void;
-    } = {},
-  ): Promise<ChatTurn> {
-    const context = agentMessagesToContext(messages, tools, this.piModel, this.now);
-    const controller = new AbortController();
-    const idleMs = this.config.streamIdleTimeoutMs ?? 120_000;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    let emitted = false;
-    const bump = (): void => {
-      if (idleTimer) clearTimeout(idleTimer);
-      if (idleMs > 0) {
-        idleTimer = setTimeout(
-          () => controller.abort(new Error(`pi-responses: no upstream events for ${idleMs}ms`)),
-          idleMs,
-        );
-      }
-    };
-    bump();
-    try {
-      const eventStream = this.streamFn(
-        this.piModel,
-        context,
-        this.options(this.config.chatMaxTokens ?? 16_384, { signal: controller.signal }),
-      );
-      for await (const event of eventStream) {
-        bump();
-        if (event.type === "text_start") {
-          emitted = true;
-          opts.onTextStart?.();
-        } else if (event.type === "text_delta") {
-          emitted = true;
-          opts.onDelta?.(event.delta);
-        } else if (event.type === "thinking_start") {
-          emitted = true;
-          opts.onReasoningStart?.();
-        } else if (event.type === "thinking_delta") {
-          emitted = true;
-          opts.onReasoning?.(event.delta);
-        }
-      }
-      return assistantToChatTurn(await this.requireSuccess(eventStream.result()));
-    } catch (error) {
-      if (!emitted && this.config.streamFallbackToBuffered !== false) {
-        return this.chat(messages, tools);
-      }
-      throw error;
-    } finally {
-      if (idleTimer) clearTimeout(idleTimer);
-    }
-  }
-
-  generateRtl(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<RtlGeneration> {
-    return this.actionClient.generateRtl(task, systemPrompt, upstream);
-  }
-
-  generateTestbench(
-    rtl: readonly ArtifactFile[],
-    topModule: string,
-    systemPrompt: string,
-    upstream?: UpstreamArtifacts,
-  ): Promise<TbGeneration> {
-    return this.actionClient.generateTestbench(rtl, topModule, systemPrompt, upstream);
-  }
-
-  generateXdc(
-    topModule: string,
-    part: string,
-    systemPrompt: string,
-    allowPinAssignments: boolean,
-    upstream?: UpstreamArtifacts,
-    topPorts?: readonly string[],
-  ): Promise<XdcGeneration> {
-    return this.actionClient.generateXdc(
-      topModule,
-      part,
-      systemPrompt,
-      allowPinAssignments,
-      upstream,
-      topPorts,
-    );
-  }
-
-  repair(input: Parameters<LoopModel["repair"]>[0]): Promise<RepairGeneration> {
-    return this.actionClient.repair(input);
-  }
-
-  generateIntake(task: string, systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
-    return this.actionClient.generateIntake(task, systemPrompt, upstream);
-  }
-
-  generateBehaviorWave(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
-    return this.actionClient.generateBehaviorWave(systemPrompt, upstream);
-  }
-
-  generateArchitecture(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
-    return this.actionClient.generateArchitecture(systemPrompt, upstream);
-  }
-
-  generateRegisterSpec(systemPrompt: string, upstream?: UpstreamArtifacts): Promise<DocGeneration> {
-    return this.actionClient.generateRegisterSpec(systemPrompt, upstream);
-  }
-}
-
 export function modelApiModeFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): ModelApiMode {
@@ -583,10 +360,9 @@ export function modelApiModeFromEnv(
   if (!raw || raw === "chat-completions" || raw === "chat_completions" || raw === "chat") {
     return "chat-completions";
   }
-  if (raw === "responses" || raw === "response") return "responses";
   if (raw === "anthropic-messages" || raw === "anthropic" || raw === "messages") return "anthropic-messages";
   throw new Error(
-    "SYNTHIA_MODEL_API must be one of chat-completions, responses, or anthropic-messages",
+    "SYNTHIA_MODEL_API must be one of chat-completions or anthropic-messages",
   );
 }
 
@@ -598,7 +374,5 @@ export function createRuntimeModelFromEnv(
   const config = modelConfigFromEnv(env);
   const mode = modelApiModeFromEnv(env);
   if (mode === "anthropic-messages") return new PiAnthropicRuntimeModel(config);
-  return mode === "responses"
-    ? new PiResponsesRuntimeModel(config)
-    : new ModelClient(config);
+  return new ModelClient(config);
 }

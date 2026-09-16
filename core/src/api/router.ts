@@ -299,20 +299,6 @@ export async function routeApi(
     return jsonBody(500, errorEnvelope(INTERNAL_ERROR, correlationId));
   }
 
-  // Appendix B exposes the dedicated eval-job surface as strict POST actions.
-  // Reject wrong methods as nonexistent before generic write-body parsing can
-  // turn an absent PUT/PATCH body into a misleading validation response.
-  if (
-    request.method !== "POST"
-    && url.pathname.startsWith(`${API_PREFIX}/internal/evolution/curator-runs/`)
-    && url.pathname.includes("/eval-jobs")
-  ) {
-    return jsonBody(
-      404,
-      errorEnvelope(notFoundError(`unknown path: ${request.method} ${url.pathname}`), correlationId),
-    );
-  }
-
   let body: unknown = null;
   if (request.method === "POST" || request.method === "PUT" || request.method === "PATCH") {
     const raw = await request.text();
