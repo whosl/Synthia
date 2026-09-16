@@ -13,8 +13,6 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type { ChatPoster } from "./model-client.ts";
 import { ModelClient } from "./model-client.ts";
 import { EvolutionModelAdapter } from "./evolution-model-adapter.ts";
-import { CoreEvolutionEvalClient } from "./evolution-eval-client.ts";
-import { EvolutionEvaluator } from "./evolution-evaluator.ts";
 import {
   EvolutionScheduler,
   type EvolutionSchedulerClock,
@@ -143,6 +141,13 @@ export interface EvolutionServiceFactoryOverrides {
   ) => EvolutionCuratorScheduleEnqueuer;
   readonly fetchImpl?: EvolutionServiceFetch;
   readonly modelPost?: ChatPoster;
+  /**
+   * Deployment seam: a fully built adapter for model wires the default
+   * ModelClient cannot speak (e.g. an Anthropic-protocol endpoint). When set,
+   * the SYNTHIA_EVOLUTION_MODEL_* env still names the model but the default
+   * client is never constructed.
+   */
+  readonly model?: EvolutionModelAdapter;
   readonly clock?: EvolutionSchedulerClock;
   readonly timer?: EvolutionServiceTimer;
   readonly stateStore?: EvolutionServiceStateStore;
@@ -587,11 +592,6 @@ export function createEvolutionServiceFromEnv(
   const distillerToken = requiredEnv(env, "SYNTHIA_EVOLUTION_DISTILLER_TOKEN");
   const curatorToken = requiredEnv(env, "SYNTHIA_EVOLUTION_CURATOR_TOKEN");
   const schedulerToken = requiredEnv(env, "SYNTHIA_EVOLUTION_SCHEDULER_TOKEN");
-  const evolutionEvalEnabled = env.SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION === "1"
-    || env.SYNTHIA_FEATURE_EVOLUTION_EVAL_EXECUTION === "true";
-  const evaluatorToken = evolutionEvalEnabled
-    ? requiredEnv(env, "SYNTHIA_EVOLUTION_EVALUATOR_TOKEN")
-    : null;
   const modelUrl = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_URL");
   const modelKey = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_KEY");
   const modelId = requiredEnv(env, "SYNTHIA_EVOLUTION_MODEL_NAME");
@@ -613,7 +613,7 @@ export function createEvolutionServiceFromEnv(
     fetchImpl: fetchImpl as typeof fetch,
     requestTimeoutMs: ioTimeoutMs,
   });
-  const model = new EvolutionModelAdapter(new ModelClient({
+  const model = overrides.model ?? new EvolutionModelAdapter(new ModelClient({
     baseUrl: absoluteHttpUrl(modelUrl, "SYNTHIA_EVOLUTION_MODEL_URL"),
     apiKey: modelKey,
     model: modelId,
@@ -648,17 +648,6 @@ export function createEvolutionServiceFromEnv(
     fetchImpl: fetchImpl as typeof fetch,
     requestTimeoutMs: ioTimeoutMs,
   });
-  const evaluator = evaluatorToken === null
-    ? undefined
-    : new EvolutionEvaluator(
-        new CoreEvolutionEvalClient({
-          baseUrl: curatorContext.coreBaseUrl,
-          evaluatorToken,
-          fetchImpl: fetchImpl as typeof fetch,
-          requestTimeoutMs: ioTimeoutMs,
-        }),
-        model,
-      );
   const manualContext = {
     ...curatorContext,
     workerId: env.SYNTHIA_EVOLUTION_CURATOR_MANUAL_WORKER_ID
@@ -676,7 +665,6 @@ export function createEvolutionServiceFromEnv(
         model,
         {
           workerId: manualContext.workerId,
-          ...(evaluator === undefined ? {} : { evaluator }),
         },
       ),
     );
@@ -687,7 +675,6 @@ export function createEvolutionServiceFromEnv(
         model,
         {
           workerId: scheduledContext.workerId,
-          ...(evaluator === undefined ? {} : { evaluator }),
         },
       ),
     );

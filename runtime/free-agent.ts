@@ -241,8 +241,6 @@ export interface FreeAgentDeps {
   contextPolicy?: ContextPolicy;
   /** 需要用户裁决的工具名单（红线工具不在此列——那些由 beforeToolCall 硬拦）。 */
   permissionTools?: readonly string[];
-  /** 挂起权限请求的裁决等待上限（毫秒）；超时按拒绝处理。默认 600_000。 */
-  permissionTimeoutMs?: number;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -522,13 +520,12 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private compactionSummary: { text: string; coveredUpTo: number } | null = null;
   /** 「跳过所有权限」开关（会话级内存态；红线工具不受它影响，仍硬拦）。 */
   private permissionSkipAll = false;
-  /** 挂起中的权限请求（同一时刻至多一个——工具顺序执行）。 */
+  /** 挂起中的权限请求（同一时刻至多一个——工具顺序执行）。无超时，一直挂到裁决/abort。 */
   private pendingPermission: {
     readonly callId: string;
     readonly tool: string;
     readonly argsPreview: string;
     resolve: (allow: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
   } | null = null;
   /** server 注入的事件监听（Core 事件 + SSE）。 */
   private permissionListener: ((event: {
@@ -601,6 +598,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         this.artifactList.push(artifact);
       }
       for (const [id, members] of restored.snapshots ?? []) this.snapshotsById.set(id, members);
+      if (typeof restored.permissionSkipAll === "boolean") {
+        this.permissionSkipAll = restored.permissionSkipAll;
+      }
     }
 
     this.agentState = deps.initialState
@@ -696,16 +696,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // 工具顺序执行，理论上不会叠挂；万一有，先按拒绝清场。
     if (this.pendingPermission) this.settlePermission(false, "superseded");
     const argsPreview = clipText(JSON.stringify(call.args ?? {}), 800);
+    // 无超时：请求一直挂着等用户裁决（UI 卡片/「跳过所有权限」/abort 三条出路）。
+    // 模型侧工具在等待期间不返回，轮次自然停在权限上，不产生任何部分状态。
     return await new Promise<boolean>((resolve) => {
-      const timeoutMs = this.deps.permissionTimeoutMs ?? 600_000;
-      const timer = setTimeout(() => {
-        if (this.pendingPermission?.callId === call.toolCallId) {
-          this.settlePermission(false, `timeout after ${timeoutMs}ms`);
-        } else {
-          resolve(false);
-        }
-      }, timeoutMs);
-      this.pendingPermission = { callId: call.toolCallId, tool: call.name, argsPreview, resolve, timer };
+      this.pendingPermission = { callId: call.toolCallId, tool: call.name, argsPreview, resolve };
       this.permissionListener?.({ kind: "request", callId: call.toolCallId, tool: call.name, argsPreview });
     });
   }
@@ -714,7 +708,6 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     const pending = this.pendingPermission;
     if (!pending) return;
     this.pendingPermission = null;
-    clearTimeout(pending.timer);
     this.permissionListener?.({
       kind: "decision",
       callId: pending.callId,
@@ -1281,6 +1274,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       pendingSteer: this.pendingSteer,
       artifacts: this.artifactList,
       snapshots: [...this.snapshotsById],
+      // Permission policy must survive restarts: losing it re-gates every
+      // tool call on a permission card after each deploy (harness ledger H20).
+      permissionSkipAll: this.permissionSkipAll,
       ...(this.claimChecks.length > 0 ? { claimChecks: this.claimChecks } : {}),
     }, null, 2) + "\n";
     const write = this.conversationWrite.then(async () => {
@@ -1353,6 +1349,8 @@ export interface LoadedFreeAgentConversation {
   readonly snapshots?: readonly (readonly [string, readonly string[]])[];
   /** claim-check 审计记录（无命中时缺失；向后兼容旧 sidecar）。 */
   readonly claimChecks?: readonly ClaimCheckRecord[];
+  /** 权限 skip-all 开关（旧 sidecar 缺失 = false；H20 持久化）。 */
+  readonly permissionSkipAll?: boolean;
 }
 
 /**

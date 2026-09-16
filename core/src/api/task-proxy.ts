@@ -752,7 +752,9 @@ function outboxEvent(tx: TransactionClient, ctx: RequestContext, aggregate: { ty
 const MAIN_AUTHORIZATION_SCOPE = Object.freeze({
   schema: "task-scope.v1",
   workspace: "project",
-  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
+  // sim/** is read-only: RULE-25 reserves it for platform-written evidence
+  // references. Sessions may read them back but never write there.
+  read_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**", "sim/**"],
   write_paths: ["rtl/**", "tb/**", "doc/**", "prj/constr/**"],
   run_classes: ["exploratory", "gate_check", "formal"],
   can_submit_gates: true,
@@ -1399,6 +1401,18 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
     });
     return { agentId: response.agent_id };
   });
+
+  // Auto-kickoff (harness ledger H18): the task text is the operator's
+  // opening instruction, not a dormant label — every caller so far had to
+  // send a redundant "开始执行" message to actually start the agent. Deliver
+  // the task text as the first user message right after creation. A kickoff
+  // failure never fails the create: the task exists and is fully usable via
+  // an explicit message.
+  try {
+    await runtime.sendMessage(result.agentId, task, `create-kickoff-${result.agentId}`);
+  } catch {
+    // intentional: creation succeeded; kickoff is best-effort
+  }
 
   return { status: 201, data: result };
 }

@@ -410,33 +410,6 @@ describe("CoreCuratorEvolutionClient", () => {
     });
   });
 
-  test("claim rejects the unfrozen recovery error_code extension", async () => {
-    const invalid = structuredClone(curatorClaim()) as unknown as {
-      run: { eval_recovery: { jobs: unknown[] } };
-    };
-    invalid.run.eval_recovery.jobs = [{
-      eval_job_id: "job-1",
-      tool_run_id: "tool-1",
-      application_id: "application-1",
-      version_id: "version-1",
-      ordinal: 1,
-      operation: "synthesize",
-      state: "failed",
-      error_code: "EVOLUTION_EVAL_NOT_ACCEPTED",
-      workspace_id: "workspace-1",
-      workspace_revision: 1,
-      workspace_manifest_hash: HASH_A,
-      workspace_sealed: true,
-      evidence_state: "none",
-      retention_state: "not_applicable",
-      evidence_manifest_hash: null,
-      reconciliation_state: "confirmed",
-    }];
-    const client = curator((async () => ok(invalid)) as unknown as typeof fetch);
-    await expect(client.claimManual({ worker_id: "curator-worker-1", lease_seconds: 120 }))
-      .rejects.toMatchObject({ code: "evolution_contract_error", retryable: false });
-  });
-
   test("renew, complete, and fail use exact A.5 bodies and response identities", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     const input = curatorComplete();

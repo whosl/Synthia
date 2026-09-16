@@ -16,6 +16,8 @@ function sha256Hex(data) {
   const h = createHash("sha256");
   if (typeof data === "string") {
     h.update(data, "utf8");
+  } else if (data instanceof ArrayBuffer) {
+    h.update(new Uint8Array(data));
   } else {
     h.update(data);
   }
@@ -331,6 +333,130 @@ import { access, constants } from "node:fs/promises";
 import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join as join2, resolve } from "node:path";
+
+// connector/log-digest.ts
+var LOG_DIGEST_FILE_NAME = "log-digest.json";
+var MAX_FAILURE_LINES = 20;
+var MAX_WARNING_LINES = 15;
+var MAX_PASS_LINES = 10;
+var LINE_CHAR_CAP = 400;
+var CONTEXT_LINE_CHAR_CAP = 200;
+var CONTEXT_LINES = 2;
+var FAILURE_LINE_RE = /^\s*(?:ERROR\b|Fatal:|\*\s*Error|FAIL\b|\[\s*FAIL\s*\])|\bFAIL\s*\(/;
+var SIMULATOR_FAILURE_RE = /(?:\$fatal|\bFatal:)/;
+var WARNING_LINE_RE = /^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/;
+var PASS_LINE_RE = /\bPASS/;
+var PHASE_MARKER_RE = /^(?:PHASE=\S+|PHASE_EXIT_CODE=\d+|SOURCE_VALIDATION_OK|SIMULATION_OK|SYNTHIA_DRC_FAILED|SYNTHIA_TIMING_FAILED|SYNTHIA_TIMING_UNCONSTRAINED)$/;
+function capLine(line, cap) {
+  return line.length <= cap ? line : `${line.slice(0, cap)}…`;
+}
+function isFailureLine(line, source) {
+  if (FAILURE_LINE_RE.test(line))
+    return true;
+  return source === "simulator" && SIMULATOR_FAILURE_RE.test(line);
+}
+function isPassLine(line, source) {
+  return source === "simulator" && PASS_LINE_RE.test(line) && !isFailureLine(line, source);
+}
+function stdoutSimulatorRegion(stdout) {
+  const lines = stdout.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.includes("SIMULATOR_OUTPUT_BEGIN"));
+  if (start === -1)
+    return;
+  let end = -1;
+  for (let i = lines.length - 1;i > start; i--) {
+    if (lines[i].includes("SIMULATOR_OUTPUT_END")) {
+      end = i;
+      break;
+    }
+  }
+  return end > start ? { start, end } : undefined;
+}
+function scanStream(text, source, skipTbRegion, region) {
+  const lines = text.split(/\r?\n/);
+  const failure = [];
+  const warning = [];
+  const pass = [];
+  const phaseMarkers = [];
+  let failureTotal = 0;
+  let warningTotal = 0;
+  let passTotal = 0;
+  let truncated = false;
+  for (let i = 0;i < lines.length; i++) {
+    const line = lines[i];
+    if (source === "stdout" && PHASE_MARKER_RE.test(line)) {
+      phaseMarkers.push(capLine(line, LINE_CHAR_CAP));
+      continue;
+    }
+    const inSimulatorRegion = skipTbRegion && region !== undefined && i >= region.start && i <= region.end;
+    if (inSimulatorRegion)
+      continue;
+    if (isFailureLine(line, source)) {
+      failureTotal++;
+      if (failure.length < MAX_FAILURE_LINES) {
+        const contextBefore = [];
+        for (let j = i - 1;j >= 0 && contextBefore.length < CONTEXT_LINES; j--) {
+          const prev = lines[j];
+          if (prev.trim().length > 0)
+            contextBefore.unshift(capLine(prev, CONTEXT_LINE_CHAR_CAP));
+        }
+        failure.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP), ...contextBefore.length > 0 ? { contextBefore } : {} });
+      } else {
+        truncated = true;
+      }
+    } else if (WARNING_LINE_RE.test(line)) {
+      warningTotal++;
+      if (warning.length < MAX_WARNING_LINES)
+        warning.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
+      else
+        truncated = true;
+    } else if (isPassLine(line, source)) {
+      passTotal++;
+      if (pass.length < MAX_PASS_LINES)
+        pass.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
+      else
+        truncated = true;
+    }
+  }
+  return {
+    failure,
+    warning,
+    pass,
+    phaseMarkers,
+    truncated,
+    counts: { failure: failureTotal, warning: warningTotal, pass: passTotal }
+  };
+}
+function buildLogDigest(operation, streams) {
+  const stdout = streams.stdout ?? "";
+  const stderr = streams.stderr ?? "";
+  const simulator = streams.simulator;
+  const region = simulator !== undefined ? stdoutSimulatorRegion(stdout) : undefined;
+  const out = scanStream(stdout, "stdout", simulator !== undefined, region);
+  const err = scanStream(stderr, "stderr", false, undefined);
+  const sim = simulator !== undefined ? scanStream(simulator, "simulator", false, undefined) : undefined;
+  return {
+    schema: "synthia-log-digest.v1",
+    operation,
+    counts: {
+      failure: out.counts.failure + err.counts.failure + (sim?.counts.failure ?? 0),
+      warning: out.counts.warning + err.counts.warning + (sim?.counts.warning ?? 0),
+      pass: out.counts.pass + err.counts.pass + (sim?.counts.pass ?? 0)
+    },
+    failureLines: [...sim?.failure ?? [], ...out.failure, ...err.failure],
+    warningLines: [...out.warning, ...err.warning, ...sim?.warning ?? []],
+    passLines: [...sim?.pass ?? [], ...out.pass, ...err.pass],
+    phaseMarkers: out.phaseMarkers,
+    scanned: {
+      stdout: stdout.length,
+      stderr: stderr.length,
+      ...simulator !== undefined ? { simulator: simulator.length } : {}
+    },
+    truncated: out.truncated || err.truncated || (sim?.truncated ?? false)
+  };
+}
+
+// connector/vivado.ts
 var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
 var VIVADO_CAPABILITIES = [
   ["discover_toolchain", "node", "toolchain_snapshot"],
@@ -388,7 +514,7 @@ function isPlainObject(value) {
 var VERILOG_MEDIA_TYPES = { "text/verilog": true, "text/x-verilog": true, "text/systemverilog": true, "application/systemverilog": true };
 function assertSourceLanguage(source) {
   const lower = source.path.toLowerCase();
-  const extOk = lower.endsWith(".v") || lower.endsWith(".sv");
+  const extOk = lower.endsWith(".v") || lower.endsWith(".sv") || lower.endsWith(".vh") || lower.endsWith(".svh");
   const mediaOk = source.mediaType === undefined || VERILOG_MEDIA_TYPES[source.mediaType] === true;
   if (!extOk || !mediaOk)
     reject("UNSUPPORTED_SOURCE_LANGUAGE");
@@ -683,9 +809,14 @@ function scriptFor(request, inputDir, outputDir) {
 puts [join [get_parts *] \\"\\n\\"]`;
   if (request.operation === "query_parts")
     return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
-  if (request.operation === "validate_sources")
+  if (request.operation === "validate_sources") {
+    for (const src of "sources" in request ? request.sources : []) {
+      if (/^\s*\\/m.test(src.content) || /\\`/.test(src.content))
+        reject(`SUSPICIOUS_ESCAPE_ARTIFACT:${src.path}: leading backslash or escaped backtick — shell-escaping artifact that xvlog tolerates but synthesis rejects`);
+    }
     return `${sources}
 puts SOURCE_VALIDATION_OK`;
+  }
   if (request.operation === "simulate") {
     const designPaths = [];
     const simPaths = [];
@@ -719,10 +850,13 @@ proc phaseExitCode {options} {
   }
   return 1
 }
+proc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }
 set phase compile
-if {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }
+if {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
+catch {catLog [file join $simRoot compile.log]}
 set phase elaborate
-if {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; return -options $sim_options $sim_output }
+if {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot elaborate.log]}; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
+catch {catLog [file join $simRoot elaborate.log]}
 set phase simulate
 if {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }
 puts "PHASE=simulate"
@@ -768,7 +902,7 @@ function evidenceInputManifest(request) {
     toolchainHash: request.toolchainHash ?? request.toolchain?.profileHash ?? null,
     top: "top" in request ? request.top : null,
     testbench: request.operation === "simulate" ? request.testbench : null,
-    part: "part" in request ? request.part : request.toolchain?.part ?? null,
+    part: request.operation === "synthesize" || request.operation === "implement" ? "part" in request ? request.part : request.toolchain?.part ?? null : null,
     stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
     sources: "sources" in request ? request.sources.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : [],
     constraints: "constraints" in request && request.constraints ? request.constraints.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : []
@@ -849,7 +983,7 @@ function parseSimulatePhases(text) {
 }
 function judgeSimulation(simulatorStdout, phaseExitCode, exitCode) {
   const region = simulatorStdout ?? "";
-  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region))
+  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region) || /^\s*\[\s*FAIL\s*\]/m.test(region) || /\bFAIL\s*\(/m.test(region))
     return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
   if ((phaseExitCode ?? exitCode) !== 0 || exitCode !== 0)
     return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
@@ -1036,6 +1170,8 @@ class VivadoBatchAdapter {
     }
     const text = `${result.stdout}
 ${result.stderr}`;
+    const baseDigest = buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr });
+    await writeFile2(join2(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(baseDigest, null, 2), "utf8");
     const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
     const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
     if (licenseFailure) {
@@ -1055,8 +1191,10 @@ ${result.stderr}`;
         phaseExitCode: sim.phaseExitCode ?? null,
         simulatorVerdict: verdict.errorCode ?? "passed"
       });
+      const digest = sim.simulatorStdout !== undefined ? buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr, simulator: sim.simulatorStdout }) : baseDigest;
+      await writeFile2(join2(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(digest, null, 2), "utf8");
       const ev2 = await evidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode };
+      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode, logDigest: digest };
     }
     if (request.operation === "implement") {
       const stopBeforeBitstream = request.stopBeforeBitstream === true;
@@ -1077,12 +1215,12 @@ ${result.stderr}`;
         errorCode: verdict.errorCode ?? null
       });
       const ev2 = verdict.status === "succeeded" ? await evidence(workspace, request.jobId) : await failedImplementationEvidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode };
+      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode, logDigest: baseDigest };
     }
     const status = result.exitCode === 0 ? "succeeded" : "failed";
     await writeExecutionEvidence(outputDir, request, result, status);
     const ev = await evidence(workspace, request.jobId);
-    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev };
+    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, logDigest: baseDigest };
   }
 }
 
@@ -1163,6 +1301,8 @@ function execution(config) {
         meta.phaseExitCode = result.phaseExitCode;
       if (result.simulatorStdout !== undefined)
         meta.simulatorStdout = result.simulatorStdout;
+      if (result.logDigest !== undefined)
+        meta.logDigest = result.logDigest;
       if (result.stdout !== undefined)
         meta.stdout = result.stdout;
       if (result.stderr !== undefined)

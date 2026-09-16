@@ -6,10 +6,6 @@
  * project, governance, Connector, or Vivado operations.
  */
 
-import type {
-  EvolutionEvalInputV1,
-  EvolutionEvalRecoveryV1,
-} from "./evolution-eval-client.ts";
 
 export type EvolutionQualityState =
   | "active_unproven"
@@ -250,7 +246,6 @@ export interface CuratorClaimV1 {
     readonly lease_token: string;
     readonly lease_expires_at: string;
     readonly schedule_bucket: string;
-    readonly eval_recovery: EvolutionEvalRecoveryV1;
     readonly applications: readonly {
       readonly application: SkillApplicationDetailV1;
       readonly primary_version: {
@@ -268,7 +263,6 @@ export interface CuratorClaimV1 {
           readonly content: string;
         }[];
       };
-      readonly eval_input: EvolutionEvalInputV1 | null;
       readonly evidence_snapshot_hash: string;
       readonly evidence: readonly {
         readonly type: string;
@@ -860,136 +854,7 @@ function parseDistillationClaim(value: unknown): DistillationClaimV1 {
   };
 }
 
-function parseEvalInput(value: unknown, path: string): EvolutionEvalInputV1 {
-  const row = record(value, path);
-  const allowedOperations = requireArray(row.allowed_operations, `${path}.allowed_operations`)
-    .map((operation, index) => {
-      if (
-        operation !== "validate_sources"
-        && operation !== "simulate"
-        && operation !== "synthesize"
-        && operation !== "implement"
-      ) throw contractError(`${path}.allowed_operations[${index}] is invalid`);
-      return operation;
-    });
-  if (new Set(allowedOperations).size !== allowedOperations.length) {
-    throw contractError(`${path}.allowed_operations contains duplicates`);
-  }
-  return {
-    eval_input_ref: requireOpaqueText(row.eval_input_ref, `${path}.eval_input_ref`),
-    input_manifest_hash: requireHash(row.input_manifest_hash, `${path}.input_manifest_hash`),
-    source_commit: requireCommit(row.source_commit, `${path}.source_commit`),
-    source_manifest_hash: requireHash(row.source_manifest_hash, `${path}.source_manifest_hash`),
-    allowed_operations: allowedOperations,
-    trial_bitstream_allowed: requireBoolean(
-      row.trial_bitstream_allowed,
-      `${path}.trial_bitstream_allowed`,
-    ),
-    part: nullableText(row.part, `${path}.part`),
-    toolchain_profile_hash: requireHash(
-      row.toolchain_profile_hash,
-      `${path}.toolchain_profile_hash`,
-    ),
-  };
-}
 
-function parseEvalRecovery(value: unknown, path: string): EvolutionEvalRecoveryV1 {
-  const row = record(value, path);
-  requireExactKeys(
-    row,
-    ["budget_started_at", "deadline_at", "unknown_effect_latched_at", "jobs"],
-    path,
-  );
-  const budgetStartedAt = nullableTimestamp(row.budget_started_at, `${path}.budget_started_at`);
-  const deadlineAt = nullableTimestamp(row.deadline_at, `${path}.deadline_at`);
-  if ((budgetStartedAt === null) !== (deadlineAt === null)) {
-    throw contractError(`${path} budget timestamps are inconsistent`);
-  }
-  const jobs = requireArray(row.jobs, `${path}.jobs`).map((raw, index): EvolutionEvalRecoveryV1["jobs"][number] => {
-    const job = record(raw, `${path}.jobs[${index}]`);
-    requireExactKeys(job, [
-      "eval_job_id", "tool_run_id", "application_id", "version_id", "ordinal",
-      "operation", "state", "workspace_id", "workspace_revision",
-      "workspace_manifest_hash", "workspace_sealed", "evidence_state",
-      "retention_state", "evidence_manifest_hash", "reconciliation_state",
-    ], `${path}.jobs[${index}]`);
-    const ordinal = requirePositiveInteger(job.ordinal, `${path}.jobs[${index}].ordinal`);
-    if (ordinal > 3) throw contractError(`${path}.jobs[${index}].ordinal is invalid`);
-    const operation = job.operation;
-    if (
-      operation !== "validate_sources"
-      && operation !== "simulate"
-      && operation !== "synthesize"
-      && operation !== "implement"
-    ) throw contractError(`${path}.jobs[${index}].operation is invalid`);
-    const state = job.state;
-    if (
-      state !== "submitted" && state !== "running" && state !== "rejected"
-      && state !== "succeeded" && state !== "failed" && state !== "cancelled"
-      && state !== "timeout" && state !== "unknown_effect"
-    ) throw contractError(`${path}.jobs[${index}].state is invalid`);
-    const evidenceState = job.evidence_state;
-    if (
-      evidenceState !== "none" && evidenceState !== "freeze_pending"
-      && evidenceState !== "frozen" && evidenceState !== "corrupt"
-      && evidenceState !== "unavailable_at_deadline"
-    ) throw contractError(`${path}.jobs[${index}].evidence_state is invalid`);
-    const retentionState = job.retention_state;
-    if (
-      retentionState !== "not_applicable" && retentionState !== "pending_ack"
-      && retentionState !== "acknowledged" && retentionState !== "quarantine_pending"
-      && retentionState !== "expired"
-    ) throw contractError(`${path}.jobs[${index}].retention_state is invalid`);
-    const reconciliationState = job.reconciliation_state;
-    if (
-      reconciliationState !== "not_needed" && reconciliationState !== "confirmed"
-      && reconciliationState !== "required"
-    ) throw contractError(`${path}.jobs[${index}].reconciliation_state is invalid`);
-    return {
-      eval_job_id: requireText(job.eval_job_id, `${path}.jobs[${index}].eval_job_id`),
-      tool_run_id: requireText(job.tool_run_id, `${path}.jobs[${index}].tool_run_id`),
-      application_id: requireText(job.application_id, `${path}.jobs[${index}].application_id`),
-      version_id: requireText(job.version_id, `${path}.jobs[${index}].version_id`),
-      ordinal: ordinal as 1 | 2 | 3,
-      operation,
-      state,
-      workspace_id: requireText(job.workspace_id, `${path}.jobs[${index}].workspace_id`),
-      workspace_revision: requirePositiveInteger(
-        job.workspace_revision,
-        `${path}.jobs[${index}].workspace_revision`,
-      ),
-      workspace_manifest_hash: requireHash(
-        job.workspace_manifest_hash,
-        `${path}.jobs[${index}].workspace_manifest_hash`,
-      ),
-      workspace_sealed: requireBoolean(
-        job.workspace_sealed,
-        `${path}.jobs[${index}].workspace_sealed`,
-      ),
-      evidence_state: evidenceState,
-      retention_state: retentionState,
-      evidence_manifest_hash: job.evidence_manifest_hash === null
-        ? null
-        : requireHash(
-            job.evidence_manifest_hash,
-            `${path}.jobs[${index}].evidence_manifest_hash`,
-          ),
-      reconciliation_state: reconciliationState,
-    };
-  });
-  if (jobs.length > 3 || jobs.some((job, index) => job.ordinal !== index + 1)) {
-    throw contractError(`${path}.jobs exceeds or violates the serial three-job budget`);
-  }
-  return {
-    budget_started_at: budgetStartedAt,
-    deadline_at: deadlineAt,
-    unknown_effect_latched_at: nullableTimestamp(
-      row.unknown_effect_latched_at,
-      `${path}.unknown_effect_latched_at`,
-    ),
-    jobs,
-  };
-}
 
 function requireCommit(value: unknown, path: string): string {
   if (typeof value !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
@@ -1015,7 +880,6 @@ function parseCuratorClaim(value: unknown): CuratorClaimV1 {
       lease_token: requireOpaqueText(run.lease_token, "run.lease_token"),
       lease_expires_at: requireTimestamp(run.lease_expires_at, "run.lease_expires_at"),
       schedule_bucket: requireText(run.schedule_bucket, "run.schedule_bucket"),
-      eval_recovery: parseEvalRecovery(run.eval_recovery, "run.eval_recovery"),
       applications: requireArray(run.applications, "run.applications")
         .map((raw, index) => parseCuratorApplication(raw, `run.applications[${index}]`)),
     },
@@ -1087,9 +951,6 @@ function parseCuratorApplication(
         };
       }),
     },
-    eval_input: row.eval_input === null
-      ? null
-      : parseEvalInput(row.eval_input, `${path}.eval_input`),
     evidence_snapshot_hash: requireHash(row.evidence_snapshot_hash, `${path}.evidence_snapshot_hash`),
     evidence: requireArray(row.evidence, `${path}.evidence`).map((raw, index) => {
       const item = record(raw, `${path}.evidence[${index}]`);

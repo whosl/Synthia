@@ -16,3 +16,5 @@ CREATE TABLE IF NOT EXISTS tool_timing_metrics (
 
 CREATE INDEX IF NOT EXISTS tool_timing_metrics_project_parsed_idx
   ON tool_timing_metrics (project_id, parsed_at DESC);
+
+INSERT INTO schema_migrations(version) VALUES ('0014_tool_timing_metrics') ON CONFLICT (version) DO NOTHING;

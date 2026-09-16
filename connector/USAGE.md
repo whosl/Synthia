@@ -159,6 +159,14 @@ POST /jobs/evidence
 
 ## M4-F Worker release 与 evolution-eval ledger
 
+> **状态注记（2026-09-14 消融）**：certified-eval 管线与 attestation 机器已从源码切除
+>（部署 bundle 自 4ef254a 起本就无 eval/attestation 代码；生产配置自 519ab6e 起恒为
+> `evolution_eval_enabled=false`）。本章与 `specs/repros/connector-ceremony-archive/` 为
+> 历史 ceremony 记录；`build-worker-release.ts` 脚本随 eval 认证层一并移除。
+> bundle 的正式构建入口仍以 Windows Gate 手册为准。
+
+## M4-F Worker release 与 evolution-eval ledger（历史记录）
+
 仓库中的 `server.bundle.mjs` 是部署输入，不得用旧 bundle、临时单次构建或源码存在差异的 bundle 覆盖正式 Worker。正式 release 只能在 clean commit 上、使用与 Windows Gate 相同且固定为 Bun `1.3.14` 的 runtime 构建：
 
 ```bash

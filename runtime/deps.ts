@@ -6,14 +6,11 @@
  *
  * Exports:
  *  - CounterScriptedModel + artifact helpers (offline smoke)
- *  - buildRemoteConnector  (direct Cloudflare connector from worker config)
  *  - buildCoreApiConnector  (via-core job submission through Core)
  *  - buildCoreGovernanceClient (Core API artifact/gate governance)
  */
 
 import { readFile } from "node:fs/promises";
-import { createEnvironmentCloudflareRemoteConnector } from "../connector/http.ts";
-import type { ConnectorEndpoint } from "../connector/remote.ts";
 import {
   CoreApiConnector,
   resolveCoreApiConfig,
@@ -92,48 +89,6 @@ export function xdcSmoke(): ArtifactFile {
 // ---------------------------------------------------------------------------
 
 const CONNECTOR_HOST = "connect.wenzhuolin.xyz";
-
-export async function buildRemoteConnector(projectId: string): Promise<RemoteVivadoConnector> {
-  const cfg = JSON.parse(await readFile("connector/worker-66.config.json", "utf8")) as Record<string, unknown>;
-  const str = (k: string): string => { const v = cfg[k]; if (typeof v !== "string") throw new Error(`worker config missing ${k}`); return v; };
-  const num = (k: string): number => { const v = cfg[k]; if (typeof v !== "number") throw new Error(`worker config missing ${k}`); return v; };
-  const arr = (k: string): string[] => { const v = cfg[k]; if (!Array.isArray(v)) throw new Error(`worker config missing ${k}`); return v as string[]; };
-  const labels = cfg.worker_labels as Record<string, string>;
-  const endpoint: ConnectorEndpoint = {
-    connector_id: str("connector_id"),
-    display_name: str("display_name"),
-    endpoint_url: `https://${CONNECTOR_HOST}`,
-    protocol_version: str("protocol_version"),
-    transport_mode: "direct_https",
-    auth_mode: "mtls",
-    tls_trust_ref: "secret://trust/cloudflare-edge",
-    tls_client_cert_ref: "secret://cert/cloudflare-origin",
-    project_scope: arr("project_scope"),
-    data_classification_scope: arr("data_classification_scope") as ConnectorEndpoint["data_classification_scope"],
-    allowed_capability_ids: arr("allowed_capability_ids"),
-    toolchain_profile_hash: str("toolchain_profile_hash"),
-    worker_labels: labels,
-    heartbeat_interval_seconds: num("heartbeat_interval_seconds"),
-    lease_seconds: num("lease_seconds"),
-    max_concurrency: num("max_concurrency"),
-    registration_state: "registering",
-    created_at: str("created_at"),
-    updated_at: str("updated_at"),
-    audited_by: str("audited_by"),
-    expected_capability_map_version: str("capability_map_version"),
-    expected_part_catalog_hash: str("part_catalog_hash"),
-    expected_sdk_worker_build_hash: str("sdk_worker_build_hash"),
-  };
-  const clientFactory = () => createEnvironmentCloudflareRemoteConnector({
-    endpoint,
-    actor: { actor_type: "service", actor_id: "synthia-runtime" },
-    classification: "internal",
-    projectId,
-    allowlist: [CONNECTOR_HOST],
-    env: process.env,
-  });
-  return new RemoteVivadoConnector({ clientFactory, connectorId: endpoint.connector_id, projectId, onLifecycle: (e) => process.stderr.write(`[runtime] lifecycle/${e.action} ${e.result} ${e.detail ?? ""}\n`) });
-}
 
 export interface CoreApiTaskJobBinding {
   readonly taskId: string;
