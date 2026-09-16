@@ -4,10 +4,9 @@
  *
  *   DATABASE_URL=postgres://... [PORT=8787] bun run core/scripts/serve.ts
  *
- * Connector port is built from env when Cloudflare credentials are present
- * (SYNTHIA_CF_ACCESS_CLIENT_ID / SYNTHIA_CF_ACCESS_CLIENT_SECRET /
- * SYNTHIA_CONNECTOR_CONFIG); without them the server still starts and the
- * Job endpoints answer 503 capability_unavailable.
+ * Connector port is built from SYNTHIA_CONNECTOR_CONFIG (direct mTLS);
+ * without it the server still starts and the job endpoints answer 503
+ * capability_unavailable.
  * Historical-material writes require SYNTHIA_FEATURE_HISTORICAL_MATERIALS=1
  * (or true); unset/0/false keeps the capability read-only.
  * Side-task workspace/adoption writes require SYNTHIA_FEATURE_SIDE_TASKS=1.

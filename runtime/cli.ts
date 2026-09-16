@@ -6,7 +6,7 @@
  *        [--resume <agentId>] [--acceptance-tb <path> --acceptance-module <module>]
  *
  * Modes:
- *  - default         real model (SYNTHIA_MODEL_*) + real Cloudflare connector
+ *  - default         real model (SYNTHIA_MODEL_*) — requires --via-core (direct transport removed)
  *  - --via-core      real model + CoreApiConnector (submits jobs through Core
  *                    API instead of hitting worker 66 directly); governance via
  *                    Core API (artifact registration + gate submissions).
@@ -48,7 +48,7 @@ import { CoreGovernanceClient } from "./governance-client.ts";
 import { newAgentId, createAgentState, loadAgentState, saveAgentState } from "./agent-state.ts";
 import type { GovernanceClient, LoopModel, LoopResult, AgentState } from "./types.ts";
 import { NoGovernanceClient as NoGovClient } from "./types.ts";
-import { CounterScriptedModel, buildRemoteConnector, buildCoreApiConnector } from "./deps.ts";
+import { CounterScriptedModel, buildCoreApiConnector } from "./deps.ts";
 
 const DEFAULT_PART = "xc7k70tfbv676-1";
 const DEFAULT_PROJECT = "p1";
@@ -196,7 +196,8 @@ async function main(): Promise<void> {
   } else if (args.fakeConnector) {
     connector = new FakeVivadoConnector({ behavior: successBehavior() });
   } else {
-    connector = await buildRemoteConnector(project);
+    // Cloudflare 中继传输已消融（生产为 direct mTLS / 经 Core 两条路）。
+    throw new Error("direct worker transport removed — pass --via-core (production path) or --offline/--fake-connector");
   }
 
   // Governance: --no-governance → NoGovernanceClient; --via-core → CoreGovernanceClient.

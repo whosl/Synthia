@@ -2,7 +2,7 @@
  * Synthia Core API — production Connector adapter (IF-002 run/connector slice)
  *
  * Implements {@link ConnectorPort} by delegating to the real remote Connector
- * client built from `connector/http.ts`'s `createEnvironmentCloudflareRemoteConnector`.
+ * client built from `connector/http.ts`'s `createMtlsDirectRemoteConnector` (direct mTLS).
  *
  * Core is multi-project but `RemoteConnectorClient` is constructed single-project
  * (it validates project scope at construction), so the adapter caches one client
@@ -36,7 +36,7 @@ import {
   type SubmitJobParams,
 } from "./connector-port.ts";
 
-/** Fixed production tunnel endpoint — the public Cloudflare origin for worker 66. */
+/** 历史常量：Cloudflare 隧道时代保留，direct_https 配置不使用。 */
 const PRODUCTION_ENDPOINT_URL = "https://connect.wenzhuolin.xyz";
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_TLS_MATERIAL_BYTES = 1024 * 1024;
@@ -367,7 +367,6 @@ export class RemoteConnectorAdapter implements ConnectorPort {
         classification: "internal",
         projectId,
         env: this.env,
-        secretNames: { clientId: "SYNTHIA_CF_ACCESS_CLIENT_ID", clientSecret: "SYNTHIA_CF_ACCESS_CLIENT_SECRET" },
       });
     } catch (err) {
       throw toConnectorError(err);
@@ -592,40 +591,5 @@ export async function createConnectorFromEnv(
     const directEndpoint = String(config.endpoint_url ?? "");
     if (!directEndpoint) return undefined;
     return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
-  } else {
-    // Cloudflare-tunnel deployments require the Access service-token credentials.
-    const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
-    const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
-    if (!cfId || !cfSecret) return undefined;
-
-    // Override the endpoint origin to the public tunnel; allowlist must include it.
-    // The tunnel terminates TLS at Cloudflare Access, so the mTLS material in the
-    // on-disk (LAN) config does not apply: point the TLS refs at the Cloudflare
-    // secret references the environment factory resolves into Access credentials.
-    config = {
-      ...config,
-      endpoint_url: endpointUrl,
-      tls_trust_ref: "secret://trust/cloudflare-edge",
-      tls_client_cert_ref: "secret://cert/cloudflare-origin",
-    };
   }
-  const allowlist = [new URL(endpointUrl).hostname];
-
-  // Dynamic import: the Connector package lives outside Core's compilation unit
-  // (core/tsconfig.json includes only src/**/*.ts) and connector/index.ts already
-  // imports from ../core/src/*, so a static import would pull all of connector/
-  // (vivado.ts, worker.ts) into Core's type-check graph and create a core↔connector
-  // dependency cycle. Loading it lazily here keeps Core self-contained and lets the
-  // test path skip the Connector module entirely (fake is injected instead).
-  const connectorHttpModulePath: string = "../../../connector/http.ts";
-  const httpModule = (await import(connectorHttpModulePath)) as unknown as {
-    createEnvironmentCloudflareRemoteConnector: RemoteFactory;
-  };
-  const factory: RemoteFactory = httpModule.createEnvironmentCloudflareRemoteConnector;
-  return new RemoteConnectorAdapter(
-    factory,
-    config,
-    allowlist,
-    env,
-  );
 }
