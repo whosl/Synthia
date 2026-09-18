@@ -7,6 +7,10 @@
  * requires dedicated evolution Core tokens plus dedicated model credentials.
  */
 
+// Node-20 polyfills（Promise.withResolvers）须先于任何使用它们的模块体加载；
+// Bun 下为空操作。
+import "../core/src/compat/polyfill.ts";
+import { isMainModule } from "../core/src/compat/main-module.ts";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
@@ -1054,6 +1058,6 @@ async function withDeadline<T>(
   }
 }
 
-if (import.meta.main) {
+if (isMainModule(import.meta)) {
   await runEvolutionServiceEntrypoint();
 }

@@ -31,7 +31,10 @@ echo "[3/5] runtime bundle (node target)..."
 bun build runtime/server.ts --target=node --outfile "$OUT/runtime-serve.mjs"
 grep -q "Bun\.serve\|Bun\.spawn" "$OUT/runtime-serve.mjs" && { echo "runtime bundle still references Bun.* — abort"; exit 1; }
 
-echo "[4/5] collect assets..."
+echo "[4/6] evolution bundle (node target)..."
+bun build runtime/evolution-service.ts --target=node --outfile "$OUT/evolution-service.mjs"
+
+echo "[5/6] collect assets..."
 cp connector/worker-66.config.json "$OUT/"
 # runtime 的 SkillLoader 按 cwd 相对路径 skills/fpga/skill-pack.json 启动即读
 # （DEFAULT_PACK_PATH，无 env 覆盖点）——技能包必须随包分发。
@@ -39,7 +42,7 @@ cp -r skills "$OUT/skills"
 cp deploy/platform/env.example "$OUT/"
 cp deploy/platform/sandbox/* "$OUT/"
 
-echo "[5/5] tar..."
+echo "[6/6] tar..."
 printf '*\n' > dist/.gitignore
 TARBALL="dist/synthia-platform-$(date +%Y%m%d).tar.gz"
 tar -czf "$TARBALL" -C "$OUT" .
