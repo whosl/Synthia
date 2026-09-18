@@ -17,7 +17,18 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const pg = require(require.resolve("pg", { paths: [scriptDir, join(scriptDir, "pg-bootstrap")] }));
 
-const ENV_REAL = join(scriptDir, "..", "env.real");
+// env.real 位置探测：tar 平铺解包时脚本在部署根（scriptDir/env.real）；
+// 嵌套布局时在上级（scriptDir/../env.real）；从子目录运行时以 cwd 兜底。
+// import.meta.url 锚定的是脚本文件位置而非 cwd——三种候选依次探测。
+const ENV_REAL = await (async () => {
+  const { access } = await import("node:fs/promises");
+  const candidates = [join(scriptDir, "env.real"), join(scriptDir, "..", "env.real"), join(process.cwd(), "env.real")];
+  for (const candidate of candidates) {
+    try { await access(candidate); return candidate; } catch {}
+  }
+  console.error(`FAIL: env.real 不存在于任何候选路径（已探测：${candidates.join("、")}）`);
+  process.exit(1);
+})();
 const IDENTITIES = [
   { uid: "synthia-evolution-distiller", scopes: ["core:evolution-distiller"], envVar: "SYNTHIA_EVOLUTION_DISTILLER_TOKEN" },
   { uid: "synthia-evolution-curator", scopes: ["core:evolution-curator"], envVar: "SYNTHIA_EVOLUTION_CURATOR_TOKEN" },
