@@ -9,6 +9,7 @@
 import type { Pool } from "pg";
 import type { ConnectorPort } from "./connector-port.ts";
 import { createRuntimeClientFromEnv, type RuntimeClient } from "./task-proxy.ts";
+import { serveFetch } from "../compat/http.ts";
 import {
   resolveCoreFeatureFlags,
   type CoreFeatureFlags,
@@ -65,12 +66,13 @@ export function startSynthiaServer(pool: Pool, opts: SynthiaServerOptions = {}):
     opts.runtimeActorId ?? process.env.SYNTHIA_RUNTIME_ACTOR_ID,
   );
   const featureFlags = resolveCoreFeatureFlags({ features: opts.features });
-  const server = Bun.serve({
+  const server = serveFetch({
     port: opts.port ?? 0,
     hostname: opts.hostname ?? "127.0.0.1",
     // Bun 默认 idleTimeout=10s。SSE 透传（GET …/tasks/:agentId/stream）在模型
     // 推理静默期会超过它而被掐断，浏览器于是陷入 ~10 秒一次的重连回放循环，
     // 流式输出永远渲染不出来。放到 Bun 上限，保活由 Runtime 的心跳负责。
+    // （Node 桥不认这个值，改为关闭 requestTimeout，语义等价。）
     idleTimeout: 255,
     fetch: (request: Request) => routeApi(
       request,

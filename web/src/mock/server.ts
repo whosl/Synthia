@@ -58,6 +58,7 @@ import {
   normalizeSideTaskWritePath,
 } from "../domain/side-tasks.ts";
 import { sha256Bytes } from "../util/sha256.ts";
+import { stripBackendPrefix } from "../api/platform.ts";
 import {
   MOCK_P4_PROFILE,
   mockP4Artifact,
@@ -1333,7 +1334,8 @@ let installed = false;
  */
 export async function mockApiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response | null> {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  const { pathname, searchParams } = new URL(url, "http://mock.local");
+  const { pathname: rawPathname, searchParams } = new URL(url, "http://mock.local");
+  const pathname = stripBackendPrefix(rawPathname);
   if (!pathname.startsWith("/api/v1")) return null;
 
   const method = (init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET")).toUpperCase();

@@ -181,6 +181,7 @@ import {
 } from "../domain/formal-delivery.ts";
 import { sha256Hex } from "../util/sha256.ts";
 import { ApiError } from "../api/client.ts";
+import { apiBase } from "../api/platform.ts";
 import type {
   ApprovalCardProps,
   ChatComposerMode,
@@ -1433,7 +1434,7 @@ function openStream(agentId: string): void {
   streamFeed.value = [];
   streamPhase.value = "connecting";
   streamHandle = subscribeTaskStream(
-    `${(import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ""}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/stream?from=turn`,
+    `${apiBase()}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(agentId)}/stream?from=turn`,
     readToken(),
     0,
     {

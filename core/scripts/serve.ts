@@ -13,6 +13,9 @@
  * Self-evolution (learned skills) requires SYNTHIA_FEATURE_SELF_EVOLUTION=1.
  */
 import { Pool } from "pg";
+// Node-20 polyfills (Promise.withResolvers) must land before any module body
+// that uses them; under Bun this import is a no-op.
+import "../src/compat/polyfill.ts";
 import { startSynthiaServer } from "../src/api/server.ts";
 import { createConnectorFromEnv } from "../src/api/connector-adapter.ts";
 import { resolveCoreFeatureFlags } from "../src/api/feature-flags.ts";
@@ -39,6 +42,9 @@ const pool = new Pool({ connectionString: DATABASE_URL });
 const connector = await createConnectorFromEnv({ env: process.env });
 const server = startSynthiaServer(pool, {
   port: process.env.PORT ? Number(process.env.PORT) : 8787,
+  // 平台沙箱（Daytona）里预览代理从容器网络访问后端，须绑 0.0.0.0；
+  // 缺省保持回环（本地/家庭部署语义不变）。
+  ...(process.env.SYNTHIA_CORE_HOST ? { hostname: process.env.SYNTHIA_CORE_HOST } : {}),
   connector,
   features,
 });

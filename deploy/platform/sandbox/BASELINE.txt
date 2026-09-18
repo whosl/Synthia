@@ -1,0 +1,2 @@
+# 导出基线（2026-09-18，本机 synthia 库）——与 20-restore-db.sh 输出的 restore-ok 计数人工比对
+1 projects, 1 tasks, 10 auth_tokens, 9 artifacts

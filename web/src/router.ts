@@ -7,8 +7,9 @@
  *   （spec D23：跨项目待办见 §3.6/§7 R6）；
  * - 旧 view 文件不删除，只是不再被路由引用（孤儿文件，留待集成阶段清理）。
  */
-import { createRouter, createWebHistory } from "vue-router";
+import { createRouter, createWebHashHistory, createWebHistory } from "vue-router";
 import { readToken } from "./stores/auth.ts";
+import { PLATFORM_PREVIEW } from "./api/platform.ts";
 
 const LoginView = () => import("./views/LoginView.vue");
 const ProjectsView = () => import("./views/ProjectListView.vue");
@@ -17,7 +18,9 @@ const ApprovalsView = () => import("./views/ApprovalsView.vue");
 const EvolutionView = () => import("./views/EvolutionView.vue");
 
 export const router = createRouter({
-  history: createWebHistory(),
+  // 平台预览模式跑在动态子路径下，history 路由的根绝对跳转和刷新都会
+  // 逃出预览根；hash 路由对任意托管路径免疫。常规部署保持 history 模式。
+  history: PLATFORM_PREVIEW ? createWebHashHistory() : createWebHistory(),
   routes: [
     { path: "/", redirect: "/projects" },
     { path: "/login", name: "login", component: LoginView, meta: { public: true } },
