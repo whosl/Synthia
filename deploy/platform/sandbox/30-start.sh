@@ -17,7 +17,7 @@ mkdir -p logs "$SYNTHIA_WORKSPACES_DIR"
 # 幂等：先清旧的（按端口精确找 PID）。
 # 冷启动时端口无人监听 → grep 无匹配退出 1 → 在 set -euo pipefail 下会
 # 静默中止整个脚本，因此该管道必须容忍空结果（|| true）。
-for port in 8000 5173; do
+for port in 8000 5173 8790; do
   pids=$(ss -tlnp 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $NF}' | grep -oP 'pid=\K[0-9]+' | sort -u || true)
   for pid in $pids; do kill "$pid" 2>/dev/null || true; done
 done
@@ -26,11 +26,19 @@ sleep 0.5
 set -a; . ./env.real; set +a
 nohup node "$PWD/core-serve.mjs" >> logs/core.log 2>&1 &
 echo "core pid=$! -> :8000 (logs/core.log)"
+if [ -f runtime-serve.mjs ]; then
+  mkdir -p "${SYNTHIA_RUNS_DIR:-$PWD/synthia-data/runs}"
+  nohup node "$PWD/runtime-serve.mjs" >> logs/runtime.log 2>&1 &
+  echo "runtime pid=$! -> :8790 loopback (logs/runtime.log)"
+fi
 nohup python3 -m http.server 5173 --bind 0.0.0.0 --directory "$PWD/web" >> logs/web.log 2>&1 &
 echo "web  pid=$! -> :5173 (logs/web.log)"
 
-sleep 1.5
+sleep 2.5
 echo "--- 自检 ---"
+if [ -f runtime-serve.mjs ]; then
+  curl -s -m 3 http://127.0.0.1:8790/tasks | head -c 80; echo " <- runtime(agents 列表，空数组=正常)"
+fi
 curl -s -m 3 "http://127.0.0.1:8000/api/v1/projects" | head -c 120; echo " <- core(401=正常，未带token)"
 curl -s -m 3 -o /dev/null -w "web http_code=%{http_code}\n" http://127.0.0.1:5173/
 echo "最后一步：调 generate_preview_url(5173) 生成预览路径，浏览器访问 {预览根}/ 即 Synthia。"

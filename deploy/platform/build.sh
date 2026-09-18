@@ -20,16 +20,21 @@ echo "[1/4] core bundle (node target)..."
 bun build core/scripts/serve.ts --target=node --outfile "$OUT/core-serve.mjs"
 grep -q "Bun\.serve\|Bun\.spawn" "$OUT/core-serve.mjs" && { echo "bundle still references Bun.* — abort"; exit 1; }
 
-echo "[2/4] web platform build..."
-(cd web && VITE_PLATFORM_PREVIEW=1 bun run build >/dev/null)
+echo "[2/5] web platform build（feature flags 对齐 golden 线 dev-up）..."
+(cd web && VITE_PLATFORM_PREVIEW=1 VITE_FEATURE_HISTORICAL_MATERIALS=1 \
+  VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 bun run build >/dev/null)
 cp -r web/dist "$OUT/web"
 
-echo "[3/4] collect assets..."
+echo "[3/5] runtime bundle (node target)..."
+bun build runtime/server.ts --target=node --outfile "$OUT/runtime-serve.mjs"
+grep -q "Bun\.serve\|Bun\.spawn" "$OUT/runtime-serve.mjs" && { echo "runtime bundle still references Bun.* — abort"; exit 1; }
+
+echo "[4/5] collect assets..."
 cp connector/worker-66.config.json "$OUT/"
 cp deploy/platform/env.example "$OUT/"
 cp deploy/platform/sandbox/* "$OUT/"
 
-echo "[4/4] tar..."
+echo "[5/5] tar..."
 printf '*\n' > dist/.gitignore
 TARBALL="dist/synthia-platform-$(date +%Y%m%d).tar.gz"
 tar -czf "$TARBALL" -C "$OUT" .

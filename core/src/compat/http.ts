@@ -11,7 +11,8 @@ export interface FetchServer {
 export interface ServeFetchOptions {
   readonly fetch: (request: Request) => Response | Promise<Response>;
   readonly port: number;
-  readonly hostname: string;
+  /** 与 Bun.serve 一致：缺省 0.0.0.0。core 显式传 127.0.0.1（本机语义）。 */
+  readonly hostname?: string;
   /** Bun-only connection idle budget; the Node branch disables request timeouts instead (SSE survival is the point). */
   readonly idleTimeout?: number;
 }
@@ -39,7 +40,7 @@ export function serveFetch(options: ServeFetchOptions): FetchServer {
   if (bunServe !== undefined) {
     const server = bunServe({
       port: options.port,
-      hostname: options.hostname,
+      hostname: options.hostname ?? "0.0.0.0",
       ...(options.idleTimeout === undefined ? {} : { idleTimeout: options.idleTimeout }),
       fetch: options.fetch,
     });
@@ -58,10 +59,11 @@ function serveNodeHttp(options: ServeFetchOptions): FetchServer {
   // Long-lived SSE responses must outlive Node's 300 s requestTimeout default.
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
-  server.listen(options.port, options.hostname);
+  const hostname = options.hostname ?? "0.0.0.0";
+  server.listen(options.port, hostname);
   return {
     port: options.port,
-    hostname: options.hostname,
+    hostname,
     stop: () => {
       server.closeAllConnections?.();
       server.close(() => undefined);

@@ -12,6 +12,7 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -26,7 +27,10 @@ if (typeof dumpPath !== "string" || !dumpPath) {
 // pg_dump ≥16.10/17.6 默认在首尾注入 \restrict/\unrestrict psql 元命令；
 // simple-query 协议不认反斜杠命令（SQLSTATE 42601），剔除这两行再整体执行。
 // 只精确匹配这两种元命令——将来若换 COPY 格式 dump，数据块里的 "\." 不受影响。
-const sql = (await readFile(dumpPath, "utf8")).replace(/^\\(?:un)?restrict [^\n]*$/gm, "");
+// .gz 直接支持（--inserts 文本压缩率高，线上传输只发 gz）。
+const raw = await readFile(dumpPath);
+const text = dumpPath.endsWith(".gz") ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+const sql = text.replace(/^\\(?:un)?restrict [^\n]*$/gm, "");
 const client = new pg.Client({ connectionString: process.env.DATABASE_URL ?? "postgres://synthia@127.0.0.1:5432/synthia" });
 await client.connect();
 try {
