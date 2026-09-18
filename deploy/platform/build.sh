@@ -31,6 +31,9 @@ grep -q "Bun\.serve\|Bun\.spawn" "$OUT/runtime-serve.mjs" && { echo "runtime bun
 
 echo "[4/5] collect assets..."
 cp connector/worker-66.config.json "$OUT/"
+# runtime 的 SkillLoader 按 cwd 相对路径 skills/fpga/skill-pack.json 启动即读
+# （DEFAULT_PACK_PATH，无 env 覆盖点）——技能包必须随包分发。
+cp -r skills "$OUT/skills"
 cp deploy/platform/env.example "$OUT/"
 cp deploy/platform/sandbox/* "$OUT/"
 
