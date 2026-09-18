@@ -21,8 +21,10 @@ bun build core/scripts/serve.ts --target=node --outfile "$OUT/core-serve.mjs"
 grep -q "Bun\.serve\|Bun\.spawn" "$OUT/core-serve.mjs" && { echo "bundle still references Bun.* — abort"; exit 1; }
 
 echo "[2/5] web platform build（feature flags 对齐 golden 线 dev-up）..."
+# 4 个编译期 flag = dev:mock 全集（golden dev-up 少开 self-evolution，平台按全量 UI 交付）
 (cd web && VITE_PLATFORM_PREVIEW=1 VITE_FEATURE_HISTORICAL_MATERIALS=1 \
-  VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 bun run build >/dev/null)
+  VITE_FEATURE_SIDE_TASKS=1 VITE_FEATURE_FORMAL_DELIVERY=1 \
+  VITE_FEATURE_SELF_EVOLUTION=1 bun run build >/dev/null)
 cp -r web/dist "$OUT/web"
 
 echo "[3/5] runtime bundle (node target)..."
