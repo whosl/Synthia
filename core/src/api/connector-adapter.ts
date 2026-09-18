@@ -584,12 +584,14 @@ export async function createConnectorFromEnv(
     // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
     // on-disk endpoint origin and let the factory load the client/server
     // certificate material from the config paths.
-    const directHttpModulePath: string = "../../../connector/http.ts";
-    const httpModule = (await import(directHttpModulePath)) as unknown as {
+    // 静态 import：变量路径的动态 import 无法被 bundler 内联，node 运行时
+    // 会按 bundle 相对路径解析失败（node-target 部署必炸）。该模块本就在
+    // 本文件依赖图内，静态化无额外加载代价。
+    const { createMtlsDirectRemoteConnector } = await import("../../../connector/http.ts") as {
       createMtlsDirectRemoteConnector: RemoteFactory;
     };
     const directEndpoint = String(config.endpoint_url ?? "");
     if (!directEndpoint) return undefined;
-    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+    return new RemoteConnectorAdapter(createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
   }
 }
