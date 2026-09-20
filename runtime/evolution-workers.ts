@@ -46,11 +46,11 @@ export const DISTILLER_SYSTEM_PROMPT = [
   "A failed/cancelled episode may create or patch only when a locally effective step or explicit human correction is evidenced.",
   "Learned Skill files are inert guidance assets and must never request permissions, Connector access, governance writes, or hardware download.",
   "Allowed assets: root SKILL.md, references/, templates/, and scripts/*.tcl|*.py|*.ts. Shell is forbidden.",
-  "Actions: {action:'no_op'}, {action:'create',skill:{...}}, or {action:'patch',skill:{skill_id,...}}.",
+  "Actions: {action:'no_op'}, {action:'create',skill:{...}}, or {action:'patch',skill:{...}}.",
   "skill fields are exactly: slug, name, summary, description, applicability, outcome_contract, files.",
   "skill.slug is kebab-case; applicability and outcome_contract are JSON objects describing when to apply the skill and its guaranteed result contract.",
   'skill.files items are exactly {path, kind, language, content}: for "SKILL.md" use kind "skill_md" and language null; references/ files use kind "reference" and language null; templates/ use "template" and null; scripts/*.tcl|*.py|*.ts use kind "script" and language "tcl"|"python"|"typescript" respectively. Exactly one file must have path "SKILL.md".',
-  "For patch, select an existing skill_id and repeat every skill field plus skill_id. The worker derives expected parent/revision; never invent CAS fields.",
+  "For patch, identify the target BY slug (slugs are unique) and repeat every skill field. OMIT skill_id — the worker resolves the slug; transcribing long ids by hand is error-prone. The worker derives expected parent/revision; never invent CAS fields.",
 ].join("\n");
 
 export const CURATOR_SYSTEM_PROMPT = [
@@ -387,8 +387,14 @@ function parseDistillationOutput(
   const skill = parseSkill(row.skill, action === "patch");
   if (action === "create") return { action, skill };
 
-  const target = existingSkills.find((candidate) => candidate.skill_id === skill.skill_id);
-  if (!target) malformed("patch skill_id is not in existing_skills");
+  // The model transcribes 40-char ids unreliably (one observed b6->b5
+  // substitution); slugs are unique, so the patch target resolves by slug
+  // and an echoed skill_id is only cross-checked against it.
+  const target = existingSkills.find((candidate) => candidate.slug === skill.slug);
+  if (!target) malformed("patch slug is not in existing_skills");
+  if (skill.skill_id != null && skill.skill_id !== target.skill_id) {
+    malformed("patch skill_id does not match the target slug");
+  }
   if (
     target.active_version_id === null
     || target.pinned
@@ -399,16 +405,16 @@ function parseDistillationOutput(
   }
   return {
     action,
-    skill: skill as DistillationSkillV1 & { readonly skill_id: string },
+    skill: { ...skill, skill_id: target.skill_id } as DistillationSkillV1 & { readonly skill_id: string },
     expectedParentVersionId: target.active_version_id,
     expectedControlRevision: target.control_revision,
   };
 }
 
-function parseSkill(raw: unknown, requireSkillId: boolean): DistillationSkillV1 {
+function parseSkill(raw: unknown, skillIdAllowed: boolean): DistillationSkillV1 {
   const row = strictRecord(raw, "skill");
   const keys = [
-    ...(requireSkillId ? ["skill_id"] : []),
+    ...(skillIdAllowed ? ["skill_id"] : []),
     "slug",
     "name",
     "summary",
@@ -417,7 +423,9 @@ function parseSkill(raw: unknown, requireSkillId: boolean): DistillationSkillV1 
     "outcome_contract",
     "files",
   ];
-  exactKeys(row, keys, "skill");
+  // skill_id is optional when allowed: the patch target resolves by slug and
+  // an echoed id is only cross-checked (models transcribe long ids unreliably).
+  exactKeys(row, keys, "skill", skillIdAllowed ? ["skill_id"] : []);
   const slug = boundedText(row.slug, "skill.slug", 128);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) malformed("skill.slug must be kebab-case");
   const filesRaw = array(row.files, "skill.files", MAX_FILES);
@@ -431,7 +439,7 @@ function parseSkill(raw: unknown, requireSkillId: boolean): DistillationSkillV1 
   const applicability = structured(row.applicability, "skill.applicability");
   const outcomeContract = structured(row.outcome_contract, "skill.outcome_contract");
   return {
-    ...(requireSkillId ? { skill_id: identifier(row.skill_id, "skill.skill_id") } : {}),
+    ...(row.skill_id !== undefined ? { skill_id: identifier(row.skill_id, "skill.skill_id") } : {}),
     slug,
     name: boundedText(row.name, "skill.name", 512),
     summary: boundedText(row.summary, "skill.summary", 4_096),
@@ -750,11 +758,17 @@ function strictRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exactKeys(row: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(row).sort();
-  const canonical = [...expected].sort();
-  if (actual.length !== canonical.length || actual.some((key, index) => key !== canonical[index])) {
-    malformed(`${label} fields must be exactly: ${canonical.join(", ")}`);
+function exactKeys(
+  row: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+  optional: readonly string[] = [],
+): void {
+  const actual = new Set(Object.keys(row));
+  const missing = expected.filter((key) => !actual.has(key) && !optional.includes(key));
+  const extra = [...actual].filter((key) => !expected.includes(key));
+  if (missing.length > 0 || extra.length > 0) {
+    malformed(`${label} fields must be exactly: ${[...expected].sort().join(", ")}`);
   }
 }
 
