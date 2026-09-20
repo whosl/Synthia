@@ -385,7 +385,7 @@ function evidenceInputManifest(request: VivadoRequest): Record<string, unknown> 
     top: "top" in request ? request.top : null,
     testbench: request.operation === "simulate" ? request.testbench : null,
     part: request.operation === "synthesize" || request.operation === "implement"
-      ? ("part" in request ? request.part : request.toolchain?.part ?? null)
+      ? ("part" in request ? request.part : (request as { toolchain?: { part?: string } }).toolchain?.part ?? null)
       : null,
     stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
     sources: "sources" in request
