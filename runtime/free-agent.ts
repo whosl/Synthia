@@ -787,6 +787,18 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       } else {
         view = compactForContextWindow(this.messages, policy, this.lastPromptTokens);
       }
+      // 可观测性（harness 规约）：投影生效时报告水位与收益，机械压缩不再静默。
+      const triggerAt = policy.contextWindow * (policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO);
+      if ((this.lastPromptTokens ?? 0) >= triggerAt) {
+        const fullChars = this.messages.reduce((n, m) => n + (m.content ?? "").length, 0);
+        const viewChars = view.reduce((n, m) => n + (m.content ?? "").length, 0);
+        process.stderr.write(
+          `[free-agent] context watermark active for ${this.agentId}: promptTokens=${this.lastPromptTokens} `
+            + `(window=${policy.contextWindow}, trigger=${triggerAt.toFixed(0)}), model view `
+            + `${fullChars} -> ${viewChars} chars (-${(100 - (viewChars / Math.max(fullChars, 1)) * 100).toFixed(0)}%), `
+            + `mode=${this.compactionSummary ? "summary+tail" : "mechanical-only"}\n`,
+        );
+      }
     }
     const loader = this.deps.loadReferenceContext;
     if (!loader) return view;
@@ -833,6 +845,13 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       const text = turn.kind === "text" ? turn.content.trim() : "";
       if (!text) return;
       this.compactionSummary = { text, coveredUpTo: split };
+      // 可观测性（harness 规约）：摘要发生时必须可见——何时、覆盖多少、压成多少。
+      // 此前压缩全程静默，长会话事故只能靠猜。
+      process.stderr.write(
+        `[free-agent] context summary compacted for ${this.agentId}: messages [${covered},${split}) `
+          + `${region.length} chars -> summary ${text.length} chars (promptTokens=${this.lastPromptTokens}, `
+          + `window=${policy.contextWindow}, trigger=${ratio})\n`,
+      );
     } catch (error) {
       process.stderr.write(
         `[free-agent] summary compaction failed for ${this.agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
