@@ -152,5 +152,8 @@ function strictTextContent(turn: unknown): string {
 }
 
 function malformed(message: string): never {
+  if (process.env.SYNTHIA_EVOLUTION_DEBUG === "1") {
+    process.stderr.write(`[malformed] ${message}\n${new Error("trace").stack?.split("\n").slice(1, 6).join("\n")}\n`);
+  }
   throw new EvolutionModelAdapterError(message);
 }
