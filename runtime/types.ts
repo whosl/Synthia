@@ -722,8 +722,11 @@ export interface AgentState {
   readonly currentStage: StageId;
   /** Gate currently awaiting approval (when status is awaiting_approval). */
   readonly awaitingGate?: GateId;
-  /** 最近一次模型调用实测的输入 token 数（上下文水位；runtime 重启后 UI 环仍可显示）。 */
+  /** 最近一次模型调用实测的输入 token 数（上下文水位；恢复时回读会话）。 */
   readonly contextPromptTokens?: number | null;
+  /** LLM 结构化摘要缓存（text + 已覆盖到的消息下标）；重启恢复后长会话
+   *  不必重付一次摘要调用，且超窗历史仍以摘要视图发给模型。 */
+  readonly compactionSummary?: { readonly text: string; readonly coveredUpTo: number } | null;
   /** Loop/task status: running / paused for user or approval / terminal. */
   readonly status:
     | "running"
