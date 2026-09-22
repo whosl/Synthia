@@ -89,6 +89,7 @@ class FakeRuntimeClient implements RuntimeClient {
     this.unreachable = false;
     this.createCount = 0;
     this.lastCreate = null;
+    this.permissionCalls = [];
   }
 
   async createTask(body: {
@@ -165,6 +166,20 @@ class FakeRuntimeClient implements RuntimeClient {
     const run = this.agents.get(agentId);
     if (!run) throw new RuntimeClientError(404, `agent not found: ${agentId}`, { code: "AGENT_NOT_FOUND", retryable: false });
     return run.detail;
+  }
+
+  /** Captures permission forwards (agentId + body) for assertions. */
+  permissionCalls: Array<{ agentId: string; body: { callId?: string; allow?: boolean; skipAll?: boolean } }> = [];
+
+  async resolveTaskPermission(
+    agentId: string,
+    body: { callId?: string; allow?: boolean; skipAll?: boolean },
+  ): Promise<unknown> {
+    this.permissionCalls.push({ agentId, body });
+    if (!this.agents.has(agentId)) {
+      throw new RuntimeClientError(404, `agent not found: ${agentId}`, { code: "AGENT_NOT_FOUND", retryable: false });
+    }
+    return { ok: true, permission: { pending: null, skip_all: body.skipAll === true } };
   }
 
   /** Drive a run to a terminal state with optional reason (test helper). */
@@ -852,4 +867,60 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
     const { status } = await callApi(`/api/v1/projects/${projectId}/tasks/agent-nope/stream`, { token: ids.humanToken });
     expect(status).toBe(404);
   });
+
+  // ─── POST .../tasks/:agentId/permission — 项目隔离（review P1 修复回归）──
+
+  test("cross-project legacy agent: skipAll must 404 and never reach Runtime", async () => {
+    const projectIdA = await createProject();
+    const projectIdB = await createProject();
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectIdA, process_instance_id: "pi-perm", task: "perm" });
+    const { status, json } = await callApi(`/api/v1/projects/${projectIdB}/tasks/${agentId}/permission`, {
+      method: "POST",
+      token: ids.humanToken,
+      body: { skipAll: true },
+    });
+    expect(status).toBe(404);
+    expect(envelopeError(json).code).toBe("not_found");
+    expect(fake.permissionCalls).toHaveLength(0);
+  });
+
+  test("cross-project legacy agent: verdict must 404 and never reach Runtime", async () => {
+    const projectIdA = await createProject();
+    const projectIdB = await createProject();
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectIdA, process_instance_id: "pi-perm", task: "perm" });
+    const { status } = await callApi(`/api/v1/projects/${projectIdB}/tasks/${agentId}/permission`, {
+      method: "POST",
+      token: ids.humanToken,
+      body: { callId: "call-x", allow: true },
+    });
+    expect(status).toBe(404);
+    expect(fake.permissionCalls).toHaveLength(0);
+  });
+
+  test("same-project legacy agent forwards to Runtime", async () => {
+    const projectId = await createProject();
+    const { agent_id: agentId } = await fake.createTask({ project_id: projectId, process_instance_id: "pi-perm", task: "perm" });
+    const { status, json } = await callApi(`/api/v1/projects/${projectId}/tasks/${agentId}/permission`, {
+      method: "POST",
+      token: ids.humanToken,
+      body: { skipAll: true },
+    });
+    expect(status).toBe(200);
+    expect(fake.permissionCalls).toHaveLength(1);
+    expect(fake.permissionCalls[0]!.agentId).toBe(agentId);
+    expect(fake.permissionCalls[0]!.body.skipAll).toBe(true);
+    expect((json as { data?: { ok?: boolean } }).data?.ok).toBe(true);
+  });
+
+  test("unknown agent id in unrelated project → 404 (not forwarded)", async () => {
+    const projectIdB = await createProject();
+    const { status } = await callApi(`/api/v1/projects/${projectIdB}/tasks/agent-ghost/permission`, {
+      method: "POST",
+      token: ids.humanToken,
+      body: { skipAll: true },
+    });
+    expect(status).toBe(404);
+    expect(fake.permissionCalls).toHaveLength(0);
+  });
+
 });
