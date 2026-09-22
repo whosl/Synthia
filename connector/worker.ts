@@ -16,7 +16,11 @@ export interface WorkerExecutionResult {
   stdout?: string;
   stderr?: string;
 }
-export interface WorkerExecution { discover(): Promise<DiscoverySnapshot>; execute(request: JobRequest, workspace: string): Promise<WorkerExecutionResult>; }
+export interface WorkerExecution {
+  discover(): Promise<DiscoverySnapshot>;
+  /** signal 在作业被取消时触发；执行器应尽力终止子进程并让 promise 落定。 */
+  execute(request: JobRequest, workspace: string, signal?: AbortSignal): Promise<WorkerExecutionResult>;
+}
 
 export interface WorkerRuntimeOptions { endpoint: ConnectorEndpoint; workspaceRoot: string; execution?: WorkerExecution; now?: () => Date; }
 const terminal = new Set<Job["state"]>(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
@@ -44,7 +48,9 @@ function exactObjectKeys(value: unknown, required: readonly string[], optional: 
 export class WorkerRuntime {
   private readonly endpoint: ConnectorEndpoint; private readonly root: string; private readonly execution: WorkerExecution; private readonly clock: () => Date;
   private registration?: ConnectorRegistration; private discovery?: DiscoverySnapshot; private active = 0; private leaseExpiresAt?: number;
-  private readonly jobs = new Map<string, Job>(); private readonly jobBindings = new Map<string, { projectId: string; classification: DataClassification }>(); private readonly keys = new Map<string, { fingerprint: string; status: number; body: RemoteEnvelope<unknown> }>(); private readonly pending: string[] = [];
+  private readonly jobs = new Map<string, Job>();
+  /** running 态作业的取消控制器；/jobs/cancel 经此把终止传到进程守护层。 */
+  private readonly activeControllers = new Map<string, AbortController>(); private readonly jobBindings = new Map<string, { projectId: string; classification: DataClassification }>(); private readonly keys = new Map<string, { fingerprint: string; status: number; body: RemoteEnvelope<unknown> }>(); private readonly pending: string[] = [];
   /** H8: registry snapshot reload — resolves once the on-disk job registry
    *  (if any) has been merged; every request awaits it so post-restart
    *  queries cannot race the restore. */
@@ -142,7 +148,23 @@ export class WorkerRuntime {
     }
     const jobId = p.job_id; if (!good(jobId)) throw new Error("INVALID_JOB_ID"); const job = this.jobs.get(jobId); const binding = this.jobBindings.get(jobId); if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND");
     if (path === "/jobs/status") return { status: 200, body: this.envelope(e, copy(job)) };
-    if (path === "/jobs/cancel") { if (!terminal.has(job.state)) { job.state = "cancelled"; void this.snapshotRegistry(); } return { status: 200, body: this.envelope(e, copy(job)) }; }
+    if (path === "/jobs/cancel") {
+      if (!terminal.has(job.state)) {
+        const controller = this.activeControllers.get(jobId);
+        if (controller) {
+          // 正在执行：先进入 cancelling 并把终止传给执行器；run() 收尾时
+          // 确认落 cancelled。此前直接改 cancelled 而进程照跑——占并发
+          // 名额、写产物，状态与真实执行脱节（review P1）。
+          job.state = "cancelling";
+          controller.abort();
+        } else {
+          // 尚未开跑（排队中）：可直接终态。
+          job.state = "cancelled";
+        }
+        void this.snapshotRegistry();
+      }
+      return { status: 200, body: this.envelope(e, copy(job)) };
+    }
     if (path === "/jobs/evidence") { if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE"); this.assertEvidenceLimits(job.evidence); return { status: 200, body: this.envelope(e, copy(job.evidence)) }; }
     if (path === "/jobs/evidence/content") { const name = p.name; if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE"); return this.evidenceContent(e, job, name, p.complete === true); }
     throw new Error("NOT_FOUND");
@@ -153,13 +175,19 @@ export class WorkerRuntime {
   private async pump(): Promise<void> { while (this.active < this.endpoint.max_concurrency && this.pending.length) { const jobId = this.pending.shift()!; const job = this.jobs.get(jobId); if (!job || terminal.has(job.state)) continue; this.active++; void this.run(job).finally(() => { this.active--; void this.pump(); }); } }
   private async run(job: Job): Promise<void> {
     const workspace = join(this.root, job.id);
+    const controller = new AbortController();
+    this.activeControllers.set(job.id, controller);
     try {
       await mkdir(workspace, { recursive: true });
       await writeFile(join(workspace, "request-input.txt"), job.request.input, "utf8");
       job.state = "preparing";
       job.state = "running";
-      const result = await this.execution.execute(copy(job.request), workspace);
-      if (this.jobs.get(job.id)?.state === "cancelled") return;
+      const result = await this.execution.execute(copy(job.request), workspace, controller.signal);
+      if (this.jobs.get(job.id)?.state === "cancelled" || this.jobs.get(job.id)?.state === "cancelling") {
+        job.state = "cancelled";
+        await this.snapshotRegistry();
+        return;
+      }
       job.state = result.outcome === "success" ? "succeeded" : result.outcome === "timeout" ? "timeout" : result.outcome === "lost" ? "lost" : result.outcome === "unknown_effect" ? "unknown_effect" : "failed";
       if (result.error_code) job.errorCode = result.error_code;
       if (result.output !== undefined) {
@@ -174,9 +202,15 @@ export class WorkerRuntime {
       // after completion must not reload the job as non-terminal/lost.
       await this.snapshotRegistry();
     } catch {
-      if (this.jobs.get(job.id)?.state === "cancelled") return;
+      if (this.jobs.get(job.id)?.state === "cancelled" || this.jobs.get(job.id)?.state === "cancelling") {
+        job.state = "cancelled";
+        await this.snapshotRegistry();
+        return;
+      }
       job.state = "failed";
       if (!job.errorCode) job.errorCode = "WORKER_EXECUTION_ERROR";
+    } finally {
+      this.activeControllers.delete(job.id);
     }
   }
   private async evidenceContent(e: RemoteEnvelope<unknown>, job: Job, name: string, complete = false): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {

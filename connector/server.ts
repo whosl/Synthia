@@ -242,7 +242,7 @@ function execution(
       try { await access(config.vivado_binary, constants.X_OK); } catch { return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] }; }
       return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, ...remoteAttestation, capabilities: DISCOVERY_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
     },
-    async execute(request: JobRequest, _workspace: string): Promise<WorkerExecutionResult> {
+    async execute(request: JobRequest, _workspace: string, signal?: AbortSignal): Promise<WorkerExecutionResult> {
       const candidate = (request as JobRequest & { parameters?: unknown }).parameters;
       if (!candidate || typeof candidate !== "object") return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
       if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: config.vivado_part })) {
@@ -260,7 +260,7 @@ function execution(
       } as VivadoRequest;
       let result;
       try {
-        result = await adapter.execute(vivadoRequest);
+        result = await adapter.execute(vivadoRequest, signal);
       } catch (error) {
         const message = error instanceof Error ? error.message : "VIVADO_EXECUTION_ERROR";
         const errorCode = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";

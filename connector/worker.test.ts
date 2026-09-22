@@ -332,3 +332,75 @@ describe("worker job registry persistence (H8)", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cancellation semantics (review P1: cancelled state must reflect real stop)
+// ---------------------------------------------------------------------------
+
+describe("worker cancellation semantics", () => {
+  test("cancel during execution: cancelling → abort fires → settles cancelled, no success evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-cancel-"));
+    try {
+      let releaseExecution!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseExecution = resolve; });
+      let sawSignal = false;
+      const rt = runtime(root, (_request, _workspace, signal) => new Promise((resolve) => {
+        if (signal) {
+          if (signal.aborted) sawSignal = true;
+          else signal.addEventListener("abort", () => { sawSignal = true; }, { once: true });
+        }
+        void gate.then(() => resolve({ outcome: "success", output: "{\"late\":true}" }));
+      }));
+      await prime(rt);
+      const request: JobRequest = { jobId: "cancel-live", idempotencyKey: "jk-cancel-live", projectId: "p1", operation: "vivado_synthesize", runClass: "exploratory", input: "sha", correlationId: "c" };
+      await post(rt, "/jobs/submit", { request }, "fake-1");
+      // 等到 running（execute 已进入）。
+      await new Promise((r) => setTimeout(r, 30));
+
+      const cancelled = await post(rt, "/jobs/cancel", { job_id: "cancel-live" });
+      if (cancelled.status !== 200) throw new Error(`cancel failed: ${cancelled.status}`);
+      expect((cancelled.payload as { state?: string }).state).toBe("cancelling");
+      expect(sawSignal).toBe(true);
+
+      releaseExecution(); // 执行器（进程）此刻才真正退出
+      await new Promise((r) => setTimeout(r, 30));
+      const status = await post(rt, "/jobs/status", { job_id: "cancel-live" });
+      expect((status.payload as { state?: string }).state).toBe("cancelled");
+      // 迟到的成功结果不得附着为证据。
+      const evidence = await post(rt, "/jobs/evidence", { job_id: "cancel-live" });
+      expect(evidence.status).toBeGreaterThanOrEqual(400);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("cancel before start (still queued): terminal cancelled immediately", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-cancel-q-"));
+    try {
+      let busy!: () => void;
+      const block = new Promise<void>((resolve) => { busy = resolve; });
+      let started = 0;
+      const rt = new WorkerRuntime({
+        endpoint: { ...endpoint, max_concurrency: 1 },
+        workspaceRoot: root,
+        execution: {
+          async discover() { return discovery; },
+          execute: () => { started += 1; return block.then(() => ({ outcome: "success" as const })); },
+        },
+      });
+      await prime(rt);
+      const req = (jobId: string): JobRequest => ({ jobId, idempotencyKey: `jk-${jobId}`, projectId: "p1", operation: "vivado_synthesize", runClass: "exploratory", input: "sha", correlationId: jobId });
+      await post(rt, "/jobs/submit", { request: req("cancel-q-first") }, "fake-1");
+      await post(rt, "/jobs/submit", { request: req("cancel-q-second") }, "fake-1");
+      await new Promise((r) => setTimeout(r, 30));
+      expect(started).toBe(1); // 并发 1：第二个在排队
+
+      const cancelled = await post(rt, "/jobs/cancel", { job_id: "cancel-q-second" });
+      expect((cancelled.payload as { state?: string }).state).toBe("cancelled");
+
+      busy();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(started).toBe(1); // 排队中的被取消后不再被 pump 拉起
+      const status = await post(rt, "/jobs/status", { job_id: "cancel-q-second" });
+      expect((status.payload as { state?: string }).state).toBe("cancelled");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
