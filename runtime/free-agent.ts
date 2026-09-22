@@ -277,6 +277,9 @@ export function compactForContextWindow(
   }
   // 从尾部数：最近 keep 条工具结果保持原样，更早的且超预算的截头保留。
   // 含压缩标记的跳过（标记本身会撑过预算长度，不检测就会二次截断）。
+  // 保命优先：水位超过「窗口本身」（不只是触发线）时 keep 保护失效——
+  // 摘要请求装不下、机械层又不截的话，请求根本发不出去（死循环）。
+  const overWindow = lastPromptTokens > policy.contextWindow;
   let toolSeen = 0;
   let changed = false;
   const out: AgentMessage[] = [];
@@ -288,7 +291,7 @@ export function compactForContextWindow(
     }
     toolSeen += 1;
     if (
-      toolSeen <= keep
+      (toolSeen <= keep && !overWindow)
       || message.content.length <= budget
       || message.content.includes("[context-compacted:")
     ) {
@@ -512,6 +515,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private readonly deps: FreeAgentDeps;
   /** 最近一次模型调用回报的输入 token 数；null = 网关未回报，水位管理停摆。 */
   private lastPromptTokens: number | null = null;
+  /** 本轮次是否已用过超窗强制压缩重试（单次机会，防递归）。 */
+  private forcedCompactionRetried = false;
   /**
    * LLM 结构化摘要缓存：text = 当前摘要，coveredUpTo = messages 里已被摘要
    * 覆盖到的下标（该下标之后的消息仍以原文进模型视图）。仅内存态——runtime
@@ -579,6 +584,19 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.beforeToolCallHook = defaultBeforeToolCall;
     this.afterToolCallHook = defaultAfterToolCall;
     this.beforeModelCallHook = defaultBeforeModelCall;
+
+    // 上下文水位与摘要缓存：从持久化状态回读。此前两者都是纯内存态——
+    // 重启后完整历史直接重放，一旦超窗（请求失败拿不到新 usage）就形成
+    // 「无水位→不压缩→无水位」死循环（review P1）。
+    if (deps.initialState) {
+      const persisted = deps.initialState.contextPromptTokens;
+      if (typeof persisted === "number" && persisted > 0) this.lastPromptTokens = persisted;
+      const summary = deps.initialState.compactionSummary;
+      if (summary && Number.isInteger(summary.coveredUpTo) && summary.coveredUpTo >= 1
+        && typeof summary.text === "string" && summary.text.trim()) {
+        this.compactionSummary = { text: summary.text, coveredUpTo: summary.coveredUpTo };
+      }
+    }
 
     // Seed conversation with the system prompt. When low-trust reference data
     // follows, bind its exact marker and precedence in the trusted system role;
@@ -756,6 +774,29 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.permissionListener = listener;
   }
 
+  /** 全历史字符/4 估算——恢复后首请求的保守水位（防超窗死循环）。 */
+  private estimateMessagesTokens(): number {
+    let chars = 0;
+    for (const message of this.messages) {
+      chars += message.content?.length ?? 0;
+      if (message.role === "assistant") {
+        for (const call of message.toolCalls ?? []) chars += JSON.stringify(call.args ?? {}).length;
+      }
+    }
+    return Math.ceil(chars / 4);
+  }
+
+  /**
+   * 有效水位：实测优先；null（重启后尚未回报、或网关从不回报 usage）时退回
+   * 字符估算。没有这一层，恢复后的超窗会话将陷入「无水位→不压缩→请求
+   * 失败→仍无水位」死循环（review P1）。
+   */
+  private effectivePromptTokens(): number | null {
+    if (this.lastPromptTokens !== null) return this.lastPromptTokens;
+    if (!this.deps.contextPolicy) return null;
+    return this.estimateMessagesTokens();
+  }
+
   contextUsage(): { promptTokens: number | null; contextWindow: number } {
     return {
       promptTokens: this.lastPromptTokens,
@@ -777,7 +818,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         const tail = compactForContextWindow(
           this.messages.slice(this.compactionSummary.coveredUpTo),
           policy,
-          this.lastPromptTokens,
+          this.effectivePromptTokens(),
         );
         view = [
           this.messages[0]!,
@@ -785,7 +826,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
           ...tail,
         ];
       } else {
-        view = compactForContextWindow(this.messages, policy, this.lastPromptTokens);
+        view = compactForContextWindow(this.messages, policy, this.effectivePromptTokens());
       }
       // 可观测性（harness 规约）：投影生效时报告水位与收益，机械压缩不再静默。
       const triggerAt = policy.contextWindow * (policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO);
@@ -829,7 +870,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   private async maybeCompactBySummary(policy: ContextPolicy): Promise<void> {
     if (policy.summaryEnabled === false) return;
     const ratio = policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO;
-    if (this.lastPromptTokens === null || this.lastPromptTokens < policy.contextWindow * ratio) return;
+    const watermark = this.effectivePromptTokens();
+    if (watermark === null || watermark < policy.contextWindow * ratio) return;
     const split = tailSplitIndex(this.messages, policy.summaryKeepTokens ?? DEFAULT_SUMMARY_KEEP_TOKENS);
     const covered = this.compactionSummary?.coveredUpTo ?? 1;
     if (split <= covered) return;
@@ -839,7 +881,14 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // 摘要请求也要能装进窗口：超预算直接放弃，机械截断兜底。预留量按窗口
     // 比例（大窗口 2000、小窗口 20%），避免小窗口下守卫恒真。
     const reserve = Math.min(2_000, Math.floor(policy.contextWindow * 0.2));
-    if (estimateTokens(prompt) > policy.contextWindow - reserve) return;
+    if (estimateTokens(prompt) > policy.contextWindow - reserve) {
+      // 摘要请求自身装不下（极小窗口/巨型单消息）：放弃摘要，靠机械层的
+      // 超窗强制模式保命（见 compactForContextWindow 的 overWindow）。
+      process.stderr.write(
+        `[free-agent] summary prompt exceeds window budget for ${this.agentId}; falling back to mechanical truncation\n`,
+      );
+      return;
+    }
     try {
       const turn = await this.deps.model.chat([{ role: "user", content: prompt }], []);
       const text = turn.kind === "text" ? turn.content.trim() : "";
@@ -872,7 +921,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       this.checkAbort();
 
       if (this.consumeSteer()) await this.persist();
-      const modelMessages = await this.messagesForModel();
+      let modelMessages = await this.messagesForModel();
 
       // Layer 3: beforeModelCall data-domain pre-check.
       const stop = this.beforeModelCallHook(modelMessages);
@@ -895,8 +944,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       let reasoningPartId: string | null = null;
       const useStream = !!streamingModel
         && !!(opts.onTextStart || opts.onDelta || opts.onReasoningStart || opts.onReasoningDelta);
-      const turn: ChatTurn = useStream && streamingModel
-        ? await streamingModel.chatStream(modelMessages, this.deps.tools, {
+      const callModel = (): Promise<ChatTurn> => useStream && streamingModel
+        ? streamingModel.chatStream(modelMessages, this.deps.tools, {
             onTextStart: () => {
               partId = `sp-${this.agentId}-${++this.streamPartCounter}`;
               opts.onTextStart?.(partId);
@@ -912,7 +961,25 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
               if (reasoningPartId) opts.onReasoningDelta?.(reasoningPartId, t);
             },
           })
-        : await this.deps.model.chat(modelMessages, this.deps.tools);
+        : this.deps.model.chat(modelMessages, this.deps.tools);
+      let turn: ChatTurn;
+      try {
+        turn = await callModel();
+      } catch (modelError) {
+        // 超窗重试（一次性）：水位可能陈旧（网关缓存差异、上游缩窗），
+        // 请求以 context_length 类错误失败时强制按估算压缩并重发一次。
+        // 只重试一次且仅当有压缩策略——避免把确定的失败变成静默降级。
+        const message = modelError instanceof Error ? modelError.message : String(modelError);
+        const oversize = /context[_ ]length|too many tokens|maximum context|context window|token limit|exceeds the model/i.test(message);
+        if (!oversize || !this.deps.contextPolicy || this.forcedCompactionRetried) throw modelError;
+        this.forcedCompactionRetried = true;
+        this.lastPromptTokens = this.estimateMessagesTokens();
+        process.stderr.write(
+          `[free-agent] ${this.agentId}: context overflow (${message.slice(0, 120)}) — forcing compaction and retrying once\n`,
+        );
+        modelMessages = await this.messagesForModel();
+        turn = await callModel();
+      }
 
       // 水位采样：promptTokens 即本次请求的真实输入规模，下一次
       // messagesForModel 按它决定是否压缩旧工具结果。
@@ -1264,6 +1331,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
       contextPromptTokens: this.lastPromptTokens,
+      compactionSummary: this.compactionSummary,
       status,
       ...(endedReason ? { endedReason } : {}),
       ...(locked

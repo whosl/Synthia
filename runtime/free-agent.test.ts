@@ -1558,3 +1558,177 @@ describe("free-agent: permission interaction", () => {
     expect(session.permissionState().pending).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Long-session recovery (review P1: watermark/summary survive restart)
+// ---------------------------------------------------------------------------
+
+describe("free-agent: long-session restart recovery", () => {
+  test("persisted watermark + summary restore: view uses summary, no re-summary needed", async () => {
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      txt("## Objective\n- 重启前摘要"),
+      txt("重启后继续。"),
+    ]);
+    const agentId = `agent-recovery-${++idCounter}`;
+    const policy: ContextPolicy = {
+      contextWindow: 1_000,
+      compactTriggerRatio: 0.5,
+      keepToolResults: 8,
+      toolResultBudgetChars: 10_000,
+      summaryKeepTokens: 120,
+    };
+    const deps = {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+      agentsDir,
+      contextPolicy: policy,
+    };
+    const session = createFreeAgentSession(agentId, deps);
+    await session.prompt("登记两份");
+    // 摘要已生成（第三次调用是摘要请求）。
+    expect(model.calls[2]!.messages[0]?.role).toBe("user");
+
+    // 重启恢复：同一 agentId 新会话，initialState 从磁盘读。
+    const state = await loadAgentState(agentId, agentsDir);
+    expect(state?.contextPromptTokens).toBe(900);
+    expect(state?.compactionSummary?.text).toContain("重启前摘要");
+
+    const model2 = new ScriptedModel([txt("重启后继续。")]);
+    const conversation = await loadFreeAgentConversation(agentId, agentsDir);
+    const resumed = createFreeAgentSession(agentId, {
+      ...deps,
+      model: model2,
+      initialState: state ?? undefined,
+      ...(conversation ? { initialConversation: conversation } : {}),
+    });
+    await resumed.prompt("继续");
+    // 恢复后的首个模型调用直接使用摘要视图：不再发摘要请求（model2 只有 1 次调用），
+    // 且视图第一条是 system、第二条是摘要消息、尾部是原文——不是完整历史。
+    expect(model2.calls).toHaveLength(1);
+    const view = model2.calls[0]!.messages;
+    expect(view[0]!.role).toBe("system");
+    const summaryMsg = view[1]!;
+    if (summaryMsg.role !== "user") throw new Error("expected summary message");
+    expect(summaryMsg.content).toContain("重启前摘要");
+    // 摘要覆盖区之外只剩第二轮之后的消息（tc2 尾部），不含 tc1 全文。
+    const toolBodies = view.filter((m) => m.role === "tool") as Extract<AgentMessage, { role: "tool" }>[];
+    expect(toolBodies.map((t) => t.toolCallId)).toEqual(["tc2"]);
+  });
+
+  test("null watermark after restart falls back to size estimate — oversized history compacts before first call", async () => {
+    // 死循环场景：恢复后无实测水位，但历史已超窗。估算兜底必须在首个
+    // 模型请求前触发压缩（否则请求失败 → 永远拿不到 usage → 永不压缩）。
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel([
+      txt("## Objective\n- 恢复时生成的摘要"),
+      txt("继续。"),
+    ]);
+    const agentId = `agent-recovery-${++idCounter}`;
+    const long = "X".repeat(8_000); // ~2000 tokens 估算 > 1000×0.5
+    const state = {
+      agentId,
+      task: "长会话",
+      part: "xc7a100tcsg324-1",
+      projectId: "proj-test",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentStage: "intake" as const,
+      status: "awaiting_user" as const,
+      contextPromptTokens: null, // 从未采到水位（模型从未成功响应）
+    };
+    const convMessages: AgentMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+      { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "x", args: {} }] },
+      { role: "tool", toolCallId: "t1", name: "x", content: long },
+      { role: "assistant", content: "done" },
+    ];
+    // 直接构造会话：initialState 带空水位 + 长历史。
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+      agentsDir,
+      contextPolicy: { contextWindow: 2_000, compactTriggerRatio: 0.5, summaryKeepTokens: 50 },
+      initialState: state,
+      initialConversation: { agentId, messages: convMessages.slice(1), claimChecks: [], pendingSteer: [] },
+    } as never);
+    await session.prompt("继续");
+    // 第一次调用是摘要请求（估算水位超阈触发），第二次才是主调用。
+    expect(model.calls[0]!.messages).toHaveLength(1);
+    expect(model.calls[0]!.messages[0]!.role).toBe("user");
+    const main = model.calls[1]!.messages;
+    const summaryMsg = main[1]!;
+    if (summaryMsg.role !== "user") throw new Error("expected summary view");
+    expect(summaryMsg.content).toContain("恢复时生成的摘要");
+    // 8K 工具结果不再以全文出现在主调用视图里（被摘要区吃掉）。
+    expect(main.some((m) => m.role === "tool" && m.content.length > 1_000)).toBe(false);
+  });
+
+  test("context-overflow error triggers one forced compaction retry", async () => {
+    const gov = new MockGovernanceClient();
+    let failOnce = true;
+    const model: ConversationalModel = {
+      async chat(messages: readonly AgentMessage[]): Promise<ChatTurn> {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error("prompt is too long: 90000 tokens > maximum context length 81920");
+        }
+        return { kind: "text", content: "压缩后成功" };
+      },
+    };
+    const agentId = `agent-recovery-${++idCounter}`;
+    const long = "Y".repeat(6_000);
+    const state = {
+      agentId,
+      task: "溢出重试",
+      part: "xc7a100tcsg324-1",
+      projectId: "proj-test",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentStage: "intake" as const,
+      status: "awaiting_user" as const,
+      contextPromptTokens: 100, // 陈旧低水位（真实已超窗）
+    };
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+      agentsDir,
+      contextPolicy: { contextWindow: 1_000, compactTriggerRatio: 0.5, summaryKeepTokens: 50 },
+      initialState: state,
+      initialConversation: {
+        agentId,
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "x", args: {} }] },
+          { role: "tool", toolCallId: "t1", name: "x", content: long },
+          { role: "assistant", content: "done" },
+        ],
+        claimChecks: [],
+        pendingSteer: [],
+      },
+    } as never);
+    const reply = await session.prompt("继续");
+    expect(reply).toBe("压缩后成功");
+  });
+});
