@@ -18,7 +18,7 @@ import {
   formatEvolutionTime,
   successRateText,
 } from "../../domain/evolution.ts";
-import { skillDisplayName, skillOutcomeSegments } from "../../domain/evolution-display.ts";
+import { efficiencyDuration, efficiencySpeedup, skillDisplayName, skillOutcomeSegments } from "../../domain/evolution-display.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
 import { Input } from "../ui/input";
@@ -87,10 +87,8 @@ const efficiencySpeedupText = computed(() => {
   if (!metrics || metrics.efficiency_speedup === null || metrics.efficiency_saved_ms === null) {
     return "未知";
   }
-  const speedup = metrics.efficiency_speedup >= 10
-    ? Math.round(metrics.efficiency_speedup)
-    : Math.round(metrics.efficiency_speedup * 10) / 10;
-  return `${speedup}× · 省 ${formatEvolutionDuration(metrics.efficiency_saved_ms)}`;
+  const delta = metrics.efficiency_saved_ms;
+  return `${efficiencySpeedup(metrics.efficiency_speedup)} · ${delta < 0 ? "多用" : "省"} ${efficiencyDuration(delta)}`;
 });
 
 // disable/archive 改变 Skill 可用性、影响 Agent 检索，需二次确认；enable/restore/pin/unpin 直接执行
@@ -248,10 +246,10 @@ function shortHash(value: string): string {
         <StatCard
           label="中位活跃处理时长"
           :value="formatEvolutionDuration(detail.metrics.median_duration_ms)"
-          hint="apply→关闭的活跃时长（间隔裁剪，不含人挂起）"
+          hint="技能应用至关闭，长间隔按上限计入"
         />
         <StatCard
-          label="提效对照"
+          label="提效对比"
           :value="efficiencySpeedupText"
           :hint="detail.metrics.baseline_duration_ms === null
             ? '源轨迹时长未知'

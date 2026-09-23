@@ -22,3 +22,21 @@ export function skillOutcomeSegments(metrics: SkillMetricsV1) {
     { key: "pending", label: "待评价", count: metrics.pending },
   ];
 }
+
+/** Compact human duration; negative deltas are labelled separately, never formatted as negative ms. */
+export function efficiencyDuration(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "待积累";
+  const seconds = Math.round(Math.abs(value) / 1000);
+  if (seconds === 0) return value === 0 ? "0 秒" : "不足 1 秒";
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+export function efficiencySpeedup(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "待积累";
+  if (value < 0.01) return "<0.01×";
+  return `${Number(value.toFixed(2))}×`;
+}

@@ -299,3 +299,52 @@ export function computeSkillMetrics(
       : null,
   };
 }
+
+export interface EvolutionEfficiencyObservation {
+  readonly skillId: string;
+  readonly outcome: EvaluationOutcome | null;
+  readonly baselineMs: number | null;
+  readonly appliedMs: number | null;
+}
+
+export interface EvolutionEfficiencyV1 {
+  readonly measurement_state: MeasurementState;
+  readonly primary_applications: number;
+  readonly successful_applications: number;
+  readonly compared_applications: number;
+  readonly compared_skills: number;
+  readonly baseline_total_ms: number | null;
+  readonly applied_total_ms: number | null;
+  /** Signed net difference. Slower successful applications reduce the total. */
+  readonly net_saved_ms: number | null;
+  readonly speedup: number | null;
+  readonly scope: "all_versions";
+  readonly gap_cap_seconds: 600;
+}
+
+/** Origin-trajectory comparison is an observational estimate, not a causal time-savings claim. */
+export function computeEvolutionEfficiency(
+  observations: readonly EvolutionEfficiencyObservation[],
+): EvolutionEfficiencyV1 {
+  const successes = observations.filter((row) => row.outcome === "success");
+  const comparable = successes.filter((row) =>
+    row.baselineMs !== null && Number.isFinite(row.baselineMs) && row.baselineMs > 0
+    && row.appliedMs !== null && Number.isFinite(row.appliedMs) && row.appliedMs > 0,
+  );
+  const baseline = comparable.reduce((sum, row) => sum + row.baselineMs!, 0);
+  const applied = comparable.reduce((sum, row) => sum + row.appliedMs!, 0);
+  const measured = comparable.length > 0;
+  return {
+    measurement_state: measured ? "observed" : "unknown",
+    primary_applications: observations.length,
+    successful_applications: successes.length,
+    compared_applications: comparable.length,
+    compared_skills: new Set(comparable.map((row) => row.skillId)).size,
+    baseline_total_ms: measured ? baseline : null,
+    applied_total_ms: measured ? applied : null,
+    net_saved_ms: measured ? baseline - applied : null,
+    speedup: measured ? baseline / applied : null,
+    scope: "all_versions",
+    gap_cap_seconds: 600,
+  };
+}

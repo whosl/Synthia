@@ -2,6 +2,7 @@ import type {
   CuratorRunV1,
   EvaluationOutcome,
   EvolutionOverviewV1,
+  EvolutionEfficiencyV1,
   LearnedSkillDetailV1,
   LearnedSkillFileV1,
   LearnedSkillListV1,
@@ -245,6 +246,45 @@ export function parseLearnedSkillSummary(value: unknown, label = "learned skill"
   };
 }
 
+export function parseEvolutionEfficiency(value: unknown): EvolutionEfficiencyV1 | null {
+  if (value == null) return null;
+  const label = "evolution efficiency";
+  const row = record(value, label);
+  const result: EvolutionEfficiencyV1 = {
+    measurement_state: oneOf(row.measurement_state, MEASUREMENT_STATES, `${label}.measurement_state`),
+    primary_applications: integer(row.primary_applications, `${label}.primary_applications`),
+    successful_applications: integer(row.successful_applications, `${label}.successful_applications`),
+    compared_applications: integer(row.compared_applications, `${label}.compared_applications`),
+    compared_skills: integer(row.compared_skills, `${label}.compared_skills`),
+    baseline_total_ms: nullableInteger(row.baseline_total_ms, `${label}.baseline_total_ms`),
+    applied_total_ms: nullableInteger(row.applied_total_ms, `${label}.applied_total_ms`),
+    net_saved_ms: row.net_saved_ms === null ? null : number(row.net_saved_ms, `${label}.net_saved_ms`),
+    speedup: row.speedup === null ? null : number(row.speedup, `${label}.speedup`),
+    scope: oneOf(row.scope, new Set(["all_versions"] as const), `${label}.scope`),
+    gap_cap_seconds: exactNumber(row.gap_cap_seconds, 600, `${label}.gap_cap_seconds`) as 600,
+  };
+  if (result.compared_applications > result.successful_applications
+    || result.successful_applications > result.primary_applications
+    || result.compared_skills > result.compared_applications) {
+    throw new EvolutionContractError(`${label} has inconsistent coverage counts`);
+  }
+  if (result.compared_applications === 0) {
+    if (result.measurement_state !== "unknown" || result.baseline_total_ms !== null
+      || result.applied_total_ms !== null || result.net_saved_ms !== null || result.speedup !== null) {
+      throw new EvolutionContractError(`${label} cannot claim savings without comparisons`);
+    }
+  } else {
+    const baseline = result.baseline_total_ms;
+    const applied = result.applied_total_ms;
+    if (result.measurement_state !== "observed" || !baseline || !applied || result.compared_skills === 0
+      || result.net_saved_ms !== baseline - applied || result.speedup === null
+      || Math.abs(result.speedup - baseline / applied) > 1e-9) {
+      throw new EvolutionContractError(`${label} totals do not match its comparison`);
+    }
+  }
+  return result;
+}
+
 export function parseEvolutionOverview(value: unknown): EvolutionOverviewV1 {
   const row = record(value, "evolution overview");
   if (row.schema !== "evolution-overview.v1") {
@@ -263,6 +303,7 @@ export function parseEvolutionOverview(value: unknown): EvolutionOverviewV1 {
     learned_skills_enabled: boolean(row.learned_skills_enabled, "evolution overview.learned_skills_enabled"),
     settings_revision: integer(row.settings_revision, "evolution overview.settings_revision"),
     skill_counts: skillCounts,
+    efficiency: parseEvolutionEfficiency(row.efficiency),
     pending_applications: integer(row.pending_applications, "evolution overview.pending_applications"),
     curator: {
       last_run_at: nullableIsoTime(curator.last_run_at, "evolution overview.curator.last_run_at"),

@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { startSynthiaServer, type SynthiaServer } from "../src/api/server.ts";
 import type { RuntimeClient } from "../src/api/task-proxy.ts";
+import { readEvolutionEfficiency } from "../src/services/evolution-efficiency.ts";
 import { sha256Hex } from "../src/hashing.ts";
 import {
   apiCall,
@@ -1297,12 +1298,6 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     await harness.client.query("BEGIN");
     try {
       await harness.client.query(
-        `UPDATE evolution_eval_run eval
-            SET completed_at=COALESCE(eval.completed_at,clock_timestamp())
-           FROM curator_run run
-          WHERE run.id=eval.curator_run_id AND run.state IN ('queued','running')`,
-      );
-      await harness.client.query(
         `UPDATE curator_run
             SET state='failed',error_code='test_cleanup',details_hash=$1,completed_at=now()
           WHERE state IN ('queued','running')`,
@@ -1315,11 +1310,8 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     }
     await harness.client.query("DELETE FROM curator_application_reservation");
     await harness.client.query(
-      `DELETE FROM curator_run run
-        WHERE run.manual_key IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM evolution_eval_run eval WHERE eval.curator_run_id=run.id
-          )`,
+      // Migration 0035 retired evolution_eval_run; only the learning-loop records remain.
+      "DELETE FROM curator_run WHERE manual_key IS NULL",
     );
     await harness.client.query(
       "UPDATE curator_run SET completed_at=now()-interval '8 days' WHERE state='completed'",
@@ -1545,12 +1537,6 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     await harness.client.query("BEGIN");
     try {
       await harness.client.query(
-        `UPDATE evolution_eval_run eval
-            SET completed_at=COALESCE(eval.completed_at,clock_timestamp())
-           FROM curator_run run
-          WHERE run.id=eval.curator_run_id AND run.state IN ('queued','running')`,
-      );
-      await harness.client.query(
         `UPDATE curator_run
             SET state='failed',worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,
                 error_code='m4_cleanup',details_hash=$1,completed_at=now()
@@ -1564,11 +1550,8 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     }
     await harness.client.query("DELETE FROM curator_application_reservation");
     await harness.client.query(
-      `DELETE FROM curator_run run
-        WHERE run.manual_key IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM evolution_eval_run eval WHERE eval.curator_run_id=run.id
-          )`,
+      // Migration 0035 retired evolution_eval_run; only the learning-loop records remain.
+      "DELETE FROM curator_run WHERE manual_key IS NULL",
     );
     await harness.client.query("UPDATE curator_run SET completed_at=now()-interval '9 days' WHERE state='completed'");
     await harness.client.query(
@@ -1677,6 +1660,15 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     });
     expect(await stateOfFailed()).toBe("failed");
   });
+  test("overview exposes the full historical efficiency projection", async () => {
+    const response = await apiCall(harness.baseUrl, "/api/v1/evolution/overview", { token: harness.ids.humanToken });
+    expect(response.status).toBe(200);
+    expect(data(response.json).efficiency).toEqual(await readEvolutionEfficiency(harness.client));
+    expect(row(data(response.json).efficiency).scope).toBe("all_versions");
+    const unauthorized = await apiCall(harness.baseUrl, "/api/v1/evolution/overview");
+    expect(unauthorized.status).toBe(401);
+  });
+
 });
 
 if (!DATABASE_URL) {

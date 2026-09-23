@@ -71,8 +71,26 @@ export interface LearnedSkillSummaryV1 {
   readonly metrics: SkillMetricsV1;
 }
 
+export interface EvolutionEfficiencyV1 {
+  readonly measurement_state: MeasurementState;
+  readonly primary_applications: number;
+  readonly successful_applications: number;
+  readonly compared_applications: number;
+  readonly compared_skills: number;
+  readonly baseline_total_ms: number | null;
+  readonly applied_total_ms: number | null;
+  /** Signed net difference. Slower successful applications reduce the total. */
+  readonly net_saved_ms: number | null;
+  readonly speedup: number | null;
+  readonly scope: "all_versions";
+  readonly gap_cap_seconds: 600;
+}
+
+
 export interface EvolutionOverviewV1 {
   readonly schema: "evolution-overview.v1";
+  /** Absent on older Core releases; never interpreted as zero. */
+  readonly efficiency?: EvolutionEfficiencyV1 | null;
   readonly rollout_enabled: boolean;
   readonly learning_paused: boolean;
   readonly learned_skills_enabled: boolean;

@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { EVOLUTION_ACTIVE_GAP_CAP_SECONDS, readEvolutionEfficiency } from "../services/evolution-efficiency.ts";
 import {
   appendOutboxEventInTx,
   withTransaction,
@@ -337,7 +338,7 @@ async function metricRows(query: QueryClient, versionId: string): Promise<SkillM
  * (tasks sit awaiting_user for days) do not masquerade as effort while
  * genuine model/tool round-trips and permission waits still count.
  */
-const ACTIVE_GAP_CAP_SECONDS = 600;
+const ACTIVE_GAP_CAP_SECONDS = EVOLUTION_ACTIVE_GAP_CAP_SECONDS;
 
 /**
  * The "hard way" arm: the gap-clipped active span of the origin episode —
@@ -458,6 +459,7 @@ async function overview(query: QueryClient, ctx: RequestContext): Promise<Record
     learned_skills_enabled: settings.learned_skills_enabled,
     settings_revision: Number(settings.revision),
     skill_counts: counts,
+    efficiency: await readEvolutionEfficiency(query),
     pending_applications: Number((pendingResult.rows[0] as Row).count),
     curator: {
       last_run_at: nullableIso(lastRun),
