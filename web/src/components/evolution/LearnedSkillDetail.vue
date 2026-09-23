@@ -226,9 +226,9 @@ function shortHash(value: string): string {
           hint="primary applied / pending"
         />
         <StatCard
-          label="中位处理时间"
+          label="中位活跃处理时长"
           :value="formatEvolutionDuration(detail.metrics.median_duration_ms)"
-          hint="从 apply 到局部目标关闭"
+          hint="apply→关闭的活跃时长（间隔裁剪，不含人挂起）"
         />
         <StatCard
           label="提效对照"
