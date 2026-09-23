@@ -15,6 +15,7 @@
  * （sta.rpt 懒加载与作业提交都由父级注入/承接）。
  */
 import { computed, ref } from "vue";
+import ProjectToolbarButton from "../layout/ProjectToolbarButton.vue";
 import type { ToolSummary } from "../../api/types.ts";
 import type { ProcessGateView } from "../../domain/process-profile.ts";
 import { currentProcessGate, processProgress, PROCESS_GATE_STATUS_TEXT } from "../../domain/process-profile.ts";
@@ -129,10 +130,9 @@ function select(stageId: string): void {
 
 <template>
   <div ref="root" class="relative inline-flex min-w-0" @mouseenter="onEnter" @mouseleave="onLeave">
-    <button
-      type="button"
-      class="inline-flex max-w-[380px] cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-transparent px-[11px] py-[3px] text-xs whitespace-nowrap text-fg hover:border-brand hover:bg-brand-subtle"
-      :aria-expanded="open"
+    <ProjectToolbarButton
+      class="max-w-[380px]"
+      :expanded="open"
       @click="toggle"
     >
       <span
@@ -149,11 +149,11 @@ function select(stageId: string): void {
       />
       <span class="truncate text-fg-secondary">{{ faceText }}</span>
       <span class="text-[9px] text-fg-muted" aria-hidden="true">▾</span>
-    </button>
+    </ProjectToolbarButton>
 
     <div
       v-if="open"
-      class="absolute top-[calc(100%+10px)] left-0 z-[100] w-[400px] rounded-[10px] border border-line-strong bg-raised px-4 py-3.5 shadow-[0_14px_38px_var(--shadow-color)]"
+      class="absolute top-[calc(100%+10px)] left-0 z-[100] w-[400px] max-w-[calc(100vw-32px)] rounded-[10px] border border-line-strong bg-raised px-4 py-3.5 shadow-[0_14px_38px_var(--shadow-color)]"
       role="menu"
     >
       <h4 class="m-0 mb-2.5 text-[11px] font-semibold text-fg-muted">项目信息</h4>

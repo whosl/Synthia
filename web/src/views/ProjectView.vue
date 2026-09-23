@@ -196,6 +196,7 @@ import { prevRevisionId } from "./project-view-contract.ts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import { Sheet, SheetContent } from "../components/ui/sheet";
 import TopBar from "../components/layout/TopBar.vue";
+import ProjectToolbarButton from "../components/layout/ProjectToolbarButton.vue";
 import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import WorkspaceFilePane from "../components/editor/WorkspaceFilePane.vue";
@@ -2611,36 +2612,28 @@ function onToggleChatOverlay(): void {
             @select-stage="onSelectStage"
             @run-action="onRunImplAction"
           />
+          <ProjectToolbarButton
+            v-if="formalDeliveryEnabled"
+            class="shrink-0"
+            :expanded="formalDeliveryOpen"
+            @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
+          >
+            正式流程
+            <span v-if="processState" class="tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
+          </ProjectToolbarButton>
+          <ProjectToolbarButton
+            v-if="historicalMaterialsEnabled"
+            class="shrink-0"
+            :expanded="materialsOpen"
+            @click="materialsOpen ? closeMaterials() : openMaterials()"
+          >
+            历史资料
+            <span v-if="materialSnapshots.length > 0" class="tabular-nums">{{ materialSnapshots.length }}</span>
+          </ProjectToolbarButton>
+          <span v-if="isMock" class="project-demo-tag shrink-0 max-[700px]:hidden">演示数据</span>
         </template>
       </TopBar>
     </header>
-    <!-- 全景与审批在中栏标签中；辅助工程操作按功能开关显示。 -->
-    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
-      <span v-if="isMock" class="project-demo-tag">演示数据</span>
-      <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
-        <button
-          v-if="formalDeliveryEnabled"
-          type="button"
-          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
-          :aria-expanded="formalDeliveryOpen"
-          @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
-        >
-          正式流程
-          <span v-if="processState" class="text-[11px] text-fg-secondary tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
-        </button>
-        <button
-          v-if="historicalMaterialsEnabled"
-          type="button"
-          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
-          :aria-expanded="materialsOpen"
-          @click="materialsOpen ? closeMaterials() : openMaterials()"
-        >
-          历史资料
-          <span v-if="materialSnapshots.length > 0" class="text-[11px] text-fg-secondary">{{ materialSnapshots.length }}</span>
-        </button>
-      </div>
-    </div>
-
     <div v-if="loadErrorText" class="flex flex-none items-center justify-between gap-3 bg-danger/12 px-4 py-2 text-xs text-danger" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
     <div v-if="loading" class="grid flex-1 place-items-center text-fg-secondary" role="status">正在准备项目工作区…</div>
 
