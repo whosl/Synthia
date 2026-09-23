@@ -51,12 +51,13 @@ const query = ref("");
 const type = ref("all");
 const showCreate = ref(false);
 const visibleRows = computed(() =>
-  filterProjects(rows.value, query.value, type.value),
+  filterProjects(rows.value, query.value, type.value === "review" ? "all" : type.value).filter((row) => type.value !== "review" || row.submissions.some((sub) => sub.state === "in_review")),
 );
 const filters = [
   { id: "all", label: "全部项目" },
   { id: "engineering", label: "工程项目" },
   { id: "free", label: "自由项目" },
+  { id: "review", label: "待审批项目" },
 ];
 
 // 门户卡片/列表的共享片段（原 portal.css 的 .stat-card / .empty-state 等）
@@ -122,7 +123,7 @@ function projectCreated(id: string) {
           >工程与探索</span
         >
       </div>
-      <router-link :class="[statCardClass, 'hover:border-brand hover:text-fg']" to="/approvals"
+      <button type="button" :class="[statCardClass, 'cursor-pointer text-left hover:border-brand hover:text-fg']" :aria-pressed="type === 'review'" @click="type = type === 'review' ? 'all' : 'review'"
         ><span :class="[statIconClass, 'bg-warn/10 text-warn']"
           ><Inbox :size="22"
         /></span>
@@ -147,7 +148,7 @@ function projectCreated(id: string) {
         <ArrowRight
           :size="18"
           class="ml-auto text-fg-muted max-[600px]:size-3.5"
-      /></router-link>
+      /></button>
       <div :class="statCardClass">
         <span :class="[statIconClass, 'bg-ok/10 text-ok']"
           ><Sparkles :size="22"
@@ -309,7 +310,7 @@ function projectCreated(id: string) {
         <router-link
           v-for="row in visibleRows"
           :key="row.project.id"
-          :to="{ name: 'project', params: { id: row.project.id } }"
+          :to="{ name: 'project', params: { id: row.project.id }, query: type === 'review' ? { sub: row.submissions.find(sub => sub.state === 'in_review')?.id } : {} }"
           class="group grid grid-cols-[46px_minmax(180px,1.5fr)_minmax(150px,1fr)_128px_18px] items-center gap-[18px] border-b border-line px-5 py-4 text-fg transition-colors last:border-b-0 hover:bg-[color-mix(in_srgb,var(--accent-subtle)_40%,var(--surface-panel))] hover:text-fg max-[1200px]:grid-cols-[44px_minmax(0,1fr)_155px_18px] max-[1200px]:gap-3.5 max-[1200px]:px-[18px] max-[1200px]:py-[18px] max-[600px]:grid-cols-[38px_minmax(0,1fr)_16px] max-[600px]:gap-3 max-[600px]:px-4 max-[600px]:py-4"
           :aria-label="`进入项目：${row.project.name}`"
         >

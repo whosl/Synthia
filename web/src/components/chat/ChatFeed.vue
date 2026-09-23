@@ -300,6 +300,7 @@ onMounted(() => void nextTick(scrollToBottom));
     -->
     <ApprovalCard
       v-if="approval"
+      :key="approval.submissionId"
       v-bind="approval"
       @approve="emit('approve')"
       @reject="emit('reject', $event)"

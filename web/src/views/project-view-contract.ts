@@ -374,6 +374,9 @@ export type ChatComposerMode = "new-task" | "prompt" | "steer";
  * ProjectView 里；本组件连 submission id 都不需要知道。
  */
 export interface ApprovalCardProps {
+  readonly submissionId?: string;
+  readonly approvedDescription?: string;
+  readonly approveLabel?: string;
   /** `domain/unified.ts:deriveApprovalCard` 的输出；"hidden" 时整卡不渲染。 */
   readonly state: ApprovalCardState;
   /** 门 id 原文（"G4"），仅用于 title 悬浮与 `approvalButtonLabel` 取里程碑文案。 */

@@ -238,8 +238,10 @@ watch(
   { immediate: true },
 );
 
+// Watch the document values separately: metadata polling replaces file objects
+// without changing these values, and must never rebuild an unsaved editor model.
 watch(
-  () => [props.content, props.language, props.diffAgainst, props.file?.artifactId] as const,
+  [() => props.content, () => props.language, () => props.diffAgainst, () => props.file?.artifactId],
   () => {
     if (needsMonaco.value && monacoRef) renderContent();
   },
@@ -354,7 +356,7 @@ function submitSave(): void {
           <EmptyHeader>
             <EmptyMedia variant="icon"><FileX :size="20" /></EmptyMedia>
             <EmptyTitle>无法显示文件内容</EmptyTitle>
-            <EmptyDescription>请从文件树重新打开以重试。</EmptyDescription>
+            <EmptyDescription>请重新加载，或关闭标签后再次打开。</EmptyDescription>
           </EmptyHeader>
         </Empty>
         <DocPreview v-else-if="showDocPreview" :content="content ?? ''" />

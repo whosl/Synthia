@@ -8,7 +8,7 @@
  * 返回项目列表是纯本地导航，不跨栏耦合数据，因此不走 emit，直接用 router 完成。
  */
 import { useRouter } from "vue-router";
-import { Inbox, LogOut, Moon, Sparkles, Sun } from "lucide-vue-next";
+import { LogOut, Moon, Sparkles, Sun } from "lucide-vue-next";
 import type { TopBarEmits, TopBarProps } from "../../views/project-view-contract.ts";
 import Button from "../ui/AppButton.vue";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -56,12 +56,6 @@ function onBack(): void {
     </div>
 
     <div class="flex flex-none items-center gap-2 max-[700px]:gap-[2px]">
-      <router-link
-        class="grid size-[30px] place-items-center rounded-md text-fg-secondary hover:bg-hover hover:text-brand"
-        to="/approvals"
-        aria-label="审批中心"
-        title="审批中心"
-      ><Inbox :size="17" /></router-link>
       <!-- <1280px：对话栏浮层化，顶栏露出对话按钮（spec R3） -->
       <button
         type="button"

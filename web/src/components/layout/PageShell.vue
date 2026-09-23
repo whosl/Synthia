@@ -3,7 +3,6 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import {
   Cpu,
-  Inbox,
   LayoutGrid,
   LogOut,
   Moon,
@@ -15,7 +14,7 @@ import { resolveTheme, toggleTheme } from "../../domain/theme.ts";
 import { useAuthStore } from "../../stores/auth.ts";
 import { SELF_EVOLUTION_FEATURE_ENABLED } from "../../domain/feature-flags.ts";
 
-defineProps<{ section: "projects" | "approvals" | "evolution" }>();
+defineProps<{ section: "projects" | "evolution" }>();
 const router = useRouter();
 const auth = useAuthStore();
 const theme = ref(
@@ -86,15 +85,6 @@ function logout() {
           ><LayoutGrid :size="16" />项目工作台</router-link
         >
         <router-link
-          to="/approvals"
-          :class="[
-            navLinkClass,
-            section === 'approvals' ? navSelectedClass : navIdleClass,
-          ]"
-          :aria-current="section === 'approvals' ? 'page' : undefined"
-          ><Inbox :size="16" />审批中心</router-link
-        >
-        <router-link
           v-if="SELF_EVOLUTION_FEATURE_ENABLED"
           to="/evolution"
           :class="[
@@ -140,11 +130,7 @@ function logout() {
           class="flex items-center gap-3.5 text-xs text-fg-muted max-[600px]:gap-2 max-[600px]:text-[11px]"
           >工作空间 <span>/</span>
           <strong class="font-medium text-fg-secondary">{{
-            section === "projects"
-              ? "项目工作台"
-              : section === "evolution"
-                ? "自进化"
-                : "审批中心"
+            section === "projects" ? "项目工作台" : "自进化"
           }}</strong></span
         >
         <div class="flex items-center gap-4 max-[600px]:gap-2">

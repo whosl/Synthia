@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
-import { useEditorContent } from "../composables/use-editor-content.ts";
+import { createFileTab, tabAfterClose, type WorkspaceFileTab } from "../domain/workspace-tabs.ts";
 import Button from "../components/ui/AppButton.vue";
 import EngineeringOverviewPanel from "../components/projects/EngineeringOverviewPanel.vue";
 import EngineeringOverview from "../components/projects/EngineeringOverview.vue";
@@ -141,9 +141,8 @@ import {
   type ApprovalMember,
   type DecisionFailure,
 } from "../domain/unified.ts";
-import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
-import { buildFileTreeEntries, workspaceEntryPath } from "../domain/file-tree.ts";
-import { deriveReadonlyReason } from "../domain/editor-state.ts";
+import { GATE_REVIEW_NAMES } from "../domain/gates.ts";
+import { buildFileTreeEntries } from "../domain/file-tree.ts";
 import { resolveTheme, toggleTheme, type Theme } from "../domain/theme.ts";
 import { processVersionText, projectType, projectTypeText } from "../domain/project.ts";
 import {
@@ -186,8 +185,6 @@ import type {
   ApprovalCardProps,
   ChatComposerMode,
   ChatFeedProps,
-  CodeEditorProps,
-  EditorReadonlyReason,
   FileTreeEntry,
   FileTreeProps,
   FileTreeViewMode,
@@ -195,13 +192,15 @@ import type {
   RecordsPanelProps,
   TopBarProps,
 } from "./project-view-contract.ts";
-import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
+import { prevRevisionId } from "./project-view-contract.ts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import { Sheet, SheetContent } from "../components/ui/sheet";
 import TopBar from "../components/layout/TopBar.vue";
 import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
-import CodeEditor from "../components/editor/CodeEditor.vue";
+import WorkspaceFilePane from "../components/editor/WorkspaceFilePane.vue";
+import WorkspaceTabs from "../components/editor/WorkspaceTabs.vue";
+import ProjectReviews from "../components/projects/ProjectReviews.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
 import AgentPaneTabs from "../components/chat/AgentPaneTabs.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
@@ -400,6 +399,7 @@ async function refreshOnce(): Promise<void> {
     loadArtifactsAndRevisions().finally(() => { if (!disposed) filesInitializing.value = false; }),
     loadWorkspace(),
     loadProcessProjection(),
+    loadProjectReviews(),
   ]);
   if (disposed) return;
   const failure = results.find((result) => result.status === "rejected");
@@ -944,7 +944,6 @@ async function loadProcessProjection(): Promise<boolean> {
   ) {
     processProfile.value = null;
     processState.value = null;
-    processSubmissions.value = [];
     processProjectionError.value = null;
     return false;
   }
@@ -964,20 +963,11 @@ async function loadProcessProjection(): Promise<boolean> {
     processProfile.value = profile;
     processState.value = state;
     processProjectionError.value = null;
-    try {
-      const submissions = await listGateSubmissions(api, projectId);
-      if (serial === processProjectionSerial) processSubmissions.value = submissions;
-    } catch {
-      // Profile + process-state remain a complete Core projection. Submission
-      // state only refines the current gate to waiting/failed.
-      if (serial === processProjectionSerial) processSubmissions.value = [];
-    }
     return true;
   } catch (err) {
     if (serial !== processProjectionSerial) return false;
     processProfile.value = null;
     processState.value = null;
-    processSubmissions.value = [];
     processProjectionError.value = formalErrorText(err);
     return false;
   } finally {
@@ -1721,165 +1711,72 @@ const hasAgent = computed(() => currentAgentId.value !== null);
 // 中栏：当前打开的文件 / 版本 / 内容 / 只读态
 // ─────────────────────────────────────────────────────────────────────
 
-const openArtifactId = ref<string | null>(null);
-const openRevisionId = ref<string | null>(null);
-const {
-  fileContent, fileContentLoading, contentSource, saving, saveError, diffAgainst,
-  resetContent, loadRevisionContent, loadWorkspaceContent, loadComparison, saveWorkspaceContent,
-} = useEditorContent(api, projectId);
-const editorDirty = ref(false);
-
-function canLeaveEditor(): boolean {
-  if (saving.value) return false;
-  if (!editorDirty.value) return true;
-  if (!window.confirm("当前文件有未保存的修改。放弃修改并继续？")) return false;
-  editorDirty.value = false;
-  return true;
+const fileTabs = ref<WorkspaceFileTab[]>([]);
+const activeWorkspaceTab = ref("overview");
+const tabStates = ref<Record<string, { dirty?: boolean; saving?: boolean }>>({});
+const activeFileTab = computed(() => fileTabs.value.find((tab) => tab.id === activeWorkspaceTab.value) ?? null);
+function currentTabEntry(tab: WorkspaceFileTab): FileTreeEntry {
+  return fileTreeEntries.value.find((entry) => tab.source === "workspace"
+    ? entry.path === tab.entry.path
+    : entry.artifactId === tab.entry.artifactId)
+    ?? (tab.source === "workspace" ? { ...tab.entry, status: null } : tab.entry);
 }
-
-onBeforeRouteLeave(() => canLeaveEditor());
-onBeforeRouteUpdate((to, from) => {
-  if (to.path === from.path && (to.query.run ?? null) === currentAgentId.value && to.query.sub === from.query.sub) return true;
-  const changesContext = to.path !== from.path || to.query.run !== from.query.run || to.query.sub !== from.query.sub;
-  if (changesContext && sending.value) return false;
-  return !changesContext || canLeaveEditor();
-});
+const openArtifactId = computed(() => activeFileTab.value ? currentTabEntry(activeFileTab.value).artifactId : null);
+const workspaceTabs = computed(() => [
+  { id: "overview", label: "工程全景", kind: "overview" as const },
+  ...(project.value && projectType(project.value) === "engineering" ? [{
+    id: "reviews", label: "阶段审批", kind: "reviews" as const,
+    count: processSubmissions.value.filter((row) => row.state === "in_review").length,
+  }] : []),
+  ...fileTabs.value.map((tab) => ({ ...tab, kind: "file" as const, ...tabStates.value[tab.id] })),
+]);
+const editorAgentStatus = computed(() => agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null);
+function updateTabState(id: string, key: "dirty" | "saving", value: boolean): void {
+  if (fileTabs.value.some((tab) => tab.id === id)) tabStates.value[id] = { ...tabStates.value[id], [key]: value };
+}
+function canLeaveEditor(): boolean {
+  if (Object.values(tabStates.value).some((state) => state.saving)) return false;
+  return !Object.values(tabStates.value).some((state) => state.dirty)
+    || window.confirm("打开的标签中有未保存的修改。放弃修改并离开项目？");
+}
+onBeforeRouteLeave(() => !deciding.value && canLeaveEditor());
+onBeforeRouteUpdate((to, from) => to.path === from.path || (!sending.value && !deciding.value && canLeaveEditor()));
 function warnBeforeUnload(event: BeforeUnloadEvent): void {
-  if (!editorDirty.value && !saving.value) return;
+  if (!deciding.value && !Object.values(tabStates.value).some((state) => state.dirty || state.saving)) return;
   event.preventDefault();
   event.returnValue = "";
 }
 onMounted(() => window.addEventListener("beforeunload", warnBeforeUnload));
 onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnload));
 
-const openFileEntry = computed<FileTreeEntry | null>(
-  () => (openArtifactId.value ? fileTreeEntries.value.find((e) => e.artifactId === openArtifactId.value) ?? null : null),
-);
-
-const activeRevision = computed<ArtifactRevision | null>(() => {
-  const entry = openFileEntry.value;
-  if (!entry) return null;
-  return entry.revisions.find((r) => r.id === openRevisionId.value) ?? entry.latestRevision;
-});
-
-/**
- * 只读原因（spec §3.3 三态表 + D19）：已批准 > agent 运行中 > 没有可写的目标。
- *
- * 后两条是新增的、也是最容易被忽略的：**保存只能写工作区文件**。流水线产出的
- * `art-*` 从没落过盘（status 为 null），历史版本的正文也不是盘上那份字节——这两种
- * 情况下放开编辑，用户敲下的字没有任何地方可去，比直接说只读更伤人。
- */
-const readonlyReason = computed<EditorReadonlyReason>(() => {
-  const entry = openFileEntry.value;
-  if (!entry) return null;
-  return deriveReadonlyReason(
-    {
-      revisionState: activeRevision.value?.state ?? null,
-      agentStatus: agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null,
-      inWorkspace: entry.status !== null,
-      contentSource: contentSource.value,
-    },
-    isTerminalStatus,
-  );
-});
-
-/** Monaco 语言 id：优先按 docs 路径后缀判断，无路径信息时按产物类型兜底猜测。 */
-function inferLanguage(entry: FileTreeEntry | null): string {
-  if (!entry) return "plaintext";
-  const path = entry.path;
-  if (path) {
-    if (path.endsWith(".sv") || path.endsWith(".svh")) return "systemverilog";
-    if (path.endsWith(".v") || path.endsWith(".vh")) return "verilog";
-    if (path.endsWith(".xdc") || path.endsWith(".tcl")) return "tcl";
-    if (path.endsWith(".md")) return "markdown";
-    if (path.endsWith(".json")) return "json";
-    if (path.endsWith(".yaml") || path.endsWith(".yml")) return "yaml";
-  }
-  if (entry.artifactType === "RTL_SOURCE_SET") return "verilog";
-  if (entry.artifactType === "TB_SOURCE_SET") return "systemverilog";
-  if (entry.artifactType === "XDC_CANDIDATE" || entry.artifactType === "CONSTRAINT_DESIGN") return "tcl";
-  return "markdown";
+function selectWorkspaceTab(id: string): void {
+  activeWorkspaceTab.value = id;
+  if (id === "reviews") void openProjectReviews();
 }
-
-/**
- * 打开文件。默认打开的是**盘上那份**，不是最新那版修订——文件树上标着「已改动」的
- * 行点进来却看见登记在册的旧内容，是在骗人。只有盘上没有这个文件（流水线产出的
- * `art-*`）时才退回读修订。
- *
- * `revisionId` 传了就是钉版本：审批快照钉的是提交那一刻的修订，对话流产物卡钉的是
- * agent 登记那一刻，两者都必须绕开工作区当前字节。传了但在版本列表里找不到（历史
- * 版本已被清理）时回落最新版，总比什么都不打开强。
- */
+function closeWorkspaceTab(id: string): void {
+  const tab = fileTabs.value.find((item) => item.id === id);
+  if (!tab || tabStates.value[id]?.saving) return;
+  if (tabStates.value[id]?.dirty && !window.confirm(`“${tab.label}”有未保存的修改。放弃修改并关闭？`)) return;
+  activeWorkspaceTab.value = tabAfterClose(workspaceTabs.value.map((item) => item.id), activeWorkspaceTab.value, id);
+  fileTabs.value = fileTabs.value.filter((item) => item.id !== id);
+  delete tabStates.value[id];
+  if (activeWorkspaceTab.value === "reviews") void openProjectReviews();
+}
+function addFileTab(tab: WorkspaceFileTab | null): void {
+  if (!tab) {
+    toast.error("无法定位指定的文件版本，请刷新文件列表后重试。");
+    return;
+  }
+  if (!fileTabs.value.some((item) => item.id === tab.id)) fileTabs.value.push(tab);
+  activeWorkspaceTab.value = tab.id;
+  treeDrawerOpen.value = false;
+}
 function openFile(artifactId: string, revisionId?: string): void {
-  const entry = fileTreeEntries.value.find((e) => e.artifactId === artifactId);
-  if (!entry || !canLeaveEditor()) return;
-  resetContent();
-  const target = pickRevision(entry, revisionId);
-  openArtifactId.value = artifactId;
-  openRevisionId.value = target?.id ?? null;
-  diffAgainst.value = null;
-  saveError.value = null;
-
-  if (!revisionId && entry.status !== null && entry.path) {
-    void loadWorkspaceContent(entry.path);
-    return;
-  }
-  if (!target) {
-    // 盘上没有、也没有任何修订：`buildFileTreeEntries` 不会造出这样的条目，走到这里
-    // 说明数据在两次刷新之间变了。空着比显示上一个文件的正文诚实。
-    fileContent.value = null;
-    contentSource.value = "revision";
-    return;
-  }
-  void loadRevisionContent(artifactId, target.id);
+  const entry = fileTreeEntries.value.find((item) => item.artifactId === artifactId);
+  addFileTab(entry ? createFileTab(entry, revisionId) : null);
 }
-
-function onSelectRevision(revisionId: string): void {
-  if (!openArtifactId.value || !canLeaveEditor()) return;
-  openRevisionId.value = revisionId;
-  diffAgainst.value = null;
-  saveError.value = null;
-  void loadRevisionContent(openArtifactId.value, revisionId);
-}
-
-/**
- * 进 diff 模式：head 装进编辑器，base 作为对照。两处调用——版本条上手选两版、
- * 对话流产物卡上的「查看改动」——共用这一份，保证两条路进来的 diff 完全一致。
- */
-async function compareRevisions(entry: FileTreeEntry, baseRevisionId: string, headRevisionId: string): Promise<void> {
-  const base = entry.revisions.find((r) => r.id === baseRevisionId);
-  const head = entry.revisions.find((r) => r.id === headRevisionId);
-  if (!base || !head || !canLeaveEditor()) return;
-  openArtifactId.value = entry.artifactId;
-  openRevisionId.value = head.id;
-  await loadComparison(entry.artifactId, base, head);
-}
-
-async function onCompareRevisions(baseRevisionId: string, headRevisionId: string): Promise<void> {
-  const entry = openFileEntry.value;
-  if (!entry) return;
-  await compareRevisions(entry, baseRevisionId, headRevisionId);
-}
-
-function onExitDiff(): void {
-  diffAgainst.value = null;
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// 工作区写回与一键登记（内容归 git，治理状态归 PG）
-// ─────────────────────────────────────────────────────────────────────
-
-/**
- * 编辑器保存：写回工作区文件，**只落盘不 commit**。
- *
- * 成功后把服务端确认的字节回填进 fileContent——不是多此一举：CodeEditor 靠「盘上
- * 这份与编辑器里这份相同」来放下未保存标记，不回填的话保存按钮会一直亮着。随后刷新
- * 工作区树，让顶栏的待登记计数与这一行的角标跟上。
- */
-async function onSave(content: string): Promise<void> {
-  const entry = openFileEntry.value;
-  if (!entry?.path || readonlyReason.value || diffAgainst.value) return;
-  if (await saveWorkspaceContent(entry.path, content)) await loadWorkspace();
+function compareRevisions(entry: FileTreeEntry, baseRevisionId: string, headRevisionId: string): void {
+  addFileTab(createFileTab(entry, headRevisionId, baseRevisionId));
 }
 
 const registering = ref(false);
@@ -1906,28 +1803,11 @@ async function onRegister(changeReason: string): Promise<void> {
     await registerWorkspace(api, projectId, changeReason, attempt.key);
     registerAttempt = null;
     await refresh();
-    // 登记不改盘上的字节，但打开的那份从「未登记改动」变成了某一版修订——重开一次让
-    // 版本条、只读态、以及未登记文件的合成 id 一起归位。
-    if (openArtifactId.value) reopenAfterRegister(openArtifactId.value);
   } catch (err) {
     registerError.value = humanizeLoadError(err);
   } finally {
     registering.value = false;
   }
-}
-
-/**
- * 登记后重开当前文件。未登记的行 id 是合成的 `ws:<path>`（见 domain/file-tree.ts），
- * 登记之后它换成了真 artifact id，原来那个 id 在树里已经不存在——按路径找回来。
- */
-function reopenAfterRegister(previousId: string): void {
-  if (fileTreeEntries.value.some((e) => e.artifactId === previousId)) {
-    openFile(previousId);
-    return;
-  }
-  const path = workspaceEntryPath(previousId);
-  const moved = path ? fileTreeEntries.value.find((e) => e.path === path) : undefined;
-  if (moved) openFile(moved.artifactId);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1981,7 +1861,7 @@ const overviewProps = computed(() => ({
   mock: isMock,
 }));
 
-watch(() => overviewOpen.value || !openArtifactId.value, (visible, _previous, onCleanup) => {
+watch(() => overviewOpen.value || activeWorkspaceTab.value === "overview", (visible, _previous, onCleanup) => {
   if (!visible) return;
   let refreshing = false;
   const update = async () => {
@@ -2066,12 +1946,13 @@ const focusStageId = ref<string | null>(null);
 function onSelectStage(stageId: string): void {
   viewMode.value = "stage";
   focusStageId.value = stageId;
+  if (project.value && projectType(project.value) === "engineering") void openProjectReviews(stageId);
 }
 
-function onLogout(): void {
-  if (!canLeaveEditor()) return;
-  auth.logout();
-  void router.push({ name: "login" });
+async function onLogout(): Promise<void> {
+  // Let the route guard confirm once, before clearing the session.
+  const failure = await router.push({ name: "login" });
+  if (!failure) auth.logout();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2118,13 +1999,6 @@ const RIGHT_PANE_MIN = 280;
 const RIGHT_PANE_MAX = 560;
 const leftPaneDefault = readStoredPaneWidth("synthia.splitter.left", LEFT_PANE_MIN, LEFT_PANE_MAX, 240);
 const rightPaneDefault = readStoredPaneWidth("synthia.splitter.right", RIGHT_PANE_MIN, RIGHT_PANE_MAX, 380);
-function showEngineeringOverview(): void {
-  if (!canLeaveEditor()) return;
-  resetContent();
-  openArtifactId.value = null;
-  openRevisionId.value = null;
-}
-
 function focusConversation(): void {
   chatOverlayOpen.value = true;
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
@@ -2256,6 +2130,57 @@ async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
 // 就地审批（spec §3.5 step 6）：提交拉取 / 待审产物 / 批准 / 驳回
 // ─────────────────────────────────────────────────────────────────────
 
+const reviewsLoading = ref(false);
+const reviewsLoadError = ref<string | null>(null);
+const reviewDetailError = ref<string | null>(null);
+const reviewsError = computed(() => reviewDetailError.value ?? reviewsLoadError.value);
+const reviewSelecting = ref(false);
+const reviewSelection = ref<string | null>(null);
+const reviewGateNames = computed<Record<string, string>>(() => Object.fromEntries(
+  stageChain.value?.map((gate) => [gate.node.id, gate.node.name]) ?? (isGjbReferenceProject.value ? [] : Object.entries(GATE_REVIEW_NAMES)),
+));
+let reviewsRequest: Promise<void> | null = null;
+function loadProjectReviews(): Promise<void> {
+  if (!project.value || projectType(project.value) !== "engineering") return Promise.resolve();
+  if (reviewsRequest) return reviewsRequest;
+  reviewsLoading.value = true;
+  reviewsRequest = listGateSubmissions(api, projectId).then((rows) => {
+    if (disposed) return;
+    processSubmissions.value = rows;
+    reviewsLoadError.value = null;
+    const selected = submission.value;
+    const updated = selected && rows.find((row) => row.id === selected.id);
+    if (updated && updated.state !== selected.state && !deciding.value && !reviewSelecting.value) {
+      void openSubmissionDeepLink(updated.id, false);
+    }
+  }).catch((err) => { if (!disposed) reviewsLoadError.value = humanizeLoadError(err); })
+    .finally(() => { reviewsLoading.value = false; reviewsRequest = null; });
+  return reviewsRequest;
+}
+async function refreshProjectReviews(): Promise<void> {
+  if (deciding.value) return;
+  await loadProjectReviews();
+  const id = reviewSelection.value ?? submission.value?.id;
+  if (id) await openSubmissionDeepLink(id, false);
+}
+async function openProjectReviews(gate?: string): Promise<void> {
+  activeWorkspaceTab.value = "reviews";
+  await loadProjectReviews();
+  if (disposed || activeWorkspaceTab.value !== "reviews" || deciding.value) return;
+  if (!gate && submission.value) return;
+  const rows = processSubmissions.value.filter((row) => !gate || row.gate === gate);
+  const target = [...rows].sort((a, b) => Number(b.state === "in_review") - Number(a.state === "in_review") || Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+  if (target) selectProjectReview(target.id);
+}
+function selectProjectReview(id: string): void {
+  if (deciding.value) return;
+  if (route.query.sub === id) void openSubmissionDeepLink(id);
+  else void router.replace({ query: { ...route.query, sub: id } });
+}
+watch(() => route.query.sub, (id) => {
+  if (typeof id === "string" && !loading.value) void openSubmissionDeepLink(id);
+});
+
 const submission = ref<GateSubmissionDetail | null>(null);
 const approvalMembers = ref<readonly ApprovalMember[] | null>(null);
 const approvalMembersError = ref<string | null>(null);
@@ -2321,52 +2246,53 @@ async function loadApprovalMembers(sub: GateSubmissionDetail): Promise<void> {
 /** 拉取/切换当前待批提交。判据见 `shouldFetchSubmission`（稳定等待期间不重复请求）。 */
 async function syncApproval(): Promise<void> {
   const run = detail.value;
-  if (!shouldFetchSubmission(run, submission.value)) return;
+  if (reviewSelection.value || reviewSelecting.value || deciding.value || !shouldFetchSubmission(run, submission.value)) return;
   try {
     const subs = await listGateSubmissions(api, projectId, "in_review");
     const found = findApprovalSubmission(subs, run!.awaiting_gate!);
     if (!found || submission.value?.id === found.id) return;
     const full = await getGateSubmission(api, projectId, found.id);
-    if (disposed || detail.value?.agent_id !== run?.agent_id || route.query.sub) return;
+    if (disposed || detail.value?.agent_id !== run?.agent_id || route.query.sub || reviewSelection.value || reviewSelecting.value || deciding.value) return;
     clearApproval(); // 换了一条提交 → 上一条的幂等尝试与错误提示全部作废
     submission.value = full;
     void loadApprovalMembers(full);
   } catch (err) {
-    approvalMembersError.value = humanizeLoadError(err);
+    if (!disposed && !reviewSelection.value && !reviewSelecting.value) approvalMembersError.value = humanizeLoadError(err);
   }
 }
 
 /**
  * `?sub=` 深链：旧的 `/approvals/:projectId/:subId` 重定向过来时走这里（router.ts）。
  *
- * 直接取该提交，并把当前 agent 切到 `awaiting_gate` 与之匹配的那个——否则从待办点
- * 进来会停在默认（最新）agent 上，要批的那张卡根本不在当前上下文里。找不到对应
- * agent（会话已结束/丢失）时标记为孤儿，由 `approvalCardProps` 退化成按提交状态渲染。
+ * 直接打开项目内阶段审批，不切换对话任务。审批以提交自身状态为准，
+ * 不依赖 Runtime 会话是否仍存在；材料点击后在独立的只读文件标签中打开。
  *
  * 挂载及审批深链变化时加载；过期请求不得覆盖当前所选上下文。
  */
 let deepLinkSerial = 0;
-async function openSubmissionDeepLink(subId: string): Promise<void> {
+async function openSubmissionDeepLink(subId: string, activate = true): Promise<void> {
+  if (deciding.value) return;
   const serial = ++deepLinkSerial;
-  chatOverlayOpen.value = true;
+  reviewSelection.value = subId;
+  reviewSelecting.value = true;
+  if (activate) activeWorkspaceTab.value = "reviews";
+  chatOverlayOpen.value = false;
+  reviewDetailError.value = null;
   try {
     const full = await getGateSubmission(api, projectId, subId);
+    const reason = full.state === "rejected" ? await loadRejectionReason(api, projectId, subId) : null;
     if (disposed || serial !== deepLinkSerial) return;
-    const owner = agents.value.find((a) => a.status === "awaiting_approval" && a.awaiting_gate === full.gate);
-    if (owner && owner.agent_id !== currentAgentId.value) {
-      currentAgentId.value = owner.agent_id;
-      forceNewTask.value = false;
-      const ownerDetail = await getTask(api, projectId, owner.agent_id);
-      if (disposed || serial !== deepLinkSerial || currentAgentId.value !== owner.agent_id) return;
-      detail.value = ownerDetail;
-    }
     clearApproval();
     submission.value = full;
-    approvalOrphan.value = !owner;
-    if (full.state === "rejected") rejectionReason.value = await loadRejectionReason(api, projectId, subId);
+    approvalOrphan.value = true;
+    rejectionReason.value = reason;
     void loadApprovalMembers(full);
   } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
+    if (disposed || serial !== deepLinkSerial) return;
+    clearApproval();
+    reviewDetailError.value = humanizeLoadError(err);
+  } finally {
+    if (serial === deepLinkSerial) reviewSelecting.value = false;
   }
 }
 
@@ -2393,7 +2319,7 @@ async function afterDecision(subId: string): Promise<void> {
 
 async function onApprove(): Promise<void> {
   const sub = submission.value;
-  if (!sub || deciding.value) return;
+  if (!sub || sub.state !== "in_review" || deciding.value || reviewSelecting.value) return;
   deciding.value = true;
   decisionError.value = null;
   try {
@@ -2456,7 +2382,7 @@ async function onApprove(): Promise<void> {
 
 async function onReject(reason: string): Promise<void> {
   const sub = submission.value;
-  if (!sub || deciding.value) return;
+  if (!sub || sub.state !== "in_review" || deciding.value || reviewSelecting.value) return;
   deciding.value = true;
   decisionError.value = null;
   try {
@@ -2476,7 +2402,7 @@ async function onReject(reason: string): Promise<void> {
 
 const approvalCardProps = computed<ApprovalCardProps | null>(() => {
   const sub = submission.value;
-  if (!sub) return null;
+  if (!sub || reviewSelecting.value) return null;
   const run = detail.value;
   // 正常路径按 run 状态推导可见性；深链孤儿退化成按提交自身状态推导（见 approvalOrphan）。
   const state = approvalOrphan.value
@@ -2487,8 +2413,11 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
   if (state === "hidden") return null;
   return {
     state,
+    submissionId: sub.id,
+    approveLabel: isGjbReferenceProject.value ? (sub.gate === "G4" ? "批准交付" : "批准阶段") : undefined,
+    approvedDescription: isGjbReferenceProject.value ? "已批准，本次阶段审查已完成。" : undefined,
     gate: sub.gate,
-    review: GATE_REVIEW_NAMES[sub.gate as GateId] ?? sub.gate,
+    review: reviewGateNames.value[sub.gate] ?? sub.gate,
     members: approvalMembers.value,
     membersError: approvalMembersError.value,
     submittedAt: sub.submitted_at,
@@ -2496,6 +2425,12 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
     decisionError: decisionError.value,
     rejectionReason: rejectionReason.value,
   };
+});
+
+const projectApprovalCard = computed<ApprovalCardProps | null>(() => {
+  if (!submission.value || reviewSelecting.value) return null;
+  const card = approvalCardProps.value;
+  return card ? { ...card, state: deriveApprovalCard({ status: "awaiting_approval", awaiting_gate: submission.value.gate }, submission.value) } : null;
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2520,20 +2455,6 @@ const fileTreeProps = computed<FileTreeProps>(() => ({
   pendingCount: workspace.value?.pending_count ?? 0,
   registering: registering.value,
   registerError: registerError.value,
-}));
-
-const codeEditorProps = computed<CodeEditorProps>(() => ({
-  file: openFileEntry.value,
-  activeRevision: activeRevision.value,
-  content: fileContent.value,
-  contentSource: contentSource.value,
-  loading: fileContentLoading.value,
-  readonlyReason: readonlyReason.value,
-  saving: saving.value,
-  saveError: saveError.value,
-  language: inferLanguage(openFileEntry.value),
-  theme: theme.value,
-  diffAgainst: diffAgainst.value,
 }));
 
 const chatFeedProps = computed<ChatFeedProps>(() => ({
@@ -2693,9 +2614,8 @@ function onToggleChatOverlay(): void {
         </template>
       </TopBar>
     </header>
-    <!-- 工程全景对所有项目开放，正式流程与历史资料入口按功能开关显示。 -->
-    <div v-if="project" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
-      <button type="button" class="overview-entry" :aria-pressed="!openArtifactId" @click="showEngineeringOverview"><span aria-hidden="true">◈</span> 工程全景 <span class="overview-entry-hint">设计 · 验证 · 交付</span></button>
+    <!-- 全景与审批在中栏标签中；辅助工程操作按功能开关显示。 -->
+    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
       <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
         <button
@@ -2754,22 +2674,30 @@ function onToggleChatOverlay(): void {
         <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
       <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
-        <EngineeringOverviewPanel
-          v-if="!openArtifactId"
-          embedded
-          v-bind="overviewProps"
-          @expand="overviewOpen = true"
-          @records="onOpenRecords"
-          @collaborate="focusConversation"
-        />
-        <CodeEditor v-if="openArtifactId"
-          v-bind="codeEditorProps"
-          @select-revision="onSelectRevision"
-          @compare-revisions="onCompareRevisions"
-          @exit-diff="onExitDiff"
-          @save="onSave"
-          @dirty-change="editorDirty = $event"
-        />
+        <div class="flex h-full min-h-0 min-w-0 flex-col">
+          <WorkspaceTabs :tabs="workspaceTabs" :active-id="activeWorkspaceTab" @select="selectWorkspaceTab" @close="closeWorkspaceTab" />
+          <div class="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel" :aria-label="workspaceTabs.find(tab => tab.id === activeWorkspaceTab)?.label">
+            <EngineeringOverviewPanel
+              v-show="activeWorkspaceTab === 'overview'" embedded v-bind="overviewProps"
+              @expand="overviewOpen = true" @records="onOpenRecords" @collaborate="focusConversation"
+            />
+            <ProjectReviews
+              v-if="projectType(project) === 'engineering'" v-show="activeWorkspaceTab === 'reviews'"
+              :rows="processSubmissions" :selected="submission" :card="projectApprovalCard"
+              :members="approvalMembers" :members-error="approvalMembersError"
+              :loading="reviewsLoading" :selecting="reviewSelecting" :error="reviewsError" :gate-names="reviewGateNames"
+              @select="selectProjectReview" @refresh="refreshProjectReviews" @approve="onApprove" @reject="onReject" @open-doc="onOpenDoc"
+            />
+            <WorkspaceFilePane
+              v-for="tab in fileTabs" v-show="activeWorkspaceTab === tab.id" :key="tab.id"
+              :project-id="projectId" :tab="tab" :entry="currentTabEntry(tab)" :agent-status="editorAgentStatus" :theme="theme"
+              @dirty="updateTabState(tab.id, 'dirty', $event)" @saving="updateTabState(tab.id, 'saving', $event)" @saved="loadWorkspace"
+              @revision="openFile(currentTabEntry(tab).artifactId, $event)"
+              @compare="(base, head) => compareRevisions(currentTabEntry(tab), base, head)"
+              @exit-diff="openFile(currentTabEntry(tab).artifactId, tab.revisionId ?? undefined)"
+            />
+          </div>
+        </div>
       </ResizablePanel>
       <template v-if="!rightCollapsed">
         <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
@@ -2994,10 +2922,6 @@ function onToggleChatOverlay(): void {
 </template>
 
 <style scoped>
-.overview-entry { display: inline-flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle)); border-radius: 5px; padding: 4px 9px; background: var(--accent-subtle); color: var(--accent); cursor: pointer; font-size: 11px; }
-.overview-entry:hover { border-color: var(--accent); }
-.overview-entry-hint { border-left: 1px solid var(--border-strong); padding-left: 8px; color: var(--text-secondary); font-size: 10px; }
-@media (max-width: 600px) { .overview-entry-hint { display: none; } }
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
 .project-view-overlay > :deep(.chat-feed) {
   flex: 1;
