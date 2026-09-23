@@ -6,7 +6,7 @@ import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
 import Button from "../components/ui/AppButton.vue";
-import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
+import EngineeringOverviewPanel from "../components/projects/EngineeringOverviewPanel.vue";
 import EngineeringOverview from "../components/projects/EngineeringOverview.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
@@ -1933,8 +1933,19 @@ async function refreshToolSummary(): Promise<void> {
   }
 }
 
-watch(overviewOpen, (open, _previous, onCleanup) => {
-  if (!open) return;
+const overviewProps = computed(() => ({
+  projectName: project.value?.name ?? "",
+  targetPart: project.value?.target_part ?? null,
+  summary: toolSummary.value,
+  fileCount: workspace.value?.files.length ?? null,
+  processState: processState.value,
+  stageChain: stageChain.value,
+  recordJobIds: recordJobs.value.map((job) => job.jobId),
+  mock: isMock,
+}));
+
+watch(() => overviewOpen.value || !openArtifactId.value, (visible, _previous, onCleanup) => {
+  if (!visible) return;
   let refreshing = false;
   const update = async () => {
     if (refreshing || document.hidden) return;
@@ -2070,15 +2081,16 @@ const RIGHT_PANE_MIN = 280;
 const RIGHT_PANE_MAX = 560;
 const leftPaneDefault = readStoredPaneWidth("synthia.splitter.left", LEFT_PANE_MIN, LEFT_PANE_MAX, 240);
 const rightPaneDefault = readStoredPaneWidth("synthia.splitter.right", RIGHT_PANE_MIN, RIGHT_PANE_MAX, 380);
+function showEngineeringOverview(): void {
+  if (!canLeaveEditor()) return;
+  resetContent();
+  openArtifactId.value = null;
+  openRevisionId.value = null;
+}
+
 function focusConversation(): void {
   chatOverlayOpen.value = true;
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
-}
-
-// 首页示例任务：填入当前草稿并聚焦输入框（与 ChatFeed 空态示例同一 EXAMPLE_TASKS 数据源）。
-function onWelcomeExample(text: string): void {
-  chatDraft.value = text;
-  focusConversation();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2646,7 +2658,7 @@ function onToggleChatOverlay(): void {
     </header>
     <!-- 工程全景对所有项目开放，正式流程与历史资料入口按功能开关显示。 -->
     <div v-if="project" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
-      <button type="button" class="overview-entry" :aria-expanded="overviewOpen" @click="overviewOpen = true"><span aria-hidden="true">◈</span> 工程全景 <span class="overview-entry-hint">设计 · 验证 · 交付</span></button>
+      <button type="button" class="overview-entry" :aria-pressed="!openArtifactId" @click="showEngineeringOverview"><span aria-hidden="true">◈</span> 工程全景 <span class="overview-entry-hint">设计 · 验证 · 交付</span></button>
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
       <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
         <button
@@ -2703,22 +2715,13 @@ function onToggleChatOverlay(): void {
         <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
       <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
-        <WorkspaceWelcome
+        <EngineeringOverviewPanel
           v-if="!openArtifactId"
-          :project-name="project.name"
-          :engineering="projectType(project) === 'engineering'"
-          :has-agent="hasAgent"
-          :show-browse="leftCollapsed"
-          :type-label="projectTypeLabel"
-          :profile-label="projectProfileLabel"
-          :process-state="processState"
-          :stage-chain="stageChain"
-          :summary="toolSummary"
-          :example-tasks="EXAMPLE_TASKS"
-          @overview="overviewOpen = true"
-          @start="focusConversation"
-          @browse="treeDrawerOpen = true"
-          @example="onWelcomeExample"
+          embedded
+          v-bind="overviewProps"
+          @expand="overviewOpen = true"
+          @records="onOpenRecords"
+          @collaborate="focusConversation"
         />
         <CodeEditor v-if="openArtifactId"
           v-bind="codeEditorProps"
@@ -2940,14 +2943,7 @@ function onToggleChatOverlay(): void {
     <EngineeringOverview
       v-if="project"
       v-model:open="overviewOpen"
-      :project-name="project.name"
-      :target-part="project.target_part ?? null"
-      :summary="toolSummary"
-      :file-count="workspace?.files.length ?? null"
-      :process-state="processState"
-      :stage-chain="stageChain"
-      :record-job-ids="recordJobs.map(job => job.jobId)"
-      :mock="isMock"
+      v-bind="overviewProps"
       @records="onOpenRecords"
       @collaborate="focusConversation"
     />

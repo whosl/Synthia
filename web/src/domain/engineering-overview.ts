@@ -1,4 +1,16 @@
-import type { ToolSummary } from "../api/types.ts";
+import type { ProcessStateV1, ToolSummary } from "../api/types.ts";
+import type { ProcessGateView } from "./process-profile.ts";
+
+export interface EngineeringOverviewProps {
+  projectName: string;
+  targetPart: string | null;
+  summary: ToolSummary | null;
+  fileCount: number | null;
+  processState: ProcessStateV1 | null;
+  stageChain: readonly ProcessGateView[] | null;
+  recordJobIds: readonly string[];
+  mock: boolean;
+}
 
 export type OverviewState = "unknown" | "idle" | "running" | "passed" | "failed" | "stopped";
 

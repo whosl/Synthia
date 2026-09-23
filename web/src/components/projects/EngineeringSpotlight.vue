@@ -19,7 +19,7 @@ const selected = computed(() => props.rows.find((row) => row.project.id === chos
         <select id="spotlight-project" :value="selected.project.id" @change="chosenId = ($event.target as HTMLSelectElement).value">
           <option v-for="row in rows" :key="row.project.id" :value="row.project.id">{{ row.project.name }}</option>
         </select>
-        <router-link :to="{ name: 'project', params: { id: selected.project.id }, query: { overview: '1' } }">进入工程全景<ArrowUpRight :size="16" /></router-link>
+        <router-link :to="{ name: 'project', params: { id: selected.project.id } }">进入工程全景<ArrowUpRight :size="16" /></router-link>
       </div>
     </div>
     <div class="spotlight-visual" aria-hidden="true">
