@@ -68,6 +68,7 @@ import {
   routeMockP4,
 } from "./p4.ts";
 import { routeMockEvolution } from "./evolution.ts";
+import { mockToolSummary } from "./tool-summary.ts";
 
 /** 假装有网络：让 loading 态真的能被看见，而不是同步瞬间填满。 */
 const LATENCY_MS = 80;
@@ -1131,6 +1132,14 @@ async function route(
 
   // /projects/:id
   if (rest.length === 0 && method === "GET") return ok(project);
+
+  if (rest.length === 1 && rest[0] === "tool-summary" && method === "GET") {
+    const details = fixtureProject ? mockAgents().flatMap((agent) => {
+      const detail = mockAgentDetail(agent.agent_id);
+      return detail ? [detail] : [];
+    }) : [];
+    return ok(mockToolSummary(projectId, details));
+  }
 
   if (rest.length === 1 && rest[0] === "copy-as-engineering" && method === "POST") {
     return copyMockProjectAsEngineering(projectId, body);

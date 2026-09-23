@@ -7,6 +7,7 @@ import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import { useEditorContent } from "../composables/use-editor-content.ts";
 import Button from "../components/ui/AppButton.vue";
 import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
+import EngineeringOverview from "../components/projects/EngineeringOverview.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
@@ -213,6 +214,7 @@ const router = useRouter();
 const auth = useAuthStore();
 const projectId = String(route.params.id);
 const isMock = import.meta.env.VITE_MOCK === "1";
+const overviewOpen = ref(route.query.overview === "1");
 
 // ─────────────────────────────────────────────────────────────────────
 // 基础数据 + 轮询（3s；无活动 run 时跳过请求，保留恢复能力）
@@ -1931,6 +1933,19 @@ async function refreshToolSummary(): Promise<void> {
   }
 }
 
+watch(overviewOpen, (open, _previous, onCleanup) => {
+  if (!open) return;
+  let refreshing = false;
+  const update = async () => {
+    if (refreshing || document.hidden) return;
+    refreshing = true;
+    try { await refreshToolSummary(); } finally { refreshing = false; }
+  };
+  void update();
+  const timer = window.setInterval(() => void update(), 5000);
+  onCleanup(() => window.clearInterval(timer));
+}, { immediate: true });
+
 async function loadStaReportText(jobId: string): Promise<string> {
   const evidence = await getJobEvidenceContent(api, projectId, jobId, "sta.rpt");
   return evidence.content;
@@ -2629,9 +2644,9 @@ function onToggleChatOverlay(): void {
         </template>
       </TopBar>
     </header>
-    <!-- 项目类型/流程/器件信息已收入顶栏「项目概览」chip；本行只剩工程项目
-         的正式流程/历史资料入口（自由项目整行不渲染）。 -->
-    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
+    <!-- 工程全景对所有项目开放，正式流程与历史资料入口按功能开关显示。 -->
+    <div v-if="project" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
+      <button type="button" class="overview-entry" :aria-expanded="overviewOpen" @click="overviewOpen = true"><span aria-hidden="true">◈</span> 工程全景 <span class="overview-entry-hint">设计 · 验证 · 交付</span></button>
       <span v-if="isMock" class="project-demo-tag">演示数据</span>
       <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
         <button
@@ -2700,6 +2715,7 @@ function onToggleChatOverlay(): void {
           :stage-chain="stageChain"
           :summary="toolSummary"
           :example-tasks="EXAMPLE_TASKS"
+          @overview="overviewOpen = true"
           @start="focusConversation"
           @browse="treeDrawerOpen = true"
           @example="onWelcomeExample"
@@ -2921,10 +2937,28 @@ function onToggleChatOverlay(): void {
       </SheetContent>
     </Sheet>
 
+    <EngineeringOverview
+      v-if="project"
+      v-model:open="overviewOpen"
+      :project-name="project.name"
+      :target-part="project.target_part ?? null"
+      :summary="toolSummary"
+      :file-count="workspace?.files.length ?? null"
+      :process-state="processState"
+      :stage-chain="stageChain"
+      :record-job-ids="recordJobs.map(job => job.jobId)"
+      :mock="isMock"
+      @records="onOpenRecords"
+      @collaborate="focusConversation"
+    />
   </div>
 </template>
 
 <style scoped>
+.overview-entry { display: inline-flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle)); border-radius: 5px; padding: 4px 9px; background: var(--accent-subtle); color: var(--accent); cursor: pointer; font-size: 11px; }
+.overview-entry:hover { border-color: var(--accent); }
+.overview-entry-hint { border-left: 1px solid var(--border-strong); padding-left: 8px; color: var(--text-secondary); font-size: 10px; }
+@media (max-width: 600px) { .overview-entry-hint { display: none; } }
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
 .project-view-overlay > :deep(.chat-feed) {
   flex: 1;

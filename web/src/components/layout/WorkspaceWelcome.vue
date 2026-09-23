@@ -63,7 +63,7 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits<{ start: []; browse: []; example: [text: string] }>();
+const emit = defineEmits<{ start: []; browse: []; example: [text: string]; overview: [] }>();
 
 // 头部当前门徽章：「G2 · 设计确认」；流程走完显示「已密封」。
 const gateBadge = computed(() => {
@@ -157,6 +157,12 @@ const visibleExamples = computed(() => props.exampleTasks.slice(0, 3));
         </div>
       </header>
 
+      <button type="button" class="panorama-card" @click="emit('overview')">
+        <span class="panorama-symbol" aria-hidden="true">◈</span>
+        <span><small>ENGINEERING OVERVIEW</small><strong>看见设计的每一步</strong><span>打开工程全景，查看验证进展与设计成果</span></span>
+        <span class="panorama-arrow" aria-hidden="true">↗</span>
+      </button>
+
       <!-- 流程进度：G0–G4 迷你步进器（仅阶段链存在时渲染）；窄屏隐藏门名只留编号 -->
       <section v-if="stageChain && stageChain.length" aria-label="流程进度" class="flex flex-col gap-3">
         <div class="flex items-baseline justify-between">
@@ -240,3 +246,14 @@ const visibleExamples = computed(() => props.exampleTasks.slice(0, 3));
     </div>
   </div>
 </template>
+
+<style scoped>
+.panorama-card { display: flex; align-items: center; gap: 18px; width: 100%; text-align: left; padding: 23px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle)); border-radius: 12px; color: var(--text-primary); background: radial-gradient(ellipse at 0 50%, var(--accent-subtle), transparent 75%), var(--surface-panel); cursor: pointer; transition: border-color 150ms; }
+.panorama-card:hover { border-color: var(--accent); }
+.panorama-symbol { display: grid; place-items: center; flex-shrink: 0; width: 48px; height: 48px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 10px; color: var(--accent); font-size: 32px; }
+.panorama-card small { display: block; font: 8px var(--font-mono); letter-spacing: 1.5px; color: var(--accent); }
+.panorama-card strong { display: block; font-size: 17px; font-weight: 550; margin: 8px 0; }
+.panorama-card span > span { display: block; color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
+.panorama-arrow { margin-left: auto; color: var(--accent); font-size: 22px; }
+@media (max-width: 600px) { .panorama-card { padding: 16px; gap: 12px; }.panorama-symbol { width: 36px; height: 36px; font-size: 25px; }.panorama-card strong { font-size: 15px; } }
+</style>
