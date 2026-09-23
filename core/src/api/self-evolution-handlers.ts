@@ -318,8 +318,12 @@ async function metricRows(query: QueryClient, versionId: string): Promise<SkillM
 
 /**
  * The "hard way" arm: the active span of the origin episode — the
- * version-1 distillation source trajectory, scoped to that episode's turn
- * when it has one so earlier turns in the same task do not inflate it.
+ * version-1 distillation source trajectory. Scoped task-wide up to the
+ * episode's seal point, NOT to the episode's own turn: methods crystallize
+ * over a task's whole exploration (the validate-sources origin is a 1-minute
+ * final turn at the end of a 12-turn, 97-minute task), and cutting that
+ * exploration off would understate the baseline the skill is supposed to
+ * compress.
  */
 async function baselineDurationMs(query: QueryClient, skillId: string): Promise<number | null> {
   const result = await query.query(
@@ -333,7 +337,6 @@ async function baselineDurationMs(query: QueryClient, skillId: string): Promise<
           FROM task_conversation_event ev
          WHERE ev.task_id=e.task_id
            AND ev.sequence<=e.end_event_sequence
-           AND (e.turn_id IS NULL OR ev.payload->>'turn_id'=e.turn_id)
       ) span
       WHERE s.id=$1`,
     [skillId],
