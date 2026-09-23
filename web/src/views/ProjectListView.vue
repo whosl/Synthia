@@ -22,7 +22,6 @@ import {
 import { PROJECT_STATUS_TEXT } from "../domain/gates.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import CreateProjectDialog from "../components/projects/CreateProjectDialog.vue";
-import EngineeringSpotlight from "../components/projects/EngineeringSpotlight.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import Badge from "../components/ui/AppBadge.vue";
 import Button from "../components/ui/AppButton.vue";
@@ -101,8 +100,6 @@ function projectCreated(id: string) {
         >
       </div>
     </div>
-
-    <EngineeringSpotlight v-if="!loading" :rows="rows" />
 
     <div
       class="mb-9 grid grid-cols-3 gap-4 max-[600px]:mb-7 max-[600px]:gap-2"
