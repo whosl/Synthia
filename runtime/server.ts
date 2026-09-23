@@ -868,12 +868,16 @@ function contextPolicyFromEnv(
  */
 function permissionDepsFromEnv(
   env: Record<string, string | undefined>,
-): { permissionTools: readonly string[] } {
+): { permissionTools: readonly string[]; maxToolRounds: number } {
   const raw = env.SYNTHIA_AGENT_PERMISSION_TOOLS;
   const tools = raw === undefined
     ? ["vivado_run"]
     : raw.split(",").map((t) => t.trim()).filter(Boolean);
-  return { permissionTools: tools };
+  const rounds = Number(env.SYNTHIA_AGENT_MAX_TOOL_ROUNDS);
+  return {
+    permissionTools: tools,
+    maxToolRounds: Number.isFinite(rounds) && rounds >= 0 ? Math.floor(rounds) : 0,
+  };
 }
 
 function depsFactoryInput(projectId: string, runtime: {

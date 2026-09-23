@@ -1732,3 +1732,61 @@ describe("free-agent: long-session restart recovery", () => {
     expect(reply).toBe("压缩后成功");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tool round limit (unbounded by default)
+// ---------------------------------------------------------------------------
+
+describe("free-agent: tool round limit", () => {
+  test("default is unbounded: 60+ tool rounds complete without the safety valve", async () => {
+    // 60 轮工具调用 + 最终文本；默认配置下不触发任何上限。
+    const rounds = 60;
+    const turns: ChatTurn[] = [];
+    for (let i = 0; i < rounds; i++) turns.push(call(`tc-${i}`, "fpga-intake", { content: `# Doc ${i}`, filename: `doc/intake/d${i}.md` }));
+    turns.push(txt("60 轮后完成。"));
+    const gov = new MockGovernanceClient();
+    const model = new ScriptedModel(turns);
+    const agentId = `agent-rounds-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+      agentsDir,
+    });
+    const reply = await session.prompt("登记 60 份");
+    expect(reply).toBe("60 轮后完成。");
+    expect(model.calls).toHaveLength(rounds + 1);
+  });
+
+  test("maxToolRounds > 0 still enforces the valve", async () => {
+    const turns: ChatTurn[] = [
+      call("tc-0", "fpga-intake", { content: "# A", filename: "doc/intake/a.md" }),
+      call("tc-1", "fpga-intake", { content: "# B", filename: "doc/intake/b.md" }),
+      txt("never reached"),
+    ];
+    const model = new ScriptedModel(turns);
+    const agentId = `agent-rounds-${++idCounter}`;
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [...assembleSkillTools()],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: new MockGovernanceClient(),
+      connector: null,
+      agentsDir,
+      maxToolRounds: 2,
+    });
+    let rejected: unknown = null;
+    try { await session.prompt("登记"); } catch (e) { rejected = e; }
+    expect(rejected instanceof Error).toBe(true);
+    expect((rejected as Error).message).toContain("exceeded 2 tool rounds");
+    expect(session.status()).toBe("failed");
+  });
+});
