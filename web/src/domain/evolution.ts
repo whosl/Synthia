@@ -148,6 +148,14 @@ function parseMetrics(value: unknown, label: string): SkillMetricsV1 {
       row.first_solved_problem_families,
       `${label}.first_solved_problem_families`,
     ),
+    // Newer fields tolerate absence (older Core payloads) as null.
+    baseline_duration_ms: nullableInteger(row.baseline_duration_ms ?? null, `${label}.baseline_duration_ms`),
+    efficiency_saved_ms: row.efficiency_saved_ms == null
+      ? null
+      : number(row.efficiency_saved_ms, `${label}.efficiency_saved_ms`),
+    efficiency_speedup: row.efficiency_speedup == null
+      ? null
+      : number(row.efficiency_speedup, `${label}.efficiency_speedup`),
   };
   if (measurementState === "unknown" && successRate !== null) {
     throw new EvolutionContractError(`${label}.unknown measurement cannot expose success_rate`);

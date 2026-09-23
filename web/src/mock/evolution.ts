@@ -31,6 +31,9 @@ const observedMetrics = {
   median_duration_ms: 912_000,
   human_corrections: 1,
   first_solved_problem_families: null,
+  baseline_duration_ms: 5_820_000,
+  efficiency_saved_ms: 4_908_000,
+  efficiency_speedup: 6.38,
 };
 
 const unknownMetrics = {
@@ -46,6 +49,9 @@ const unknownMetrics = {
   median_duration_ms: null,
   human_corrections: null,
   first_solved_problem_families: null,
+  baseline_duration_ms: null,
+  efficiency_saved_ms: null,
+  efficiency_speedup: null,
 };
 
 function initialSkills(): LearnedSkillSummaryV1[] {

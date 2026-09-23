@@ -81,6 +81,18 @@ const firstSolvedText = computed(() => {
   return detail ? detail.metrics.first_solved_problem_families ?? "未知" : "未知";
 });
 
+// 提效对照：源轨迹（蒸馏臂）vs success 应用中位（技能臂）；缺任一侧臂显示未知
+const efficiencySpeedupText = computed(() => {
+  const metrics = props.detail?.metrics;
+  if (!metrics || metrics.efficiency_speedup === null || metrics.efficiency_saved_ms === null) {
+    return "未知";
+  }
+  const speedup = metrics.efficiency_speedup >= 10
+    ? Math.round(metrics.efficiency_speedup)
+    : Math.round(metrics.efficiency_speedup * 10) / 10;
+  return `${speedup}× · 省 ${formatEvolutionDuration(metrics.efficiency_saved_ms)}`;
+});
+
 // disable/archive 改变 Skill 可用性、影响 Agent 检索，需二次确认；enable/restore/pin/unpin 直接执行
 const pendingControl = ref<"disable" | "archive" | null>(null);
 const controlConfirmText = computed(() => {
@@ -222,7 +234,7 @@ function shortHash(value: string): string {
         <button v-for="(tab, index) in tabs" :id="`skill-tab-${tab.id}`" :key="tab.id" type="button" role="tab" :tabindex="activeTab === tab.id ? 0 : -1" :aria-selected="activeTab === tab.id" :aria-controls="`skill-panel-${tab.id}`" @keydown="onTabKey($event, index)" @click="activeTab = tab.id">{{ tab.label }}</button>
       </div>
       <section v-if="activeTab === 'overview'" id="skill-panel-overview" role="tabpanel" aria-labelledby="skill-tab-overview" class="grid min-w-0 gap-4">
-      <section class="grid grid-cols-3 gap-3 max-[560px]:grid-cols-1" aria-label="Skill 真实调用指标">
+      <section class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1" aria-label="Skill 真实调用指标">
         <StatCard
           label="目标解决率"
           :value="successRateText(detail.metrics)"
@@ -234,9 +246,16 @@ function shortHash(value: string): string {
           hint="实际调用记录"
         />
         <StatCard
-          label="中位处理时间"
+          label="中位活跃处理时长"
           :value="formatEvolutionDuration(detail.metrics.median_duration_ms)"
-          hint="从应用技能到目标关闭"
+          hint="apply→关闭的活跃时长（间隔裁剪，不含人挂起）"
+        />
+        <StatCard
+          label="提效对照"
+          :value="efficiencySpeedupText"
+          :hint="detail.metrics.baseline_duration_ms === null
+            ? '源轨迹时长未知'
+            : `源轨迹 ${formatEvolutionDuration(detail.metrics.baseline_duration_ms)} → 技能应用中位`"
         />
       </section>
       <div class="outcome-card" aria-label="调用结果分布">

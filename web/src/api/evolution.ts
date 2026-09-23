@@ -46,6 +46,9 @@ export interface SkillMetricsV1 {
   readonly median_duration_ms: number | null;
   readonly human_corrections: number | null;
   readonly first_solved_problem_families: number | null;
+  readonly baseline_duration_ms: number | null;
+  readonly efficiency_saved_ms: number | null;
+  readonly efficiency_speedup: number | null;
 }
 
 export interface LearnedSkillSummaryV1 {
