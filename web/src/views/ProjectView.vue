@@ -1064,19 +1064,22 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
     }
 
     const runtimeFormal = formalFlowProgress.value;
-    formalPreview.value = null;
-    formalApproval.value = null;
-    formalApprovalId.value = null;
+    // 先在局部算好新值、收尾一次性提交——此前先把三个 ref 清 null 再经
+    // 多个 await 回填，3s 轮询每轮都让正式输入卡（依赖这些值的 v-if）
+    // 整块卸载又挂载，视觉上就是反复闪烁。
+    let nextPreview: FormalInputPreviewV1 | null = null;
+    let nextApproval: FormalInputApprovalV1 | null = null;
+    let nextApprovalId: string | null = null;
     if (runtimeFormal?.preview.work_version_id === processState.value.workVersionId) {
       if (runtimeFormal.preview.schema !== "formal-input-preview.v1") {
         throw new ProcessContractError("Runtime 返回了不支持的正式输入 preview");
       }
-      formalPreview.value = runtimeFormal.preview;
-      formalApprovalId.value = runtimeFormal.approval_id;
+      nextPreview = runtimeFormal.preview;
+      nextApprovalId = runtimeFormal.approval_id;
       try {
-        formalApproval.value = await getFormalInputApproval(api, projectId, runtimeFormal.approval_id);
+        nextApproval = await getFormalInputApproval(api, projectId, runtimeFormal.approval_id);
       } catch (err) {
-        if (err instanceof ApiError && err.status === 404) formalApproval.value = null;
+        if (err instanceof ApiError && err.status === 404) nextApproval = null;
         else throw err;
       }
     }
@@ -1091,17 +1094,20 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
       : deliveryReleases.value[0]?.id ?? null;
     await loadSelectedDeliveryRelease(preferredRelease, serial);
     if (
-      !formalApproval.value
+      !nextApproval
       && selectedDeliveryRelease.value?.work_version_id === processState.value.workVersionId
     ) {
-      formalApproval.value = await getFormalInputApproval(
+      nextApproval = await getFormalInputApproval(
         api,
         projectId,
         selectedDeliveryRelease.value.formal_input_approval_id,
       );
-      formalPreview.value = formalApproval.value;
-      formalApprovalId.value = formalApproval.value.id;
+      nextPreview = nextApproval;
+      nextApprovalId = nextApproval.id;
     }
+    formalPreview.value = nextPreview;
+    formalApproval.value = nextApproval;
+    formalApprovalId.value = nextApprovalId;
 
     try {
       const sources = materialSnapshots.value.length > 0
