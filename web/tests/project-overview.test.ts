@@ -10,6 +10,7 @@ import {
   filterProjects,
   loadProjectOverview,
   pendingReviews,
+  type ProjectOverview,
 } from "../src/domain/project-overview.ts";
 import { loginDestination, viewKey } from "../src/domain/navigation.ts";
 import { prepareWriteAttempt } from "../src/domain/write-attempt.ts";
@@ -93,6 +94,50 @@ function clientFor(
 }
 
 describe("project overview business flow", () => {
+  test("project links arrive before slow statistics without claiming complete counts", async () => {
+    const { client } = clientFor();
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const snapshots: (readonly ProjectOverview[])[] = [];
+    const slowClient: typeof client = async (path, options) => {
+      if (path !== "/api/v1/projects") await barrier;
+      return client(path, options);
+    };
+    const result = loadProjectOverview(slowClient, {
+      onProgress: (rows) => { snapshots.push(rows); started(); },
+    });
+    await ready;
+    expect(snapshots[0]!.map((row) => row.project.id)).toEqual(["engineering", "free"]);
+    expect(snapshots[0]!.every((row) => row.pending)).toBeTrue();
+    expect(snapshots[0]![0]!.progress).toBeNull();
+    release();
+    const rows = await result;
+    expect(rows.every((row) => row.pending === false)).toBeTrue();
+    expect(pendingReviews(rows)).toHaveLength(1);
+    expect(snapshots[0]!.every((row) => row.pending)).toBeTrue();
+  });
+
+  test("leaving the list stops scheduling subsequent batches and publishing updates", async () => {
+    const projects = Array.from({ length: 9 }, (_, index) => ({ ...free, id: `free-${index}` }));
+    const { client, calls } = clientFor(Object.fromEntries([
+      ["/api/v1/projects", projects],
+      ...projects.map((project) => [`/api/v1/projects/${project.id}/tasks`, { agents: [] }]),
+    ]));
+    let disposed = false;
+    const updates: (readonly ProjectOverview[])[] = [];
+    await loadProjectOverview(client, {
+      isDisposed: () => disposed,
+      onProgress: (rows) => {
+        updates.push(rows);
+        if (rows.some((row) => row.pending === false)) disposed = true;
+      },
+    });
+    expect(calls.filter((path) => path.endsWith("/tasks"))).toHaveLength(4);
+    expect(updates).toHaveLength(2);
+  });
+
   test("uses verified Core G0-G4 completion, not a legacy submission-derived stage", async () => {
     const { client, calls } = clientFor();
     const rows = await loadProjectOverview(client);

@@ -41,12 +41,13 @@ const {
   rows,
   loading,
   refreshing,
+  detailsLoading,
   error,
   reviews,
   activeTasks,
   incompleteRows,
   reload,
-} = useProjectOverview(api);
+} = useProjectOverview(api, true);
 const query = ref("");
 const type = ref("all");
 const showCreate = ref(false);
@@ -133,10 +134,10 @@ function projectCreated(id: string) {
             >等待审批</span
           ><strong
             class="mt-[5px] block text-[30px] leading-[1.2] font-[550] tabular-nums max-[600px]:text-[26px]"
-            >{{ loading ? "—" : reviews.length
+            >{{ detailsLoading ? "—" : reviews.length
             }}<small
               v-if="
-                !loading &&
+                !detailsLoading &&
                 incompleteRows.some((row) =>
                   row.issues.some((issue) => issue.label === '待审批记录'),
                 )
@@ -159,10 +160,10 @@ function projectCreated(id: string) {
             >活跃主任务</span
           ><strong
             class="mt-[5px] block text-[30px] leading-[1.2] font-[550] tabular-nums max-[600px]:text-[26px]"
-            >{{ loading ? "—" : activeTasks.length
+            >{{ detailsLoading ? "—" : activeTasks.length
             }}<small
               v-if="
-                !loading &&
+                !detailsLoading &&
                 incompleteRows.some((row) =>
                   row.issues.some((issue) => issue.label === '任务状态'),
                 )
@@ -395,7 +396,7 @@ function projectCreated(id: string) {
         />
         <h2 id="activity-title" class="m-0 text-xs font-[550]">正在推进</h2>
       </div>
-      <p v-if="loading" class="m-0 text-xs leading-[1.7] text-fg-secondary">
+      <p v-if="detailsLoading" class="m-0 text-xs leading-[1.7] text-fg-secondary">
         正在读取任务状态…
       </p>
       <p

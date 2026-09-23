@@ -7,7 +7,7 @@ import {
   type ProjectOverview,
 } from "../domain/project-overview.ts";
 
-export function useProjectOverview(client: ApiClient) {
+export function useProjectOverview(client: ApiClient, progressive = false) {
   const rows = ref<readonly ProjectOverview[]>([]);
   const loading = ref(true);
   const refreshing = ref(false);
@@ -20,7 +20,15 @@ export function useProjectOverview(client: ApiClient) {
     refreshing.value = true;
     error.value = null;
     try {
-      const result = await loadProjectOverview(client);
+      const firstLoad = loading.value;
+      const result = await loadProjectOverview(client, {
+        isDisposed: () => disposed,
+        onProgress: progressive && firstLoad ? (nextRows) => {
+          if (disposed) return;
+          rows.value = nextRows;
+          loading.value = false;
+        } : undefined,
+      });
       if (disposed) return;
       rows.value = result;
       lastUpdated.value = new Date().toISOString();
@@ -47,6 +55,7 @@ export function useProjectOverview(client: ApiClient) {
     rows,
     loading,
     refreshing,
+    detailsLoading: computed(() => loading.value || rows.value.some((row) => row.pending)),
     error,
     lastUpdated,
     reload,

@@ -358,6 +358,8 @@ let withdrawChangeRequestAttempt: WriteAttempt<{ readonly changeRequestId: strin
 
 const loading = ref(true);
 const taskListReady = ref(false);
+const conversationInitializing = ref(true);
+const filesInitializing = ref(true);
 const loadErrorText = ref<string | null>(null);
 
 let poller: Poller | null = null;
@@ -388,11 +390,26 @@ async function loadWorkspace(): Promise<boolean> {
   }
 }
 
-/** 每轮刷新：run 列表 + 当前 run 详情 + 产物/版本（agent 运行期间会不断产出新候选版本）+ 工作区。 */
+/** Independent pane reads run together; the refresh promise still waits for all facts after writes. */
 async function refreshOnce(): Promise<void> {
   if (disposed) return;
+  const results = await Promise.allSettled([
+    refreshTaskDetails(),
+    loadArtifactsAndRevisions().finally(() => { if (!disposed) filesInitializing.value = false; }),
+    loadWorkspace(),
+    loadProcessProjection(),
+  ]);
+  if (disposed) return;
+  const failure = results.find((result) => result.status === "rejected");
+  loadErrorText.value = failure?.status === "rejected" ? humanizeLoadError(failure.reason) : null;
+  if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
+}
+
+/** Load conversation independently so file revision reads do not delay the Agent pane. */
+async function refreshTaskDetails(): Promise<void> {
+  if (disposed) return;
   try {
-    const [taskList] = await Promise.all([listTasks(api, projectId), loadArtifactsAndRevisions(), loadWorkspace()]);
+    const taskList = await listTasks(api, projectId);
     if (disposed) return;
     taskListReady.value = true;
     agents.value = [...taskList.agents]
@@ -430,13 +447,10 @@ async function refreshOnce(): Promise<void> {
       detail.value = null;
       mainTaskEvents.value = [];
     }
-    loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
     void syncApproval();
-    await loadProcessProjection();
-    if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
-  } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
+  } finally {
+    if (!disposed) conversationInitializing.value = false;
   }
 }
 
@@ -1382,18 +1396,23 @@ async function initializeProject(): Promise<void> {
     const value = await getProject(api, projectId);
     if (disposed) return;
     project.value = value;
+    // The overview needs only project identity and its independent tool summary.
+    loading.value = false;
     await refresh();
     if (disposed) return;
-    void refreshToolSummary();
-    if (sideTasksEnabled.value) await loadSideTasks();
+    if (sideTasksEnabled.value) void loadSideTasks();
     // 深链要在 refresh 之后：它需要 agents 已就绪才能找到在等这道门的那个 agent。
     const subId = route.query.sub;
     if (typeof subId === "string" && subId.length > 0) await openSubmissionDeepLink(subId);
   } catch (err) {
     if (!disposed) loadErrorText.value = humanizeLoadError(err);
   } finally {
-    if (!disposed) loading.value = false;
+    if (!disposed) {
+      loading.value = false;
+      conversationInitializing.value = false;
+    }
   }
+  if (disposed) return;
   poller?.stop();
   poller = createPoller(() => {
     if (document.visibilityState === "hidden") return;
@@ -1925,12 +1944,14 @@ const staReportLoader = computed(() => {
   return timing ? () => loadStaReportText(timing.sourceJobId) : undefined;
 });
 
-async function refreshToolSummary(): Promise<void> {
-  try {
-    toolSummary.value = await getToolSummary(api, projectId);
-  } catch {
-    toolSummary.value = null; // 端点不可达（旧 Core / mock）时静默隐藏卡片
-  }
+let toolSummaryRequest: Promise<void> | null = null;
+function refreshToolSummary(): Promise<void> {
+  if (toolSummaryRequest) return toolSummaryRequest;
+  toolSummaryRequest = getToolSummary(api, projectId)
+    .then((summary) => { if (!disposed) toolSummary.value = summary; })
+    .catch(() => { if (!disposed) toolSummary.value = null; })
+    .finally(() => { toolSummaryRequest = null; });
+  return toolSummaryRequest;
 }
 
 const overviewProps = computed(() => ({
@@ -2704,7 +2725,9 @@ function onToggleChatOverlay(): void {
           :max-size="LEFT_PANE_MAX"
           class="min-h-0 overflow-hidden"
         >
+          <div v-if="filesInitializing" class="p-4 text-xs text-fg-muted" role="status">正在加载项目文件…</div>
           <FileTree
+            v-else
             v-bind="fileTreeProps"
             @update:viewMode="onUpdateViewMode"
             @open-file="onOpenFile"
@@ -2753,7 +2776,7 @@ function onToggleChatOverlay(): void {
             @archive="onArchiveSideAgent"
           />
           <ChatFeed
-            v-if="activeAgentPane === 'main'"
+            v-if="activeAgentPane === 'main' && !conversationInitializing"
             v-bind="chatFeedProps"
             @update:draft="chatDraft = $event"
             @close="chatOverlayOpen = false"
@@ -2767,6 +2790,7 @@ function onToggleChatOverlay(): void {
             @approve="onApprove"
             @reject="onReject"
           />
+          <div v-else-if="conversationInitializing" class="grid place-items-center p-6 text-xs text-fg-muted" role="status">正在加载项目对话…</div>
           <SideTasksPanel
             v-else
             open
@@ -2804,7 +2828,9 @@ function onToggleChatOverlay(): void {
     <!-- <1024px：文件树抽屉化（spec R3），与 ResizablePanelGroup 内的左栏互斥渲染 -->
     <Sheet :open="leftCollapsed && treeDrawerOpen" @update:open="(open) => { if (!open) onCloseDrawer(); }">
       <SheetContent side="left" :show-close-button="false" class="w-[min(320px,86vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <div v-if="filesInitializing" class="p-4 text-xs text-fg-muted" role="status">正在加载项目文件…</div>
         <FileTree
+          v-else
           v-bind="fileTreeProps"
           @update:viewMode="onUpdateViewMode"
           @open-file="onOpenFile"
@@ -2827,7 +2853,7 @@ function onToggleChatOverlay(): void {
               @archive="onArchiveSideAgent"
             />
             <ChatFeed
-              v-if="activeAgentPane === 'main'"
+              v-if="activeAgentPane === 'main' && !conversationInitializing"
               v-bind="chatFeedProps"
               @update:draft="chatDraft = $event"
               @close="chatOverlayOpen = false"
@@ -2841,6 +2867,7 @@ function onToggleChatOverlay(): void {
               @approve="onApprove"
               @reject="onReject"
             />
+            <div v-else-if="conversationInitializing" class="grid place-items-center p-6 text-xs text-fg-muted" role="status">正在加载项目对话…</div>
             <SideTasksPanel
               v-else
               open
