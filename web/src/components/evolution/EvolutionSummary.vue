@@ -7,10 +7,8 @@ import {
   canToggleLearning,
   formatEvolutionTime,
 } from "../../domain/evolution.ts";
-import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
 import { Input } from "../ui/input";
-import StatCard from "../StatCard.vue";
 import ConfirmDialog from "../ConfirmDialog.vue";
 
 const props = defineProps<{
@@ -46,7 +44,7 @@ const dangerConfirmText = computed(() => {
   }
   if (pendingDanger.value === "skills") {
     return {
-      title: "全局禁用 Learned Skills？",
+      title: "全局禁用技能复用？",
       description: "所有 Agent 将立即停止使用 Learned Skills；历史事实与调用记录保留，可稍后重新启用。",
       confirmLabel: "确认禁用",
     };
@@ -83,50 +81,20 @@ function onReason(value: string | number): void {
 </script>
 
 <template>
-  <section class="grid gap-4 rounded-lg border border-line bg-panel p-5 max-[560px]:p-3" aria-labelledby="evolution-summary-title">
-    <div class="flex items-start justify-between gap-2 max-[560px]:flex-col">
-      <div>
-        <p class="m-0 mb-1 text-xs font-bold tracking-[0.04em] text-brand uppercase">Self-evolution v1</p>
-        <h2 id="evolution-summary-title" class="m-0">能力演进概览</h2>
-        <p class="m-0 text-fg-secondary">Learned Skill 自动沉淀并乐观生效；质量结论只来自 Curator 的真实调用评价。</p>
-      </div>
-      <div class="flex items-center gap-2 max-[560px]:w-full max-[560px]:justify-start">
-        <Badge :tone="overview.rollout_enabled ? 'ok' : 'danger'">
-          {{ overview.rollout_enabled ? "Core 能力已启用" : "Core 能力未启用" }}
-        </Badge>
-        <Button size="sm" variant="ghost" :disabled="operatingAction !== null" @click="emit('refresh')">刷新</Button>
-      </div>
-    </div>
-
-    <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
-      <StatCard
-        label="待 Curator 评价"
-        :value="overview.pending_applications"
-        hint="pending application 单独统计"
-      />
-      <StatCard
-        label="已观察 Skill"
-        :value="overview.skill_counts.active_observed"
-        hint="不含待观察与 inconclusive"
-      />
-      <StatCard
-        label="需要关注"
-        :value="overview.skill_counts.needs_review + overview.skill_counts.degraded + overview.skill_counts.quarantined"
-        hint="复核、降级或隔离"
-      />
-      <StatCard
-        label="已禁用 / 归档"
-        :value="overview.skill_counts.disabled + overview.skill_counts.archived"
-        hint="历史事实仍然保留"
-      />
-    </div>
-
+  <details class="evolution-controls rounded-lg border border-line bg-panel" aria-label="进化管理">
+    <summary class="flex cursor-pointer flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-fg-secondary">
+      <span>学习与评价设置</span>
+      <span>{{ !overview.rollout_enabled ? "学习未开放" : overview.learning_paused ? "学习已暂停" : "学习已开启" }} · {{ overview.rollout_enabled && overview.learned_skills_enabled ? "技能已启用" : "技能已禁用" }} <span class="ml-2 text-brand">展开管理</span></span>
+    </summary>
+    <div class="grid gap-4 border-t border-line p-5 max-[560px]:p-3">
+    <p class="m-0 text-xs text-fg-muted">调整学习、技能使用和评价计划。</p>
+    <p class="m-0 text-xs text-fg-secondary">{{ overview.skill_counts.active_unproven }} 项待观察 · {{ overview.skill_counts.disabled }} 项已禁用 · {{ overview.skill_counts.archived }} 项已归档</p>
     <div class="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
       <section class="flex min-w-0 justify-between gap-3 rounded-md border border-line bg-base p-3 max-[560px]:flex-col">
         <div>
           <h3 class="m-0 mb-1">学习与使用</h3>
           <p class="m-0 text-fg-secondary">
-            Distiller：<strong>{{ overview.learning_paused ? "已暂停" : "运行中" }}</strong>
+            自动学习：<strong>{{ !overview.rollout_enabled ? "未开放" : overview.learning_paused ? "已暂停" : "已开启" }}</strong>
             · Learned Skills：<strong>{{ overview.learned_skills_enabled ? "已启用" : "已禁用" }}</strong>
           </p>
         </div>
@@ -147,7 +115,7 @@ function onReason(value: string | number): void {
             :disabled="operating || skillsUnavailable || reasonMissing"
             @click="requestToggle('skills')"
           >
-            {{ overview.learned_skills_enabled ? "禁用 Learned Skills" : "启用 Learned Skills" }}
+            {{ overview.learned_skills_enabled ? "禁用技能复用" : "启用技能复用" }}
           </Button>
         </div>
       </section>
@@ -155,8 +123,8 @@ function onReason(value: string | number): void {
       <section class="flex min-w-0 justify-between gap-3 rounded-md border border-line bg-base p-3 max-[560px]:flex-col">
         <div>
           <h3 class="m-0 mb-1">Curator</h3>
-          <p class="m-0 text-fg-secondary">上次：{{ formatEvolutionTime(overview.curator.last_run_at) }}</p>
-          <p class="m-0 text-fg-secondary">下次具备资格：{{ formatEvolutionTime(overview.curator.next_eligible_at) }}</p>
+          <p class="m-0 text-fg-secondary">上次评价：{{ formatEvolutionTime(overview.curator.last_run_at) }}</p>
+          <p class="m-0 text-fg-secondary">下次可执行：{{ formatEvolutionTime(overview.curator.next_eligible_at) }}</p>
         </div>
         <div class="flex flex-wrap items-center justify-end gap-2 max-[560px]:w-full max-[560px]:justify-start">
           <Button
@@ -166,7 +134,7 @@ function onReason(value: string | number): void {
             :disabled="operating || curatorUnavailable || reasonMissing"
             @click="emit('run-curator', 'run')"
           >
-            Run Curator now
+            立即评价
           </Button>
           <Button
             size="sm"
@@ -174,7 +142,7 @@ function onReason(value: string | number): void {
             :disabled="operating || curatorUnavailable || reasonMissing"
             @click="emit('run-curator', 'dry_run')"
           >
-            Dry-run
+            预演检查
           </Button>
         </div>
       </section>
@@ -200,7 +168,7 @@ function onReason(value: string | number): void {
         @update:model-value="onReason"
       />
     </label>
-    <p v-if="reasonMissing" class="m-0 text-xs text-fg-secondary">填写原因后才可执行控制操作；失败重试会复用同一请求体和幂等键。</p>
+    <p v-if="reasonMissing" class="m-0 text-xs text-fg-secondary">填写原因后可执行操作。</p>
     <p v-if="lastManualRun" class="m-0 text-xs text-ok" role="status">
       {{ lastManualRun.mode === "run" ? "Curator 已排队" : "Curator dry-run 已完成" }}：{{ lastManualRun.curator_run_id }}
     </p>
@@ -209,6 +177,7 @@ function onReason(value: string | number): void {
       每轮最多 {{ overview.curator.max_vivado_jobs }} 个 Vivado 任务 · 最长 {{ overview.curator.max_duration_minutes }} 分钟
     </p>
 
+    </div>
     <ConfirmDialog
       :open="pendingDanger !== null"
       :title="dangerConfirmText?.title ?? ''"
@@ -217,5 +186,5 @@ function onReason(value: string | number): void {
       @update:open="closeDanger"
       @confirm="confirmDanger"
     />
-  </section>
+  </details>
 </template>

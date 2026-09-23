@@ -35,11 +35,10 @@ describe("self-evolution global UI contract", () => {
   test("overview exposes pause, disable, Run Curator now, dry-run, and fixed schedule facts", () => {
     for (const label of [
       "暂停学习",
-      "禁用 Learned Skills",
-      "Run Curator now",
-      "Dry-run",
+      "禁用技能复用",
+      "立即评价",
+      "预演检查",
       "控制原因（写操作必填）",
-      "失败重试会复用同一请求体和幂等键",
     ]) {
       expect(summary, label).toContain(label);
     }

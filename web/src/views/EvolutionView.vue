@@ -39,6 +39,7 @@ import { createPoller, type Poller } from "../domain/tasks.ts";
 import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
+import EvolutionLandscape from "../components/evolution/EvolutionLandscape.vue";
 import EvolutionSummary from "../components/evolution/EvolutionSummary.vue";
 import LearnedSkillList from "../components/evolution/LearnedSkillList.vue";
 import LearnedSkillDetail from "../components/evolution/LearnedSkillDetail.vue";
@@ -77,6 +78,7 @@ const lastManualRun = ref<CuratorRunV1 | null>(null);
 
 let skillLoadSequence = 0;
 let applicationLoadSequence = 0;
+let versionLoadSequence = 0;
 let settingsAttempt: FrozenWriteAttempt<UpdateEvolutionSettingsRequestV1> | null = null;
 let skillControlAttempt: FrozenWriteAttempt<SkillControlRequestV1> | null = null;
 let curatorAttempt: FrozenWriteAttempt<CreateCuratorRunRequestV1> | null = null;
@@ -107,6 +109,9 @@ async function loadApplication(applicationId: string): Promise<void> {
 
 async function loadSkill(skillId: string): Promise<void> {
   const sequence = ++skillLoadSequence;
+  applicationLoadSequence += 1;
+  versionLoadSequence += 1;
+  applicationLoading.value = false;
   selectedSkillId.value = skillId;
   skillLoading.value = true;
   detailError.value = null;
@@ -131,7 +136,7 @@ async function loadSkill(skillId: string): Promise<void> {
     applications.value = applicationPage.items;
     applicationsTruncated.value = applicationPage.next_cursor !== null;
     const firstApplication = applicationPage.items[0]?.application_id;
-    if (firstApplication) await loadApplication(firstApplication);
+    if (firstApplication) void loadApplication(firstApplication);
   } catch (error) {
     if (sequence === skillLoadSequence) detailError.value = error;
   } finally {
@@ -157,7 +162,7 @@ async function refreshAll(background = false): Promise<void> {
     skillsTruncated.value = page.next_cursor !== null;
     const retained = selectedSkillId.value && page.items.some((skill) => skill.skill_id === selectedSkillId.value)
       ? selectedSkillId.value
-      : page.items[0]?.skill_id ?? null;
+      : page.items.find((skill) => skill.enabled && skill.availability_state === "available" && skill.quality_state === "active_observed")?.skill_id ?? page.items[0]?.skill_id ?? null;
     selectedSkillId.value = retained;
     if (background) {
       // 轻轮询只把列表投影合并进当前详情头部，不重取版本与调用记录（详情刷新交给手动刷新/重选）
@@ -165,7 +170,7 @@ async function refreshAll(background = false): Promise<void> {
       if (summary) replaceSkill(summary);
       return;
     }
-    if (retained) await loadSkill(retained);
+    if (retained) void loadSkill(retained);
     else {
       skillDetail.value = null;
       skillVersion.value = null;
@@ -183,11 +188,13 @@ async function refreshAll(background = false): Promise<void> {
 async function selectVersion(versionId: string): Promise<void> {
   const skillId = selectedSkillId.value;
   if (!skillId || !versionId) return;
+  const sequence = ++versionLoadSequence;
   detailError.value = null;
   try {
-    skillVersion.value = await getLearnedSkillVersion(api, skillId, versionId);
+    const version = await getLearnedSkillVersion(api, skillId, versionId);
+    if (sequence === versionLoadSequence && selectedSkillId.value === skillId) skillVersion.value = version;
   } catch (error) {
-    detailError.value = error;
+    if (sequence === versionLoadSequence && selectedSkillId.value === skillId) detailError.value = error;
   }
 }
 
@@ -350,6 +357,9 @@ onMounted(() => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  skillLoadSequence += 1;
+  applicationLoadSequence += 1;
+  versionLoadSequence += 1;
   poller?.stop();
   poller = null;
 });
@@ -360,7 +370,7 @@ onBeforeUnmount(() => {
     <div class="text-fg">
       <header class="mb-4">
         <h1 class="m-0 text-[28px] max-[560px]:text-2xl">自进化</h1>
-        <p class="m-0 text-fg-secondary">查看 Synthia 自动沉淀的能力、真实调用证据和 Curator 评价。</p>
+        <p class="m-0 text-fg-secondary">经验沉淀、技能复用与效果验证。</p>
       </header>
 
     <!-- 宽度由 PageShell 的 max-w-[1392px] 统一约束，不再每层重复 w-[min(1500px,100%)] -->
@@ -400,6 +410,16 @@ onBeforeUnmount(() => {
       </div>
 
       <template v-if="overview">
+        <EvolutionLandscape
+          :overview="overview"
+          :skills="skills"
+          :selected-skill-id="selectedSkillId"
+          :truncated="skillsTruncated"
+          :refreshing="loading || operatingAction !== null"
+          @select="loadSkill"
+          @refresh="refreshAll()"
+        />
+        <div class="mt-3">
         <EvolutionSummary
           :overview="overview"
           :reason="summaryReason"
@@ -411,6 +431,7 @@ onBeforeUnmount(() => {
           @run-curator="runCurator"
           @refresh="refreshAll()"
         />
+        </div>
 
         <p
           v-if="notice"
@@ -430,6 +451,7 @@ onBeforeUnmount(() => {
           <div class="grid min-w-0 content-start gap-3">
             <ErrorNotice v-if="detailError" :error="detailError" />
             <LearnedSkillDetail
+              :key="selectedSkillId ?? 'empty'"
               :detail="skillDetail"
               :version="skillVersion"
               :applications="applications"
