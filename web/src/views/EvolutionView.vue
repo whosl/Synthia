@@ -39,7 +39,6 @@ import { createPoller, type Poller } from "../domain/tasks.ts";
 import { SELF_EVOLUTION_FEATURE_ENABLED } from "../domain/feature-flags.ts";
 import PageShell from "../components/layout/PageShell.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
-import EvolutionEfficiency from "../components/evolution/EvolutionEfficiency.vue";
 import EvolutionLandscape from "../components/evolution/EvolutionLandscape.vue";
 import EvolutionSummary from "../components/evolution/EvolutionSummary.vue";
 import LearnedSkillList from "../components/evolution/LearnedSkillList.vue";
@@ -411,7 +410,6 @@ onBeforeUnmount(() => {
       </div>
 
       <template v-if="overview">
-        <EvolutionEfficiency :efficiency="overview.efficiency" />
         <EvolutionLandscape
           :overview="overview"
           :skills="skills"
