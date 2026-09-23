@@ -67,6 +67,18 @@ const firstSolvedText = computed(() => {
   return detail ? detail.metrics.first_solved_problem_families ?? "未知" : "未知";
 });
 
+// 提效对照：源轨迹（蒸馏臂）vs success 应用中位（技能臂）；缺任一侧臂显示未知
+const efficiencySpeedupText = computed(() => {
+  const metrics = props.detail?.metrics;
+  if (!metrics || metrics.efficiency_speedup === null || metrics.efficiency_saved_ms === null) {
+    return "未知";
+  }
+  const speedup = metrics.efficiency_speedup >= 10
+    ? Math.round(metrics.efficiency_speedup)
+    : Math.round(metrics.efficiency_speedup * 10) / 10;
+  return `${speedup}× · 省 ${formatEvolutionDuration(metrics.efficiency_saved_ms)}`;
+});
+
 // disable/archive 改变 Skill 可用性、影响 Agent 检索，需二次确认；enable/restore/pin/unpin 直接执行
 const pendingControl = ref<"disable" | "archive" | null>(null);
 const controlConfirmText = computed(() => {
@@ -217,6 +229,13 @@ function shortHash(value: string): string {
           label="中位处理时间"
           :value="formatEvolutionDuration(detail.metrics.median_duration_ms)"
           hint="从 apply 到局部目标关闭"
+        />
+        <StatCard
+          label="提效对照"
+          :value="efficiencySpeedupText"
+          :hint="detail.metrics.baseline_duration_ms === null
+            ? '源轨迹时长未知'
+            : `源轨迹 ${formatEvolutionDuration(detail.metrics.baseline_duration_ms)} → 技能应用中位`"
         />
         <StatCard
           label="人工纠正"

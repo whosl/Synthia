@@ -167,6 +167,16 @@ export interface SkillMetricObservation {
   readonly firstSolvedProblemFamily?: boolean;
 }
 
+/**
+ * The "hard way" arm for efficiency deltas: the active span of the origin
+ * episode (the version-1 distillation source trajectory). The skill encodes
+ * that trajectory's solution path, so its duration is the causal baseline
+ * later applications are compared against.
+ */
+export interface SkillMetricBaseline {
+  readonly durationMs: number | null;
+}
+
 export interface SkillMetricsV1 {
   readonly measurement_state: MeasurementState;
   readonly primary_applied: number;
@@ -181,6 +191,12 @@ export interface SkillMetricsV1 {
   readonly human_corrections: number | null;
   /** null until problem-family identity is backed by an explicit Core fact. */
   readonly first_solved_problem_families: number | null;
+  /** Origin-episode trajectory span, ms; null when the lineage is unavailable. */
+  readonly baseline_duration_ms: number | null;
+  /** baseline − median(success application duration); positive = time saved. */
+  readonly efficiency_saved_ms: number | null;
+  /** baseline / median(success application duration); > 1 = speedup. */
+  readonly efficiency_speedup: number | null;
 }
 
 function median(values: readonly number[]): number | null {
@@ -192,9 +208,40 @@ function median(values: readonly number[]): number | null {
     : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+/**
+ * Efficiency needs both arms: a positive baseline and at least one
+ * success-duration observation. A zero-length episode span or an empty
+ * success arm yields nulls rather than a misleading 0×/∞×.
+ */
+function efficiencyAgainstBaseline(
+  baselineMs: number | null,
+  successMedianMs: number | null,
+): Pick<SkillMetricsV1, "baseline_duration_ms" | "efficiency_saved_ms" | "efficiency_speedup"> {
+  if (baselineMs === null || baselineMs <= 0) {
+    return {
+      baseline_duration_ms: baselineMs,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    };
+  }
+  if (successMedianMs === null || successMedianMs <= 0) {
+    return {
+      baseline_duration_ms: baselineMs,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    };
+  }
+  return {
+    baseline_duration_ms: baselineMs,
+    efficiency_saved_ms: baselineMs - successMedianMs,
+    efficiency_speedup: baselineMs / successMedianMs,
+  };
+}
+
 /** Observation-only metrics; pending/inconclusive never enter the denominator. */
 export function computeSkillMetrics(
   observations: readonly SkillMetricObservation[],
+  baseline?: SkillMetricBaseline,
 ): SkillMetricsV1 {
   const primary = observations.filter((item) => item.role === "primary");
   const success = primary.filter((item) => item.outcome === "success").length;
@@ -232,6 +279,15 @@ export function computeSkillMetrics(
     execution_failure: executionFailure,
     success_rate: denominator > 0 ? success / denominator : null,
     median_duration_ms: median(durations),
+    ...efficiencyAgainstBaseline(
+      baseline?.durationMs ?? null,
+      median(
+        primary
+          .filter((item) => item.outcome === "success")
+          .map((item) => item.durationMs)
+          .filter((value): value is number => value !== null && value >= 0),
+      ),
+    ),
     human_corrections:
       correctionValues.length > 0
         ? correctionValues.reduce((sum, value) => sum + value, 0)

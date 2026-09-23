@@ -150,6 +150,9 @@ function metrics() {
     median_duration_ms: null,
     human_corrections: null,
     first_solved_problem_families: null,
+    baseline_duration_ms: null,
+    efficiency_saved_ms: null,
+    efficiency_speedup: null,
   };
 }
 

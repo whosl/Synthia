@@ -316,6 +316,32 @@ async function metricRows(query: QueryClient, versionId: string): Promise<SkillM
   }));
 }
 
+/**
+ * The "hard way" arm: the active span of the origin episode — the
+ * version-1 distillation source trajectory, scoped to that episode's turn
+ * when it has one so earlier turns in the same task do not inflate it.
+ */
+async function baselineDurationMs(query: QueryClient, skillId: string): Promise<number | null> {
+  const result = await query.query(
+    `SELECT floor(extract(epoch from (span.max_at - span.min_at)) * 1000)::bigint AS baseline_ms
+       FROM learned_skill s
+       JOIN learned_skill_version v ON v.skill_id=s.id AND v.version_no=1
+       JOIN distillation_run d ON d.id=v.distillation_run_id
+       JOIN learning_episode e ON e.id=d.episode_id
+      CROSS JOIN LATERAL (
+        SELECT min(ev.created_at) AS min_at, max(ev.created_at) AS max_at
+          FROM task_conversation_event ev
+         WHERE ev.task_id=e.task_id
+           AND ev.sequence<=e.end_event_sequence
+           AND (e.turn_id IS NULL OR ev.payload->>'turn_id'=e.turn_id)
+      ) span
+      WHERE s.id=$1`,
+    [skillId],
+  );
+  const row = result.rows[0] as Row | undefined;
+  return row === undefined ? null : Number(row.baseline_ms);
+}
+
 async function skillSummary(query: QueryClient, skillId: string): Promise<Record<string, unknown>> {
   const result = await query.query(
     `SELECT s.*,v.version_no,vs.quality_state
@@ -336,7 +362,10 @@ async function skillSummary(query: QueryClient, skillId: string): Promise<Record
     qualityState: quality,
   });
   const metrics = row.active_version_id
-    ? computeSkillMetrics(await metricRows(query, String(row.active_version_id)))
+    ? computeSkillMetrics(
+      await metricRows(query, String(row.active_version_id)),
+      { durationMs: await baselineDurationMs(query, String(row.id)) },
+    )
     : computeSkillMetrics([]);
   return {
     schema: "learned-skill-summary.v1",

@@ -33,6 +33,9 @@ export interface EvolutionSkillMetricsV1 {
   readonly median_duration_ms: number | null;
   readonly human_corrections: number | null;
   readonly first_solved_problem_families: number | null;
+  readonly baseline_duration_ms: number | null;
+  readonly efficiency_saved_ms: number | null;
+  readonly efficiency_speedup: number | null;
 }
 
 export interface EvolutionLearnedSkillSummaryV1 {
@@ -1107,6 +1110,16 @@ function parseMetrics(value: unknown, path: string): EvolutionSkillMetricsV1 {
         row.first_solved_problem_families,
         `${path}.first_solved_problem_families`,
       ),
+    // Newer fields tolerate absence (older Core payloads) as null.
+    baseline_duration_ms: row.baseline_duration_ms == null
+      ? null
+      : nullableNonNegativeNumber(row.baseline_duration_ms, `${path}.baseline_duration_ms`),
+    efficiency_saved_ms: row.efficiency_saved_ms == null
+      ? null
+      : finiteNumber(row.efficiency_saved_ms, `${path}.efficiency_saved_ms`),
+    efficiency_speedup: row.efficiency_speedup == null
+      ? null
+      : positiveNumber(row.efficiency_speedup, `${path}.efficiency_speedup`),
   };
   const deterministic = metrics.success + metrics.applicability_failure + metrics.execution_failure;
   const evaluated = deterministic + metrics.inconclusive;
@@ -1396,6 +1409,21 @@ function nullableNonNegativeNumber(value: unknown, path: string): number | null 
   if (value === null) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw contractError(`${path} must be a non-negative number or null`);
+  }
+  return value;
+}
+
+/** Efficiency deltas may be negative (the skill arm was slower). */
+function finiteNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw contractError(`${path} must be a finite number`);
+  }
+  return value;
+}
+
+function positiveNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw contractError(`${path} must be a positive number`);
   }
   return value;
 }
