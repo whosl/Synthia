@@ -325,6 +325,8 @@ const changeRequests = ref<readonly ChangeRequestV1[]>([]);
 const projectWorkVersion = ref<ProjectWorkVersionV1 | null>(null);
 const readinessSourceOptions = ref<readonly { readonly id: string; readonly label: string }[]>([]);
 const formalDeliveryLoading = ref(false);
+/** 首次成功装载过事实：此后轮询刷新静默进行，不再闪烁骨架屏。 */
+const formalDeliveryHydrated = ref(false);
 const formalDeliveryOperating = ref(false);
 const formalDeliveryError = ref<string | null>(null);
 let processProjectionSerial = 0;
@@ -1025,7 +1027,12 @@ async function loadSelectedDeliveryRelease(releaseId: string | null, serial = fo
 async function loadFormalDelivery(includeProjection = true): Promise<void> {
   if (!formalDeliveryEnabled.value || formalDeliveryLoading.value) return;
   const serial = ++formalDeliverySerial;
-  formalDeliveryLoading.value = true;
+  // 骨架屏只出现在首开（尚无事实）与错误重试两种情形；打开状态下的 3s
+  // 轮询刷新是静默的——否则每轮 loading 翻转都把整个面板换成骨架屏，
+  // 造成「正在读取 Core 正式事实…」反复闪烁。
+  if (formalDeliveryError.value !== null || !formalDeliveryHydrated.value) {
+    formalDeliveryLoading.value = true;
+  }
   formalDeliveryError.value = null;
   try {
     if (includeProjection) await loadProcessProjection();
@@ -1111,7 +1118,10 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
   } catch (err) {
     if (serial === formalDeliverySerial) formalDeliveryError.value = formalErrorText(err);
   } finally {
-    if (serial === formalDeliverySerial) formalDeliveryLoading.value = false;
+    if (serial === formalDeliverySerial) {
+      formalDeliveryLoading.value = false;
+      formalDeliveryHydrated.value = true;
+    }
   }
 }
 
