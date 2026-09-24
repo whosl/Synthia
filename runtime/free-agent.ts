@@ -283,9 +283,32 @@ export function compactForContextWindow(
   let toolSeen = 0;
   let changed = false;
   const out: AgentMessage[] = [];
+  // 叙述预算：overWindow 保命模式下，超长 assistant 叙述同样截头——
+  // 会话体量的大头常常是叙述而非工具结果（p19 实例：1.4MB 叙述 vs 2.9MB
+  // 工具），只截工具依然发不出去。正常水位下叙述永不截。
+  const narrationBudget = budget * 2;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]!;
     if (message.role !== "tool") {
+      if (
+        overWindow
+        && message.role === "assistant"
+        && message.content !== null
+        && message.content.length > narrationBudget
+        && !message.content.includes("[context-compacted:")
+      ) {
+        changed = true;
+        const omitted = message.content.length - narrationBudget;
+        out.unshift({
+          ...message,
+          content:
+            `${message.content.slice(0, narrationBudget)}
+`
+            + `…[context-compacted: ${omitted} chars omitted from this older narration; `
+            + "full text remains in the session record]",
+        });
+        continue;
+      }
       out.unshift(message);
       continue;
     }
@@ -970,7 +993,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         // 请求以 context_length 类错误失败时强制按估算压缩并重发一次。
         // 只重试一次且仅当有压缩策略——避免把确定的失败变成静默降级。
         const message = modelError instanceof Error ? modelError.message : String(modelError);
-        const oversize = /context[_ ]length|too many tokens|maximum context|context window|token limit|exceeds the model/i.test(message);
+        const oversize = /context[_ ]length|too many tokens|maximum context|context window|token limit|exceeds the model|prompt is too long|\[1261\]/i.test(message);
         if (!oversize || !this.deps.contextPolicy || this.forcedCompactionRetried) throw modelError;
         this.forcedCompactionRetried = true;
         this.lastPromptTokens = this.estimateMessagesTokens();

@@ -1732,3 +1732,62 @@ describe("free-agent: long-session restart recovery", () => {
     expect(reply).toBe("压缩后成功");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gateway-specific overflow (p19 incident: stale watermark + 1261 + narration mass)
+// ---------------------------------------------------------------------------
+
+describe("free-agent: gateway 1261 overflow with stale watermark", () => {
+  test("stale-low watermark + bigmodel-style error recovers via forced retry incl. narration", async () => {
+    const gov = new MockGovernanceClient();
+    let failOnce = true;
+    const seenSizes: number[] = [];
+    const model: ConversationalModel = {
+      async chat(messages: readonly AgentMessage[]): Promise<ChatTurn> {
+        seenSizes.push(messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0));
+        if (failOnce) {
+          failOnce = false;
+          throw new Error('400 {"type":"error","error":{"type":"invalid_request_error","code":"1261","message":"[1261][prompt is too long][x]"}}');
+        }
+        return { kind: "text", content: "恢复成功" };
+      },
+    };
+    const agentId = `agent-1261-${++idCounter}`;
+    const bigNarration = "N".repeat(20_000); // 叙述大头（p19 形态）
+    const bigTool = "T".repeat(20_000);
+    const session = createFreeAgentSession(agentId, {
+      model,
+      tools: [],
+      systemPrompt: "sys",
+      projectId: "proj-test",
+      part: "xc7a100tcsg324-1",
+      classification: "internal",
+      governance: gov,
+      connector: null,
+      agentsDir,
+      // 小窗口 + 陈旧低水位：恢复时 effective=100，首请求必超窗。
+      contextPolicy: { contextWindow: 1_000, compactTriggerRatio: 0.5, summaryKeepTokens: 50 },
+      initialState: {
+        agentId, task: "t", part: "part", projectId: "p",
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        currentStage: "intake", status: "awaiting_user", contextPromptTokens: 100,
+      },
+      initialConversation: {
+        agentId,
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: bigNarration },
+          { role: "assistant", content: null, toolCalls: [{ toolCallId: "t1", name: "x", args: {} }] },
+          { role: "tool", toolCallId: "t1", name: "x", content: bigTool },
+          { role: "assistant", content: bigNarration },
+        ],
+        claimChecks: [], pendingSteer: [],
+      },
+    } as never);
+    const reply = await session.prompt("继续");
+    expect(reply).toBe("恢复成功");
+    expect(seenSizes.length).toBeGreaterThanOrEqual(2);
+    // 首请求大（40k+），重试请求显著缩小（叙述+工具都被强制截断）。
+    expect(seenSizes[seenSizes.length - 1]).toBeLessThan(seenSizes[0]! / 3);
+  });
+});
