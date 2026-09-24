@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
-import { FileText, Layers, ShieldCheck, X } from "lucide-vue-next";
+import { Activity, FileText, Layers, ShieldCheck, X } from "lucide-vue-next";
 
 const props = defineProps<{
-  tabs: readonly { id: string; label: string; description?: string; kind: "overview" | "reviews" | "file"; dirty?: boolean; saving?: boolean; count?: number }[];
+  tabs: readonly { id: string; label: string; description?: string; kind: "overview" | "reviews" | "file" | "waveform"; dirty?: boolean; saving?: boolean; count?: number }[];
   activeId: string;
 }>();
 const emit = defineEmits<{ select: [id: string]; close: [id: string] }>();
@@ -18,7 +18,7 @@ function navigate(event: KeyboardEvent, index: number): void {
   else if (event.key === "ArrowLeft") target = (index - 1 + props.tabs.length) % props.tabs.length;
   else if (event.key === "Home") target = 0;
   else if (event.key === "End") target = props.tabs.length - 1;
-  else if (event.key === "Delete" && props.tabs[index]?.kind === "file") {
+  else if (event.key === "Delete" && (props.tabs[index]?.kind === "file" || props.tabs[index]?.kind === "waveform")) {
     event.preventDefault();
     emit("close", props.tabs[index]!.id);
     return;
@@ -31,14 +31,14 @@ function navigate(event: KeyboardEvent, index: number): void {
 
 <template>
   <div ref="strip" class="workspace-tabs" role="tablist" aria-label="项目工作区标签">
-    <div v-for="(tab, index) in tabs" :key="tab.id" class="workspace-tab" :class="{ active: activeId === tab.id }" @auxclick.middle.prevent="tab.kind === 'file' && emit('close', tab.id)">
+    <div v-for="(tab, index) in tabs" :key="tab.id" class="workspace-tab" :class="{ active: activeId === tab.id }" @auxclick.middle.prevent="(tab.kind === 'file' || tab.kind === 'waveform') && emit('close', tab.id)">
       <button type="button" role="tab" :aria-selected="activeId === tab.id" :tabindex="activeId === tab.id ? 0 : -1" :title="tab.description ?? tab.label" @click="emit('select', tab.id)" @keydown="navigate($event, index)">
-        <component :is="tab.kind === 'overview' ? Layers : tab.kind === 'reviews' ? ShieldCheck : FileText" :size="14" aria-hidden="true" />
+        <component :is="tab.kind === 'overview' ? Layers : tab.kind === 'reviews' ? ShieldCheck : tab.kind === 'waveform' ? Activity : FileText" :size="14" aria-hidden="true" />
         <span class="tab-label">{{ tab.label }}</span>
         <span v-if="tab.count" class="tab-count">{{ tab.count }}</span>
         <span v-if="tab.dirty" class="dirty-dot" aria-label="未保存">●</span>
       </button>
-      <button v-if="tab.kind === 'file'" type="button" class="tab-close" :disabled="tab.saving" :aria-label="`关闭 ${tab.label}`" @click="emit('close', tab.id)"><X :size="13" /></button>
+      <button v-if="tab.kind === 'file' || tab.kind === 'waveform'" type="button" class="tab-close" :disabled="tab.saving" :aria-label="`关闭 ${tab.label}`" @click="emit('close', tab.id)"><X :size="13" /></button>
     </div>
   </div>
 </template>

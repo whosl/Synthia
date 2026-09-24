@@ -1077,6 +1077,7 @@ export interface JobEvidenceManifest {
 
 /** GET /projects/:id/jobs/:jobId/evidence/content?name= 响应 data。 */
 export interface JobEvidenceContent {
+  readonly encoding?: "utf8" | "base64";
   readonly name: string;
   readonly content: string;
   readonly sha256: string;

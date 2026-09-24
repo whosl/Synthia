@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, watch } from "vue";
 import { api } from "../../api/service.ts";
 import { useEditorContent } from "../../composables/use-editor-content.ts";
 import { deriveReadonlyReason, languageFromPath } from "../../domain/editor-state.ts";
@@ -10,6 +10,7 @@ import type { Theme } from "../../domain/theme.ts";
 import CodeEditor from "./CodeEditor.vue";
 import Button from "../ui/AppButton.vue";
 
+const WaveformViewer = defineAsyncComponent(() => import("../waveform/WaveformViewer.vue"));
 const props = defineProps<{ projectId: string; tab: WorkspaceFileTab; entry: FileTreeEntry; agentStatus: string | null; theme: Theme }>();
 const emit = defineEmits<{
   dirty: [value: boolean];
@@ -49,7 +50,8 @@ async function save(content: string): Promise<void> {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <div v-if="saveError && fileContent === null && !fileContentLoading" class="flex-none border-b border-line px-3 py-2"><Button size="sm" @click="load">重新加载文件</Button></div>
-  <CodeEditor
+  <WaveformViewer v-if="entry.path?.toLowerCase().endsWith('.vcd') && fileContent !== null && tab.source !== 'diff'" :content="fileContent" :name="entry.path.split('/').pop()!" />
+  <CodeEditor v-else
     :file="editorEntry" :active-revision="revision" :content="fileContent" :content-source="contentSource"
     :loading="fileContentLoading" :readonly-reason="readonlyReason" :saving="saving" :save-error="saveError"
     :language="language" :theme="theme" :diff-against="diffAgainst"

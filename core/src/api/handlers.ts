@@ -2335,7 +2335,14 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
 
   let content;
   try {
-    content = await connector.fetchEvidenceContent(projectId, jobId, name);
+    const waveform = name.toLowerCase().endsWith(".vcd");
+    if (waveform) {
+      const manifest = await connector.fetchEvidence(projectId, jobId);
+      const entry = manifest.entries.find((entry) => entry.name === name);
+      if (!entry) throw notFoundError(`evidence entry not found: ${name}`);
+      if (entry.sizeBytes > 8 * 1024 * 1024) throw validationError("波形超过 8 MiB 查看上限，请缩小信号范围或仿真窗口");
+    }
+    content = await connector.fetchEvidenceContent(projectId, jobId, name, waveform ? { requireFull: true } : undefined);
   } catch (err) {
     throw mapConnectorError(err);
   }

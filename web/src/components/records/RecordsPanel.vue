@@ -116,6 +116,7 @@ function setEntryVisible(jobId: string, name: string, visible: boolean): void {
 }
 
 function entryButtonLabel(jobId: string, name: string): string {
+  if (name.toLowerCase().endsWith(".vcd")) return "查看波形";
   const state = contentState(jobId, name);
   if (!state) return "查看内容";
   if (state.status === "loading") return "加载中…";
@@ -124,6 +125,7 @@ function entryButtonLabel(jobId: string, name: string): string {
 }
 
 function onViewEntry(jobId: string, name: string): void {
+  if (name.toLowerCase().endsWith(".vcd")) { emit("view-entry", jobId, name); return; }
   const state = contentState(jobId, name);
   if (!state) {
     setEntryVisible(jobId, name, true);

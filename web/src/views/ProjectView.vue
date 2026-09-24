@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Project workspace: main conversation, files, approvals, and governed delivery. */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
@@ -201,6 +201,7 @@ import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
 import WorkspaceFilePane from "../components/editor/WorkspaceFilePane.vue";
 import WorkspaceTabs from "../components/editor/WorkspaceTabs.vue";
+const WaveformEvidencePane = defineAsyncComponent(() => import("../components/waveform/WaveformEvidencePane.vue"));
 import ProjectReviews from "../components/projects/ProjectReviews.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
 import AgentPaneTabs from "../components/chat/AgentPaneTabs.vue";
@@ -1712,6 +1713,7 @@ const hasAgent = computed(() => currentAgentId.value !== null);
 // 中栏：当前打开的文件 / 版本 / 内容 / 只读态
 // ─────────────────────────────────────────────────────────────────────
 
+const waveformTabs = ref<{ id: string; jobId: string; name: string; label: string; description: string }[]>([]);
 const fileTabs = ref<WorkspaceFileTab[]>([]);
 const activeWorkspaceTab = ref("overview");
 const tabStates = ref<Record<string, { dirty?: boolean; saving?: boolean }>>({});
@@ -1729,6 +1731,7 @@ const workspaceTabs = computed(() => [
     id: "reviews", label: "阶段审批", kind: "reviews" as const,
     count: processSubmissions.value.filter((row) => row.state === "in_review").length,
   }] : []),
+  ...waveformTabs.value.map((tab) => ({ ...tab, kind: "waveform" as const })),
   ...fileTabs.value.map((tab) => ({ ...tab, kind: "file" as const, ...tabStates.value[tab.id] })),
 ]);
 const editorAgentStatus = computed(() => agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null);
@@ -1755,6 +1758,12 @@ function selectWorkspaceTab(id: string): void {
   if (id === "reviews") void openProjectReviews();
 }
 function closeWorkspaceTab(id: string): void {
+  if (waveformTabs.value.some((tab) => tab.id === id)) {
+    activeWorkspaceTab.value = tabAfterClose(workspaceTabs.value.map((tab) => tab.id), activeWorkspaceTab.value, id);
+    waveformTabs.value = waveformTabs.value.filter((tab) => tab.id !== id);
+    if (activeWorkspaceTab.value === "reviews") void openProjectReviews();
+    return;
+  }
   const tab = fileTabs.value.find((item) => item.id === id);
   if (!tab || tabStates.value[id]?.saving) return;
   if (tabStates.value[id]?.dirty && !window.confirm(`“${tab.label}”有未保存的修改。放弃修改并关闭？`)) return;
@@ -2116,6 +2125,13 @@ function onCloseRecords(): void {
 }
 
 async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
+  if (name.toLowerCase().endsWith(".vcd")) {
+    const id = JSON.stringify(["waveform", jobId, name]);
+    if (!waveformTabs.value.some((tab) => tab.id === id)) waveformTabs.value.push({ id, jobId, name, label: name, description: `${name} · 运行 ${jobId}` });
+    activeWorkspaceTab.value = id;
+    recordsOpen.value = false;
+    return;
+  }
   const key = recordEntryKey(jobId, name);
   if (recordEntryContent.value[key]?.status === "ready") return;
   recordEntryContent.value = { ...recordEntryContent.value, [key]: { status: "loading" } };
@@ -2680,6 +2696,10 @@ function onToggleChatOverlay(): void {
               :members="approvalMembers" :members-error="approvalMembersError"
               :loading="reviewsLoading" :selecting="reviewSelecting" :error="reviewsError" :gate-names="reviewGateNames"
               @select="selectProjectReview" @refresh="refreshProjectReviews" @approve="onApprove" @reject="onReject" @open-doc="onOpenDoc"
+            />
+            <WaveformEvidencePane
+              v-for="tab in waveformTabs" v-show="activeWorkspaceTab === tab.id" :key="tab.id"
+              :project-id="projectId" :job-id="tab.jobId" :name="tab.name"
             />
             <WorkspaceFilePane
               v-for="tab in fileTabs" v-show="activeWorkspaceTab === tab.id" :key="tab.id"

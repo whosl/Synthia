@@ -332,11 +332,35 @@ describe("Vivado simulate contract", () => {
       // run to their $finish instead of stopping prematurely.
       expect(tcl).toContain("set_property xsim.simulate.runtime {100ms} [get_filesets sim_1]");
       expect(tcl).toContain("launch_simulation -mode behavioral");
+      expect(tcl).toContain("set_property xsim.simulate.custom_tcl");
+      const wave = await readFile(join(result.workspace, "output", "waveform.tcl"), "utf8");
+      expect(wave).toContain("limit_vcd 4194304");
+      expect(wave.indexOf("open_vcd")).toBeLessThan(wave.indexOf("run 100ms"));
+      expect(wave).toContain("log_vcd [get_objects -r /*]");
+      expect(wave).toContain("return -options $run_options $run_error");
+
       // Mixed sources: .v -> read_verilog, .sv -> read_verilog -sv (no free-form paths)
       expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/dut.v")}}`);
       expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "tb/tb.sv")}}`);
       // Validated mediaType selects SystemVerilog parsing regardless of extension
       expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "rtl/sv_as_v.v")}}`);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("failed simulations retain real VCD bytes in hashed evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-wave-"));
+    try {
+      const bytes = "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n0!\n#5\n1!\n";
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_cmd, _args, cwd) => {
+        await writeFile(join(cwd, "output", "waveform.vcd"), bytes);
+        return { exitCode: 0, stdout: passSimStdout.replace("PASS", "FAIL assertion"), stderr: "" };
+      } });
+      const result = await adapter.execute(simulateRequest());
+      expect(result.status).toBe("failed");
+      const entry = result.evidence.entries.find((e) => e.name === "waveform.vcd")!;
+      expect(entry.mediaType).toBe("text/plain");
+      expect(entry.sizeBytes).toBe(Buffer.byteLength(bytes));
+      expect(entry.sha256).toBe(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
