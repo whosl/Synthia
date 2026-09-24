@@ -46,8 +46,24 @@ describe("VCD waveform values", () => {
     expect(signalValue(v.signals[0]!, 0, "hex")).toBe("-1.25");
     expect(v.unit).toBe("tick"); expect(v.warnings.length).toBe(1);
   });
-  test("bounded parsing rejects excessive changes and signal declarations", () => {
-    expect(() => parseVcd(header + "0!\n".repeat(500001))).toThrow("50 万");
+  test("XSim zero-width parameters infer width without dropping digital traces", () => {
+    const v = parseVcd(`$timescale 1ps $end
+$var reg 1 ! clk $end
+$var parameter 0 a! PIXDIV $end
+$var parameter 0 b! FIFO_AW $end
+$enddefinitions $end
+0! b100 a! b100 b! #5 1!`);
+    expect(v.signals.map(s => s.width)).toEqual([1, 3, 3]);
+    expect(signalValue(v.signals[1]!, 0, "dec")).toBe("4");
+    expect(v.signals[0]!.changes.length).toBe(2);
+    expect(() => parseVcd("$var wire 0 ! invalid $end $enddefinitions $end 0!")).toThrow();
+    expect(() => parseVcd(`$var parameter 0 ! p $end $enddefinitions $end b${"1".repeat(4097)} !`)).toThrow("4096");
+  });
+  test("bounded parsing previews excessive changes and rejects excessive declarations", () => {
+    const limited = parseVcd(header + "0!\n" + "#1\n1!\n#2\n" + "0!\n".repeat(500001) + "#100 1!");
+    expect(limited.endTime).toBe(1);
+    expect(limited.warnings.some(w => w.includes("50 万"))).toBe(true);
+    expect(limited.signals[0]!.changes).toEqual([{ time: 0, value: "0" }, { time: 1, value: "1" }]);
     expect(() => parseVcd("$var wire 1 ! clk $end\n".repeat(4097))).toThrow("4096");
   });
 });

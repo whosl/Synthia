@@ -7,6 +7,7 @@ export function parseVcd(text: string): VcdData {
   if (text.length > MAX_VCD_BYTES || new TextEncoder().encode(text).length > MAX_VCD_BYTES) throw new Error("波形超过 8 MiB 查看上限");
   const signals: VcdSignal[] = [], scopes: string[] = [], byId = new Map<string, VcdChange[]>();
   const warnings = new Set<string>();
+  const unsizedParameters = new Map<string, VcdSignal[]>();
   const tokens = /\S+/g;
   const next = (): string | undefined => tokens.exec(text)?.[0];
   function block(): string[] {
@@ -17,16 +18,22 @@ export function parseVcd(text: string): VcdData {
     }
     throw new Error("VCD 指令不完整，文件可能被截断");
   }
-  let time = 0, count = 0, definitions = false, timescale = 1, unit = "", stopped = false;
+  let time = 0, previousTime = 0, count = 0, definitions = false, timescale = 1, unit = "", stopped = false;
   for (let token = next(); token !== undefined; token = next()) {
     if (token === "$scope") { const b = block(); if (!b[1]) throw new Error("VCD 层级声明无效"); scopes.push(b[1]); }
     else if (token === "$upscope") { block(); scopes.pop(); }
     else if (token === "$var") {
-      const b = block(), width = Number(b[1]), id = b[2];
+      const b = block(), declaredWidth = Number(b[1]), id = b[2];
+      // XSim 2021.1 emits integer parameters with width 0; infer their
+      // display width from values instead of rejecting the entire capture.
+      const unsized = b[0] === "parameter" && declaredWidth === 0;
+      const width = unsized ? 1 : declaredWidth;
       if (!id || !b[3] || !Number.isInteger(width) || width < 1 || width > 4096) throw new Error("VCD 信号声明无效或位宽超过 4096");
       if (signals.length >= 4096) throw new Error("信号超过 4096 个，请缩小采集范围");
       const changes = byId.get(id) ?? []; byId.set(id, changes);
-      signals.push({ id, name: [...scopes, b.slice(3).join("")].join("."), width, type: b[0]!, changes });
+      const signal = { id, name: [...scopes, b.slice(3).join("")].join("."), width, type: b[0]!, changes };
+      signals.push(signal);
+      if (unsized) unsizedParameters.set(id, [...(unsizedParameters.get(id) ?? []), signal]);
     } else if (token === "$timescale") {
       const match = block().join("").match(/^(1|10|100)(s|ms|us|ns|ps|fs)$/);
       if (!match) throw new Error("VCD 时间单位无效"); timescale = Number(match[1]); unit = match[2]!;
@@ -41,7 +48,7 @@ export function parseVcd(text: string): VcdData {
       if (!/^#\d+$/.test(token)) throw new Error("VCD 时间戳无效");
       const value = Number(token.slice(1));
       if (!Number.isSafeInteger(value) || value < time) throw new Error("VCD 时间戳超出精度或时间顺序无效");
-      if (!stopped) time = value;
+      if (!stopped && value > time) { previousTime = time; time = value; }
     } else {
       if (!definitions) throw new Error("缺少 VCD 信号定义");
       let id: string | undefined, value: string;
@@ -49,9 +56,21 @@ export function parseVcd(text: string): VcdData {
       else if (/^[01xXzZ]/.test(token)) { value = token[0]!.toLowerCase(); id = token.slice(1); }
       else throw new Error("包含暂不支持的 VCD 数据类型");
       if (!id || !byId.has(id) || !value || (!/^[01xz]+$/.test(value) && !/^[rR]/.test(token))) throw new Error("VCD 信号值无效或数据被截断");
+      for (const parameter of unsizedParameters.get(id) ?? []) {
+        if (value.length > 4096) throw new Error("VCD 信号位宽超过 4096");
+        parameter.width = Math.max(parameter.width, value.length);
+      }
       if (stopped) continue;
       const changes = byId.get(id)!;
-      if (++count > 500_000) throw new Error("波形变化超过 50 万条，请缩短采集窗口");
+      if (++count > 500_000) {
+        // Keep a usable bounded preview, ending at the last complete time step.
+        // Never present a partly collected group of same-time changes as final.
+        warnings.add("波形变化超过 50 万条，仅显示前段完整时间范围；可下载原始 VCD 查看全部采集内容。");
+        stopped = true;
+        time = previousTime;
+        for (const values of byId.values()) while (values.length && values.at(-1)!.time > time) values.pop();
+        continue;
+      }
       if (changes.at(-1)?.time === time) changes[changes.length - 1] = { time, value };
       else if (changes.at(-1)?.value !== value) changes.push({ time, value });
     }

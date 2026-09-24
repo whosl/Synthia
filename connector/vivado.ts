@@ -71,14 +71,9 @@ export interface VivadoProcessGuardian {
 export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner }
 export const VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-/** XSim simulation runtime cap (sim-time, not wall-clock).
- *  TBs with $finish complete naturally before this; TBs without $finish stop
- *  here instead of looping until the process-level timeoutMs (30 min default)
- *  burns Vivado compute on 66. 100 ms sim-time is far beyond what realistic
- *  behavioral TBs need (the golden UART TB runs ~4.2 ms), yet tight enough to
- *  fail-closed quickly on a runaway TB. request.timeoutMs remains the hard
- *  wall-clock backstop. */
-const XSIM_RUNTIME_CAP = "100ms";
+/** Run until the testbench finishes. Frame-based suites can need hundreds of
+ * simulated milliseconds; the process timeout bounds broken/nonterminating TBs. */
+const XSIM_RUNTIME = "all";
 export const WAVEFORM_CAPTURE_BYTES = 4 * 1024 * 1024;
 
 /** Controlled XSim script: bounded VCD capture never changes the TB verdict. */
@@ -90,7 +85,7 @@ if {[catch {
   limit_vcd ${WAVEFORM_CAPTURE_BYTES}
   log_vcd [get_objects -r /*]
 } wave_error]} { puts "SYNTHIA_WAVEFORM_EXPORT_UNAVAILABLE: $wave_error" }
-set run_code [catch {run ${XSIM_RUNTIME_CAP}} run_error run_options]
+set run_code [catch {run ${XSIM_RUNTIME}} run_error run_options]
 if {$wave_open} { catch {flush_vcd}; catch {close_vcd} }
 if {$run_code} { return -options $run_options $run_error }
 quit
@@ -361,7 +356,7 @@ function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string):
     const projectPart = tclQuote(request.toolchain?.part ?? "xc7k70tfbv676-1");
     const topQ = tclQuote(request.top);
     const tbQ = tclQuote(request.testbench);
-    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME_CAP}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl ${tclQuote(join(outputDir, "waveform.tcl"))} [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
+    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl [file normalize ${tclQuote(join(outputDir, "waveform.tcl"))}] [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot compile.log]}\nset phase elaborate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot elaborate.log]}; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot elaborate.log]}\nset phase simulate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }\nputs "PHASE=simulate"\nputs "PHASE_EXIT_CODE=0"\nputs "SIMULATOR_OUTPUT_BEGIN"\nputs $sim_output\nputs "SIMULATOR_OUTPUT_END"\nputs SIMULATION_OK`;
   }
@@ -899,9 +894,13 @@ function parseSimulatePhases(text: string): { phase?: string; phaseExitCode?: nu
  *  to avoid false matches from log lines or echoed source elsewhere. */
 function judgeSimulation(simulatorStdout: string | undefined, phaseExitCode: number | undefined, exitCode: number): { status: VivadoResultStatus; errorCode?: string } {
   const region = simulatorStdout ?? "";
-  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region)) return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
+  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /(?:^\s*(?:\[FAIL\]|FAIL\b)|\bFAIL\s*[:(])/im.test(region)) return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
   if ((phaseExitCode ?? exitCode) !== 0 || exitCode !== 0) return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
-  if (/\bPASS\b/.test(region)) return { status: "succeeded" };
+  // A per-scenario PASS is not completion: XSim can quit at a runtime cap
+  // while the testbench is still waiting. Require the simulator's $finish
+  // observation as well as an explicit testbench success verdict.
+  const finished = /^\s*\$finish called at time\s*:/m.test(region);
+  if (finished && /\bPASS\b/.test(region)) return { status: "succeeded" };
   return { status: "failed", errorCode: "VIVADO_SIMULATION_INCONCLUSIVE" };
 }
 export type ReportVerdict = "passed" | "failed" | "unconstrained" | "inconclusive";
