@@ -6,11 +6,11 @@ import type { EngineeringOverviewProps } from "../../domain/engineering-overview
 const props = defineProps<EngineeringOverviewProps & { open: boolean }>();
 const emit = defineEmits<{
   "update:open": [open: boolean];
-  records: [jobId: string];
+  records: [jobId: string | null];
   collaborate: [];
 }>();
 
-function showRecord(jobId: string): void {
+function showRecord(jobId: string | null): void {
   emit("update:open", false);
   emit("records", jobId);
 }
