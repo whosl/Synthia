@@ -34,7 +34,7 @@ function countFiles(groups: { readonly files: readonly unknown[] }[] | readonly 
   return n;
 }
 
-const sourceCount = computed(() => countFiles(split.value.source.groups));
+const sourceCount = computed(() => countFiles(split.value.source.groups) + (props.waveforms?.length ?? 0));
 const docCount = computed(() => countFiles(split.value.docs.groups));
 
 // ─── 分组展开/折叠（纯本地 UI 态：默认全部展开，不跨刷新保留）───────────────
@@ -249,7 +249,8 @@ watch(
       <div class="flex-none px-2 pt-2">
         <ViewSwitcher :model-value="viewMode" @update:model-value="emit('update:viewMode', $event)" />
       </div>
-      <FileTreeSection
+      <div class="min-h-0 flex-1 overflow-y-auto">
+      <FileTreeSection v-if="split.source.groups.length || !waveforms?.length"
         :result="split.source"
         key-prefix="source"
         :collapsed="collapsedGroups"
@@ -261,6 +262,18 @@ watch(
         @open-file="onOpenFile"
         @escape-view="emit('update:viewMode', 'type')"
       />
+      <div v-if="waveforms?.length" class="waveform-files px-2 pb-2">
+        <p class="px-1 text-[11px] font-semibold text-fg-secondary">仿真波形 · {{ waveforms.length }}</p>
+        <button v-for="file in waveforms" :key="file.id" type="button"
+          class="waveform-file" :class="{ selected: activeWaveformId === file.id }" :title="file.description"
+          :aria-label="`打开波形 ${file.description}`" @click="emit('open-waveform', file.jobId, file.name)">
+          <span>∿ {{ file.name }}</span><small>{{ file.description }}</small>
+        </button>
+      </div>
+      <p v-if="waveformsLoading" class="px-3 text-[11px] text-fg-muted">正在读取运行产物…</p>
+      <p v-if="waveformsEmptyText && !waveformsLoading && !waveformsError" class="px-3 text-[11px] text-fg-muted">{{ waveformsEmptyText }}</p>
+      <p v-if="waveformsError" class="px-3 text-[11px] text-danger">运行产物加载失败：{{ waveformsError }}</p>
+      </div>
     </section>
 
     <div
@@ -296,3 +309,8 @@ watch(
   </div>
 </template>
 
+
+<style scoped>
+.waveform-file { display: grid; gap: 3px; width: 100%; min-width: 0; padding: 7px 8px; margin: 2px 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.waveform-file:hover { background: var(--surface-hover); }.waveform-file.selected { border-color: var(--accent); background: var(--accent-subtle); }.waveform-file span { font: 11px var(--font-mono); }.waveform-file small { font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>

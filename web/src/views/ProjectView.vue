@@ -32,6 +32,8 @@ import {
   getFormalInputApproval,
   getImportSnapshot,
   getJobEvidenceContent,
+  getJobEvidence,
+  listJobs,
   getToolSummary,
   getProject,
   getProcessProfile,
@@ -117,7 +119,8 @@ import {
   type SynthiaPart,
   type SynthiaReasoningPart,
 } from "../domain/parts.ts";
-import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
+import type { JobRunSummary, JobEvidenceManifest } from "../api/types.ts";
+import { buildRecordJobs, mergeProjectRecordJobs, waveformFiles, recordEntryKey } from "../domain/records.ts";
 import { injectChangeCards, type RevisionChangeInput } from "../domain/change-cards.ts";
 import {
   applyStreamEvent,
@@ -400,6 +403,7 @@ async function refreshOnce(): Promise<void> {
     refreshTaskDetails(),
     loadArtifactsAndRevisions().finally(() => { if (!disposed) filesInitializing.value = false; }),
     loadWorkspace(),
+    loadProjectRecords(),
     loadProcessProjection(),
     loadProjectReviews(),
   ]);
@@ -2111,13 +2115,59 @@ const recordsOpen = ref(false);
 const recordsFocusJobId = ref<string | null>(null);
 const recordEntryContent = ref<Record<string, RecordEntryContentState>>({});
 
-const recordJobs = computed(() => (detail.value ? buildRecordJobs(detail.value) : []));
+const projectRuns = ref<JobRunSummary[]>([]);
+const recordsLoading = ref(false);
+const recordsError = ref<string | null>(null);
+const recordManifests = ref<Record<string, JobEvidenceManifest["entries"]>>({});
+const manifestStates = ref<Record<string, { loading?: boolean; error?: string }>>({});
+const manifestAttempts = new Map<string, string>();
+const recordJobs = computed(() => mergeProjectRecordJobs(
+  projectRuns.value.map((run) => ({ ...run, evidenceEntries: run.evidenceEntries ?? recordManifests.value[run.id] })),
+  detail.value ? buildRecordJobs(detail.value) : [],
+));
+const projectWaveforms = computed(() => waveformFiles(recordJobs.value));
+const terminalRecordStates = new Set(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect", "unsupported"]);
+async function loadRecordManifest(jobId: string): Promise<void> {
+  const run = projectRuns.value.find((row) => row.id === jobId);
+  if (!run || run.evidenceEntries != null || recordManifests.value[jobId] || manifestStates.value[jobId]?.loading) return;
+  if (!terminalRecordStates.has(run.state)) return;
+  manifestAttempts.set(jobId, run.state);
+  manifestStates.value[jobId] = { loading: true };
+  try {
+    const result = await getJobEvidence(api, projectId, jobId);
+    if (!disposed) { recordManifests.value[jobId] = result.entries; manifestStates.value[jobId] = {}; }
+  } catch (err) {
+    if (!disposed) manifestStates.value[jobId] = { error: humanizeLoadError(err) };
+  }
+}
+async function discoverWaveforms(): Promise<void> {
+  const pending = projectRuns.value.filter((run) => run.operation === "simulate" && terminalRecordStates.has(run.state)
+    && run.evidenceEntries == null && !recordManifests.value[run.id] && manifestAttempts.get(run.id) !== run.state);
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(3, pending.length) }, async () => {
+    while (!disposed && index < pending.length) await loadRecordManifest(pending[index++]!.id);
+  }));
+}
+async function loadProjectRecords(): Promise<void> {
+  if (recordsLoading.value || disposed) return;
+  recordsLoading.value = true;
+  try {
+    const rows = await listJobs(api, projectId, 1000, true);
+    if (disposed) return;
+    projectRuns.value = rows; recordsError.value = null;
+    void discoverWaveforms();
+  } catch (err) { if (!disposed) recordsError.value = humanizeLoadError(err); }
+  finally { if (!disposed) recordsLoading.value = false; }
+}
+
 
 function onOpenRecords(jobId: string | null): void {
   closeFormalDelivery();
   closeSideTasks();
   recordsFocusJobId.value = jobId;
   recordsOpen.value = true;
+  void loadProjectRecords();
+  if (jobId) void loadRecordManifest(jobId);
 }
 
 function onCloseRecords(): void {
@@ -2130,6 +2180,7 @@ async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
     if (!waveformTabs.value.some((tab) => tab.id === id)) waveformTabs.value.push({ id, jobId, name, label: name, description: `${name} · 运行 ${jobId}` });
     activeWorkspaceTab.value = id;
     recordsOpen.value = false;
+    treeDrawerOpen.value = false;
     return;
   }
   const key = recordEntryKey(jobId, name);
@@ -2463,6 +2514,12 @@ const topBarProps = computed<TopBarProps>(() => ({
 
 const fileTreeProps = computed<FileTreeProps>(() => ({
   entries: fileTreeEntries.value,
+  waveforms: projectWaveforms.value,
+  activeWaveformId: activeWorkspaceTab.value,
+  waveformsLoading: recordsLoading.value || Object.values(manifestStates.value).some((state) => state.loading),
+  waveformsError: recordsError.value,
+  waveformsEmptyText: projectRuns.value.some((run) => run.operation === "simulate") && !projectWaveforms.value.length
+    ? "尚无波形文件；历史仿真未采集的波形需重新仿真生成。" : null,
   documentContext: isGjbReferenceProject.value ? "gjb" : "generic",
   viewMode: viewMode.value,
   hasAgent: hasAgent.value,
@@ -2542,6 +2599,10 @@ async function onToggleSkipPermissions(skip: boolean): Promise<void> {
 const recordsPanelProps = computed<RecordsPanelProps>(() => ({
   open: recordsOpen.value,
   jobs: recordJobs.value,
+  loading: recordsLoading.value,
+  error: recordsError.value,
+  manifestStates: manifestStates.value,
+  limited: projectRuns.value.length >= 1000,
   focusJobId: recordsFocusJobId.value,
   entryContent: recordEntryContent.value,
 }));
@@ -2676,6 +2737,7 @@ function onToggleChatOverlay(): void {
             v-bind="fileTreeProps"
             @update:viewMode="onUpdateViewMode"
             @open-file="onOpenFile"
+            @open-waveform="onViewRecordEntry"
             @close-drawer="onCloseDrawer"
             @register="onRegister"
           />
@@ -2791,6 +2853,7 @@ function onToggleChatOverlay(): void {
           v-bind="fileTreeProps"
           @update:viewMode="onUpdateViewMode"
           @open-file="onOpenFile"
+            @open-waveform="onViewRecordEntry"
           @close-drawer="onCloseDrawer"
           @register="onRegister"
         />
@@ -2861,7 +2924,7 @@ function onToggleChatOverlay(): void {
     <!-- 运行记录抽屉：任意视口宽度可开合，不与左右栏的响应式降级绑定 -->
     <Sheet :open="recordsOpen" @update:open="(open) => { if (!open) onCloseRecords(); }">
       <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
-        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
+        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" @load-evidence="loadRecordManifest" @refresh="loadProjectRecords" />
       </SheetContent>
     </Sheet>
 

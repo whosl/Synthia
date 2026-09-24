@@ -183,6 +183,22 @@ describe.skipIf(!DATABASE_URL)("jobs list API — real PostgreSQL", () => {
     expect(ok.endTime).toBeNull();
   });
 
+  test("project history optionally includes stored evidence metadata, scoped to the project", async () => {
+    const pid = await createProject();
+    const other = await createProject();
+    const jobId = await seedRun(pid);
+    await seedRun(other);
+    const entries = [{ name: "waveform.vcd", sha256: "a".repeat(64), sizeBytes: 123, mediaType: "text/plain" }];
+    await client.query("UPDATE tool_run SET evidence=$1::jsonb WHERE id=$2", [JSON.stringify({ jobId, entries }), jobId]);
+    const result = await callApi(`/api/v1/projects/${pid}/jobs?include_evidence=1`, { token: ids.humanToken });
+    expect(result.status).toBe(200);
+    const rows = envelopeData(result.json);
+    expect(rows.length).toBe(1); expect(rows[0]!.evidenceEntries).toEqual(entries);
+    expect(rows[0]!.createdAt).toBeDefined();
+    const basic = await callApi(`/api/v1/projects/${pid}/jobs`, { token: ids.humanToken });
+    expect(envelopeData(basic.json)[0]!.evidenceEntries).toBeUndefined();
+  });
+
   test("ordering: multiple runs returned newest start_time first", async () => {
     const pid = await createProject();
     const oldest = await seedRun(pid, { startTime: new Date("2026-01-01T00:00:00Z"), endTime: new Date("2026-01-01T00:01:00Z") });

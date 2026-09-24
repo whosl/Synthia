@@ -19,6 +19,7 @@ const emit = defineEmits<RecordsPanelEmits>();
 
 /** VivadoResult 状态原文 → 中文（成功态由 job.ok 单独判断，这里只覆盖非成功值）。 */
 const STATUS_TEXT: Readonly<Record<string, string>> = {
+  queued: "排队中", submitted: "已提交", running: "运行中", cancelled: "已取消", cancelling: "取消中",
   failed: "失败",
   timeout: "超时",
   lost: "丢失",
@@ -51,7 +52,9 @@ function isExpanded(jobId: string): boolean {
 /** ui/accordion 的 update:modelValue 声明是 string | string[] | undefined 并集，
  *  multiple 模式下实际只会是数组，这里收窄后再写回。 */
 function onExpandedChange(value: string | string[] | undefined): void {
-  expandedIds.value = Array.isArray(value) ? value : [];
+  const next = Array.isArray(value) ? value : [];
+  for (const id of next) if (!expandedIds.value.includes(id)) emit("load-evidence", id);
+  expandedIds.value = next;
 }
 
 const cardEls = new Map<string, Element>();
@@ -65,6 +68,7 @@ const highlightedJobId = ref<string | null>(null);
 let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function focusJob(jobId: string): Promise<void> {
+  emit("load-evidence", jobId);
   if (!isExpanded(jobId)) {
     expandedIds.value = [...expandedIds.value, jobId];
   }
@@ -147,10 +151,13 @@ function onViewEntry(jobId: string, name: string): void {
     <PanelHeader title="运行记录" @close="emit('close')" />
 
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
-      <div v-if="jobs.length === 0" class="my-auto px-4 py-6 text-center text-xs text-fg-muted">暂无证据记录</div>
+      <div class="mb-3 flex items-center justify-between text-[11px] text-fg-muted"><span>项目运行历史 · {{ jobs.length }} 条{{ limited ? '（最近 1000 条）' : '' }}</span><button type="button" :disabled="loading" class="text-brand" @click="emit('refresh')">刷新</button></div>
+      <p v-if="error" role="alert" class="text-xs text-danger">加载运行记录失败：{{ error }}</p>
+      <p v-if="loading" role="status" class="text-xs text-fg-muted">正在加载运行记录…</p>
+      <div v-if="jobs.length === 0 && !loading && !error" class="my-auto px-4 py-6 text-center text-xs text-fg-muted">暂无证据记录</div>
 
       <Accordion
-        v-else
+        v-if="jobs.length > 0"
         type="multiple"
         :model-value="expandedIds"
         class="records-accordion flex flex-col gap-2"
@@ -180,10 +187,12 @@ function onViewEntry(jobId: string, name: string): void {
               <div class="flex flex-wrap gap-2 text-[11px] text-fg-muted">
                 <span v-if="job.ts" class="tabular-nums">{{ formatTime(job.ts) }}</span>
                 <span class="mono">job:{{ job.jobId }}</span>
-                <span class="mono">sha256:{{ shortHash(job.inputSha256) }}</span>
+                <span v-if="job.inputSha256" class="mono">sha256:{{ shortHash(job.inputSha256) }}</span>
               </div>
 
-              <div v-if="job.entries.length === 0" class="text-xs text-fg-muted">无证据条目</div>
+              <p v-if="manifestStates?.[job.jobId]?.loading" class="text-xs text-fg-muted">正在读取证据清单…</p>
+              <div v-else-if="manifestStates?.[job.jobId]?.error" class="text-xs text-danger">证据暂不可用：{{ manifestStates[job.jobId]!.error }} <button type="button" class="text-brand" @click="emit('load-evidence', job.jobId)">重试</button></div>
+              <div v-else-if="job.entries.length === 0" class="text-xs text-fg-muted">尚无可用证据文件</div>
               <ul v-else class="m-0 flex list-none flex-col gap-1 p-0">
                 <li v-for="entry in job.entries" :key="entry.name" class="rounded-sm bg-panel px-2 py-1">
                   <div class="flex items-center gap-2 text-xs">

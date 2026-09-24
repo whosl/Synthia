@@ -213,6 +213,11 @@ export interface TopBarEmits {
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface FileTreeProps {
+  readonly waveforms?: readonly import("../domain/records.ts").WaveformFile[];
+  readonly activeWaveformId?: string;
+  readonly waveformsLoading?: boolean;
+  readonly waveformsError?: string | null;
+  readonly waveformsEmptyText?: string | null;
   /** ProjectView 已完成 artifact↔TaskDocRef 关联的统一视图模型（见上）。 */
   readonly entries: readonly FileTreeEntry[];
   /** 新版 GJB 工程按正式文档名分组；自由/兼容项目使用中性产物分组。 */
@@ -257,6 +262,7 @@ export interface FileTreeProps {
 }
 
 export interface FileTreeEmits {
+  "open-waveform": [jobId: string, name: string];
   "update:viewMode": [mode: FileTreeViewMode];
   /** 点击文件 → 中栏编辑器打开该 artifact 的最新版本（ProjectView 负责取内容）。 */
   "open-file": [artifactId: string];
@@ -517,6 +523,10 @@ export type RecordEntryContentState =
   | { readonly status: "ready"; readonly content: JobEvidenceContent };
 
 export interface RecordsPanelProps {
+  readonly loading?: boolean;
+  readonly error?: string | null;
+  readonly limited?: boolean;
+  readonly manifestStates?: Readonly<Record<string, { loading?: boolean; error?: string }>>;
   /** 是否展示（veil/抽屉的显隐由 ProjectView 控制，与 FileTree 抽屉同构）。 */
   readonly open: boolean;
   /** 当前 run 的完整 job 列表，见 `domain/records.ts:buildRecordJobs`。 */
@@ -528,6 +538,8 @@ export interface RecordsPanelProps {
 }
 
 export interface RecordsPanelEmits {
+  "load-evidence": [jobId: string];
+  refresh: [];
   /** 关闭面板（veil 点击/关闭按钮）。 */
   close: [];
   /** 点击某条证据的「查看内容」；ProjectView 据此调 `getJobEvidenceContent` 并写回 entryContent。 */

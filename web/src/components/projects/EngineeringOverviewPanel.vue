@@ -11,7 +11,7 @@ const props = defineProps<EngineeringOverviewProps & { embedded?: boolean }>();
 const emit = defineEmits<{
   close: [];
   expand: [];
-  records: [jobId: string];
+  records: [jobId: string | null];
   collaborate: [];
 }>();
 const selectedKey = ref("simulate");
@@ -46,6 +46,7 @@ function showRecord(): void {
         <header class="overview-topbar">
           <span class="overview-brand"><Cpu :size="22" /> SYNTHIA <span>工程全景</span></span>
           <div class="overview-actions">
+            <Button size="sm" variant="ghost" @click="emit('records', null)">运行记录</Button>
             <span v-if="mock" class="source-tag">演示数据</span>
             <span v-else class="source-tag">项目实际记录</span>
             <button v-if="embedded" class="close-overview" type="button" aria-label="放大工程全景" @click="emit('expand')"><Maximize2 :size="18" /></button>

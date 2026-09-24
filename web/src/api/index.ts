@@ -651,8 +651,11 @@ export function getProject(client: ApiClient, projectId: string): Promise<Projec
 }
 
 /** GET /projects/:id/jobs — 项目工具运行列表（新到旧；记录标签页）。 */
-export function listJobs(client: ApiClient, projectId: string, limit?: number): Promise<JobRunSummary[]> {
-  const query = limit !== undefined ? `?limit=${encodeURIComponent(String(limit))}` : "";
+export function listJobs(client: ApiClient, projectId: string, limit?: number, includeEvidence = false): Promise<JobRunSummary[]> {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (includeEvidence) params.set("include_evidence", "1");
+  const query = params.size ? `?${params}` : "";
   return client<JobRunSummary[]>(`${V1}/projects/${encodeURIComponent(projectId)}/jobs${query}`);
 }
 
