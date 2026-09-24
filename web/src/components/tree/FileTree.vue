@@ -271,7 +271,6 @@ watch(
         </button>
       </div>
       <p v-if="waveformsLoading" class="px-3 text-[11px] text-fg-muted">正在读取运行产物…</p>
-      <p v-if="waveformsEmptyText && !waveformsLoading && !waveformsError" class="px-3 text-[11px] text-fg-muted">{{ waveformsEmptyText }}</p>
       <p v-if="waveformsError" class="px-3 text-[11px] text-danger">运行产物加载失败：{{ waveformsError }}</p>
       </div>
     </section>

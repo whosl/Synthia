@@ -217,7 +217,6 @@ export interface FileTreeProps {
   readonly activeWaveformId?: string;
   readonly waveformsLoading?: boolean;
   readonly waveformsError?: string | null;
-  readonly waveformsEmptyText?: string | null;
   /** ProjectView 已完成 artifact↔TaskDocRef 关联的统一视图模型（见上）。 */
   readonly entries: readonly FileTreeEntry[];
   /** 新版 GJB 工程按正式文档名分组；自由/兼容项目使用中性产物分组。 */

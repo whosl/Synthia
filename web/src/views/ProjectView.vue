@@ -2518,8 +2518,6 @@ const fileTreeProps = computed<FileTreeProps>(() => ({
   activeWaveformId: activeWorkspaceTab.value,
   waveformsLoading: recordsLoading.value || Object.values(manifestStates.value).some((state) => state.loading),
   waveformsError: recordsError.value,
-  waveformsEmptyText: projectRuns.value.some((run) => run.operation === "simulate") && !projectWaveforms.value.length
-    ? "尚无波形文件；历史仿真未采集的波形需重新仿真生成。" : null,
   documentContext: isGjbReferenceProject.value ? "gjb" : "generic",
   viewMode: viewMode.value,
   hasAgent: hasAgent.value,
