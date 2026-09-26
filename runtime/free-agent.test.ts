@@ -1227,15 +1227,15 @@ describe("free-agent: watermark compaction in the model view", () => {
     const gov = new MockGovernanceClient();
     const model = new ScriptedModel([
       call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
-      // 这轮回报高水位（> 1000×0.5）——下一轮的模型视图应压缩 tc1 的结果。
-      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      // 这轮回报高水位（> 20000×0.5）——下一轮的模型视图应压缩 tc1 的结果。
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 15_000 } },
       txt("两份候选已登记。"),
     ]);
     const { session, agentId } = makeSession({
       model,
       governance: gov,
       contextPolicy: {
-        contextWindow: 1_000,
+        contextWindow: 20_000,
         compactTriggerRatio: 0.5,
         keepToolResults: 1,
         toolResultBudgetChars: 60,
@@ -1325,7 +1325,7 @@ describe("summary helpers (pure)", () => {
 
 describe("free-agent: LLM summary compaction", () => {
   const policy: ContextPolicy = {
-    contextWindow: 1_000,
+    contextWindow: 20_000,
     compactTriggerRatio: 0.5,
     keepToolResults: 8,
     toolResultBudgetChars: 10_000, // 关掉机械层，专测摘要层
@@ -1336,7 +1336,7 @@ describe("free-agent: LLM summary compaction", () => {
     const gov = new MockGovernanceClient();
     const model = new ScriptedModel([
       call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
-      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 15_000 } },
       // 第 3 次调用是摘要请求（messagesForModel 发起），回放摘要文本。
       txt("## Objective\n- 完成两份文档登记"),
       txt("两份候选已登记。"),
@@ -1374,7 +1374,7 @@ describe("free-agent: LLM summary compaction", () => {
     const gov = new MockGovernanceClient();
     const model = new ScriptedModel([
       call("tc1", "fpga-intake", { content: "# One\nFirst doc.", filename: "doc/intake/one.md" }),
-      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      { ...call("tc2", "fpga-intake", { content: "# Two\nSecond doc.", filename: "doc/intake/two.md" }), usage: { promptTokens: 15_000 } },
       txt(""), // 摘要调用返回空文本 → 视为失败
       txt("完成。"),
     ]);
@@ -1397,9 +1397,9 @@ describe("free-agent: LLM summary compaction", () => {
     const gov = new MockGovernanceClient();
     const model = new ScriptedModel([
       call("tc1", "fpga-intake", { content: "# One", filename: "doc/intake/one.md" }),
-      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 900 } },
+      { ...call("tc2", "fpga-intake", { content: "# Two", filename: "doc/intake/two.md" }), usage: { promptTokens: 15_000 } },
       txt("## Objective\n- 第一版摘要"),
-      call("tc3", "fpga-intake", { content: "# Three", filename: "doc/intake/three.md" }),
+      { ...call("tc3", "fpga-intake", { content: "# Three", filename: "doc/intake/three.md" }), usage: { promptTokens: 15_000 } },
       txt("## Objective\n- 第二版合并摘要"),
       txt("最终回复"),
     ]);
@@ -1407,7 +1407,7 @@ describe("free-agent: LLM summary compaction", () => {
 
     await session.prompt("登记三份文档");
 
-    // 第 4 次调用是第二次摘要请求（r3 的 turn 无 usage，水位沿用 900）：包含
+    // 第 5 次调用是第二次摘要请求（新调用回报高水位）：包含
     // <prior-summary> 与旧摘要文本。
     const secondSummary = model.calls[4]!;
     const promptText = secondSummary.messages[0]!.content;
@@ -1823,7 +1823,7 @@ describe("free-agent: gateway 1261 overflow with stale watermark", () => {
       governance: gov,
       connector: null,
       agentsDir,
-      // 小窗口 + 陈旧低水位：恢复时 effective=100，首请求必超窗。
+      // 小窗口 + 陈旧低水位：新增的估算检查会在首请求前压缩历史。
       contextPolicy: { contextWindow: 1_000, compactTriggerRatio: 0.5, summaryKeepTokens: 50 },
       initialState: {
         agentId, task: "t", part: "part", projectId: "p",
@@ -1845,7 +1845,105 @@ describe("free-agent: gateway 1261 overflow with stale watermark", () => {
     const reply = await session.prompt("继续");
     expect(reply).toBe("恢复成功");
     expect(seenSizes.length).toBeGreaterThanOrEqual(2);
-    // 首请求大（40k+），重试请求显著缩小（叙述+工具都被强制截断）。
-    expect(seenSizes[seenSizes.length - 1]).toBeLessThan(seenSizes[0]! / 3);
+    // 即使上次水位只有 100，首次请求也已截断；错误重试不应还原全文。
+    expect(seenSizes[0]).toBeLessThan(20_000);
+    expect(seenSizes[seenSizes.length - 1]).toBeLessThanOrEqual(seenSizes[0]!);
+  });
+});
+
+// Regression: usage from an old response must never masquerade as a new request.
+describe("free-agent: request context accounting", () => {
+  function create(opts: Partial<import("./free-agent.ts").FreeAgentDeps> & { model: ConversationalModel }) {
+    const agentId = `agent-context-${++idCounter}`;
+    return createFreeAgentSession(agentId, {
+      tools: [], systemPrompt: "sys", projectId: "proj-test", part: "part",
+      classification: "internal", governance: new MockGovernanceClient(), connector: null, agentsDir,
+      contextPolicy: { contextWindow: 200_000, windowSource: "default", summaryEnabled: false, enforceEstimatedBudget: true },
+      ...opts,
+    });
+  }
+
+  test("pending, unreported and restored requests keep historical usage separate", async () => {
+    let release!: (turn: ChatTurn) => void;
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    let calls = 0;
+    const session = create({ model: { async chat() {
+      if (++calls === 1) return { kind: "text", content: "ok", usage: { promptTokens: 442_242 } };
+      started();
+      return await new Promise<ChatTurn>((resolve) => { release = resolve; });
+    } } });
+    await session.prompt("hello");
+    expect(session.contextUsage().requestState).toBe("measured");
+    const measuredAt = session.contextUsage().measuredAt;
+    const pending = session.prompt("continue");
+    await startedPromise;
+    expect(session.contextUsage()).toMatchObject({ promptTokens: 442_242, requestState: "pending", measuredAt });
+    expect(session.contextUsage().estimatedPromptTokens).toBeLessThan(1_000);
+    release({ kind: "text", content: "done" });
+    await pending;
+    expect(session.contextUsage()).toMatchObject({ promptTokens: 442_242, requestState: "unreported", measuredAt });
+    const state = await loadAgentState(session.agentId);
+    expect(state?.contextUsageSnapshot?.requestState).toBe("unreported");
+    const restored = create({ model: new ScriptedModel([]), initialState: state! });
+    expect(restored.contextUsage()).toMatchObject({ promptTokens: 442_242, requestState: "restored", estimatedPromptTokens: null, measuredAt });
+  });
+
+  test("failed summaries and 429 responses preserve measurement and expose reduced request estimate", async () => {
+    let calls = 0;
+    const session = create({
+      contextPolicy: { contextWindow: 200_000, summaryKeepTokens: 20, enforceEstimatedBudget: true },
+      model: { async chat() {
+        if (++calls === 1) return { kind: "text", content: "A".repeat(5_000), usage: { promptTokens: 442_242 } };
+        throw new Error("429 quota exceeded [1308]");
+      } },
+    });
+    await session.prompt("begin");
+    await expect(session.prompt("continue")).rejects.toThrow("429");
+    expect(session.contextUsage()).toMatchObject({ promptTokens: 442_242, requestState: "failed", failure: "rate_limit", compactionState: "failed" });
+    expect(session.contextUsage().estimatedPromptTokens).toBeLessThan(3_000);
+    expect((await loadAgentState(session.agentId))?.contextPromptTokens).toBe(442_242);
+  });
+
+  test("budget guard includes reference data, tool schema and output reserve", async () => {
+    for (const extras of [
+      { loadReferenceContext: async () => "R".repeat(9_000) },
+      { tools: [{ name: "inspect", description: "D".repeat(9_000), parameters: { type: "object" as const, properties: {} }, execute: async () => ({ content: "ok" }) }] },
+    ]) {
+      const model = new ScriptedModel([]);
+      const session = create({ model, ...extras, contextPolicy: { contextWindow: 4_000, outputReserveTokens: 2_000, enforceEstimatedBudget: true, summaryEnabled: false } });
+      await expect(session.prompt("go")).rejects.toThrow("context_budget_exceeded");
+      expect(model.calls).toHaveLength(0);
+      expect(session.contextUsage()).toMatchObject({ requestState: "failed", failure: "context_limit" });
+    }
+  });
+
+  test("large new tool output triggers projection despite the previous small measurement", async () => {
+    const model = new ScriptedModel([
+      { ...call("big", "inspect", {}), usage: { promptTokens: 100 } }, txt("done"),
+    ]);
+    const session = create({ model,
+      tools: [{ name: "inspect", description: "Inspect", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "X".repeat(40_000) }) }],
+      contextPolicy: { contextWindow: 4_000, outputReserveTokens: 500, enforceEstimatedBudget: true, summaryEnabled: false, toolResultBudgetChars: 200 },
+    });
+    await session.prompt("inspect");
+    const projected = model.calls[1]!.messages.find((m) => m.role === "tool")!;
+    expect(projected.content).toContain("context-compacted:");
+    const history = await loadFreeAgentConversation(session.agentId, agentsDir);
+    expect(history!.messages.find((m) => m.role === "tool")!.content).toHaveLength(40_000);
+    expect(session.contextUsage().promptTokens).toBe(100);
+  });
+
+  test("overflow retry does not replace measured input with an estimate", async () => {
+    let calls = 0;
+    const session = create({ model: { async chat() {
+      if (++calls === 1) return { kind: "text", content: "ok", usage: { promptTokens: 100 } };
+      if (calls === 2) throw new Error("[1261][prompt is too long]");
+      return { kind: "text", content: "recovered" };
+    } } });
+    await session.prompt("hello");
+    await session.prompt("continue");
+    expect(calls).toBe(3);
+    expect(session.contextUsage()).toMatchObject({ promptTokens: 100, requestState: "unreported", failure: null });
   });
 });

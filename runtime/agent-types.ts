@@ -10,6 +10,7 @@
  * pi-ai 的 provider adapter，但不得把工具执行或治理控制交给第三方 agent loop。
  */
 
+import type { ContextUsage } from "./context-usage.ts";
 import type { ArtifactType, GateId, GovernanceClient, LoopConnector } from "./types.ts";
 import type {
   RuntimeTaskKind,
@@ -268,7 +269,7 @@ export interface FreeAgentSession {
     }) => void,
   ): void;
   /** 上下文水位（UI 环形指示）：promptTokens 为最近实测输入规模，null=未回报。 */
-  contextUsage(): { promptTokens: number | null; contextWindow: number };
+  contextUsage(): ContextUsage;
   /** 立即终止。 */
   abort(reason?: string): void;
 }

@@ -18,6 +18,7 @@
  * Tcl. The default beforeToolCall hook blocks all such operations.
  */
 
+import { contextFailure, newContextUsage, type ContextUsage, type ContextUsageSnapshot } from "./context-usage.ts";
 import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
@@ -65,6 +66,10 @@ import type {
 export interface ContextPolicy {
   /** 模型上下文窗口（token）。分母，断言值——部署侧须与网关实际窗口核对。 */
   readonly contextWindow: number;
+  readonly windowSource?: "configured" | "default";
+  /** Deployment budget guard, including tools and reference context (character estimate). */
+  readonly enforceEstimatedBudget?: boolean;
+  readonly outputReserveTokens?: number;
   /** 触发压缩的水位比（默认 0.7）。 */
   readonly compactTriggerRatio?: number;
   /** 保持原样的最近工具结果条数（默认 8）。 */
@@ -134,7 +139,7 @@ const SUMMARY_UPDATE_INSTRUCTIONS = [
 /** 模型视图里摘要消息的固定前缀（user 角色，紧随 system）。 */
 const SUMMARY_VIEW_PREFIX = "[Synthia context summary — the earlier conversation was compacted into this summary. Treat it as reliable context; on conflict, recent messages below win.]\n\n";
 
-/** 粗略 token 估算（字符/4）。只用于分区选择与防溢出守卫，水位本身用网关实测。 */
+/** 粗略 token 估算（字符/4），用于请求预算与分区选择；界面明确区分估算和实测。 */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
@@ -544,8 +549,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   readonly projectId: string;
 
   private readonly deps: FreeAgentDeps;
-  /** 最近一次模型调用回报的输入 token 数；null = 网关未回报，水位管理停摆。 */
+  /** 最近一次主模型调用回报的输入 token 数；与当前请求估算分开保存。 */
   private lastPromptTokens: number | null = null;
+  private contextSnapshot: ContextUsageSnapshot = newContextUsage();
+  private compactionWatermark: number | null = null;
   /** 本轮次是否已用过超窗强制压缩重试（单次机会，防递归）。 */
   private forcedCompactionRetried = false;
   /**
@@ -621,7 +628,15 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // 「无水位→不压缩→无水位」死循环（review P1）。
     if (deps.initialState) {
       const persisted = deps.initialState.contextPromptTokens;
-      if (typeof persisted === "number" && persisted > 0) this.lastPromptTokens = persisted;
+      if (typeof persisted === "number" && Number.isFinite(persisted) && persisted >= 0) {
+        this.lastPromptTokens = persisted;
+        this.compactionWatermark = persisted;
+      }
+      this.contextSnapshot = {
+        ...newContextUsage(),
+        measuredAt: deps.initialState.contextUsageSnapshot?.measuredAt ?? null,
+        requestState: "restored",
+      };
       const summary = deps.initialState.compactionSummary;
       if (summary && Number.isInteger(summary.coveredUpTo) && summary.coveredUpTo >= 1
         && typeof summary.text === "string" && summary.text.trim()) {
@@ -693,7 +708,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // Reset abort for this prompt round.
     this.abortFlag = false;
     this.abortReason = undefined;
+    this.forcedCompactionRetried = false;
     this._status = "running";
+    this.contextSnapshot = { ...this.contextSnapshot, estimatedPromptTokens: null, requestState: "preparing", compactionState: "none", failure: null };
 
     // Append the user message.
     this.messages.push({ role: "user", content: text });
@@ -710,6 +727,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       await this.persist();
       return reply;
     } catch (e) {
+      this.contextSnapshot.requestState = "failed";
+      this.contextSnapshot.failure = contextFailure(e);
       if (e instanceof FreeAgentAbortedError) {
         this._status = "cancelled";
       } else {
@@ -817,22 +836,55 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     return Math.ceil(chars / 4);
   }
 
-  /**
-   * 有效水位：实测优先；null（重启后尚未回报、或网关从不回报 usage）时退回
-   * 字符估算。没有这一层，恢复后的超窗会话将陷入「无水位→不压缩→请求
-   * 失败→仍无水位」死循环（review P1）。
-   */
-  private effectivePromptTokens(): number | null {
-    if (this.lastPromptTokens !== null) return this.lastPromptTokens;
-    if (!this.deps.contextPolicy) return null;
-    return this.estimateMessagesTokens();
+  /** Estimate the complete model view, including tool definitions and call arguments. */
+  private estimatedViewTokens(messages: readonly AgentMessage[]): number {
+    const tools = this.deps.tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+    return estimateTokens(JSON.stringify({ messages, tools }));
   }
 
-  contextUsage(): { promptTokens: number | null; contextWindow: number } {
+  private currentView(): readonly AgentMessage[] {
+    if (!this.compactionSummary || this.messages[0]?.role !== "system") return this.messages;
+    return [this.messages[0], { role: "user", content: `${SUMMARY_VIEW_PREFIX}${this.compactionSummary.text}` },
+      ...this.messages.slice(this.compactionSummary.coveredUpTo)];
+  }
+
+  private effectivePromptTokens(): number | null {
+    if (!this.deps.contextPolicy) return null;
+    // Keep measured history separate from the estimate of the actual summary + tail.
+    // Include newly appended tool output even when the last response was small.
+    return Math.max(this.compactionWatermark ?? 0, this.estimatedViewTokens(this.currentView()));
+  }
+
+  contextUsage(): ContextUsage {
     return {
+      ...this.contextSnapshot,
       promptTokens: this.lastPromptTokens,
       contextWindow: this.deps.contextPolicy?.contextWindow ?? 0,
+      windowSource: this.deps.contextPolicy?.windowSource ?? "configured",
     };
+  }
+
+  private prepareRequest(messages: readonly AgentMessage[]): readonly AgentMessage[] {
+    const policy = this.deps.contextPolicy;
+    let view = messages;
+    let estimate = this.estimatedViewTokens(view);
+    if (policy?.enforceEstimatedBudget) {
+      const reserve = policy.outputReserveTokens ?? Math.min(16_384, Math.floor(policy.contextWindow * .1));
+      const budget = Math.max(0, policy.contextWindow - reserve);
+      if (estimate > budget) {
+        view = compactForContextWindow(view, policy, policy.contextWindow + 1);
+        estimate = this.estimatedViewTokens(view);
+        if (view !== messages && this.contextSnapshot.compactionState !== "failed") this.contextSnapshot.compactionState = "applied";
+      }
+      this.contextSnapshot.estimatedPromptTokens = estimate;
+      if (estimate > budget) {
+        this.contextSnapshot.requestState = "failed";
+        this.contextSnapshot.failure = "context_limit";
+        throw new Error(`context_budget_exceeded: 压缩后输入估算 ${estimate} tokens，超过输入预算 ${budget}（窗口 ${policy.contextWindow}，输出预留 ${reserve}）。请缩小本次输入或核对模型窗口配置。`);
+      }
+    }
+    this.contextSnapshot.estimatedPromptTokens = estimate;
+    return view;
   }
 
   // ----- core loop -----
@@ -841,6 +893,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // 上下文水位管理：只影响发给模型的视图，持久会话保持全文。
     // 第一层 LLM 结构化摘要（旧区 → 六节摘要 + 尾部原文），第二层机械截断
     // （尾部内更旧工具结果的有界摘录）。摘要失败/关闭时退化为纯机械截断。
+    this.contextSnapshot.requestState = "preparing";
+    this.contextSnapshot.estimatedPromptTokens = null;
+    this.contextSnapshot.compactionState = "none";
+    this.contextSnapshot.failure = null;
     let view: readonly AgentMessage[] = this.messages;
     const policy = this.deps.contextPolicy;
     if (policy) {
@@ -859,6 +915,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       } else {
         view = compactForContextWindow(this.messages, policy, this.effectivePromptTokens());
       }
+      if (view !== this.messages && this.contextUsage().compactionState !== "failed") this.contextSnapshot.compactionState = "applied";
       // 可观测性（harness 规约）：投影生效时报告水位与收益，机械压缩不再静默。
       const triggerAt = policy.contextWindow * (policy.compactTriggerRatio ?? DEFAULT_COMPACT_RATIO);
       if ((this.lastPromptTokens ?? 0) >= triggerAt) {
@@ -909,10 +966,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     const region = serializeMessagesForSummary(this.messages.slice(covered, split));
     if (!region.trim()) return;
     const prompt = buildSummaryPrompt({ prior: this.compactionSummary?.text ?? null, region });
-    // 摘要请求也要能装进窗口：超预算直接放弃，机械截断兜底。预留量按窗口
-    // 比例（大窗口 2000、小窗口 20%），避免小窗口下守卫恒真。
-    const reserve = Math.min(2_000, Math.floor(policy.contextWindow * 0.2));
-    if (estimateTokens(prompt) > policy.contextWindow - reserve) {
+    // The summary uses the same model/output limit as normal requests.
+    const reserve = policy.outputReserveTokens ?? Math.min(2_000, Math.floor(policy.contextWindow * 0.2));
+    if (estimateTokens(JSON.stringify([{ role: "user", content: prompt }])) > policy.contextWindow - reserve) {
+      this.contextSnapshot.compactionState = "failed";
       // 摘要请求自身装不下（极小窗口/巨型单消息）：放弃摘要，靠机械层的
       // 超窗强制模式保命（见 compactForContextWindow 的 overWindow）。
       process.stderr.write(
@@ -920,11 +977,14 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       );
       return;
     }
+    this.contextSnapshot.compactionState = "running";
     try {
       const turn = await this.deps.model.chat([{ role: "user", content: prompt }], []);
       const text = turn.kind === "text" ? turn.content.trim() : "";
-      if (!text) return;
+      if (!text) { this.contextSnapshot.compactionState = "failed"; return; }
       this.compactionSummary = { text, coveredUpTo: split };
+      this.compactionWatermark = null;
+      this.contextSnapshot.compactionState = "applied";
       // 可观测性（harness 规约）：摘要发生时必须可见——何时、覆盖多少、压成多少。
       // 此前压缩全程静默，长会话事故只能靠猜。
       process.stderr.write(
@@ -933,6 +993,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
           + `window=${policy.contextWindow}, trigger=${ratio})\n`,
       );
     } catch (error) {
+      this.contextSnapshot.compactionState = "failed";
       process.stderr.write(
         `[free-agent] summary compaction failed for ${this.agentId}: ${error instanceof Error ? error.message : String(error)}\n`,
       );
@@ -953,7 +1014,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       this.checkAbort();
 
       if (this.consumeSteer()) await this.persist();
-      let modelMessages = await this.messagesForModel();
+      let modelMessages = this.prepareRequest(await this.messagesForModel());
 
       // Layer 3: beforeModelCall data-domain pre-check.
       const stop = this.beforeModelCallHook(modelMessages);
@@ -976,7 +1037,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       let reasoningPartId: string | null = null;
       const useStream = !!streamingModel
         && !!(opts.onTextStart || opts.onDelta || opts.onReasoningStart || opts.onReasoningDelta);
-      const callModel = (): Promise<ChatTurn> => useStream && streamingModel
+      const callModel = async (): Promise<ChatTurn> => {
+        this.contextSnapshot.requestState = "pending";
+        this.contextSnapshot.failure = null;
+        return useStream && streamingModel
         ? streamingModel.chatStream(modelMessages, this.deps.tools, {
             onTextStart: () => {
               partId = `sp-${this.agentId}-${++this.streamPartCounter}`;
@@ -994,6 +1058,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
             },
           })
         : this.deps.model.chat(modelMessages, this.deps.tools);
+      };
       let turn: ChatTurn;
       try {
         turn = await callModel();
@@ -1005,18 +1070,23 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         const oversize = /context[_ ]length|too many tokens|maximum context|context window|token limit|exceeds the model|prompt is too long|\[1261\]/i.test(message);
         if (!oversize || !this.deps.contextPolicy || this.forcedCompactionRetried) throw modelError;
         this.forcedCompactionRetried = true;
-        this.lastPromptTokens = this.estimateMessagesTokens();
+        this.compactionWatermark = Math.max(this.estimateMessagesTokens(), this.deps.contextPolicy.contextWindow + 1);
         process.stderr.write(
           `[free-agent] ${this.agentId}: context overflow (${message.slice(0, 120)}) — forcing compaction and retrying once\n`,
         );
-        modelMessages = await this.messagesForModel();
+        modelMessages = this.prepareRequest(await this.messagesForModel());
         turn = await callModel();
       }
 
       // 水位采样：promptTokens 即本次请求的真实输入规模，下一次
       // messagesForModel 按它决定是否压缩旧工具结果。
-      if (typeof turn.usage?.promptTokens === "number" && turn.usage.promptTokens > 0) {
+      if (typeof turn.usage?.promptTokens === "number" && Number.isFinite(turn.usage.promptTokens) && turn.usage.promptTokens >= 0) {
         this.lastPromptTokens = turn.usage.promptTokens;
+        this.compactionWatermark = turn.usage.promptTokens;
+        this.contextSnapshot.measuredAt = new Date().toISOString();
+        this.contextSnapshot.requestState = "measured";
+      } else {
+        this.contextSnapshot.requestState = "unreported";
       }
 
       // An abort can arrive while the model request itself is in flight. Check
@@ -1364,6 +1434,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
       contextPromptTokens: this.lastPromptTokens,
+      contextUsageSnapshot: { ...this.contextSnapshot },
       compactionSummary: this.compactionSummary,
       status,
       ...(endedReason ? { endedReason } : {}),
