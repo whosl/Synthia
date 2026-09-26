@@ -3,7 +3,7 @@
  * 左栏文件树（spec §3.2）：上下分栏 + 可拖拽分隔条。
  *
  * - **上栏「源文件」**：RTL / 测试台 / 约束等源码，默认按文件路径分组（组内按
- *   完整路径排序）。`ViewSwitcher` 收进这一栏的头部，只管这一栏的分组方式。
+ *   完整路径排序），不再展示分类切换栏。
  * - **下栏「文档产物」**：其余产物，恒按 GJB 正式文档名分组——「符合 GJB 的
  *   文档都在这儿」，换分组方式没有意义，所以不受 viewMode 影响。
  *
@@ -16,7 +16,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type { FileTreeEmits, FileTreeProps } from "../../views/project-view-contract.ts";
 import { buildSplitFileTree, stageFocusGroupKey } from "../../domain/file-tree.ts";
 import FileTreeSection from "./FileTreeSection.vue";
-import ViewSwitcher from "./ViewSwitcher.vue";
 
 const props = defineProps<FileTreeProps>();
 const emit = defineEmits<FileTreeEmits>();
@@ -161,7 +160,11 @@ async function focusStage(stageId: string): Promise<void> {
   highlightedPhase.value = null;
 
   const next = new Set(collapsedGroups.value);
-  for (const prefix of ["source", "docs"]) next.delete(`${prefix}:${key}`);
+  for (const [prefix, section] of [["source", split.value.source], ["docs", split.value.docs]] as const) {
+    for (const group of section.groups) {
+      if (group.key === key || group.files.some((file) => file.phase === key)) next.delete(`${prefix}:${group.key}`);
+    }
+  }
   collapsedGroups.value = next;
   await nextTick();
 
@@ -246,9 +249,6 @@ watch(
         <span class="text-xs font-semibold text-fg">源文件</span>
         <span class="ml-auto font-mono text-[11px] text-fg-muted">{{ sourceCount }}</span>
       </header>
-      <div class="flex-none px-3 pb-2">
-        <ViewSwitcher :model-value="viewMode" @update:model-value="emit('update:viewMode', $event)" />
-      </div>
       <div class="min-h-0 flex-1 overflow-y-auto">
       <FileTreeSection v-if="split.source.groups.length || !waveforms?.length"
         :result="split.source"
@@ -276,15 +276,22 @@ watch(
     </section>
 
     <div
-      class="flex-none h-[5px] cursor-row-resize bg-line transition-colors duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-brand focus-visible:bg-brand focus-visible:outline-none"
+      class="ax-filetree-resize"
+      :class="{ dragging }"
+      title="拖动调整上下区域高度，也可使用上下方向键"
       role="separator"
       aria-orientation="horizontal"
       aria-label="调整源文件与文档产物的分栏高度"
+      :aria-valuemin="SPLIT_MIN_PCT"
+      :aria-valuemax="SPLIT_MAX_PCT"
+      :aria-valuenow="Math.round(sourcePct)"
       tabindex="0"
       @pointerdown="beginDrag"
       @keydown.up.prevent="nudge(-4)"
       @keydown.down.prevent="nudge(4)"
-    />
+    >
+      <span class="ax-filetree-resize-dots" aria-hidden="true"><i /><i /><i /></span>
+    </div>
 
     <!-- 下栏吃掉除上栏 flex-basis 之外的全部剩余高度。 -->
     <section class="flex min-h-0 flex-1 flex-col">
@@ -310,6 +317,25 @@ watch(
 
 
 <style scoped>
+.ax-filetree-resize {
+  display:flex;
+  flex:none;
+  align-items:center;
+  justify-content:center;
+  height:12px;
+  background:var(--surface-base);
+  color:var(--text-muted);
+  cursor:row-resize;
+  touch-action:none;
+  transition:color var(--duration);
+}
+.ax-filetree-resize-dots { display:flex; align-items:center; gap:4px; pointer-events:none; }
+.ax-filetree-resize-dots i { width:3px; height:3px; border-radius:50%; background:currentColor; }
+.ax-filetree-resize:hover,
+.ax-filetree-resize:focus-visible,
+.ax-filetree-resize.dragging { color:var(--accent); }
+.ax-filetree-resize:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
+
 .ax-tree-heading { min-height:48px; }
 .ax-tree-heading > span:first-child { font-size:12px; font-weight:600; }
 

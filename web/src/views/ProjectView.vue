@@ -1959,7 +1959,6 @@ const viewMode = ref<FileTreeViewMode>("path");
 const focusStageId = ref<string | null>(null);
 
 function onSelectStage(stageId: string): void {
-  viewMode.value = "stage";
   focusStageId.value = stageId;
   if (project.value && projectType(project.value) === "engineering") void openProjectReviews(stageId);
 }
