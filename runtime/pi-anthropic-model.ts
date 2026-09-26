@@ -245,9 +245,9 @@ function assistantToChatTurn(message: AssistantMessage): ChatTurn {
     ? [{ toolCallId: block.id, name: block.name, args: block.arguments }]
     : []);
   const text = textFromAssistant(message);
-  // usage 全程透传（input 即本次 prompt 实际 token 数）——会话的水位管理靠它。
-  const usage = (message.usage.input > 0 || message.usage.output > 0)
-    ? { promptTokens: message.usage.input, completionTokens: message.usage.output }
+  // pi-ai 分开统计未缓存输入、缓存读取与写入；上下文占用须包含全部输入。
+  const usage = (message.usage.input > 0 || message.usage.cacheRead > 0 || message.usage.cacheWrite > 0 || message.usage.output > 0)
+    ? { promptTokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite, completionTokens: message.usage.output }
     : undefined;
   return calls.length > 0
     ? { kind: "tool_calls", calls, content: text || null, ...(usage ? { usage } : {}) }
@@ -272,7 +272,7 @@ function assistantToChatCompletion(message: AssistantMessage): ChatCompletionRes
       finish_reason: turn.kind === "tool_calls" ? "tool_calls" : "stop",
     }],
     usage: {
-      prompt_tokens: message.usage.input,
+      prompt_tokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite,
       completion_tokens: message.usage.output,
       total_tokens: message.usage.totalTokens,
     },

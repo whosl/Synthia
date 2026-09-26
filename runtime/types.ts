@@ -1,3 +1,4 @@
+import type { ContextUsageSnapshot } from "./context-usage.ts";
 /**
  * Synthia Runtime — shared types for the minimal task loop.
  *
@@ -724,6 +725,7 @@ export interface AgentState {
   readonly awaitingGate?: GateId;
   /** 最近一次模型调用实测的输入 token 数（上下文水位；恢复时回读会话）。 */
   readonly contextPromptTokens?: number | null;
+  readonly contextUsageSnapshot?: ContextUsageSnapshot;
   /** LLM 结构化摘要缓存（text + 已覆盖到的消息下标）；重启恢复后长会话
    *  不必重付一次摘要调用，且超窗历史仍以摘要视图发给模型。 */
   readonly compactionSummary?: { readonly text: string; readonly coveredUpTo: number } | null;
