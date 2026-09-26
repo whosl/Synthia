@@ -368,12 +368,14 @@ onBeforeUnmount(() => {
 <template>
   <PageShell section="evolution">
     <div class="text-fg">
-      <header class="mb-4">
-        <h1 class="m-0 text-[28px] max-[560px]:text-2xl">自进化</h1>
-        <p class="m-0 text-fg-secondary">经验沉淀、技能复用与效果验证。</p>
+      <header class="ax-page-heading">
+        <div>
+          <p class="ax-eyebrow">LEARN · REUSE · IMPROVE</p>
+          <h1>自进化</h1>
+          <p>让每一次工程实践，成为下一次任务的起点。</p>
+        </div>
       </header>
 
-    <!-- 宽度由 PageShell 的 max-w-[1392px] 统一约束，不再每层重复 w-[min(1500px,100%)] -->
     <Empty v-if="!SELF_EVOLUTION_FEATURE_ENABLED" class="border">
       <EmptyHeader>
         <EmptyMedia variant="icon"><Sprout :size="20" /></EmptyMedia>
@@ -419,19 +421,7 @@ onBeforeUnmount(() => {
           @select="loadSkill"
           @refresh="refreshAll()"
         />
-        <div class="mt-3">
-        <EvolutionSummary
-          :overview="overview"
-          :reason="summaryReason"
-          :operating-action="operatingAction"
-          :last-manual-run="lastManualRun"
-          @update:reason="summaryReason = $event"
-          @toggle-learning="updateSettings('learning')"
-          @toggle-skills="updateSettings('skills')"
-          @run-curator="runCurator"
-          @refresh="refreshAll()"
-        />
-        </div>
+
 
         <p
           v-if="notice"
@@ -440,7 +430,10 @@ onBeforeUnmount(() => {
         >{{ notice }}</p>
         <ErrorNotice v-if="operationError" :error="operationError" />
 
-        <div class="mt-4 grid min-w-0 grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)] gap-4 max-[980px]:grid-cols-1">
+        <div class="ax-section-heading mt-8">
+          <div><h2>技能与调用证据</h2><p>选择一项技能，查看版本、复用记录与效果评价。</p></div>
+        </div>
+        <div class="grid min-w-0 grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)] gap-4 max-[980px]:grid-cols-1">
           <LearnedSkillList
             :items="skills"
             :selected-skill-id="selectedSkillId"
@@ -468,6 +461,19 @@ onBeforeUnmount(() => {
               @update:control-reason="skillControlReason = $event"
             />
           </div>
+        </div>
+        <div class="mt-6">
+        <EvolutionSummary
+          :overview="overview"
+          :reason="summaryReason"
+          :operating-action="operatingAction"
+          :last-manual-run="lastManualRun"
+          @update:reason="summaryReason = $event"
+          @toggle-learning="updateSettings('learning')"
+          @toggle-skills="updateSettings('skills')"
+          @run-curator="runCurator"
+          @refresh="refreshAll()"
+        />
         </div>
       </template>
     </template>

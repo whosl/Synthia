@@ -68,7 +68,7 @@ function onKeydown(ev: KeyboardEvent): void {
 </script>
 
 <template>
-  <div class="chat-composer flex flex-col gap-1 border-t border-line bg-panel px-3 pb-3 pt-2" :class="{ steering: mode === 'steer', sending }">
+  <div class="chat-composer flex flex-col gap-2 bg-panel px-3 pb-3 pt-2" :class="{ steering: mode === 'steer', sending }">
     <p v-if="mode === 'steer'" class="m-0 text-[11px] text-warn">插一句不保证按顺序生效，将在当前步骤结束后注入</p>
 
     <!--
@@ -79,7 +79,7 @@ function onKeydown(ev: KeyboardEvent): void {
     <div class="chat-composer-box rounded-md border border-line bg-base transition-[border-color] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] focus-within:border-brand has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55">
       <textarea
         ref="textareaEl"
-        class="chat-composer-input max-h-[160px] min-h-[30px] w-full min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-2 pt-2 leading-[1.55] text-fg placeholder:text-fg-muted focus-visible:outline-none disabled:cursor-not-allowed"
+        class="chat-composer-input max-h-[160px] min-h-[64px] w-full min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-3 pt-3 leading-[1.7] text-fg placeholder:text-fg-muted focus-visible:outline-none disabled:cursor-not-allowed"
         :value="modelValue"
         :placeholder="placeholder"
         aria-label="发送给 Agent 的消息"
@@ -102,6 +102,10 @@ function onKeydown(ev: KeyboardEvent): void {
 </template>
 
 <style scoped>
+.chat-composer-input { border:0; border-radius:12px 12px 0 0; }
+.chat-composer-box { border-radius:12px; background:var(--surface-base); }
+.chat-composer-box:focus-within { box-shadow:0 0 0 3px var(--accent-subtle); }
+
 /* steering 态描边必须压过模板里的 focus-within:border-brand（类 + 伪类的特异性
    低于这里的三选择器组合），与 reset 分层无关，故留在 scoped。
    （.chat-composer-input 同时是 ProjectView 聚焦用的 querySelector 钩子，类名勿动。） */

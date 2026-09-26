@@ -21,7 +21,7 @@ function shortTitle(task: SideTaskSummary): string {
 </script>
 
 <template>
-  <div class="flex h-[38px] min-w-0 flex-none items-stretch border-b border-line bg-panel" aria-label="Agent 窗格">
+  <div class="ax-agent-tabs flex h-[49px] min-w-0 flex-none items-stretch border-b border-line bg-panel" aria-label="Agent 窗格">
     <div class="agent-pane-tabs-scroll flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="项目 Agent">
       <button
         type="button"
@@ -80,6 +80,11 @@ function shortTitle(task: SideTaskSummary): string {
 </template>
 
 <style scoped>
+.ax-agent-tabs { padding:8px; gap:4px; }
+.ax-agent-tabs .agent-pane-tab, .ax-agent-tabs .agent-pane-side-tab { border:0; border-radius:8px; }
+.ax-agent-tabs .agent-pane-add { width:32px; border:0; border-radius:8px; }
+.ax-agent-tabs .agent-pane-tab.is-active { background:var(--surface-hover); color:var(--text-primary); }
+
 /* 未分层全局 reset 的 button { font: inherit; color: inherit } 优先级高于 Tailwind
    utilities 层：按钮文字色/字号，以及需要与 is-active 保持原层叠顺序的 hover/active
    底色（hover 在后、覆盖 active），只能留在 scoped。 */

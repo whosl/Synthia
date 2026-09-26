@@ -40,29 +40,29 @@ const coverage = computed(() => props.efficiency ? `${props.efficiency.compared_
 </template>
 
 <style scoped>
-.efficiency-overview { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr); gap: 12px 20px; margin-top: 22px; }
-.efficiency-label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--text-secondary); font-size: 11px; }
+.efficiency-overview { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px 20px; margin-top: 28px; }
+.efficiency-label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--text-secondary); font-size: 12px; }
 .efficiency-label small { border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 4px; font-size: 9px; }
-.efficiency-total { display: block; margin-top: 9px; color: var(--state-ok); font: 500 clamp(22px, 2vw, 28px)/1.3 var(--font-mono); letter-spacing: -1px; overflow-wrap: anywhere; }
+.efficiency-total { display: block; margin-top: 9px; color: var(--state-ok); font: 500 clamp(28px, 2.2vw, 36px)/1.3 var(--font-mono); letter-spacing: -1px; overflow-wrap: anywhere; }
 .slower .efficiency-total { color: var(--state-warn); }
 .efficiency-comparison { min-width: 0; }
 .efficiency-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.efficiency-facts span { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--text-secondary); font-size: 10px; min-height: 18px; }
+.efficiency-facts span { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--text-secondary); font-size: 12px; min-height: 18px; }
 .efficiency-facts svg { flex-shrink: 0; }
 .efficiency-facts strong { display: block; margin-top: 9px; font: 22px/1.5 var(--font-mono); color: var(--text-primary); overflow-wrap: anywhere; }
 .duration-comparison { display: grid; gap: 10px; margin-top: 14px; }
-.duration-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; font-size: 10px; color: var(--text-secondary); }
+.duration-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .duration-row b { font-weight: 400; font-variant-numeric: tabular-nums; }
 .duration-track { grid-column: 1 / -1; height: 5px; background: var(--surface-hover); border-radius: 4px; overflow: hidden; }
 .duration-track i { display: block; height: 100%; border-radius: inherit; background: var(--text-muted); }
 .reused .duration-track i { background: var(--state-ok); }
 .slower .reused .duration-track i { background: var(--state-warn); }
-.efficiency-method { grid-column: 1 / -1; font-size: 10px; color: var(--text-muted); }
+.efficiency-method { grid-column: 1 / -1; font-size: 12px; color: var(--text-muted); }
 .efficiency-method summary { display: flex; align-items: center; gap: 6px; width: fit-content; cursor: pointer; }
 .efficiency-method summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .efficiency-method p { line-height: 1.8; }
-.efficiency-empty { font-size: 10px; color: var(--text-muted); line-height: 1.8; margin: 8px 0 0; }
-@media (max-width: 1200px) and (min-width: 1001px), (max-width: 560px) {
+.efficiency-empty { font-size: 12px; color: var(--text-muted); line-height: 1.8; margin: 8px 0 0; }
+@media (min-width: 1401px), (max-width: 600px) {
   .efficiency-overview { grid-template-columns: 1fr; gap: 12px; margin-top: 18px; }
   .efficiency-facts { gap: 16px; }
   .efficiency-facts strong { margin-top: 4px; font-size: 20px; }
