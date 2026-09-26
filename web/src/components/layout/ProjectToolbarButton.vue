@@ -14,13 +14,13 @@ defineProps<{ expanded?: boolean }>();
 .project-toolbar-button {
   display: inline-flex;
   min-width: 0;
-  height: 26px;
+  height: 32px;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
   padding: 0 11px;
-  background: transparent;
+  background: var(--surface-panel);
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1;

@@ -44,10 +44,10 @@ function navigate(event: KeyboardEvent, index: number): void {
 </template>
 
 <style scoped>
-.workspace-tabs { display: flex; flex: none; min-width: 0; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); background: var(--surface-panel); scrollbar-width: thin; }
-.workspace-tab { display: flex; flex: none; align-items: center; border-right: 1px solid var(--border-subtle); border-top: 2px solid transparent; color: var(--text-secondary); }
-.workspace-tab.active { border-top-color: var(--accent); background: var(--surface-base); color: var(--text-primary); }
-.workspace-tab > button { display: flex; align-items: center; gap: 7px; height: 37px; padding: 0 12px; border: none; background: transparent; color: inherit; cursor: pointer; font-size: 11px; }
+.workspace-tabs { display: flex; flex: none; min-width: 0; overflow-x: auto; gap: 4px; padding: 8px; border-bottom: 1px solid var(--border-subtle); background: var(--surface-panel); scrollbar-width: thin; }
+.workspace-tab { display: flex; flex: none; align-items: center; border: 0; border-radius: 8px; color: var(--text-secondary); }
+.workspace-tab.active { background: var(--surface-hover); color: var(--text-primary); }
+.workspace-tab > button { display: flex; align-items: center; gap: 8px; height: 32px; border-radius: 8px; padding: 0 12px; border: none; background: transparent; color: inherit; cursor: pointer; font-size: 12px; }
 .workspace-tab > button:hover { background: var(--surface-hover); }
 .workspace-tab > button:focus-visible { outline: 1px solid var(--accent); outline-offset: -3px; }
 .tab-label { max-width: 180px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

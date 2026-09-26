@@ -4,6 +4,7 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
+import AppNavigation from "../components/layout/AppNavigation.vue";
 import { createFileTab, tabAfterClose, type WorkspaceFileTab } from "../domain/workspace-tabs.ts";
 import Button from "../components/ui/AppButton.vue";
 import EngineeringOverviewPanel from "../components/projects/EngineeringOverviewPanel.vue";
@@ -2663,9 +2664,9 @@ function onToggleChatOverlay(): void {
 </script>
 
 <template>
-  <div class="flex h-dvh min-h-0 flex-col bg-base text-fg">
+  <div class="ax-workbench"><AppNavigation section="workspace" compact /><div class="ax-workbench-body">
     <!-- 摘要 chip 的悬浮面板要盖住下方三栏（z-20）；抽屉走 ui/sheet（z 取自 --z-overlay）仍在其上 -->
-    <header class="relative z-20 h-[var(--topbar-height)] flex-none border-b border-line bg-panel">
+    <header class="ax-workbench-header relative z-20 h-[var(--topbar-height)] flex-none">
       <TopBar
         v-bind="topBarProps"
         @toggle-theme="onToggleTheme"
@@ -2715,9 +2716,9 @@ function onToggleChatOverlay(): void {
     <ResizablePanelGroup
       v-else-if="project"
       direction="horizontal"
-      auto-save-id="synthia.splitter"
+      auto-save-id="synthia.v-astrys.splitter"
       :keyboard-resize-by="1"
-      class="min-h-0 flex-1"
+      class="ax-workbench-panels min-h-0 flex-1"
     >
       <template v-if="!leftCollapsed">
         <ResizablePanel
@@ -2727,7 +2728,7 @@ function onToggleChatOverlay(): void {
           :default-size="leftPaneDefault"
           :min-size="LEFT_PANE_MIN"
           :max-size="LEFT_PANE_MAX"
-          class="min-h-0 overflow-hidden"
+          class="ax-workbench-pane ax-assets-pane min-h-0 overflow-hidden"
         >
           <div v-if="filesInitializing" class="p-4 text-xs text-fg-muted" role="status">正在加载项目文件…</div>
           <FileTree
@@ -2740,9 +2741,9 @@ function onToggleChatOverlay(): void {
             @register="onRegister"
           />
         </ResizablePanel>
-        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
-      <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
+      <ResizablePanel id="center" :order="2" :min-size="10" class="ax-workbench-pane ax-center-pane min-w-0 min-h-0 overflow-hidden">
         <div class="flex h-full min-h-0 min-w-0 flex-col">
           <WorkspaceTabs :tabs="workspaceTabs" :active-id="activeWorkspaceTab" @select="selectWorkspaceTab" @close="closeWorkspaceTab" />
           <div class="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel" :aria-label="workspaceTabs.find(tab => tab.id === activeWorkspaceTab)?.label">
@@ -2773,7 +2774,7 @@ function onToggleChatOverlay(): void {
         </div>
       </ResizablePanel>
       <template v-if="!rightCollapsed">
-        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
         <ResizablePanel
           id="right"
           :order="3"
@@ -2781,7 +2782,7 @@ function onToggleChatOverlay(): void {
           :default-size="rightPaneDefault"
           :min-size="RIGHT_PANE_MIN"
           :max-size="RIGHT_PANE_MAX"
-          class="min-h-0 overflow-hidden"
+          class="ax-workbench-pane ax-agent-pane min-h-0 overflow-hidden"
         >
           <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
           <AgentPaneTabs
@@ -2993,9 +2994,18 @@ function onToggleChatOverlay(): void {
       @collaborate="focusConversation"
     />
   </div>
+  </div>
 </template>
 
 <style scoped>
+.ax-workbench { display:flex; height:100dvh; min-height:0; background:var(--surface-base); color:var(--text-primary); }
+.ax-workbench-body { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; }
+.ax-workbench-header { background:var(--surface-base); }
+.ax-workbench-panels { padding:0 12px 12px 4px; }
+.ax-workbench-pane { border:1px solid var(--border-subtle); border-radius:var(--radius-container); background:var(--surface-panel); }
+.ax-pane-handle { border-radius:4px; }
+@media(max-width:700px) { .ax-workbench-header { height:92px; }.ax-workbench-panels { padding:0 8px 8px; } }
+
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
 .project-view-overlay > :deep(.chat-feed) {
   flex: 1;

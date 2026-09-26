@@ -37,7 +37,7 @@ const toneClass = computed(() => {
     case "primary":
       return "hover:bg-brand-hover";
     case "secondary":
-      return "border border-line-strong bg-panel text-fg";
+      return "border border-line bg-panel text-fg hover:border-line-strong";
     case "danger":
       return "border border-line-strong text-danger hover:border-danger hover:bg-brand-subtle hover:text-danger";
     case "ghost":
@@ -46,7 +46,7 @@ const toneClass = computed(() => {
 });
 
 const sizeClass = computed(() =>
-  props.size === "sm" ? "h-6 gap-1 px-2 text-xs font-normal" : "h-[30px] px-3 text-[13px] font-normal",
+  props.size === "sm" ? "h-7 gap-1.5 px-2.5 text-xs font-medium" : "h-8 px-3 text-[13px] font-medium",
 );
 </script>
 
