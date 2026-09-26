@@ -2741,7 +2741,7 @@ function onToggleChatOverlay(): void {
             @register="onRegister"
           />
         </ResizablePanel>
-        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整文件栏宽度" title="拖动调整栏宽，也可使用左右方向键" />
       </template>
       <ResizablePanel id="center" :order="2" :min-size="10" class="ax-workbench-pane ax-center-pane min-w-0 min-h-0 overflow-hidden">
         <div class="flex h-full min-h-0 min-w-0 flex-col">
@@ -2774,7 +2774,7 @@ function onToggleChatOverlay(): void {
         </div>
       </ResizablePanel>
       <template v-if="!rightCollapsed">
-        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整对话栏宽度" title="拖动调整栏宽，也可使用左右方向键" />
         <ResizablePanel
           id="right"
           :order="3"
@@ -3003,7 +3003,35 @@ function onToggleChatOverlay(): void {
 .ax-workbench-header { background:var(--surface-base); }
 .ax-workbench-panels { padding:0 12px 12px 4px; }
 .ax-workbench-pane { border:1px solid var(--border-subtle); border-radius:var(--radius-container); background:var(--surface-panel); }
-.ax-pane-handle { border-radius:4px; }
+.ax-pane-handle {
+  width:12px;
+  flex-shrink:0;
+  border-radius:4px;
+  background:transparent;
+  cursor:col-resize;
+  transition:background var(--duration);
+}
+.ax-pane-handle :deep(> div) {
+  width:8px;
+  height:40px;
+  border:1px solid var(--border-strong);
+  border-radius:4px;
+  background:var(--surface-hover);
+  color:var(--text-muted);
+  pointer-events:none;
+  transition:background var(--duration), border-color var(--duration), color var(--duration);
+}
+.ax-pane-handle :deep(svg) { width:8px; height:20px; flex-shrink:0; }
+.ax-pane-handle:hover,
+.ax-pane-handle:focus-visible,
+.ax-pane-handle[data-resize-handle-state="drag"] { background:var(--accent-subtle); }
+.ax-pane-handle:hover :deep(> div),
+.ax-pane-handle:focus-visible :deep(> div),
+.ax-pane-handle[data-resize-handle-state="drag"] :deep(> div) {
+  background:var(--accent);
+  border-color:var(--accent);
+  color:var(--text-on-accent);
+}
 @media(max-width:700px) { .ax-workbench-header { height:92px; }.ax-workbench-panels { padding:0 8px 8px; } }
 
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
