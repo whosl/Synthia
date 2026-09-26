@@ -172,3 +172,13 @@ describe("PiAnthropicRuntimeModel transport retry (P1)", () => {
     expect(calls).toBe(2); // 1 + 1 retry
   });
 });
+
+describe("Anthropic context accounting", () => {
+  test("includes cache-read and cache-write input, without counting output as context input", async () => {
+    const response = fakeAssistant();
+    response.usage = { ...response.usage, input: 100, cacheRead: 800, cacheWrite: 200, output: 50, totalTokens: 1150 };
+    const model = new PiAnthropicRuntimeModel(CONFIG, { complete: async () => response });
+    const turn = await model.chat([{ role: "user", content: "hello" }], []);
+    expect(turn.usage).toEqual({ promptTokens: 1100, completionTokens: 50 });
+  });
+});

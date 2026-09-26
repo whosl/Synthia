@@ -1,3 +1,4 @@
+import { contextUsageDto, newContextUsage } from "./context-usage.ts";
 /**
  * Synthia Runtime — HTTP task service.
  *
@@ -851,6 +852,9 @@ function contextPolicyFromEnv(
   return {
     contextPolicy: {
       contextWindow: Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 200_000,
+      windowSource: Number.isFinite(windowTokens) && windowTokens > 0 ? "configured" : "default",
+      enforceEstimatedBudget: true,
+      outputReserveTokens: Number(env.SYNTHIA_MODEL_CHAT_MAX_TOKENS) > 0 && Number.isFinite(Number(env.SYNTHIA_MODEL_CHAT_MAX_TOKENS)) ? Number(env.SYNTHIA_MODEL_CHAT_MAX_TOKENS) : 16_384,
       ...(Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? { compactTriggerRatio: ratio } : {}),
       ...(Number.isFinite(keep) && keep >= 0 ? { keepToolResults: keep } : {}),
       ...(Number.isFinite(budget) && budget > 0 ? { toolResultBudgetChars: budget } : {}),
@@ -1545,14 +1549,19 @@ export class RuntimeServer {
         const session = this.sessions.get(agentId);
         if (session?.contextUsage) {
           const usage = session.contextUsage();
-          return { prompt_tokens: usage.promptTokens, context_window: usage.contextWindow };
+          return contextUsageDto(usage);
         }
         // 重启后、下一条消息前会话尚未重建：回退到持久化的水位（可能从未
         // 采样过 = null，UI 显示灰环），窗口用部署配置——环不因重启消失。
-        return {
-          prompt_tokens: h.currentState?.contextPromptTokens ?? null,
-          context_window: contextPolicyFromEnv(process.env).contextPolicy.contextWindow,
-        };
+        const policy = contextPolicyFromEnv(process.env).contextPolicy;
+        return contextUsageDto({
+          ...newContextUsage(),
+          requestState: "restored",
+          measuredAt: h.currentState?.contextUsageSnapshot?.measuredAt ?? null,
+          promptTokens: h.currentState?.contextPromptTokens ?? null,
+          contextWindow: policy.contextWindow,
+          windowSource: policy.windowSource ?? "default",
+        });
       })(),
     });
   }
