@@ -2741,7 +2741,9 @@ function onToggleChatOverlay(): void {
             @register="onRegister"
           />
         </ResizablePanel>
-        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整文件栏宽度" title="拖动调整栏宽，也可使用左右方向键" />
+        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整文件栏宽度" title="拖动调整栏宽，也可使用左右方向键">
+          <span class="ax-resize-dots" aria-hidden="true"><i /><i /><i /></span>
+        </ResizableHandle>
       </template>
       <ResizablePanel id="center" :order="2" :min-size="10" class="ax-workbench-pane ax-center-pane min-w-0 min-h-0 overflow-hidden">
         <div class="flex h-full min-h-0 min-w-0 flex-col">
@@ -2774,7 +2776,9 @@ function onToggleChatOverlay(): void {
         </div>
       </ResizablePanel>
       <template v-if="!rightCollapsed">
-        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整对话栏宽度" title="拖动调整栏宽，也可使用左右方向键" />
+        <ResizableHandle with-handle class="ax-pane-handle" aria-label="调整对话栏宽度" title="拖动调整栏宽，也可使用左右方向键">
+          <span class="ax-resize-dots" aria-hidden="true"><i /><i /><i /></span>
+        </ResizableHandle>
         <ResizablePanel
           id="right"
           :order="3"
@@ -3006,32 +3010,23 @@ function onToggleChatOverlay(): void {
 .ax-pane-handle {
   width:12px;
   flex-shrink:0;
-  border-radius:4px;
   background:transparent;
+  color:var(--text-muted);
   cursor:col-resize;
-  transition:background var(--duration);
+  transition:color var(--duration);
 }
 .ax-pane-handle :deep(> div) {
   width:8px;
-  height:40px;
-  border:1px solid var(--border-strong);
-  border-radius:4px;
-  background:var(--surface-hover);
-  color:var(--text-muted);
+  height:24px;
+  border:0;
+  background:transparent;
   pointer-events:none;
-  transition:background var(--duration), border-color var(--duration), color var(--duration);
 }
-.ax-pane-handle :deep(svg) { width:8px; height:20px; flex-shrink:0; }
+.ax-resize-dots { display:flex; flex-direction:column; align-items:center; gap:4px; }
+.ax-resize-dots i { width:3px; height:3px; border-radius:50%; background:currentColor; }
 .ax-pane-handle:hover,
 .ax-pane-handle:focus-visible,
-.ax-pane-handle[data-resize-handle-state="drag"] { background:var(--accent-subtle); }
-.ax-pane-handle:hover :deep(> div),
-.ax-pane-handle:focus-visible :deep(> div),
-.ax-pane-handle[data-resize-handle-state="drag"] :deep(> div) {
-  background:var(--accent);
-  border-color:var(--accent);
-  color:var(--text-on-accent);
-}
+.ax-pane-handle[data-resize-handle-state="drag"] { color:var(--accent); }
 @media(max-width:700px) { .ax-workbench-header { height:92px; }.ax-workbench-panels { padding:0 8px 8px; } }
 
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
