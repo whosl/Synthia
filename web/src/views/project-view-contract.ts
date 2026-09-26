@@ -16,7 +16,7 @@
  * 关联，四个栏位组件与后续开发者不需要、也不应该自己再关联一遍。
  */
 
-import type { ArtifactRevision, JobEvidenceContent, WorkspaceFileStatus } from "../api/types.ts";
+import type { TaskContextUsage, ArtifactRevision, JobEvidenceContent, WorkspaceFileStatus } from "../api/types.ts";
 import type { SynthiaPart } from "../domain/parts.ts";
 import type { RecordJob } from "../domain/records.ts";
 import type { StreamPhase } from "../domain/task-stream.ts";
@@ -444,7 +444,7 @@ export interface ChatFeedProps {
    */
   readonly approval: ApprovalCardProps | null;
   /** 上下文水位（环形指示）；runtime 未回报或旧会话为 null。 */
-  readonly contextUsage: { readonly promptTokens: number | null; readonly contextWindow: number } | null;
+  readonly contextUsage: TaskContextUsage | null;
   /** 「跳过所有权限」开关当前态（红线操作不受它影响）。乐观翻转由 ProjectView 的本地覆盖合成，服务器确认后回落权威值。 */
   readonly permissionSkipAll: boolean;
   /**
