@@ -6,7 +6,7 @@
  * - entries 原样透传。
  */
 import { describe, expect, test } from "bun:test";
-import { buildRecordJobs } from "../src/domain/records.ts";
+import { buildRecordJobs, mergeProjectRecordJobs, waveformFiles } from "../src/domain/records.ts";
 import { TOOL_BAR_TITLES } from "../src/domain/tasks.ts";
 import type { TaskAuditEvent, TaskEvidenceSummary, TaskAgentDetail } from "../src/api/types.ts";
 
@@ -131,5 +131,26 @@ describe("buildRecordJobs：evidence × audit(tool_call) 按 jobId 关联", () =
     });
     const jobs = buildRecordJobs(detail);
     expect(jobs[0]!.entries).toEqual(entries);
+  });
+});
+
+
+describe("project history and waveform files", () => {
+  const entry = { name: "waveform.vcd", sha256: "b".repeat(64), sizeBytes: 100, mediaType: "text/plain" };
+  const run = (id: string, endTime: string) => ({ id, operation: "simulate", runClass: "exploratory", state: "succeeded", startTime: null, endTime, evidenceEntries: [entry] });
+  test("persisted runs are visible without any task detail and same-name waveforms stay distinct", () => {
+    const jobs = mergeProjectRecordJobs([run("old", "2026-09-23T00:00:00Z"), run("new", "2026-09-24T00:00:00Z")], []);
+    expect(jobs.map((job) => job.jobId)).toEqual(["new", "old"]);
+    expect(jobs.map((job) => job.round)).toEqual([2, 1]);
+    const files = waveformFiles(jobs);
+    expect(files.length).toBe(2); expect(files[0]!.id).not.toBe(files[1]!.id);
+    expect(files[0]!.jobId).toBe("new");
+  });
+  test("stored status wins while missing manifests retain current task evidence", () => {
+    const current = buildRecordJobs(makeDetail({ evidence: [evidenceEntry({ jobId: "same", entries: [entry] })] }));
+    const jobs = mergeProjectRecordJobs([{ ...run("same", "2026-09-24T00:00:00Z"), state: "failed", errorCode: "FAIL", evidenceEntries: null }], current);
+    expect(jobs.length).toBe(1); expect(jobs[0]!.status).toBe("failed"); expect(jobs[0]!.ok).toBe(false);
+    expect(waveformFiles(jobs).length).toBe(1);
+    expect(waveformFiles(mergeProjectRecordJobs([{ ...run("same", "2026-09-24T00:00:00Z"), evidenceEntries: [] }], current))).toEqual([]);
   });
 });

@@ -7,6 +7,8 @@ const detail = readFileSync(new URL("../src/components/evolution/LearnedSkillDet
 const list = readFileSync(new URL("../src/components/evolution/LearnedSkillList.vue", import.meta.url), "utf8");
 const router = readFileSync(new URL("../src/router.ts", import.meta.url), "utf8");
 const pageShell = readFileSync(new URL("../src/components/layout/PageShell.vue", import.meta.url), "utf8");
+const navigation = readFileSync(new URL("../src/components/layout/AppNavigation.vue", import.meta.url), "utf8");
+const foundations = readFileSync(new URL("../src/styles/v-astrys.css", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
 };
@@ -14,8 +16,9 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 describe("self-evolution global UI contract", () => {
   test("global route and shell-nav entry are feature-gated", () => {
     expect(router).toContain('{ path: "/evolution", name: "evolution", component: EvolutionView }');
-    expect(pageShell).toContain('v-if="SELF_EVOLUTION_FEATURE_ENABLED"');
-    expect(pageShell).toContain('to="/evolution"');
+    expect(pageShell).toContain('<AppNavigation :section="section"');
+    expect(navigation).toContain('v-if="SELF_EVOLUTION_FEATURE_ENABLED"');
+    expect(navigation).toContain('to="/evolution"');
     expect(packageJson.scripts["dev:mock"]).toContain("VITE_FEATURE_SELF_EVOLUTION=1");
     expect(packageJson.scripts.dev).not.toContain("VITE_FEATURE_SELF_EVOLUTION");
     expect(packageJson.scripts.build).not.toContain("VITE_FEATURE_SELF_EVOLUTION");
@@ -35,11 +38,10 @@ describe("self-evolution global UI contract", () => {
   test("overview exposes pause, disable, Run Curator now, dry-run, and fixed schedule facts", () => {
     for (const label of [
       "暂停学习",
-      "禁用 Learned Skills",
-      "Run Curator now",
-      "Dry-run",
+      "禁用技能复用",
+      "立即评价",
+      "预演检查",
       "控制原因（写操作必填）",
-      "失败重试会复用同一请求体和幂等键",
     ]) {
       expect(summary, label).toContain(label);
     }
@@ -105,7 +107,8 @@ describe("self-evolution global UI contract", () => {
 
   test("desktop content collapses to one column and remains usable at 320/390 widths", () => {
     expect(view).toContain("max-[980px]:grid-cols-1");
-    expect(view).toContain("max-[560px]:");
+    expect(view).toContain('class="ax-page-heading"');
+    expect(foundations).toContain("@media (max-width: 600px)");
     expect(detail).toContain("max-[560px]:");
     expect(detail).toContain("max-[900px]:grid-cols-1");
     expect(summary).toContain("max-[560px]:");

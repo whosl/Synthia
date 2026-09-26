@@ -91,7 +91,7 @@ async function submit() {
         </div>
       </div>
       <span class="hidden text-[11px] text-fg-muted min-[801px]:block"
-        >一个工作空间，两种工作方式。</span
+        >工程协作空间</span
       >
     </section>
     <section

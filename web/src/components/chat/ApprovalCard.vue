@@ -22,7 +22,7 @@ import type { ApprovalCardProps } from "../../views/project-view-contract.ts";
 import Badge from "../ui/AppBadge.vue";
 import Button from "../ui/AppButton.vue";
 
-const props = defineProps<ApprovalCardProps>();
+const props = defineProps<ApprovalCardProps & { hideMembers?: boolean }>();
 
 const emit = defineEmits<{
   approve: [];
@@ -34,8 +34,8 @@ const membersOpen = ref(false);
 const rejectOpen = ref(false);
 const rejectDraft = ref("");
 
-const buttonLabel = computed(() => approvalButtonLabel(props.gate));
-const milestoneLine = computed(() => approvalMilestoneLine(props.gate));
+const buttonLabel = computed(() => props.approveLabel ?? approvalButtonLabel(props.gate));
+const milestoneLine = computed(() => props.approvedDescription ?? approvalMilestoneLine(props.gate));
 const canReject = computed(() => !rejectDisabled(rejectDraft.value));
 
 /** 「已等待 12 分钟」——提交时刻缺失时不显示（宁可不写，也不写个假的）。 */
@@ -95,6 +95,7 @@ function submitReject(): void {
     </p>
 
     <template v-if="state === 'pending'">
+      <template v-if="!hideMembers">
       <!-- 待审产物：点开逐项核对，复用中栏编辑器打开快照当时的版本 -->
       <button type="button" class="flex cursor-pointer items-center gap-1 self-start border-none bg-transparent p-0 text-left text-xs text-fg-secondary hover:text-fg" @click="membersOpen = !membersOpen">
         <span class="w-[10px] text-fg-muted" aria-hidden="true">{{ membersOpen ? "▾" : "▸" }}</span>
@@ -122,6 +123,7 @@ function submitReject(): void {
         </template>
       </div>
 
+      </template>
       <div class="flex flex-wrap gap-2">
         <Button variant="primary" size="sm" :disabled="deciding" :loading="deciding" @click="emit('approve')">
           {{ buttonLabel }}

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 /** Project workspace: main conversation, files, approvals, and governed delivery. */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
-import { useEditorContent } from "../composables/use-editor-content.ts";
+import AppNavigation from "../components/layout/AppNavigation.vue";
+import { createFileTab, tabAfterClose, type WorkspaceFileTab } from "../domain/workspace-tabs.ts";
 import Button from "../components/ui/AppButton.vue";
-import WorkspaceWelcome from "../components/layout/WorkspaceWelcome.vue";
+import EngineeringOverviewPanel from "../components/projects/EngineeringOverviewPanel.vue";
+import EngineeringOverview from "../components/projects/EngineeringOverview.vue";
 import { api } from "../api/service.ts";
 import { readToken, useAuthStore } from "../stores/auth.ts";
 import {
@@ -31,6 +33,8 @@ import {
   getFormalInputApproval,
   getImportSnapshot,
   getJobEvidenceContent,
+  getJobEvidence,
+  listJobs,
   getToolSummary,
   getProject,
   getProcessProfile,
@@ -116,7 +120,8 @@ import {
   type SynthiaPart,
   type SynthiaReasoningPart,
 } from "../domain/parts.ts";
-import { buildRecordJobs, recordEntryKey } from "../domain/records.ts";
+import type { JobRunSummary, JobEvidenceManifest } from "../api/types.ts";
+import { buildRecordJobs, mergeProjectRecordJobs, waveformFiles, recordEntryKey } from "../domain/records.ts";
 import { injectChangeCards, type RevisionChangeInput } from "../domain/change-cards.ts";
 import {
   applyStreamEvent,
@@ -140,9 +145,8 @@ import {
   type ApprovalMember,
   type DecisionFailure,
 } from "../domain/unified.ts";
-import { GATE_REVIEW_NAMES, type GateId } from "../domain/gates.ts";
-import { buildFileTreeEntries, workspaceEntryPath } from "../domain/file-tree.ts";
-import { deriveReadonlyReason } from "../domain/editor-state.ts";
+import { GATE_REVIEW_NAMES } from "../domain/gates.ts";
+import { buildFileTreeEntries } from "../domain/file-tree.ts";
 import { resolveTheme, toggleTheme, type Theme } from "../domain/theme.ts";
 import { processVersionText, projectType, projectTypeText } from "../domain/project.ts";
 import {
@@ -185,8 +189,6 @@ import type {
   ApprovalCardProps,
   ChatComposerMode,
   ChatFeedProps,
-  CodeEditorProps,
-  EditorReadonlyReason,
   FileTreeEntry,
   FileTreeProps,
   FileTreeViewMode,
@@ -194,13 +196,17 @@ import type {
   RecordsPanelProps,
   TopBarProps,
 } from "./project-view-contract.ts";
-import { pickRevision, prevRevisionId } from "./project-view-contract.ts";
+import { prevRevisionId } from "./project-view-contract.ts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import { Sheet, SheetContent } from "../components/ui/sheet";
 import TopBar from "../components/layout/TopBar.vue";
+import ProjectToolbarButton from "../components/layout/ProjectToolbarButton.vue";
 import StageStatusChip from "../components/impl/StageStatusChip.vue";
 import FileTree from "../components/tree/FileTree.vue";
-import CodeEditor from "../components/editor/CodeEditor.vue";
+import WorkspaceFilePane from "../components/editor/WorkspaceFilePane.vue";
+import WorkspaceTabs from "../components/editor/WorkspaceTabs.vue";
+const WaveformEvidencePane = defineAsyncComponent(() => import("../components/waveform/WaveformEvidencePane.vue"));
+import ProjectReviews from "../components/projects/ProjectReviews.vue";
 import ChatFeed from "../components/chat/ChatFeed.vue";
 import AgentPaneTabs from "../components/chat/AgentPaneTabs.vue";
 import RecordsPanel from "../components/records/RecordsPanel.vue";
@@ -213,6 +219,7 @@ const router = useRouter();
 const auth = useAuthStore();
 const projectId = String(route.params.id);
 const isMock = import.meta.env.VITE_MOCK === "1";
+const overviewOpen = ref(route.query.overview === "1");
 
 // ─────────────────────────────────────────────────────────────────────
 // 基础数据 + 轮询（3s；无活动 run 时跳过请求，保留恢复能力）
@@ -323,6 +330,8 @@ const changeRequests = ref<readonly ChangeRequestV1[]>([]);
 const projectWorkVersion = ref<ProjectWorkVersionV1 | null>(null);
 const readinessSourceOptions = ref<readonly { readonly id: string; readonly label: string }[]>([]);
 const formalDeliveryLoading = ref(false);
+/** 首次成功装载过事实：此后轮询刷新静默进行，不再闪烁骨架屏。 */
+const formalDeliveryHydrated = ref(false);
 const formalDeliveryOperating = ref(false);
 const formalDeliveryError = ref<string | null>(null);
 let processProjectionSerial = 0;
@@ -356,6 +365,8 @@ let withdrawChangeRequestAttempt: WriteAttempt<{ readonly changeRequestId: strin
 
 const loading = ref(true);
 const taskListReady = ref(false);
+const conversationInitializing = ref(true);
+const filesInitializing = ref(true);
 const loadErrorText = ref<string | null>(null);
 
 let poller: Poller | null = null;
@@ -386,11 +397,28 @@ async function loadWorkspace(): Promise<boolean> {
   }
 }
 
-/** 每轮刷新：run 列表 + 当前 run 详情 + 产物/版本（agent 运行期间会不断产出新候选版本）+ 工作区。 */
+/** Independent pane reads run together; the refresh promise still waits for all facts after writes. */
 async function refreshOnce(): Promise<void> {
   if (disposed) return;
+  const results = await Promise.allSettled([
+    refreshTaskDetails(),
+    loadArtifactsAndRevisions().finally(() => { if (!disposed) filesInitializing.value = false; }),
+    loadWorkspace(),
+    loadProjectRecords(),
+    loadProcessProjection(),
+    loadProjectReviews(),
+  ]);
+  if (disposed) return;
+  const failure = results.find((result) => result.status === "rejected");
+  loadErrorText.value = failure?.status === "rejected" ? humanizeLoadError(failure.reason) : null;
+  if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
+}
+
+/** Load conversation independently so file revision reads do not delay the Agent pane. */
+async function refreshTaskDetails(): Promise<void> {
+  if (disposed) return;
   try {
-    const [taskList] = await Promise.all([listTasks(api, projectId), loadArtifactsAndRevisions(), loadWorkspace()]);
+    const taskList = await listTasks(api, projectId);
     if (disposed) return;
     taskListReady.value = true;
     agents.value = [...taskList.agents]
@@ -428,13 +456,10 @@ async function refreshOnce(): Promise<void> {
       detail.value = null;
       mainTaskEvents.value = [];
     }
-    loadErrorText.value = null;
     // 就地审批：只在进入等待态且尚未持有该门提交时才真的发请求（见 shouldFetchSubmission）
     void syncApproval();
-    await loadProcessProjection();
-    if (formalDeliveryOpen.value && !formalDeliveryOperating.value) void loadFormalDelivery(false);
-  } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
+  } finally {
+    if (!disposed) conversationInitializing.value = false;
   }
 }
 
@@ -926,7 +951,6 @@ async function loadProcessProjection(): Promise<boolean> {
   ) {
     processProfile.value = null;
     processState.value = null;
-    processSubmissions.value = [];
     processProjectionError.value = null;
     return false;
   }
@@ -946,20 +970,11 @@ async function loadProcessProjection(): Promise<boolean> {
     processProfile.value = profile;
     processState.value = state;
     processProjectionError.value = null;
-    try {
-      const submissions = await listGateSubmissions(api, projectId);
-      if (serial === processProjectionSerial) processSubmissions.value = submissions;
-    } catch {
-      // Profile + process-state remain a complete Core projection. Submission
-      // state only refines the current gate to waiting/failed.
-      if (serial === processProjectionSerial) processSubmissions.value = [];
-    }
     return true;
   } catch (err) {
     if (serial !== processProjectionSerial) return false;
     processProfile.value = null;
     processState.value = null;
-    processSubmissions.value = [];
     processProjectionError.value = formalErrorText(err);
     return false;
   } finally {
@@ -1009,7 +1024,12 @@ async function loadSelectedDeliveryRelease(releaseId: string | null, serial = fo
 async function loadFormalDelivery(includeProjection = true): Promise<void> {
   if (!formalDeliveryEnabled.value || formalDeliveryLoading.value) return;
   const serial = ++formalDeliverySerial;
-  formalDeliveryLoading.value = true;
+  // 骨架屏只出现在首开（尚无事实）与错误重试两种情形；打开状态下的 3s
+  // 轮询刷新是静默的——否则每轮 loading 翻转都把整个面板换成骨架屏，
+  // 造成「正在读取 Core 正式事实…」反复闪烁。
+  if (formalDeliveryError.value !== null || !formalDeliveryHydrated.value) {
+    formalDeliveryLoading.value = true;
+  }
   formalDeliveryError.value = null;
   try {
     if (includeProjection) await loadProcessProjection();
@@ -1041,19 +1061,22 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
     }
 
     const runtimeFormal = formalFlowProgress.value;
-    formalPreview.value = null;
-    formalApproval.value = null;
-    formalApprovalId.value = null;
+    // 先在局部算好新值、收尾一次性提交——此前先把三个 ref 清 null 再经
+    // 多个 await 回填，3s 轮询每轮都让正式输入卡（依赖这些值的 v-if）
+    // 整块卸载又挂载，视觉上就是反复闪烁。
+    let nextPreview: FormalInputPreviewV1 | null = null;
+    let nextApproval: FormalInputApprovalV1 | null = null;
+    let nextApprovalId: string | null = null;
     if (runtimeFormal?.preview.work_version_id === processState.value.workVersionId) {
       if (runtimeFormal.preview.schema !== "formal-input-preview.v1") {
         throw new ProcessContractError("Runtime 返回了不支持的正式输入 preview");
       }
-      formalPreview.value = runtimeFormal.preview;
-      formalApprovalId.value = runtimeFormal.approval_id;
+      nextPreview = runtimeFormal.preview;
+      nextApprovalId = runtimeFormal.approval_id;
       try {
-        formalApproval.value = await getFormalInputApproval(api, projectId, runtimeFormal.approval_id);
+        nextApproval = await getFormalInputApproval(api, projectId, runtimeFormal.approval_id);
       } catch (err) {
-        if (err instanceof ApiError && err.status === 404) formalApproval.value = null;
+        if (err instanceof ApiError && err.status === 404) nextApproval = null;
         else throw err;
       }
     }
@@ -1068,17 +1091,20 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
       : deliveryReleases.value[0]?.id ?? null;
     await loadSelectedDeliveryRelease(preferredRelease, serial);
     if (
-      !formalApproval.value
+      !nextApproval
       && selectedDeliveryRelease.value?.work_version_id === processState.value.workVersionId
     ) {
-      formalApproval.value = await getFormalInputApproval(
+      nextApproval = await getFormalInputApproval(
         api,
         projectId,
         selectedDeliveryRelease.value.formal_input_approval_id,
       );
-      formalPreview.value = formalApproval.value;
-      formalApprovalId.value = formalApproval.value.id;
+      nextPreview = nextApproval;
+      nextApprovalId = nextApproval.id;
     }
+    formalPreview.value = nextPreview;
+    formalApproval.value = nextApproval;
+    formalApprovalId.value = nextApprovalId;
 
     try {
       const sources = materialSnapshots.value.length > 0
@@ -1095,7 +1121,10 @@ async function loadFormalDelivery(includeProjection = true): Promise<void> {
   } catch (err) {
     if (serial === formalDeliverySerial) formalDeliveryError.value = formalErrorText(err);
   } finally {
-    if (serial === formalDeliverySerial) formalDeliveryLoading.value = false;
+    if (serial === formalDeliverySerial) {
+      formalDeliveryLoading.value = false;
+      formalDeliveryHydrated.value = true;
+    }
   }
 }
 
@@ -1380,18 +1409,23 @@ async function initializeProject(): Promise<void> {
     const value = await getProject(api, projectId);
     if (disposed) return;
     project.value = value;
+    // The overview needs only project identity and its independent tool summary.
+    loading.value = false;
     await refresh();
     if (disposed) return;
-    void refreshToolSummary();
-    if (sideTasksEnabled.value) await loadSideTasks();
+    if (sideTasksEnabled.value) void loadSideTasks();
     // 深链要在 refresh 之后：它需要 agents 已就绪才能找到在等这道门的那个 agent。
     const subId = route.query.sub;
     if (typeof subId === "string" && subId.length > 0) await openSubmissionDeepLink(subId);
   } catch (err) {
     if (!disposed) loadErrorText.value = humanizeLoadError(err);
   } finally {
-    if (!disposed) loading.value = false;
+    if (!disposed) {
+      loading.value = false;
+      conversationInitializing.value = false;
+    }
   }
+  if (disposed) return;
   poller?.stop();
   poller = createPoller(() => {
     if (document.visibilityState === "hidden") return;
@@ -1684,165 +1718,80 @@ const hasAgent = computed(() => currentAgentId.value !== null);
 // 中栏：当前打开的文件 / 版本 / 内容 / 只读态
 // ─────────────────────────────────────────────────────────────────────
 
-const openArtifactId = ref<string | null>(null);
-const openRevisionId = ref<string | null>(null);
-const {
-  fileContent, fileContentLoading, contentSource, saving, saveError, diffAgainst,
-  resetContent, loadRevisionContent, loadWorkspaceContent, loadComparison, saveWorkspaceContent,
-} = useEditorContent(api, projectId);
-const editorDirty = ref(false);
-
-function canLeaveEditor(): boolean {
-  if (saving.value) return false;
-  if (!editorDirty.value) return true;
-  if (!window.confirm("当前文件有未保存的修改。放弃修改并继续？")) return false;
-  editorDirty.value = false;
-  return true;
+const waveformTabs = ref<{ id: string; jobId: string; name: string; label: string; description: string }[]>([]);
+const fileTabs = ref<WorkspaceFileTab[]>([]);
+const activeWorkspaceTab = ref("overview");
+const tabStates = ref<Record<string, { dirty?: boolean; saving?: boolean }>>({});
+const activeFileTab = computed(() => fileTabs.value.find((tab) => tab.id === activeWorkspaceTab.value) ?? null);
+function currentTabEntry(tab: WorkspaceFileTab): FileTreeEntry {
+  return fileTreeEntries.value.find((entry) => tab.source === "workspace"
+    ? entry.path === tab.entry.path
+    : entry.artifactId === tab.entry.artifactId)
+    ?? (tab.source === "workspace" ? { ...tab.entry, status: null } : tab.entry);
 }
-
-onBeforeRouteLeave(() => canLeaveEditor());
-onBeforeRouteUpdate((to, from) => {
-  if (to.path === from.path && (to.query.run ?? null) === currentAgentId.value && to.query.sub === from.query.sub) return true;
-  const changesContext = to.path !== from.path || to.query.run !== from.query.run || to.query.sub !== from.query.sub;
-  if (changesContext && sending.value) return false;
-  return !changesContext || canLeaveEditor();
-});
+const openArtifactId = computed(() => activeFileTab.value ? currentTabEntry(activeFileTab.value).artifactId : null);
+const workspaceTabs = computed(() => [
+  { id: "overview", label: "工程全景", kind: "overview" as const },
+  ...(project.value && projectType(project.value) === "engineering" ? [{
+    id: "reviews", label: "阶段审批", kind: "reviews" as const,
+    count: processSubmissions.value.filter((row) => row.state === "in_review").length,
+  }] : []),
+  ...waveformTabs.value.map((tab) => ({ ...tab, kind: "waveform" as const })),
+  ...fileTabs.value.map((tab) => ({ ...tab, kind: "file" as const, ...tabStates.value[tab.id] })),
+]);
+const editorAgentStatus = computed(() => agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null);
+function updateTabState(id: string, key: "dirty" | "saving", value: boolean): void {
+  if (fileTabs.value.some((tab) => tab.id === id)) tabStates.value[id] = { ...tabStates.value[id], [key]: value };
+}
+function canLeaveEditor(): boolean {
+  if (Object.values(tabStates.value).some((state) => state.saving)) return false;
+  return !Object.values(tabStates.value).some((state) => state.dirty)
+    || window.confirm("打开的标签中有未保存的修改。放弃修改并离开项目？");
+}
+onBeforeRouteLeave(() => !deciding.value && canLeaveEditor());
+onBeforeRouteUpdate((to, from) => to.path === from.path || (!sending.value && !deciding.value && canLeaveEditor()));
 function warnBeforeUnload(event: BeforeUnloadEvent): void {
-  if (!editorDirty.value && !saving.value) return;
+  if (!deciding.value && !Object.values(tabStates.value).some((state) => state.dirty || state.saving)) return;
   event.preventDefault();
   event.returnValue = "";
 }
 onMounted(() => window.addEventListener("beforeunload", warnBeforeUnload));
 onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnload));
 
-const openFileEntry = computed<FileTreeEntry | null>(
-  () => (openArtifactId.value ? fileTreeEntries.value.find((e) => e.artifactId === openArtifactId.value) ?? null : null),
-);
-
-const activeRevision = computed<ArtifactRevision | null>(() => {
-  const entry = openFileEntry.value;
-  if (!entry) return null;
-  return entry.revisions.find((r) => r.id === openRevisionId.value) ?? entry.latestRevision;
-});
-
-/**
- * 只读原因（spec §3.3 三态表 + D19）：已批准 > agent 运行中 > 没有可写的目标。
- *
- * 后两条是新增的、也是最容易被忽略的：**保存只能写工作区文件**。流水线产出的
- * `art-*` 从没落过盘（status 为 null），历史版本的正文也不是盘上那份字节——这两种
- * 情况下放开编辑，用户敲下的字没有任何地方可去，比直接说只读更伤人。
- */
-const readonlyReason = computed<EditorReadonlyReason>(() => {
-  const entry = openFileEntry.value;
-  if (!entry) return null;
-  return deriveReadonlyReason(
-    {
-      revisionState: activeRevision.value?.state ?? null,
-      agentStatus: agents.value.find((agent) => !isTerminalStatus(agent.status))?.status ?? detail.value?.status ?? null,
-      inWorkspace: entry.status !== null,
-      contentSource: contentSource.value,
-    },
-    isTerminalStatus,
-  );
-});
-
-/** Monaco 语言 id：优先按 docs 路径后缀判断，无路径信息时按产物类型兜底猜测。 */
-function inferLanguage(entry: FileTreeEntry | null): string {
-  if (!entry) return "plaintext";
-  const path = entry.path;
-  if (path) {
-    if (path.endsWith(".sv") || path.endsWith(".svh")) return "systemverilog";
-    if (path.endsWith(".v") || path.endsWith(".vh")) return "verilog";
-    if (path.endsWith(".xdc") || path.endsWith(".tcl")) return "tcl";
-    if (path.endsWith(".md")) return "markdown";
-    if (path.endsWith(".json")) return "json";
-    if (path.endsWith(".yaml") || path.endsWith(".yml")) return "yaml";
-  }
-  if (entry.artifactType === "RTL_SOURCE_SET") return "verilog";
-  if (entry.artifactType === "TB_SOURCE_SET") return "systemverilog";
-  if (entry.artifactType === "XDC_CANDIDATE" || entry.artifactType === "CONSTRAINT_DESIGN") return "tcl";
-  return "markdown";
+function selectWorkspaceTab(id: string): void {
+  activeWorkspaceTab.value = id;
+  if (id === "reviews") void openProjectReviews();
 }
-
-/**
- * 打开文件。默认打开的是**盘上那份**，不是最新那版修订——文件树上标着「已改动」的
- * 行点进来却看见登记在册的旧内容，是在骗人。只有盘上没有这个文件（流水线产出的
- * `art-*`）时才退回读修订。
- *
- * `revisionId` 传了就是钉版本：审批快照钉的是提交那一刻的修订，对话流产物卡钉的是
- * agent 登记那一刻，两者都必须绕开工作区当前字节。传了但在版本列表里找不到（历史
- * 版本已被清理）时回落最新版，总比什么都不打开强。
- */
+function closeWorkspaceTab(id: string): void {
+  if (waveformTabs.value.some((tab) => tab.id === id)) {
+    activeWorkspaceTab.value = tabAfterClose(workspaceTabs.value.map((tab) => tab.id), activeWorkspaceTab.value, id);
+    waveformTabs.value = waveformTabs.value.filter((tab) => tab.id !== id);
+    if (activeWorkspaceTab.value === "reviews") void openProjectReviews();
+    return;
+  }
+  const tab = fileTabs.value.find((item) => item.id === id);
+  if (!tab || tabStates.value[id]?.saving) return;
+  if (tabStates.value[id]?.dirty && !window.confirm(`“${tab.label}”有未保存的修改。放弃修改并关闭？`)) return;
+  activeWorkspaceTab.value = tabAfterClose(workspaceTabs.value.map((item) => item.id), activeWorkspaceTab.value, id);
+  fileTabs.value = fileTabs.value.filter((item) => item.id !== id);
+  delete tabStates.value[id];
+  if (activeWorkspaceTab.value === "reviews") void openProjectReviews();
+}
+function addFileTab(tab: WorkspaceFileTab | null): void {
+  if (!tab) {
+    toast.error("无法定位指定的文件版本，请刷新文件列表后重试。");
+    return;
+  }
+  if (!fileTabs.value.some((item) => item.id === tab.id)) fileTabs.value.push(tab);
+  activeWorkspaceTab.value = tab.id;
+  treeDrawerOpen.value = false;
+}
 function openFile(artifactId: string, revisionId?: string): void {
-  const entry = fileTreeEntries.value.find((e) => e.artifactId === artifactId);
-  if (!entry || !canLeaveEditor()) return;
-  resetContent();
-  const target = pickRevision(entry, revisionId);
-  openArtifactId.value = artifactId;
-  openRevisionId.value = target?.id ?? null;
-  diffAgainst.value = null;
-  saveError.value = null;
-
-  if (!revisionId && entry.status !== null && entry.path) {
-    void loadWorkspaceContent(entry.path);
-    return;
-  }
-  if (!target) {
-    // 盘上没有、也没有任何修订：`buildFileTreeEntries` 不会造出这样的条目，走到这里
-    // 说明数据在两次刷新之间变了。空着比显示上一个文件的正文诚实。
-    fileContent.value = null;
-    contentSource.value = "revision";
-    return;
-  }
-  void loadRevisionContent(artifactId, target.id);
+  const entry = fileTreeEntries.value.find((item) => item.artifactId === artifactId);
+  addFileTab(entry ? createFileTab(entry, revisionId) : null);
 }
-
-function onSelectRevision(revisionId: string): void {
-  if (!openArtifactId.value || !canLeaveEditor()) return;
-  openRevisionId.value = revisionId;
-  diffAgainst.value = null;
-  saveError.value = null;
-  void loadRevisionContent(openArtifactId.value, revisionId);
-}
-
-/**
- * 进 diff 模式：head 装进编辑器，base 作为对照。两处调用——版本条上手选两版、
- * 对话流产物卡上的「查看改动」——共用这一份，保证两条路进来的 diff 完全一致。
- */
-async function compareRevisions(entry: FileTreeEntry, baseRevisionId: string, headRevisionId: string): Promise<void> {
-  const base = entry.revisions.find((r) => r.id === baseRevisionId);
-  const head = entry.revisions.find((r) => r.id === headRevisionId);
-  if (!base || !head || !canLeaveEditor()) return;
-  openArtifactId.value = entry.artifactId;
-  openRevisionId.value = head.id;
-  await loadComparison(entry.artifactId, base, head);
-}
-
-async function onCompareRevisions(baseRevisionId: string, headRevisionId: string): Promise<void> {
-  const entry = openFileEntry.value;
-  if (!entry) return;
-  await compareRevisions(entry, baseRevisionId, headRevisionId);
-}
-
-function onExitDiff(): void {
-  diffAgainst.value = null;
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// 工作区写回与一键登记（内容归 git，治理状态归 PG）
-// ─────────────────────────────────────────────────────────────────────
-
-/**
- * 编辑器保存：写回工作区文件，**只落盘不 commit**。
- *
- * 成功后把服务端确认的字节回填进 fileContent——不是多此一举：CodeEditor 靠「盘上
- * 这份与编辑器里这份相同」来放下未保存标记，不回填的话保存按钮会一直亮着。随后刷新
- * 工作区树，让顶栏的待登记计数与这一行的角标跟上。
- */
-async function onSave(content: string): Promise<void> {
-  const entry = openFileEntry.value;
-  if (!entry?.path || readonlyReason.value || diffAgainst.value) return;
-  if (await saveWorkspaceContent(entry.path, content)) await loadWorkspace();
+function compareRevisions(entry: FileTreeEntry, baseRevisionId: string, headRevisionId: string): void {
+  addFileTab(createFileTab(entry, headRevisionId, baseRevisionId));
 }
 
 const registering = ref(false);
@@ -1869,28 +1818,11 @@ async function onRegister(changeReason: string): Promise<void> {
     await registerWorkspace(api, projectId, changeReason, attempt.key);
     registerAttempt = null;
     await refresh();
-    // 登记不改盘上的字节，但打开的那份从「未登记改动」变成了某一版修订——重开一次让
-    // 版本条、只读态、以及未登记文件的合成 id 一起归位。
-    if (openArtifactId.value) reopenAfterRegister(openArtifactId.value);
   } catch (err) {
     registerError.value = humanizeLoadError(err);
   } finally {
     registering.value = false;
   }
-}
-
-/**
- * 登记后重开当前文件。未登记的行 id 是合成的 `ws:<path>`（见 domain/file-tree.ts），
- * 登记之后它换成了真 artifact id，原来那个 id 在树里已经不存在——按路径找回来。
- */
-function reopenAfterRegister(previousId: string): void {
-  if (fileTreeEntries.value.some((e) => e.artifactId === previousId)) {
-    openFile(previousId);
-    return;
-  }
-  const path = workspaceEntryPath(previousId);
-  const moved = path ? fileTreeEntries.value.find((e) => e.path === path) : undefined;
-  if (moved) openFile(moved.artifactId);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1923,13 +1855,39 @@ const staReportLoader = computed(() => {
   return timing ? () => loadStaReportText(timing.sourceJobId) : undefined;
 });
 
-async function refreshToolSummary(): Promise<void> {
-  try {
-    toolSummary.value = await getToolSummary(api, projectId);
-  } catch {
-    toolSummary.value = null; // 端点不可达（旧 Core / mock）时静默隐藏卡片
-  }
+let toolSummaryRequest: Promise<void> | null = null;
+function refreshToolSummary(): Promise<void> {
+  if (toolSummaryRequest) return toolSummaryRequest;
+  toolSummaryRequest = getToolSummary(api, projectId)
+    .then((summary) => { if (!disposed) toolSummary.value = summary; })
+    .catch(() => { if (!disposed) toolSummary.value = null; })
+    .finally(() => { toolSummaryRequest = null; });
+  return toolSummaryRequest;
 }
+
+const overviewProps = computed(() => ({
+  projectName: project.value?.name ?? "",
+  targetPart: project.value?.target_part ?? null,
+  summary: toolSummary.value,
+  fileCount: workspace.value?.files.length ?? null,
+  processState: processState.value,
+  stageChain: stageChain.value,
+  recordJobIds: recordJobs.value.map((job) => job.jobId),
+  mock: isMock,
+}));
+
+watch(() => overviewOpen.value || activeWorkspaceTab.value === "overview", (visible, _previous, onCleanup) => {
+  if (!visible) return;
+  let refreshing = false;
+  const update = async () => {
+    if (refreshing || document.hidden) return;
+    refreshing = true;
+    try { await refreshToolSummary(); } finally { refreshing = false; }
+  };
+  void update();
+  const timer = window.setInterval(() => void update(), 5000);
+  onCleanup(() => window.clearInterval(timer));
+}, { immediate: true });
 
 async function loadStaReportText(jobId: string): Promise<string> {
   const evidence = await getJobEvidenceContent(api, projectId, jobId, "sta.rpt");
@@ -2003,12 +1961,13 @@ const focusStageId = ref<string | null>(null);
 function onSelectStage(stageId: string): void {
   viewMode.value = "stage";
   focusStageId.value = stageId;
+  if (project.value && projectType(project.value) === "engineering") void openProjectReviews(stageId);
 }
 
-function onLogout(): void {
-  if (!canLeaveEditor()) return;
-  auth.logout();
-  void router.push({ name: "login" });
+async function onLogout(): Promise<void> {
+  // Let the route guard confirm once, before clearing the session.
+  const failure = await router.push({ name: "login" });
+  if (!failure) auth.logout();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2058,12 +2017,6 @@ const rightPaneDefault = readStoredPaneWidth("synthia.splitter.right", RIGHT_PAN
 function focusConversation(): void {
   chatOverlayOpen.value = true;
   void nextTick(() => document.querySelector<HTMLTextAreaElement>(".chat-composer-input")?.focus());
-}
-
-// 首页示例任务：填入当前草稿并聚焦输入框（与 ChatFeed 空态示例同一 EXAMPLE_TASKS 数据源）。
-function onWelcomeExample(text: string): void {
-  chatDraft.value = text;
-  focusConversation();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2163,13 +2116,59 @@ const recordsOpen = ref(false);
 const recordsFocusJobId = ref<string | null>(null);
 const recordEntryContent = ref<Record<string, RecordEntryContentState>>({});
 
-const recordJobs = computed(() => (detail.value ? buildRecordJobs(detail.value) : []));
+const projectRuns = ref<JobRunSummary[]>([]);
+const recordsLoading = ref(false);
+const recordsError = ref<string | null>(null);
+const recordManifests = ref<Record<string, JobEvidenceManifest["entries"]>>({});
+const manifestStates = ref<Record<string, { loading?: boolean; error?: string }>>({});
+const manifestAttempts = new Map<string, string>();
+const recordJobs = computed(() => mergeProjectRecordJobs(
+  projectRuns.value.map((run) => ({ ...run, evidenceEntries: run.evidenceEntries ?? recordManifests.value[run.id] })),
+  detail.value ? buildRecordJobs(detail.value) : [],
+));
+const projectWaveforms = computed(() => waveformFiles(recordJobs.value));
+const terminalRecordStates = new Set(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect", "unsupported"]);
+async function loadRecordManifest(jobId: string): Promise<void> {
+  const run = projectRuns.value.find((row) => row.id === jobId);
+  if (!run || run.evidenceEntries != null || recordManifests.value[jobId] || manifestStates.value[jobId]?.loading) return;
+  if (!terminalRecordStates.has(run.state)) return;
+  manifestAttempts.set(jobId, run.state);
+  manifestStates.value[jobId] = { loading: true };
+  try {
+    const result = await getJobEvidence(api, projectId, jobId);
+    if (!disposed) { recordManifests.value[jobId] = result.entries; manifestStates.value[jobId] = {}; }
+  } catch (err) {
+    if (!disposed) manifestStates.value[jobId] = { error: humanizeLoadError(err) };
+  }
+}
+async function discoverWaveforms(): Promise<void> {
+  const pending = projectRuns.value.filter((run) => run.operation === "simulate" && terminalRecordStates.has(run.state)
+    && run.evidenceEntries == null && !recordManifests.value[run.id] && manifestAttempts.get(run.id) !== run.state);
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(3, pending.length) }, async () => {
+    while (!disposed && index < pending.length) await loadRecordManifest(pending[index++]!.id);
+  }));
+}
+async function loadProjectRecords(): Promise<void> {
+  if (recordsLoading.value || disposed) return;
+  recordsLoading.value = true;
+  try {
+    const rows = await listJobs(api, projectId, 1000, true);
+    if (disposed) return;
+    projectRuns.value = rows; recordsError.value = null;
+    void discoverWaveforms();
+  } catch (err) { if (!disposed) recordsError.value = humanizeLoadError(err); }
+  finally { if (!disposed) recordsLoading.value = false; }
+}
+
 
 function onOpenRecords(jobId: string | null): void {
   closeFormalDelivery();
   closeSideTasks();
   recordsFocusJobId.value = jobId;
   recordsOpen.value = true;
+  void loadProjectRecords();
+  if (jobId) void loadRecordManifest(jobId);
 }
 
 function onCloseRecords(): void {
@@ -2177,6 +2176,14 @@ function onCloseRecords(): void {
 }
 
 async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
+  if (name.toLowerCase().endsWith(".vcd")) {
+    const id = JSON.stringify(["waveform", jobId, name]);
+    if (!waveformTabs.value.some((tab) => tab.id === id)) waveformTabs.value.push({ id, jobId, name, label: name, description: `${name} · 运行 ${jobId}` });
+    activeWorkspaceTab.value = id;
+    recordsOpen.value = false;
+    treeDrawerOpen.value = false;
+    return;
+  }
   const key = recordEntryKey(jobId, name);
   if (recordEntryContent.value[key]?.status === "ready") return;
   recordEntryContent.value = { ...recordEntryContent.value, [key]: { status: "loading" } };
@@ -2191,6 +2198,57 @@ async function onViewRecordEntry(jobId: string, name: string): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────
 // 就地审批（spec §3.5 step 6）：提交拉取 / 待审产物 / 批准 / 驳回
 // ─────────────────────────────────────────────────────────────────────
+
+const reviewsLoading = ref(false);
+const reviewsLoadError = ref<string | null>(null);
+const reviewDetailError = ref<string | null>(null);
+const reviewsError = computed(() => reviewDetailError.value ?? reviewsLoadError.value);
+const reviewSelecting = ref(false);
+const reviewSelection = ref<string | null>(null);
+const reviewGateNames = computed<Record<string, string>>(() => Object.fromEntries(
+  stageChain.value?.map((gate) => [gate.node.id, gate.node.name]) ?? (isGjbReferenceProject.value ? [] : Object.entries(GATE_REVIEW_NAMES)),
+));
+let reviewsRequest: Promise<void> | null = null;
+function loadProjectReviews(): Promise<void> {
+  if (!project.value || projectType(project.value) !== "engineering") return Promise.resolve();
+  if (reviewsRequest) return reviewsRequest;
+  reviewsLoading.value = true;
+  reviewsRequest = listGateSubmissions(api, projectId).then((rows) => {
+    if (disposed) return;
+    processSubmissions.value = rows;
+    reviewsLoadError.value = null;
+    const selected = submission.value;
+    const updated = selected && rows.find((row) => row.id === selected.id);
+    if (updated && updated.state !== selected.state && !deciding.value && !reviewSelecting.value) {
+      void openSubmissionDeepLink(updated.id, false);
+    }
+  }).catch((err) => { if (!disposed) reviewsLoadError.value = humanizeLoadError(err); })
+    .finally(() => { reviewsLoading.value = false; reviewsRequest = null; });
+  return reviewsRequest;
+}
+async function refreshProjectReviews(): Promise<void> {
+  if (deciding.value) return;
+  await loadProjectReviews();
+  const id = reviewSelection.value ?? submission.value?.id;
+  if (id) await openSubmissionDeepLink(id, false);
+}
+async function openProjectReviews(gate?: string): Promise<void> {
+  activeWorkspaceTab.value = "reviews";
+  await loadProjectReviews();
+  if (disposed || activeWorkspaceTab.value !== "reviews" || deciding.value) return;
+  if (!gate && submission.value) return;
+  const rows = processSubmissions.value.filter((row) => !gate || row.gate === gate);
+  const target = [...rows].sort((a, b) => Number(b.state === "in_review") - Number(a.state === "in_review") || Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+  if (target) selectProjectReview(target.id);
+}
+function selectProjectReview(id: string): void {
+  if (deciding.value) return;
+  if (route.query.sub === id) void openSubmissionDeepLink(id);
+  else void router.replace({ query: { ...route.query, sub: id } });
+}
+watch(() => route.query.sub, (id) => {
+  if (typeof id === "string" && !loading.value) void openSubmissionDeepLink(id);
+});
 
 const submission = ref<GateSubmissionDetail | null>(null);
 const approvalMembers = ref<readonly ApprovalMember[] | null>(null);
@@ -2257,52 +2315,53 @@ async function loadApprovalMembers(sub: GateSubmissionDetail): Promise<void> {
 /** 拉取/切换当前待批提交。判据见 `shouldFetchSubmission`（稳定等待期间不重复请求）。 */
 async function syncApproval(): Promise<void> {
   const run = detail.value;
-  if (!shouldFetchSubmission(run, submission.value)) return;
+  if (reviewSelection.value || reviewSelecting.value || deciding.value || !shouldFetchSubmission(run, submission.value)) return;
   try {
     const subs = await listGateSubmissions(api, projectId, "in_review");
     const found = findApprovalSubmission(subs, run!.awaiting_gate!);
     if (!found || submission.value?.id === found.id) return;
     const full = await getGateSubmission(api, projectId, found.id);
-    if (disposed || detail.value?.agent_id !== run?.agent_id || route.query.sub) return;
+    if (disposed || detail.value?.agent_id !== run?.agent_id || route.query.sub || reviewSelection.value || reviewSelecting.value || deciding.value) return;
     clearApproval(); // 换了一条提交 → 上一条的幂等尝试与错误提示全部作废
     submission.value = full;
     void loadApprovalMembers(full);
   } catch (err) {
-    approvalMembersError.value = humanizeLoadError(err);
+    if (!disposed && !reviewSelection.value && !reviewSelecting.value) approvalMembersError.value = humanizeLoadError(err);
   }
 }
 
 /**
  * `?sub=` 深链：旧的 `/approvals/:projectId/:subId` 重定向过来时走这里（router.ts）。
  *
- * 直接取该提交，并把当前 agent 切到 `awaiting_gate` 与之匹配的那个——否则从待办点
- * 进来会停在默认（最新）agent 上，要批的那张卡根本不在当前上下文里。找不到对应
- * agent（会话已结束/丢失）时标记为孤儿，由 `approvalCardProps` 退化成按提交状态渲染。
+ * 直接打开项目内阶段审批，不切换对话任务。审批以提交自身状态为准，
+ * 不依赖 Runtime 会话是否仍存在；材料点击后在独立的只读文件标签中打开。
  *
  * 挂载及审批深链变化时加载；过期请求不得覆盖当前所选上下文。
  */
 let deepLinkSerial = 0;
-async function openSubmissionDeepLink(subId: string): Promise<void> {
+async function openSubmissionDeepLink(subId: string, activate = true): Promise<void> {
+  if (deciding.value) return;
   const serial = ++deepLinkSerial;
-  chatOverlayOpen.value = true;
+  reviewSelection.value = subId;
+  reviewSelecting.value = true;
+  if (activate) activeWorkspaceTab.value = "reviews";
+  chatOverlayOpen.value = false;
+  reviewDetailError.value = null;
   try {
     const full = await getGateSubmission(api, projectId, subId);
+    const reason = full.state === "rejected" ? await loadRejectionReason(api, projectId, subId) : null;
     if (disposed || serial !== deepLinkSerial) return;
-    const owner = agents.value.find((a) => a.status === "awaiting_approval" && a.awaiting_gate === full.gate);
-    if (owner && owner.agent_id !== currentAgentId.value) {
-      currentAgentId.value = owner.agent_id;
-      forceNewTask.value = false;
-      const ownerDetail = await getTask(api, projectId, owner.agent_id);
-      if (disposed || serial !== deepLinkSerial || currentAgentId.value !== owner.agent_id) return;
-      detail.value = ownerDetail;
-    }
     clearApproval();
     submission.value = full;
-    approvalOrphan.value = !owner;
-    if (full.state === "rejected") rejectionReason.value = await loadRejectionReason(api, projectId, subId);
+    approvalOrphan.value = true;
+    rejectionReason.value = reason;
     void loadApprovalMembers(full);
   } catch (err) {
-    loadErrorText.value = humanizeLoadError(err);
+    if (disposed || serial !== deepLinkSerial) return;
+    clearApproval();
+    reviewDetailError.value = humanizeLoadError(err);
+  } finally {
+    if (serial === deepLinkSerial) reviewSelecting.value = false;
   }
 }
 
@@ -2329,7 +2388,7 @@ async function afterDecision(subId: string): Promise<void> {
 
 async function onApprove(): Promise<void> {
   const sub = submission.value;
-  if (!sub || deciding.value) return;
+  if (!sub || sub.state !== "in_review" || deciding.value || reviewSelecting.value) return;
   deciding.value = true;
   decisionError.value = null;
   try {
@@ -2392,7 +2451,7 @@ async function onApprove(): Promise<void> {
 
 async function onReject(reason: string): Promise<void> {
   const sub = submission.value;
-  if (!sub || deciding.value) return;
+  if (!sub || sub.state !== "in_review" || deciding.value || reviewSelecting.value) return;
   deciding.value = true;
   decisionError.value = null;
   try {
@@ -2412,7 +2471,7 @@ async function onReject(reason: string): Promise<void> {
 
 const approvalCardProps = computed<ApprovalCardProps | null>(() => {
   const sub = submission.value;
-  if (!sub) return null;
+  if (!sub || reviewSelecting.value) return null;
   const run = detail.value;
   // 正常路径按 run 状态推导可见性；深链孤儿退化成按提交自身状态推导（见 approvalOrphan）。
   const state = approvalOrphan.value
@@ -2423,8 +2482,11 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
   if (state === "hidden") return null;
   return {
     state,
+    submissionId: sub.id,
+    approveLabel: isGjbReferenceProject.value ? (sub.gate === "G4" ? "批准交付" : "批准阶段") : undefined,
+    approvedDescription: isGjbReferenceProject.value ? "已批准，本次阶段审查已完成。" : undefined,
     gate: sub.gate,
-    review: GATE_REVIEW_NAMES[sub.gate as GateId] ?? sub.gate,
+    review: reviewGateNames.value[sub.gate] ?? sub.gate,
     members: approvalMembers.value,
     membersError: approvalMembersError.value,
     submittedAt: sub.submitted_at,
@@ -2432,6 +2494,12 @@ const approvalCardProps = computed<ApprovalCardProps | null>(() => {
     decisionError: decisionError.value,
     rejectionReason: rejectionReason.value,
   };
+});
+
+const projectApprovalCard = computed<ApprovalCardProps | null>(() => {
+  if (!submission.value || reviewSelecting.value) return null;
+  const card = approvalCardProps.value;
+  return card ? { ...card, state: deriveApprovalCard({ status: "awaiting_approval", awaiting_gate: submission.value.gate }, submission.value) } : null;
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2447,6 +2515,10 @@ const topBarProps = computed<TopBarProps>(() => ({
 
 const fileTreeProps = computed<FileTreeProps>(() => ({
   entries: fileTreeEntries.value,
+  waveforms: projectWaveforms.value,
+  activeWaveformId: activeWorkspaceTab.value,
+  waveformsLoading: recordsLoading.value || Object.values(manifestStates.value).some((state) => state.loading),
+  waveformsError: recordsError.value,
   documentContext: isGjbReferenceProject.value ? "gjb" : "generic",
   viewMode: viewMode.value,
   hasAgent: hasAgent.value,
@@ -2456,20 +2528,6 @@ const fileTreeProps = computed<FileTreeProps>(() => ({
   pendingCount: workspace.value?.pending_count ?? 0,
   registering: registering.value,
   registerError: registerError.value,
-}));
-
-const codeEditorProps = computed<CodeEditorProps>(() => ({
-  file: openFileEntry.value,
-  activeRevision: activeRevision.value,
-  content: fileContent.value,
-  contentSource: contentSource.value,
-  loading: fileContentLoading.value,
-  readonlyReason: readonlyReason.value,
-  saving: saving.value,
-  saveError: saveError.value,
-  language: inferLanguage(openFileEntry.value),
-  theme: theme.value,
-  diffAgainst: diffAgainst.value,
 }));
 
 const chatFeedProps = computed<ChatFeedProps>(() => ({
@@ -2540,6 +2598,10 @@ async function onToggleSkipPermissions(skip: boolean): Promise<void> {
 const recordsPanelProps = computed<RecordsPanelProps>(() => ({
   open: recordsOpen.value,
   jobs: recordJobs.value,
+  loading: recordsLoading.value,
+  error: recordsError.value,
+  manifestStates: manifestStates.value,
+  limited: projectRuns.value.length >= 1000,
   focusJobId: recordsFocusJobId.value,
   entryContent: recordEntryContent.value,
 }));
@@ -2602,9 +2664,9 @@ function onToggleChatOverlay(): void {
 </script>
 
 <template>
-  <div class="flex h-dvh min-h-0 flex-col bg-base text-fg">
+  <div class="ax-workbench"><AppNavigation section="workspace" compact /><div class="ax-workbench-body">
     <!-- 摘要 chip 的悬浮面板要盖住下方三栏（z-20）；抽屉走 ui/sheet（z 取自 --z-overlay）仍在其上 -->
-    <header class="relative z-20 h-[var(--topbar-height)] flex-none border-b border-line bg-panel">
+    <header class="ax-workbench-header relative z-20 h-[var(--topbar-height)] flex-none">
       <TopBar
         v-bind="topBarProps"
         @toggle-theme="onToggleTheme"
@@ -2626,46 +2688,37 @@ function onToggleChatOverlay(): void {
             @select-stage="onSelectStage"
             @run-action="onRunImplAction"
           />
+          <ProjectToolbarButton
+            v-if="formalDeliveryEnabled"
+            class="shrink-0"
+            :expanded="formalDeliveryOpen"
+            @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
+          >
+            正式流程
+            <span v-if="processState" class="tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
+          </ProjectToolbarButton>
+          <ProjectToolbarButton
+            v-if="historicalMaterialsEnabled"
+            class="shrink-0"
+            :expanded="materialsOpen"
+            @click="materialsOpen ? closeMaterials() : openMaterials()"
+          >
+            历史资料
+            <span v-if="materialSnapshots.length > 0" class="tabular-nums">{{ materialSnapshots.length }}</span>
+          </ProjectToolbarButton>
+          <span v-if="isMock" class="project-demo-tag shrink-0 max-[700px]:hidden">演示数据</span>
         </template>
       </TopBar>
     </header>
-    <!-- 项目类型/流程/器件信息已收入顶栏「项目概览」chip；本行只剩工程项目
-         的正式流程/历史资料入口（自由项目整行不渲染）。 -->
-    <div v-if="project && (isMock || formalDeliveryEnabled || historicalMaterialsEnabled)" class="flex min-h-[38px] flex-wrap items-center gap-3 border-b border-line px-4 py-[5px] text-xs text-fg-secondary max-[600px]:gap-x-3 max-[600px]:gap-y-1.5" aria-label="项目辅助入口">
-      <span v-if="isMock" class="project-demo-tag">演示数据</span>
-      <div v-if="formalDeliveryEnabled || historicalMaterialsEnabled" class="ml-auto inline-flex items-center gap-2 max-[600px]:ml-0 max-[600px]:w-full max-[600px]:flex-wrap max-[600px]:pb-1">
-        <button
-          v-if="formalDeliveryEnabled"
-          type="button"
-          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
-          :aria-expanded="formalDeliveryOpen"
-          @click="formalDeliveryOpen ? closeFormalDelivery() : openFormalDelivery()"
-        >
-          正式流程
-          <span v-if="processState" class="text-[11px] text-fg-secondary tabular-nums">{{ processState.completed ? "已密封" : processState.currentGate }}</span>
-        </button>
-        <button
-          v-if="historicalMaterialsEnabled"
-          type="button"
-          class="inline-flex cursor-pointer items-center gap-1 rounded-sm border border-line-strong bg-transparent px-2 py-0.5 text-xs text-brand hover:bg-brand-subtle"
-          :aria-expanded="materialsOpen"
-          @click="materialsOpen ? closeMaterials() : openMaterials()"
-        >
-          历史资料
-          <span v-if="materialSnapshots.length > 0" class="text-[11px] text-fg-secondary">{{ materialSnapshots.length }}</span>
-        </button>
-      </div>
-    </div>
-
     <div v-if="loadErrorText" class="flex flex-none items-center justify-between gap-3 bg-danger/12 px-4 py-2 text-xs text-danger" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
     <div v-if="loading" class="grid flex-1 place-items-center text-fg-secondary" role="status">正在准备项目工作区…</div>
 
     <ResizablePanelGroup
       v-else-if="project"
       direction="horizontal"
-      auto-save-id="synthia.splitter"
+      auto-save-id="synthia.v-astrys.splitter"
       :keyboard-resize-by="1"
-      class="min-h-0 flex-1"
+      class="ax-workbench-panels min-h-0 flex-1"
     >
       <template v-if="!leftCollapsed">
         <ResizablePanel
@@ -2675,46 +2728,53 @@ function onToggleChatOverlay(): void {
           :default-size="leftPaneDefault"
           :min-size="LEFT_PANE_MIN"
           :max-size="LEFT_PANE_MAX"
-          class="min-h-0 overflow-hidden"
+          class="ax-workbench-pane ax-assets-pane min-h-0 overflow-hidden"
         >
+          <div v-if="filesInitializing" class="p-4 text-xs text-fg-muted" role="status">正在加载项目文件…</div>
           <FileTree
+            v-else
             v-bind="fileTreeProps"
             @update:viewMode="onUpdateViewMode"
             @open-file="onOpenFile"
+            @open-waveform="onViewRecordEntry"
             @close-drawer="onCloseDrawer"
             @register="onRegister"
           />
         </ResizablePanel>
-        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
       </template>
-      <ResizablePanel id="center" :order="2" :min-size="10" class="min-w-0 min-h-0 overflow-hidden">
-        <WorkspaceWelcome
-          v-if="!openArtifactId"
-          :project-name="project.name"
-          :engineering="projectType(project) === 'engineering'"
-          :has-agent="hasAgent"
-          :show-browse="leftCollapsed"
-          :type-label="projectTypeLabel"
-          :profile-label="projectProfileLabel"
-          :process-state="processState"
-          :stage-chain="stageChain"
-          :summary="toolSummary"
-          :example-tasks="EXAMPLE_TASKS"
-          @start="focusConversation"
-          @browse="treeDrawerOpen = true"
-          @example="onWelcomeExample"
-        />
-        <CodeEditor v-if="openArtifactId"
-          v-bind="codeEditorProps"
-          @select-revision="onSelectRevision"
-          @compare-revisions="onCompareRevisions"
-          @exit-diff="onExitDiff"
-          @save="onSave"
-          @dirty-change="editorDirty = $event"
-        />
+      <ResizablePanel id="center" :order="2" :min-size="10" class="ax-workbench-pane ax-center-pane min-w-0 min-h-0 overflow-hidden">
+        <div class="flex h-full min-h-0 min-w-0 flex-col">
+          <WorkspaceTabs :tabs="workspaceTabs" :active-id="activeWorkspaceTab" @select="selectWorkspaceTab" @close="closeWorkspaceTab" />
+          <div class="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel" :aria-label="workspaceTabs.find(tab => tab.id === activeWorkspaceTab)?.label">
+            <EngineeringOverviewPanel
+              v-show="activeWorkspaceTab === 'overview'" embedded v-bind="overviewProps"
+              @expand="overviewOpen = true" @records="onOpenRecords" @collaborate="focusConversation"
+            />
+            <ProjectReviews
+              v-if="projectType(project) === 'engineering'" v-show="activeWorkspaceTab === 'reviews'"
+              :rows="processSubmissions" :selected="submission" :card="projectApprovalCard"
+              :members="approvalMembers" :members-error="approvalMembersError"
+              :loading="reviewsLoading" :selecting="reviewSelecting" :error="reviewsError" :gate-names="reviewGateNames"
+              @select="selectProjectReview" @refresh="refreshProjectReviews" @approve="onApprove" @reject="onReject" @open-doc="onOpenDoc"
+            />
+            <WaveformEvidencePane
+              v-for="tab in waveformTabs" v-show="activeWorkspaceTab === tab.id" :key="tab.id"
+              :project-id="projectId" :job-id="tab.jobId" :name="tab.name"
+            />
+            <WorkspaceFilePane
+              v-for="tab in fileTabs" v-show="activeWorkspaceTab === tab.id" :key="tab.id"
+              :project-id="projectId" :tab="tab" :entry="currentTabEntry(tab)" :agent-status="editorAgentStatus" :theme="theme"
+              @dirty="updateTabState(tab.id, 'dirty', $event)" @saving="updateTabState(tab.id, 'saving', $event)" @saved="loadWorkspace"
+              @revision="openFile(currentTabEntry(tab).artifactId, $event)"
+              @compare="(base, head) => compareRevisions(currentTabEntry(tab), base, head)"
+              @exit-diff="openFile(currentTabEntry(tab).artifactId, tab.revisionId ?? undefined)"
+            />
+          </div>
+        </div>
       </ResizablePanel>
       <template v-if="!rightCollapsed">
-        <ResizableHandle class="w-[5px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
+        <ResizableHandle class="ax-pane-handle w-[8px] bg-transparent transition-colors hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[resize-handle-state=drag]:bg-brand-subtle" />
         <ResizablePanel
           id="right"
           :order="3"
@@ -2722,7 +2782,7 @@ function onToggleChatOverlay(): void {
           :default-size="rightPaneDefault"
           :min-size="RIGHT_PANE_MIN"
           :max-size="RIGHT_PANE_MAX"
-          class="min-h-0 overflow-hidden"
+          class="ax-workbench-pane ax-agent-pane min-h-0 overflow-hidden"
         >
           <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-panel [&>:last-child]:min-h-0 [&>:last-child]:flex-1">
           <AgentPaneTabs
@@ -2734,7 +2794,7 @@ function onToggleChatOverlay(): void {
             @archive="onArchiveSideAgent"
           />
           <ChatFeed
-            v-if="activeAgentPane === 'main'"
+            v-if="activeAgentPane === 'main' && !conversationInitializing"
             v-bind="chatFeedProps"
             @update:draft="chatDraft = $event"
             @close="chatOverlayOpen = false"
@@ -2748,6 +2808,7 @@ function onToggleChatOverlay(): void {
             @approve="onApprove"
             @reject="onReject"
           />
+          <div v-else-if="conversationInitializing" class="grid place-items-center p-6 text-xs text-fg-muted" role="status">正在加载项目对话…</div>
           <SideTasksPanel
             v-else
             open
@@ -2785,10 +2846,13 @@ function onToggleChatOverlay(): void {
     <!-- <1024px：文件树抽屉化（spec R3），与 ResizablePanelGroup 内的左栏互斥渲染 -->
     <Sheet :open="leftCollapsed && treeDrawerOpen" @update:open="(open) => { if (!open) onCloseDrawer(); }">
       <SheetContent side="left" :show-close-button="false" class="w-[min(320px,86vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
+        <div v-if="filesInitializing" class="p-4 text-xs text-fg-muted" role="status">正在加载项目文件…</div>
         <FileTree
+          v-else
           v-bind="fileTreeProps"
           @update:viewMode="onUpdateViewMode"
           @open-file="onOpenFile"
+            @open-waveform="onViewRecordEntry"
           @close-drawer="onCloseDrawer"
           @register="onRegister"
         />
@@ -2808,7 +2872,7 @@ function onToggleChatOverlay(): void {
               @archive="onArchiveSideAgent"
             />
             <ChatFeed
-              v-if="activeAgentPane === 'main'"
+              v-if="activeAgentPane === 'main' && !conversationInitializing"
               v-bind="chatFeedProps"
               @update:draft="chatDraft = $event"
               @close="chatOverlayOpen = false"
@@ -2822,6 +2886,7 @@ function onToggleChatOverlay(): void {
               @approve="onApprove"
               @reject="onReject"
             />
+            <div v-else-if="conversationInitializing" class="grid place-items-center p-6 text-xs text-fg-muted" role="status">正在加载项目对话…</div>
             <SideTasksPanel
               v-else
               open
@@ -2858,7 +2923,7 @@ function onToggleChatOverlay(): void {
     <!-- 运行记录抽屉：任意视口宽度可开合，不与左右栏的响应式降级绑定 -->
     <Sheet :open="recordsOpen" @update:open="(open) => { if (!open) onCloseRecords(); }">
       <SheetContent side="right" :show-close-button="false" class="project-view-overlay w-[min(380px,92vw)] gap-0 overflow-hidden bg-panel p-0 sm:max-w-none">
-        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" />
+        <RecordsPanel v-bind="recordsPanelProps" @close="onCloseRecords" @view-entry="onViewRecordEntry" @load-evidence="loadRecordManifest" @refresh="loadProjectRecords" />
       </SheetContent>
     </Sheet>
 
@@ -2921,10 +2986,26 @@ function onToggleChatOverlay(): void {
       </SheetContent>
     </Sheet>
 
+    <EngineeringOverview
+      v-if="project"
+      v-model:open="overviewOpen"
+      v-bind="overviewProps"
+      @records="onOpenRecords"
+      @collaborate="focusConversation"
+    />
+  </div>
   </div>
 </template>
 
 <style scoped>
+.ax-workbench { display:flex; height:100dvh; min-height:0; background:var(--surface-base); color:var(--text-primary); }
+.ax-workbench-body { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; }
+.ax-workbench-header { background:var(--surface-base); }
+.ax-workbench-panels { padding:0 12px 12px 4px; }
+.ax-workbench-pane { border:1px solid var(--border-subtle); border-radius:var(--radius-container); background:var(--surface-panel); }
+.ax-pane-handle { border-radius:4px; }
+@media(max-width:700px) { .ax-workbench-header { height:92px; }.ax-workbench-panels { padding:0 8px 8px; } }
+
 /* 浮层内对话流子组件的内部布局只能走 :deep()。 */
 .project-view-overlay > :deep(.chat-feed) {
   flex: 1;

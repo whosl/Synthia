@@ -1054,6 +1054,9 @@ export interface ProjectWorkVersionV1 {
 
 /** GET /projects/:id/jobs 列表项（tool_run 行镜像；startTime/endTime 可为 null）。 */
 export interface JobRunSummary {
+  readonly evidenceEntries?: JobEvidenceManifest["entries"] | null;
+  readonly inputSha256?: string;
+  readonly createdAt?: string;
   readonly id: string;
   readonly operation: string;
   readonly runClass: string;
@@ -1077,6 +1080,7 @@ export interface JobEvidenceManifest {
 
 /** GET /projects/:id/jobs/:jobId/evidence/content?name= 响应 data。 */
 export interface JobEvidenceContent {
+  readonly encoding?: "utf8" | "base64";
   readonly name: string;
   readonly content: string;
   readonly sha256: string;

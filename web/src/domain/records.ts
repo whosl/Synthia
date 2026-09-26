@@ -10,7 +10,7 @@
  * `api/index.ts:getJobEvidenceContent`（ProjectView 持有，见受控组件契约）。
  */
 
-import type { TaskAgentDetail } from "../api/types.ts";
+import type { JobRunSummary, TaskAgentDetail } from "../api/types.ts";
 import { TOOL_BAR_TITLES } from "./tasks.ts";
 
 export interface RecordEvidenceEntry {
@@ -69,4 +69,39 @@ export function buildRecordJobs(detail: TaskAgentDetail): RecordJob[] {
       entries: ev.entries,
     };
   });
+}
+
+/** Persisted project runs remain visible even without a current conversation. */
+export function mergeProjectRecordJobs(runs: readonly JobRunSummary[], current: readonly RecordJob[]): RecordJob[] {
+  const byId = new Map(current.map((job) => [job.jobId, job]));
+  for (const run of runs) {
+    const existing = byId.get(run.id);
+    byId.set(run.id, {
+      jobId: run.id, operation: run.operation, title: TOOL_BAR_TITLES[run.operation] ?? run.operation,
+      status: run.state, ok: run.state === "succeeded", inputSha256: run.inputSha256 ?? existing?.inputSha256 ?? "",
+      ts: run.startTime ?? run.endTime ?? run.createdAt ?? existing?.ts ?? null,
+      errorCode: run.errorCode ?? null, round: 0,
+      entries: run.evidenceEntries ?? existing?.entries ?? [],
+    });
+  }
+  const sorted = [...byId.values()].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.jobId.localeCompare(b.jobId));
+  const rounds = new Map<string, number>();
+  return sorted.map((job) => {
+    const round = (rounds.get(job.operation) ?? 0) + 1; rounds.set(job.operation, round);
+    return { ...job, round };
+  }).reverse();
+}
+
+export interface WaveformFile {
+  readonly id: string;
+  readonly jobId: string;
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+}
+export function waveformFiles(jobs: readonly RecordJob[]): WaveformFile[] {
+  return jobs.flatMap((job) => job.entries.filter((entry) => /\.vcd$/i.test(entry.name)).map((entry) => ({
+    id: JSON.stringify(["waveform", job.jobId, entry.name]), jobId: job.jobId, name: entry.name,
+    label: entry.name, description: `${job.title} · 第 ${job.round} 轮${job.ts ? ` · ${job.ts}` : ""} · ${job.jobId}`,
+  })));
 }

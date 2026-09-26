@@ -34,7 +34,7 @@ function countFiles(groups: { readonly files: readonly unknown[] }[] | readonly 
   return n;
 }
 
-const sourceCount = computed(() => countFiles(split.value.source.groups));
+const sourceCount = computed(() => countFiles(split.value.source.groups) + (props.waveforms?.length ?? 0));
 const docCount = computed(() => countFiles(split.value.docs.groups));
 
 // ─── 分组展开/折叠（纯本地 UI 态：默认全部展开，不跨刷新保留）───────────────
@@ -200,7 +200,7 @@ watch(
 <template>
   <div
     ref="rootEl"
-    class="flex h-full min-h-0 flex-col bg-panel text-fg"
+    class="ax-file-tree flex h-full min-h-0 flex-col bg-panel text-fg"
     :class="dragging ? 'cursor-row-resize select-none' : ''"
   >
     <!-- 一键登记横幅：钉在两栏之上，改动分布在哪一栏都看得见。 -->
@@ -242,14 +242,15 @@ watch(
     </div>
 
     <section class="flex min-h-0 shrink grow-0 flex-col" :style="{ flexBasis: `${sourcePct}%` }">
-      <header class="flex flex-none items-baseline gap-2 border-b border-line px-3 pt-2 pb-1">
+      <header class="ax-tree-heading flex flex-none items-center gap-2 px-4 py-3">
         <span class="text-xs font-semibold text-fg">源文件</span>
         <span class="ml-auto font-mono text-[11px] text-fg-muted">{{ sourceCount }}</span>
       </header>
-      <div class="flex-none px-2 pt-2">
+      <div class="flex-none px-3 pb-2">
         <ViewSwitcher :model-value="viewMode" @update:model-value="emit('update:viewMode', $event)" />
       </div>
-      <FileTreeSection
+      <div class="min-h-0 flex-1 overflow-y-auto">
+      <FileTreeSection v-if="split.source.groups.length || !waveforms?.length"
         :result="split.source"
         key-prefix="source"
         :collapsed="collapsedGroups"
@@ -261,6 +262,17 @@ watch(
         @open-file="onOpenFile"
         @escape-view="emit('update:viewMode', 'type')"
       />
+      <div v-if="waveforms?.length" class="waveform-files px-2 pb-2">
+        <p class="px-1 text-[11px] font-semibold text-fg-secondary">仿真波形 · {{ waveforms.length }}</p>
+        <button v-for="file in waveforms" :key="file.id" type="button"
+          class="waveform-file" :class="{ selected: activeWaveformId === file.id }" :title="file.description"
+          :aria-label="`打开波形 ${file.description}`" @click="emit('open-waveform', file.jobId, file.name)">
+          <span>∿ {{ file.name }}</span><small>{{ file.description }}</small>
+        </button>
+      </div>
+      <p v-if="waveformsLoading" class="px-3 text-[11px] text-fg-muted">正在读取运行产物…</p>
+      <p v-if="waveformsError" class="px-3 text-[11px] text-danger">运行产物加载失败：{{ waveformsError }}</p>
+      </div>
     </section>
 
     <div
@@ -276,7 +288,7 @@ watch(
 
     <!-- 下栏吃掉除上栏 flex-basis 之外的全部剩余高度。 -->
     <section class="flex min-h-0 flex-1 flex-col">
-      <header class="flex flex-none items-baseline gap-2 border-b border-line px-3 pt-2 pb-1">
+      <header class="ax-tree-heading flex flex-none items-center gap-2 px-4 py-3">
         <span class="text-xs font-semibold text-fg">{{ documentContext === "gjb" ? "文档产物" : "文档" }}</span>
         <span v-if="documentContext === 'gjb'" class="text-[11px] tracking-[0.04em] text-fg-muted">GJB 参考</span>
         <span class="ml-auto font-mono text-[11px] text-fg-muted">{{ docCount }}</span>
@@ -296,3 +308,11 @@ watch(
   </div>
 </template>
 
+
+<style scoped>
+.ax-tree-heading { min-height:48px; }
+.ax-tree-heading > span:first-child { font-size:12px; font-weight:600; }
+
+.waveform-file { display: grid; gap: 3px; width: 100%; min-width: 0; padding: 7px 8px; margin: 2px 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.waveform-file:hover { background: var(--surface-hover); }.waveform-file.selected { border-color: var(--accent); background: var(--accent-subtle); }.waveform-file span { font: 11px var(--font-mono); }.waveform-file small { font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>

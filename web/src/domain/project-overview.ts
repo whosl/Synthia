@@ -33,6 +33,7 @@ export interface OverviewIssue {
 
 export interface ProjectOverview {
   readonly project: Project;
+  readonly pending?: boolean;
   readonly submissions: readonly GateSubmission[];
   readonly tasks: readonly TaskAgentSummary[];
   readonly issues: readonly OverviewIssue[];
@@ -89,6 +90,10 @@ export function activeMainTasks(rows: readonly ProjectOverview[]) {
 /** Each source fails independently. Missing facts never become an empty successful result. */
 export async function loadProjectOverview(
   client: ApiClient,
+  options: {
+    onProgress?: (rows: readonly ProjectOverview[]) => void;
+    isDisposed?: () => boolean;
+  } = {},
 ): Promise<ProjectOverview[]> {
   const projects = await listProjects(client);
   let profilePromise: Promise<ProcessProfileV1> | null = null;
@@ -96,96 +101,111 @@ export async function loadProjectOverview(
     (profilePromise ??= getProcessProfile(client, GJB_REF_V1_ID).then(
       parseAndVerifyProcessProfile,
     ));
-  const rows: ProjectOverview[] = [];
+  const rows: ProjectOverview[] = projects.map((project) => ({
+    project,
+    pending: true,
+    submissions: [],
+    tasks: [],
+    issues: [],
+    stage: projectType(project) === "engineering" ? "正在读取流程状态…" : "自由探索 · 无固定阶段",
+    gateNames: {},
+    progress: null,
+    updatedAt: project.created_at,
+  }));
+  const publish = () => {
+    if (!options.isDisposed?.()) options.onProgress?.([...rows]);
+  };
+  publish();
   // Bound cross-project fan-out while allowing independent facts to load together.
   for (let offset = 0; offset < projects.length; offset += 4) {
-    rows.push(
-      ...(await Promise.all(
-        projects
-          .slice(offset, offset + 4)
-          .map(async (project): Promise<ProjectOverview> => {
-            const engineering = projectType(project) === "engineering";
-            const modern =
-              engineering &&
-              (project.process_profile_id ?? project.process_version_id) ===
-                GJB_REF_V1_ID;
-            const [submissionResult, taskResult, processResult] =
-              await Promise.allSettled([
-                engineering
-                  ? listGateSubmissions(client, project.id)
-                  : Promise.resolve([]),
-                listTasks(client, project.id),
-                modern
-                  ? Promise.all([
-                      profile(),
-                      getProcessState(client, project.id),
-                    ])
-                  : Promise.resolve(null),
-              ]);
-            const issues: OverviewIssue[] = [];
-            const submissions =
-              submissionResult.status === "fulfilled"
-                ? submissionResult.value
-                : [];
-            const tasks =
-              taskResult.status === "fulfilled"
-                ? taskResult.value.agents.filter((task) => task.kind !== "side")
-                : [];
-            if (submissionResult.status === "rejected")
-              issues.push({
-                label: "待审批记录",
-                error: submissionResult.reason,
-              });
-            if (taskResult.status === "rejected")
-              issues.push({ label: "任务状态", error: taskResult.reason });
-            let stage = engineering
-              ? isLegacyCompatProject(project)
-                ? "兼容旧流程"
-                : "流程状态暂不可用"
-              : "自由探索 · 无固定阶段";
-            let gateNames: Record<string, string> = {};
-            let progress: ProjectOverview["progress"] = null;
-            if (modern) {
-              try {
-                if (processResult.status === "rejected")
-                  throw processResult.reason;
-                const [definition, rawState] = processResult.value!;
-                gateNames = Object.fromEntries(
-                  definition.nodes.map((node) => [node.id, node.name]),
-                );
-                const state = parseProcessState(rawState, project.id);
-                const chain = deriveProcessGateChain(definition, state)!;
-                const current = currentProcessGate(chain)!;
-                stage = state.completed
-                  ? "实现与交付已完成"
-                  : `${current.node.id} · ${current.node.name}`;
-                progress = processProgress(chain);
-              } catch (error) {
-                issues.push({ label: "正式流程状态", error });
-              }
+    if (options.isDisposed?.()) return rows;
+    await Promise.all(
+      projects
+        .slice(offset, offset + 4)
+        .map(async (project, index): Promise<void> => {
+          const engineering = projectType(project) === "engineering";
+          const modern =
+            engineering &&
+            (project.process_profile_id ?? project.process_version_id) ===
+              GJB_REF_V1_ID;
+          const [submissionResult, taskResult, processResult] =
+            await Promise.allSettled([
+              engineering
+                ? listGateSubmissions(client, project.id)
+                : Promise.resolve([]),
+              listTasks(client, project.id),
+              modern
+                ? Promise.all([
+                    profile(),
+                    getProcessState(client, project.id),
+                  ])
+                : Promise.resolve(null),
+            ]);
+          const issues: OverviewIssue[] = [];
+          const submissions =
+            submissionResult.status === "fulfilled"
+              ? submissionResult.value
+              : [];
+          const tasks =
+            taskResult.status === "fulfilled"
+              ? taskResult.value.agents.filter((task) => task.kind !== "side")
+              : [];
+          if (submissionResult.status === "rejected")
+            issues.push({
+              label: "待审批记录",
+              error: submissionResult.reason,
+            });
+          if (taskResult.status === "rejected")
+            issues.push({ label: "任务状态", error: taskResult.reason });
+          let stage = engineering
+            ? isLegacyCompatProject(project)
+              ? "兼容旧流程"
+              : "流程状态暂不可用"
+            : "自由探索 · 无固定阶段";
+          let gateNames: Record<string, string> = {};
+          let progress: ProjectOverview["progress"] = null;
+          if (modern) {
+            try {
+              if (processResult.status === "rejected")
+                throw processResult.reason;
+              const [definition, rawState] = processResult.value!;
+              gateNames = Object.fromEntries(
+                definition.nodes.map((node) => [node.id, node.name]),
+              );
+              const state = parseProcessState(rawState, project.id);
+              const chain = deriveProcessGateChain(definition, state)!;
+              const current = currentProcessGate(chain)!;
+              stage = state.completed
+                ? "实现与交付已完成"
+                : `${current.node.id} · ${current.node.name}`;
+              progress = processProgress(chain);
+            } catch (error) {
+              issues.push({ label: "正式流程状态", error });
             }
-            const dates = [
-              project.created_at,
-              ...submissions.map((sub) => sub.submitted_at ?? sub.created_at),
-              ...tasks.map((task) => task.created_at),
-            ];
-            const updatedAt = dates.reduce(
-              (latest, date) =>
-                Date.parse(date) > Date.parse(latest) ? date : latest,
-              project.created_at,
-            );
-            return {
-              project,
-              submissions,
-              tasks,
-              issues,
-              stage,
-              gateNames,
-              progress,
-              updatedAt,
-            };
-          }),
-      )),
+          }
+          const dates = [
+            project.created_at,
+            ...submissions.map((sub) => sub.submitted_at ?? sub.created_at),
+            ...tasks.map((task) => task.created_at),
+          ];
+          const updatedAt = dates.reduce(
+            (latest, date) =>
+              Date.parse(date) > Date.parse(latest) ? date : latest,
+            project.created_at,
+          );
+          rows[offset + index] = {
+            project,
+            pending: false,
+            submissions,
+            tasks,
+            issues,
+            stage,
+            gateNames,
+            progress,
+            updatedAt,
+          };
+          publish();
+        }),
     );
   }
   return rows.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));

@@ -31,6 +31,9 @@ const observedMetrics = {
   median_duration_ms: 912_000,
   human_corrections: 1,
   first_solved_problem_families: null,
+  baseline_duration_ms: 5_820_000,
+  efficiency_saved_ms: 4_908_000,
+  efficiency_speedup: 6.38,
 };
 
 const unknownMetrics = {
@@ -46,6 +49,9 @@ const unknownMetrics = {
   median_duration_ms: null,
   human_corrections: null,
   first_solved_problem_families: null,
+  baseline_duration_ms: null,
+  efficiency_saved_ms: null,
+  efficiency_speedup: null,
 };
 
 function initialSkills(): LearnedSkillSummaryV1[] {
@@ -180,6 +186,19 @@ function overview(): EvolutionOverviewV1 {
     schema: "evolution-overview.v1",
     ...overviewSettings,
     skill_counts: counts(),
+    efficiency: {
+      measurement_state: "observed",
+      primary_applications: 9,
+      successful_applications: 4,
+      compared_applications: 3,
+      compared_skills: 1,
+      baseline_total_ms: 17_460_000,
+      applied_total_ms: 2_736_000,
+      net_saved_ms: 14_724_000,
+      speedup: 17_460_000 / 2_736_000,
+      scope: "all_versions",
+      gap_cap_seconds: 600,
+    },
     pending_applications: skills.reduce((total, skill) => total + skill.metrics.pending, 0),
     curator: {
       last_run_at: "2026-08-18T02:00:00.000Z",
