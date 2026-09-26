@@ -312,7 +312,7 @@ onMounted(() => void nextTick(scrollToBottom));
     <ChatComposer v-model="draft" :mode="composerMode" :can-abort="canAbort" :sending="sending" :aborting="aborting" @send="onComposerSend" @abort="emit('abort')">
       <template #controls>
         <Button v-if="agentStatus" variant="ghost" size="sm" :disabled="permissionBusy" :title="permissionSkipAll ? '权限卡已全局跳过（红线操作仍受治理拦截）' : '点击后本会话不再弹出权限卡'" @click="emit('toggle-skip-permissions', !permissionSkipAll)"><ShieldOff v-if="permissionSkipAll" :size="14" class="text-warn" aria-hidden="true" /><Shield v-else :size="14" aria-hidden="true" />{{ permissionSkipAll ? "跳过权限·开" : "跳过权限·关" }}</Button>
-        <ContextRing v-if="contextUsage" :prompt-tokens="contextUsage.promptTokens" :context-window="contextUsage.contextWindow" />
+        <ContextRing v-if="contextUsage" :usage="contextUsage" />
       </template>
     </ChatComposer>
   </div>

@@ -2541,9 +2541,7 @@ const chatFeedProps = computed<ChatFeedProps>(() => ({
   sendError: sendError.value,
   exampleTasks: EXAMPLE_TASKS,
   approval: approvalCardProps.value,
-  contextUsage: detail.value?.context_usage
-    ? { promptTokens: detail.value.context_usage.prompt_tokens, contextWindow: detail.value.context_usage.context_window }
-    : null,
+  contextUsage: detail.value?.context_usage ?? null,
   permissionSkipAll: skipAllOverride.value ?? (detail.value?.permission?.skip_all ?? false),
   pendingUserText: pendingUserText.value,
   permissionPending: pendingPermission.value,

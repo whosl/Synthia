@@ -461,6 +461,12 @@ export interface TaskPermissionState {
 export interface TaskContextUsage {
   readonly prompt_tokens: number | null;
   readonly context_window: number;
+  readonly estimated_prompt_tokens?: number | null;
+  readonly window_source?: "configured" | "default";
+  readonly request_state?: "idle" | "preparing" | "pending" | "measured" | "unreported" | "failed" | "restored";
+  readonly compaction_state?: "none" | "running" | "applied" | "failed";
+  readonly measured_at?: string | null;
+  readonly failure?: "rate_limit" | "context_limit" | "request_failed" | null;
 }
 
 export interface TaskAgentDetail extends TaskAgentSummary {
