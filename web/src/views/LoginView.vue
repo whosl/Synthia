@@ -91,7 +91,7 @@ async function submit() {
         </div>
       </div>
       <span class="hidden text-[11px] text-fg-muted min-[801px]:block"
-        >v-astrys · 工程协作空间</span
+        >工程协作空间</span
       >
     </section>
     <section

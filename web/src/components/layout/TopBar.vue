@@ -56,7 +56,6 @@ function onBack(): void {
     </div>
 
     <div class="flex flex-none items-center gap-2 max-[700px]:gap-[2px]">
-      <span class="ax-version max-[1200px]:hidden">v-astrys</span>
       <!-- <1280px：对话栏浮层化，顶栏露出对话按钮（spec R3） -->
       <button
         type="button"
@@ -87,9 +86,3 @@ function onBack(): void {
     </div>
   </div>
 </template>
-
-<style scoped>
-@media (max-width: 1200px) {
-  .ax-project-topbar .ax-version { display: none; }
-}
-</style>
