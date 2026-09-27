@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { Activity, ArrowUpRight, Check, CircuitBoard, Cpu, FileCode2, Layers, Maximize2, ShieldCheck, Sparkles, X } from "lucide-vue-next";
+import ResourceUtilizationPanel from "./ResourceUtilizationPanel.vue";
 import Button from "../ui/AppButton.vue";
 import type { EngineeringOverviewProps } from "../../domain/engineering-overview.ts";
 import { formatNs, TIMING_STATUS_LABELS } from "../../domain/impl-summary.ts";
@@ -106,6 +107,13 @@ function showRecord(): void {
               <div class="validation-count"><span>四项检查最近结果</span><strong>{{ summary ? passed : "—" }}<small> / 4 已通过</small></strong><div class="validation-segments" aria-hidden="true"><i v-for="stage in stages" :key="stage.key" :class="stage.state" /></div></div>
             </aside>
           </div>
+
+          <ResourceUtilizationPanel
+            :resources="summary?.resources ?? null"
+            :error="summary?.resourcesError"
+            :record-job-ids="recordJobIds"
+            @records="emit('records', $event)"
+          />
 
           <div class="overview-bottom">
             <section class="selected-result" aria-label="所选验证结果">

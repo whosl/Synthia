@@ -1140,6 +1140,23 @@ export interface ToolSummaryTiming {
   readonly parsedAt: string;
 }
 
+export interface ToolSummaryResources {
+  readonly device: string | null;
+  readonly design: string | null;
+  readonly sourceJobId: string;
+  readonly sourceOperation: "synthesize" | "implement" | "report_resources";
+  readonly sourceAt: string;
+  readonly reportName: string;
+  readonly metrics: readonly {
+    readonly key: "lut" | "ff" | "bram" | "dsp" | "io" | "clock";
+    readonly label: string;
+    readonly sourceLabel: string;
+    readonly used: number;
+    readonly available: number | null;
+    readonly percent: number | null;
+  }[];
+}
+
 export interface ToolSummary {
   readonly projectId: string;
   readonly generatedAt: string;
@@ -1147,4 +1164,6 @@ export interface ToolSummary {
   readonly bitstream: { readonly generated: boolean; readonly jobId: string | null; readonly at: string | null };
   readonly timing: ToolSummaryTiming | null;
   readonly timingError?: string;
+  readonly resources?: ToolSummaryResources | null;
+  readonly resourcesError?: string;
 }
