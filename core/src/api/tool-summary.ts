@@ -14,6 +14,7 @@
  * 工程项目与自由项目一视同仁：数据源是 tool_run，与项目类型无关。
  */
 import type { HandlerResult, RequestContext } from "./handlers.ts";
+import { readResourceSummary, type ToolSummaryResources } from "./resource-summary.ts";
 import { notFoundError } from "./errors.ts";
 
 export interface ToolSummaryStage {
@@ -43,6 +44,8 @@ export interface ToolSummary {
   readonly bitstream: { readonly generated: boolean; readonly jobId: string | null; readonly at: string | null };
   readonly timing: ToolSummaryTiming | null;
   readonly timingError?: string;
+  readonly resources?: ToolSummaryResources | null;
+  readonly resourcesError?: string;
 }
 
 /**
@@ -205,7 +208,9 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
     }
   }
 
+  const resources = await readResourceSummary(ctx, projectId);
   const summary: ToolSummary = {
+    ...resources,
     projectId,
     generatedAt: new Date().toISOString(),
     stages,
