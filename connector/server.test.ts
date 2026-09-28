@@ -94,3 +94,22 @@ describe("worker outer/inner request binding", () => {
     }, toolchainHash, configured)).toBe(false);
   });
 });
+
+test("configured worker bundle identity accepts exact bytes and rejects drift", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createHash } = await import("node:crypto");
+  const { verifyConfiguredBundleIdentity } = await import("./server.ts");
+  const dir = await mkdtemp(join(tmpdir(), "synthia-bundle-"));
+  try {
+    const path = join(dir, "server.bundle.mjs");
+    const original = "export const build = 1;\n";
+    await writeFile(path, original);
+    const config = { sdk_worker_build_hash: createHash("sha256").update(original).digest("hex") };
+    await verifyConfiguredBundleIdentity(config, path);
+    await writeFile(path, "export const build = 2;\n");
+    await expect(verifyConfiguredBundleIdentity(config, path)).rejects.toThrow("WORKER_BUNDLE_HASH_MISMATCH");
+    await expect(verifyConfiguredBundleIdentity({ sdk_worker_build_hash: "invalid" }, path)).rejects.toThrow("WORKER_BUNDLE_IDENTITY_INVALID");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

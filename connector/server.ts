@@ -288,6 +288,19 @@ function execution(
   };
 }
 
+export async function verifyConfiguredBundleIdentity(
+  config: Pick<WorkerConfig, "sdk_worker_build_hash">,
+  bundlePath: string,
+): Promise<void> {
+  if (!HASH_PATTERN.test(config.sdk_worker_build_hash) || !bundlePath) {
+    throw new Error("WORKER_BUNDLE_IDENTITY_INVALID");
+  }
+  const bytes = await readFile(bundlePath);
+  if (createHash("sha256").update(bytes).digest("hex") !== config.sdk_worker_build_hash) {
+    throw new Error("WORKER_BUNDLE_HASH_MISMATCH");
+  }
+}
+
 export async function startWorker(configPath?: string): Promise<{ server: Server; config: WorkerConfig }> {
   const resolvedConfigPath = configPath ?? process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json";
   const loaded = await readWorkerConfig(resolvedConfigPath);

@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 tsc=./node_modules/.bin/tsc
 status=0
 
-for proj in core runtime; do
+for proj in core runtime connector; do
   out=$("$tsc" --noEmit -p "$proj/tsconfig.json" --pretty false 2>&1)
   hits=$(printf '%s\n' "$out" | grep -E 'error TS(2304|2552):' || true)
   total=$(printf '%s\n' "$out" | grep -cE 'error TS' || true)
