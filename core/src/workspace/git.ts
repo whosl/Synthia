@@ -13,6 +13,7 @@
 
 import { lstat, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { captureProcess } from "../compat/process.ts";
 import { WorkspaceError } from "./paths.ts";
 
 /** 显式身份 + 关掉一切会改写字节或挂起的配置。 */
@@ -64,20 +65,11 @@ async function runGitRaw(
   args: readonly string[],
   options: GitRunOptions = {},
 ): Promise<GitResult> {
-  const proc = Bun.spawn({
-    cmd: ["git", ...GIT_CONFIG_ARGS, ...args],
+  const proc = await captureProcess("git", [...GIT_CONFIG_ARGS, ...args], {
     cwd,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
     env: { ...process.env, ...GIT_ENV, ...ceilingEnv(cwd), ...options.env },
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).bytes(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  return { exitCode: proc.exitCode, stdout: proc.stdout, stderr: proc.stderr };
 }
 
 /** 跑一条 git 命令；不抛，由调用方决定非零退出码是否算失败。 */

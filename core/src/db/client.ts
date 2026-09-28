@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
+import { isMainModule } from "../compat/main-module.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_PATH = join(__dirname, "migrations");
@@ -57,7 +58,7 @@ export async function migrate(options: MigrationRunnerOptions = {}): Promise<voi
 }
 
 // Entry point when run via `bun run src/db/migrate.ts`
-if (import.meta.main) {
+if (isMainModule(import.meta)) {
   migrate().catch((err) => {
     console.error("Migration failed:", err);
     process.exit(1);

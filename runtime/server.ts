@@ -42,7 +42,12 @@ import { contextUsageDto, newContextUsage } from "./context-usage.ts";
  *   SYNTHIA_RUNTIME_MODE=offline bun run runtime/server.ts   # offline smoke
  */
 
-import type { Server } from "bun";
+import { isMainModule } from "../core/src/compat/main-module.ts";
+import { serveFetch, type FetchServer } from "../core/src/compat/http.ts";
+import "../core/src/compat/polyfill.ts";
+
+/** Bun 的 Server<undefined> 换成跨运行时结构类型（core/src/compat/http.ts）。 */
+type Server = FetchServer;
 
 // ── loop + persistence ──────────────────────────────────────────────────────
 import { LoopExecutor, FakeVivadoConnector, successBehavior } from "./loop.ts";
@@ -1011,7 +1016,7 @@ export class RuntimeServer {
   private readonly taskEventChains = new Map<string, Promise<void>>();
   /** Any missing event makes the current Core-owned task ineligible to succeed. */
   private readonly taskEventFailures = new Map<string, unknown>();
-  private server?: Server<undefined>;
+  private server?: Server;
   private monitorTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -1031,7 +1036,7 @@ export class RuntimeServer {
   async start(): Promise<void> {
     await this.recover();
     this.startMonitor();
-    this.server = Bun.serve({
+    this.server = serveFetch({
       port: this.config.port,
       // Bun 默认 idleTimeout=10s，会在「无字节收发满 10 秒」时直接掐断连接。
       // SSE 长连接在模型推理阶段（实测 8–40 秒）完全静默，落在这个窗口里必被
@@ -3816,7 +3821,7 @@ async function main(): Promise<void> {
 }
 
 // Run only when executed directly, not when imported by tests.
-if (import.meta.path === Bun.main) {
+if (isMainModule(import.meta)) {
   main().catch((e) => {
     process.stderr.write(
       `[runtime-server] fatal: ${e instanceof Error ? e.message : String(e)}\n`,

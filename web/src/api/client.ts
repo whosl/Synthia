@@ -6,6 +6,7 @@
  * - Authorization 由注入的 tokenProvider 提供（sessionStorage），client 本身不依赖 store/router，便于测试。
  * - 401：清 token 并回调 onUnauthorized（跳登录）；403：抛 ApiError，由界面显示「无权限」。
  */
+import { apiBase } from "./platform.ts";
 
 export interface ApiErrorBody {
   readonly code: string;
@@ -97,7 +98,8 @@ export async function unwrapEnvelope<T>(response: Response): Promise<T> {
 }
 
 export function createClient(options: ClientOptions = {}) {
-  const baseUrl = options.baseUrl ?? ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "");
+  const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+  const baseUrl = options.baseUrl ?? (envBase !== undefined ? envBase : apiBase());
   const fetchImpl = options.fetchImpl ?? fetch;
 
   return async function request<T>(path: string, req: RequestOptions = {}): Promise<T> {

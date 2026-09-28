@@ -1,6 +1,7 @@
 /** Project workspaces own stage reviews; old approval links remain usable. */
-import { createRouter, createWebHistory } from "vue-router";
+import { createRouter, createWebHashHistory, createWebHistory } from "vue-router";
 import { readToken } from "./stores/auth.ts";
+import { PLATFORM_PREVIEW } from "./api/platform.ts";
 
 const LoginView = () => import("./views/LoginView.vue");
 const ProjectsView = () => import("./views/ProjectListView.vue");
@@ -8,7 +9,9 @@ const ProjectView = () => import("./views/ProjectView.vue");
 const EvolutionView = () => import("./views/EvolutionView.vue");
 
 export const router = createRouter({
-  history: createWebHistory(),
+  // 平台预览模式跑在动态子路径下，history 路由的根绝对跳转和刷新都会
+  // 逃出预览根；hash 路由对任意托管路径免疫。常规部署保持 history 模式。
+  history: PLATFORM_PREVIEW ? createWebHashHistory() : createWebHistory(),
   routes: [
     { path: "/", redirect: "/projects" },
     { path: "/login", name: "login", component: LoginView, meta: { public: true } },

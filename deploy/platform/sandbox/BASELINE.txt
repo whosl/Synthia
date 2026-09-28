@@ -1,0 +1,2 @@
+# 导出基线（2026-09-18，golden 线 synthia_real_ui@5432，schema 0036）——与 20-restore-db.sh 输出的 restore-ok 计数人工比对
+31 projects, 19 tasks, 98 auth_tokens, 446 artifacts

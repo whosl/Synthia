@@ -21,6 +21,8 @@ export default defineConfig({
       });
     },
   }],
+  // 平台预览构建（VITE_PLATFORM_PREVIEW=1）：资产相对路径，托管在动态子路径下。
+  base: process.env.VITE_PLATFORM_PREVIEW === "1" ? "./" : undefined,
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

@@ -579,17 +579,35 @@ export async function createConnectorFromEnv(
   } catch {
     return undefined;
   }
+  const cfId = env.SYNTHIA_CF_ACCESS_CLIENT_ID;
+  const cfSecret = env.SYNTHIA_CF_ACCESS_CLIENT_SECRET;
+  if (cfId && cfSecret) {
+    // 平台版 CF 通路：边缘终结 TLS，endpoint 覆写为公网隧道并放宽 allowlist；
+    // 盘上（LAN）配置的 mTLS 材料不适用——TLS refs 指向环境工厂解析的 CF 凭据。
+    config = {
+      ...config,
+      endpoint_url: endpointUrl,
+      tls_trust_ref: "secret://trust/cloudflare-edge",
+      tls_client_cert_ref: "secret://cert/cloudflare-origin",
+    };
+    const { createEnvironmentCloudflareRemoteConnector } = await import("../../../connector/http.ts") as unknown as {
+      createEnvironmentCloudflareRemoteConnector: RemoteFactory;
+    };
+    return new RemoteConnectorAdapter(createEnvironmentCloudflareRemoteConnector, config, [new URL(endpointUrl).hostname], env);
+  }
   if (config.transport_mode === "direct_https" && config.auth_mode === "mtls") {
     // Direct mTLS deployments (for example Core on a workstation reaching the
     // Worker over Tailscale) opt in via transport_mode "direct_https": keep the
     // on-disk endpoint origin and let the factory load the client/server
     // certificate material from the config paths.
-    const directHttpModulePath: string = "../../../connector/http.ts";
-    const httpModule = (await import(directHttpModulePath)) as unknown as {
+    // 静态 import：变量路径的动态 import 无法被 bundler 内联，node 运行时
+    // 会按 bundle 相对路径解析失败（node-target 部署必炸）。该模块本就在
+    // 本文件依赖图内，静态化无额外加载代价。
+    const { createMtlsDirectRemoteConnector } = await import("../../../connector/http.ts") as unknown as {
       createMtlsDirectRemoteConnector: RemoteFactory;
     };
     const directEndpoint = String(config.endpoint_url ?? "");
     if (!directEndpoint) return undefined;
-    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+    return new RemoteConnectorAdapter(createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
   }
 }
