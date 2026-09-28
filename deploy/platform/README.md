@@ -1,4 +1,4 @@
-# Synthia 平台沙箱部署（第一阶段：core + web + 数据 + connector 链路）
+# Synthia 平台沙箱部署（Core + Runtime + 自进化 + Web）
 
 目标平台：Daytona 管理的 Debian13 Docker 沙箱（Node 20.19.4、无 Bun、npm 走
 npmmirror、对外仅 5173 预览代理 + 8000 `__backend/` 转发、出站自由）。
@@ -15,8 +15,9 @@ npmmirror、对外仅 5173 预览代理 + 8000 `__backend/` 转发、出站自�
                                     └─ 出站 → connect.wenzhuolin.xyz（家里 66 的 Vivado worker）
 ```
 
-runtime/evolution workers 是第二/三阶段，未部署（`SYNTHIA_RUNTIME_URL=none`，
-任务端点 503 属预期）。
+当前构建脚本已包含 Runtime（8790）和自进化服务。自进化服务在专用令牌齐备时启动。
+
+此目录面向可选的 Node 沙箱，当前正式站点沿用本机 Bun + systemd；见 [`../production-release.md`](../production-release.md)。
 
 ## 一次部署流程
 
@@ -46,7 +47,7 @@ bash 30-start.sh                       # core :8000 + web :5173 + 自检
 
 ## 日常运维
 
-- **改码重部署**：本机 `build.sh` → 上传新 tar → 解包替换（保留 `env.real`、
+- **改码重部署**：本机 `build.sh` → 上传新 tar → 解包替换（更新既有实例不重新恢复数据库；保留 `env.real`、
   `pg-data/`、`pg-bootstrap/`、`logs/`）→ `bash 30-start.sh`
 - **数据冷备**：`bash snapshot-db.sh`（短暂停库 tar pg-data → 重启；产物在
   `backups/`。沙箱重建即丢——重要节点把备份下载出沙箱）
