@@ -59,7 +59,7 @@ export const VIVADO_CAPABILITIES: readonly CapabilityDefinition[] = [
 export interface EvidenceReference { readonly name: string; readonly uri: string; readonly sha256: string; readonly sizeBytes: number; readonly mediaType: string }
 export interface ToolchainMetadata { readonly binary: string; readonly vivadoVersion?: string; readonly licenseStatus: "available" | "unavailable" | "unknown"; readonly part?: string; readonly profileHash?: string }
 export interface VivadoExecutionResult { readonly status: VivadoResultStatus; readonly jobId: string; readonly operation: VivadoOperation; readonly command: readonly string[]; readonly inputSha256: string; readonly workspace: string; readonly toolchain: ToolchainMetadata; readonly exitCode?: number; readonly phase?: string; readonly phaseExitCode?: number; readonly simulatorStdout?: string; readonly stdout?: string; readonly stderr?: string; readonly output?: unknown; readonly errorCode?: string; readonly error?: Record<string, unknown>; readonly evidence: EvidenceManifest; readonly unsupportedReason?: "BINARY_UNAVAILABLE" | "LICENSE_UNAVAILABLE" | "PART_UNAVAILABLE"; readonly timeoutMs?: number; readonly timedOut?: boolean; readonly signal?: string | null; readonly logDigest?: LogDigest }
-export interface CommandResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly signal?: string | null }
+export interface CommandResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly signal?: string | null; readonly outputTruncated?: boolean }
 export interface VivadoProcessIdentity { readonly pid: number; readonly processGroupId: number; readonly startToken: string }
 export type ProcessStartObserver = (identity: VivadoProcessIdentity) => boolean | void | Promise<boolean | void>;
 export type CommandRunner = (command: string, args: readonly string[], cwd: string, timeoutMs: number, signal?: AbortSignal, onProcessStarted?: ProcessStartObserver) => Promise<CommandResult>;
@@ -71,6 +71,37 @@ export interface VivadoProcessGuardian {
 export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner }
 export const VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+export const VIVADO_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
+const OUTPUT_TRUNCATION_MARKER = Buffer.from("\n[SYNTHIA OUTPUT TRUNCATED AT 5 MiB]\n");
+
+/** Drain both pipes while retaining a bounded prefix, including split UTF-8 chunks. */
+function outputCapture() {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let truncated = false;
+  return {
+    append(chunk: Buffer) {
+      const remaining = VIVADO_OUTPUT_MAX_BYTES - size;
+      if (chunk.length > remaining) truncated = true;
+      if (remaining > 0) {
+        const kept = Buffer.from(chunk.subarray(0, remaining));
+        chunks.push(kept);
+        size += kept.length;
+      }
+    },
+    get truncated() { return truncated; },
+    text() { return Buffer.concat(chunks, size).toString("utf8"); },
+  };
+}
+
+function boundedEvidence(text: string): Buffer {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= VIVADO_OUTPUT_MAX_BYTES) return bytes;
+  return Buffer.concat([
+    bytes.subarray(0, VIVADO_OUTPUT_MAX_BYTES - OUTPUT_TRUNCATION_MARKER.length),
+    OUTPUT_TRUNCATION_MARKER,
+  ]);
+}
 /** Run until the testbench finishes. Frame-based suites can need hundreds of
  * simulated milliseconds; the process timeout bounds broken/nonterminating TBs. */
 const XSIM_RUNTIME = "all";
@@ -426,9 +457,9 @@ async function writeExecutionEvidence(
   const stdout = result.stdout ?? "";
   const stderr = result.stderr ?? "";
   await Promise.all([
-    writeFile(join(outputDir, "stdout.log"), stdout, "utf8"),
-    writeFile(join(outputDir, "stderr.log"), stderr, "utf8"),
-    writeFile(join(outputDir, "tool.log"), `${stdout}${stdout && stderr ? "\n" : ""}${stderr}`, "utf8"),
+    writeFile(join(outputDir, "stdout.log"), boundedEvidence(stdout)),
+    writeFile(join(outputDir, "stderr.log"), boundedEvidence(stderr)),
+    writeFile(join(outputDir, "tool.log"), boundedEvidence(`${stdout}${stdout && stderr ? "\n" : ""}${stderr}`)),
   ]);
   const resultName = RESULT_FILE_BY_OPERATION[request.operation];
   if (resultName) {
@@ -460,11 +491,12 @@ async function evidence(workspace: string, jobId: string, omittedNames: Readonly
 }
 function terminateProcessTree(pid: number): void {
   if (process.platform === "win32") {
-    // `pid` is always the PowerShell Job guardian. Killing only that process
-    // closes its KILL_ON_JOB_CLOSE handle and lets Windows terminate every Job
-    // member atomically. `taskkill /T` performs a separate tree enumeration
-    // and can block while the guardian itself waits for Job accounting.
-    try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore", windowsHide: true }); } catch {}
+    // Also terminate descendants if a child escaped the guardian's Job object.
+    // Bound taskkill itself, then close the guardian's kill-on-close handle.
+    try {
+      const killed = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 5_000 });
+      if (killed.error || killed.status !== 0) spawnSync("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore", windowsHide: true, timeout: 5_000 });
+    } catch {}
     return;
   }
   try { process.kill(-pid, "SIGTERM"); } catch {
@@ -752,7 +784,8 @@ const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onP
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
-  let stdout = "", stderr = "", timedOut = false;
+  const stdout = outputCapture(), stderr = outputCapture();
+  let timedOut = false;
   if (!child.pid) { reject(new Error("VIVADO_PROCESS_ID_UNAVAILABLE")); return promise; }
   const processStarted = processStartToken(child.pid).then(async (startToken) => {
     const identity = { pid: child.pid!, processGroupId: child.pid!, startToken };
@@ -766,12 +799,12 @@ const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onP
     terminateProcessTree(child.pid!);
     throw error;
   });
-  child.stdout.on("data", (d: Buffer) => stdout += d); child.stderr.on("data", (d: Buffer) => stderr += d);
+  child.stdout.on("data", (d: Buffer) => stdout.append(d)); child.stderr.on("data", (d: Buffer) => stderr.append(d));
   const timer = setTimeout(() => { timedOut = true; if (child.pid) terminateProcessTree(child.pid); }, timeoutMs);
   const abort = () => { if (child.pid) terminateProcessTree(child.pid); };
   if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
   child.once("error", reject);
-  child.once("close", (exitCode, closeSignal) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); void processStarted.then(() => resolve({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout, stderr, timedOut, signal: closeSignal }), reject); });
+  child.once("close", (exitCode, closeSignal) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); void processStarted.then(() => resolve({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout: stdout.text(), stderr: stderr.text(), outputTruncated: stdout.truncated || stderr.truncated, timedOut, signal: closeSignal }), reject); });
   return promise;
 };
 
@@ -800,11 +833,11 @@ export async function createVivadoProcessGuardian(
     detached: process.platform !== "win32",
   });
   if (!child.pid) throw new Error("VIVADO_PROCESS_ID_UNAVAILABLE");
-  let stdout = "";
-  let stderr = "";
+  const stdout = outputCapture();
+  const stderr = outputCapture();
   let spawnError: Error | undefined;
-  child.stdout.on("data", (data: Buffer) => stdout += data);
-  child.stderr.on("data", (data: Buffer) => stderr += data);
+  child.stdout.on("data", (data: Buffer) => stdout.append(data));
+  child.stderr.on("data", (data: Buffer) => stderr.append(data));
   child.once("error", (error) => { spawnError = error; });
   let exited = false;
   const closed = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolveClose) => {
@@ -867,8 +900,9 @@ export async function createVivadoProcessGuardian(
       if (spawnError) throw spawnError;
       return {
         exitCode: ended.exitCode ?? (timedOut ? 124 : 1),
-        stdout,
-        stderr,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        outputTruncated: stdout.truncated || stderr.truncated,
         timedOut,
         signal: ended.signal,
       };
@@ -1068,6 +1102,13 @@ export class VivadoBatchAdapter {
       return { ...base, status: "lost", evidence: ev };
     }
     if (result.timedOut) { const ev = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId); return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev }; }
+    if (result.outputTruncated || Buffer.byteLength(result.stdout) > VIVADO_OUTPUT_MAX_BYTES || Buffer.byteLength(result.stderr) > VIVADO_OUTPUT_MAX_BYTES) {
+      // A discarded tail may contain FAIL even when the retained prefix says PASS.
+      const errorCode = "VIVADO_OUTPUT_LIMIT_EXCEEDED";
+      await writeExecutionEvidence(outputDir, request, result, "failed", { errorCode, outputTruncated: true });
+      const ev = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
+      return { ...base, status: "failed", exitCode: result.exitCode, errorCode, evidence: ev };
+    }
     const text = `${result.stdout}\n${result.stderr}`;
     // Structured log digest: written before any verdict branch so every
     // downstream path (license failure, part failure, simulate, implement,

@@ -34,7 +34,7 @@ export const TERMINAL_STATES: ReadonlySet<string> = new Set([
  * Map a Connector job state to a VivadoResult status.
  * Shared by remote-connector and core-api-connector (identical semantics).
  */
-export function jobStateToResultStatus(state: string): string {
+export function jobStateToResultStatus(state: string): "succeeded" | "timeout" | "lost" | "unknown_effect" | "failed" {
   switch (state) {
     case "succeeded": return "succeeded";
     case "timeout": return "timeout";

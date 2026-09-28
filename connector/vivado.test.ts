@@ -721,3 +721,49 @@ describe("Vivado request fail-closed schema", () => {
     expect(() => validateVivadoRequest({ operation: "query_parts", jobId: "q-1", projectId: "project-1", runClass: "exploratory", pattern: "xc7*", family: "artix7" })).not.toThrow();
   });
 });
+
+describe("Vivado output limits", () => {
+  test("drains a real child with bounded stdout and stderr", async () => {
+    const { createVivadoProcessGuardian, VIVADO_OUTPUT_MAX_BYTES } = await import("./vivado.ts");
+    const root = await mkdtemp(join(tmpdir(), "synthia-output-"));
+    const guardian = await createVivadoProcessGuardian(root);
+    try {
+      const result = await guardian.run(process.execPath, ["-e", `const text = "x".repeat(${VIVADO_OUTPUT_MAX_BYTES + 65536}); process.stdout.write(text); process.stderr.write(text);`], root, 10_000);
+      expect(result.exitCode).toBe(0);
+      expect(result.outputTruncated).toBe(true);
+      expect(Buffer.byteLength(result.stdout)).toBe(VIVADO_OUTPUT_MAX_BYTES);
+      expect(Buffer.byteLength(result.stderr)).toBe(VIVADO_OUTPUT_MAX_BYTES);
+    } finally {
+      await guardian.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("truncated simulation cannot turn a retained PASS into success; evidence is capped in bytes", async () => {
+    const { VIVADO_OUTPUT_MAX_BYTES } = await import("./vivado.ts");
+    const root = await mkdtemp(join(tmpdir(), "synthia-output-"));
+    try {
+      const adapter = new VivadoBatchAdapter({
+        workspaceRoot: root,
+        commandRunner: async () => ({
+          exitCode: 0,
+          stdout: "SIMULATOR_OUTPUT_BEGIN\nPASS\n$finish called at time : 1 ns\nSIMULATOR_OUTPUT_END\n",
+          stderr: "界".repeat(VIVADO_OUTPUT_MAX_BYTES),
+          outputTruncated: true,
+        }),
+      });
+      const result = await adapter.execute({
+        operation: "simulate", jobId: "bounded-simulation", projectId: "project-1",
+        runClass: "exploratory", top: "top", testbench: "tb",
+        sources: [{ path: "top.v", content: "module top; endmodule" }, { path: "tb.v", content: "module tb; endmodule" }],
+      });
+      expect(result.status).toBe("failed");
+      expect(result.errorCode).toBe("VIVADO_OUTPUT_LIMIT_EXCEEDED");
+      for (const name of ["stdout.log", "stderr.log", "tool.log"]) {
+        const entry = result.evidence.entries.find((entry) => entry.name === name);
+        expect(entry).toBeDefined();
+        expect(entry!.sizeBytes).toBeLessThanOrEqual(VIVADO_OUTPUT_MAX_BYTES);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});

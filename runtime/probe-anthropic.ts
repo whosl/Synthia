@@ -26,8 +26,9 @@ const addTool: AgentTool = {
     properties: { a: { type: "integer" }, b: { type: "integer" } },
     required: ["a", "b"],
   },
-  async execute(args: Record<string, unknown>) {
-    return String(Number(args.a) + Number(args.b));
+  async execute(args: unknown) {
+    const values = args as { a: number; b: number };
+    return { content: String(Number(values.a) + Number(values.b)) };
   },
 };
 
