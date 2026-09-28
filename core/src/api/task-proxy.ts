@@ -1655,10 +1655,24 @@ export async function permissionTaskHandler(ctx: RequestContext): Promise<Handle
     payload.allow = body.allow === true;
   }
 
-  // Core-owned 任务用绑定的 runtime agent id；legacy 自由会话直接用 agentId。
+  // Core-owned 任务用绑定的 runtime agent id。findCoreOwnedTaskForWrite 的
+  // 鉴权/归属异常必须透出（成员检查、归档、项目隔离都在里面）——先前用
+  // .catch(() => null) 吞掉后向 runtime 转发任意 agentId，跨项目批准/skipAll
+  // 成为可能（code review P1）。真正查不到 Core 任务时走 legacy 兼容路径，
+  // 并与 sendTaskMessage 一致地核对 runtime 侧归属。
   let runtimeAgentId = agentId;
-  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId).catch(() => null);
-  if (coreTask?.runtime_agent_id) runtimeAgentId = coreTask.runtime_agent_id;
+  const coreTask = await findCoreOwnedTaskForWrite(ctx, projectId, agentId);
+  if (coreTask?.runtime_agent_id) {
+    runtimeAgentId = coreTask.runtime_agent_id;
+  } else {
+    let detail: RuntimeAgentDetail;
+    try {
+      detail = await runtime.getTask(agentId);
+    } catch (err) {
+      throw mapRuntimeError(err);
+    }
+    if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
+  }
 
   try {
     const response = await runtime.resolveTaskPermission(runtimeAgentId, payload);

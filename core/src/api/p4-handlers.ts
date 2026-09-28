@@ -3998,6 +3998,9 @@ export async function getP4EvidenceContentHandler(ctx: RequestContext): Promise<
     if (frozen.rows.length === 0) throw conflictApiError("EVIDENCE_NOT_FROZEN", { jobId });
     throw notFoundError(`evidence entry not found: ${name}`);
   }
+  if (name.toLowerCase().endsWith(".vcd") && numberValue(row.size_bytes) > 8 * 1024 * 1024) {
+    throw validationError("波形超过 8 MiB 查看上限，请缩小信号范围或仿真窗口");
+  }
   const bytes = row.managed_content as Uint8Array;
   if (sha256Hex(bytes) !== row.sha256 || bytes.byteLength !== numberValue(row.size_bytes)) {
     throw conflictApiError("EVIDENCE_CONTENT_HASH_MISMATCH", { name });

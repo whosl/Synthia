@@ -59,6 +59,8 @@
 
 | H30 | OPS/ARCH | **worker bundle 仓库/机上双轨漂移**：T1 期 harness 热修（logdigest/sim-fix 等一串）只打在 66 机上从未回流仓库——修复批次从仓库部署 bundle 时把机上补丁全部抹掉（digest 从 evidence 消失，模型失败反馈降级约 1.5h）。**事故+恢复**：靠部署前自做的备份恢复机上版，三补丁在真代码上重打，机上版已回流仓库为 canonical（漂移终结）。教训：热修必须当轮回流；部署前 diff 部署物与运行物 | fixed（canonical 化 + 流程教训） |
 
+| H32 | ARCH | **worker 输出无界 + 进程树孤儿**（p27 实证，2026-09-25）：① stdout/stderr 在内存中无界累积（g+=T），TB 的 $display 无限循环 7 分钟生成 1.2GB（磁盘 3 个 >400MB simulate.log 堆积）；② evidence 文件（stdout.log/tool.log）写入无大小上限；③ taskkill /F 只杀 PowerShell 包装器 PID，XSim 孙进程孤儿化继续写——幽灵 job 占死唯一并发槽，后续提交全部 capability_unavailable | **FIXED（本 commit）**：累积与写盘双 5MB 上限 + taskkill /T 树杀 + 2.6GB 日志清理。**TB 侧纪律**：失败即 $fatal 不是无限打印（p27 需修 TB） |
+
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
 一次静默窗完成：迁移 0014+0036（含迁移器自注册惯例补齐）→ Core/Runtime/worker 三点部署 → 11 项验证炮组全过（403 映射/僵尸收割/自动开工/.vh/逃逸拒绝/FAIL 模式/updated_at/约束解除）。部署中附带发现：testbench 参数约定为模块名非文件名（H18 探针踩坑记录）；外来未提交修改按标签贮藏（stash@07cfd5c7）。H19 收窄未全证；H25 的 worker 落盘队列与 H27 查看器为移交项。

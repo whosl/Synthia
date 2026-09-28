@@ -88,6 +88,52 @@ describe("self-evolution domain", () => {
       median_duration_ms: 200,
       human_corrections: 3,
       first_solved_problem_families: 1,
+      baseline_duration_ms: null,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    });
+  });
+
+  test("computes efficiency against the origin-episode baseline from success durations only", () => {
+    const observations = [
+      { role: "primary", applicationState: "evaluated", outcome: "success", durationMs: 600, humanCorrections: 0 },
+      { role: "primary", applicationState: "evaluated", outcome: "success", durationMs: 1_000, humanCorrections: 0 },
+      { role: "primary", applicationState: "evaluated", outcome: "execution_failure", durationMs: 9_000, humanCorrections: 0 },
+    ] as const;
+    // Success median is 600+1000/2 = 800; failures never enter the skill arm.
+    expect(computeSkillMetrics([...observations], { durationMs: 5_820_000 })).toMatchObject({
+      baseline_duration_ms: 5_820_000,
+      efficiency_saved_ms: 5_819_200,
+      efficiency_speedup: 7_275,
+    });
+  });
+
+  test("efficiency stays null without a positive baseline or a success arm", () => {
+    const successOnly = [
+      { role: "primary", applicationState: "evaluated", outcome: "success", durationMs: 100, humanCorrections: 0 },
+    ];
+    expect(computeSkillMetrics(successOnly, { durationMs: 0 })).toMatchObject({
+      baseline_duration_ms: 0,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    });
+    expect(computeSkillMetrics(successOnly, { durationMs: null })).toMatchObject({
+      baseline_duration_ms: null,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    });
+    expect(computeSkillMetrics(successOnly)).toMatchObject({
+      baseline_duration_ms: null,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
+    });
+    const noSuccess = [
+      { role: "primary", applicationState: "evaluated", outcome: "inconclusive", durationMs: 100, humanCorrections: 0 },
+    ];
+    expect(computeSkillMetrics(noSuccess, { durationMs: 1_000 })).toMatchObject({
+      baseline_duration_ms: 1_000,
+      efficiency_saved_ms: null,
+      efficiency_speedup: null,
     });
   });
 

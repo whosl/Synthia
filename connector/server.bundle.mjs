@@ -1,847 +1,34 @@
-import { createRequire } from "node:module";
-var __require = /* @__PURE__ */ createRequire(import.meta.url);
-
-// connector/server.ts
-import { createServer } from "node:https";
-import { readFile as readFile3 } from "node:fs/promises";
-import { access as access2, constants as constants2 } from "node:fs/promises";
-
-// connector/worker.ts
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-// core/src/hashing.ts
-import { createHash, randomUUID } from "node:crypto";
-function sha256Hex(data) {
-  const h = createHash("sha256");
-  if (typeof data === "string") {
-    h.update(data, "utf8");
-  } else if (data instanceof ArrayBuffer) {
-    h.update(new Uint8Array(data));
-  } else {
-    h.update(data);
-  }
-  return h.digest("hex");
-}
-var sha256 = sha256Hex;
-
-// connector/remote.ts
-var REMOTE_SCHEMA_VERSION = "connector.remote.v1";
-var MAX_EVIDENCE_ENTRY_BYTES = 64 * 1024 * 1024;
-var MAX_EVIDENCE_ENTRIES = 64;
-var MAX_EVIDENCE_TOTAL_BYTES = 128 * 1024 * 1024;
-var MAX_EVIDENCE_PREVIEW_BYTES = 257 * 1024;
-
-// connector/worker.ts
-var terminal = new Set(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
-var idRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-var classes = ["public", "internal", "confidential", "restricted"];
-var MAX_CONTENT_BYTES = 256 * 1024;
-var CONTENT_WINDOW_BYTES = 128 * 1024;
-var evidenceNameRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
-var unavailableExecution = {
-  async discover() {
-    return { connector_id: "unavailable", connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: "none", vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: "unavailable", sdk_worker_build_hash: "unavailable", capabilities: [], toolchain_profile_hash: "unavailable", license_status: "unknown", unsupported: ["vivado_discovery", "vivado_execution"] };
-  },
-  async execute() {
-    return { outcome: "failure", error_code: "UNSUPPORTED_VIVADO" };
-  }
-};
-function good(v) {
-  return typeof v === "string" && v.trim().length > 0;
-}
-function responseError(code, message, status) {
-  return Response.json({ error_code: code, message }, { status });
-}
-function copy(v) {
-  return structuredClone(v);
-}
-
-class WorkerRuntime {
-  endpoint;
-  root;
-  execution;
-  clock;
-  registration;
-  discovery;
-  active = 0;
-  leaseExpiresAt;
-  jobs = new Map;
-  jobBindings = new Map;
-  keys = new Map;
-  pending = [];
-  constructor(o) {
-    this.endpoint = copy(o.endpoint);
-    this.root = o.workspaceRoot;
-    this.execution = o.execution ?? unavailableExecution;
-    this.clock = o.now ?? (() => new Date);
-    if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1)
-      throw new Error("CONFIG_INVALID");
-  }
-  discoveryReady() {
-    return this.discovery?.license_status === "available" && this.discovery.capabilities.length > 0 && this.discovery.unsupported?.length === undefined;
-  }
-  hasDrift(discovery) {
-    return discovery.connector_protocol_version !== this.endpoint.protocol_version || discovery.toolchain_profile_hash !== this.endpoint.toolchain_profile_hash || this.endpoint.expected_capability_map_version !== undefined && discovery.capability_map_version !== this.endpoint.expected_capability_map_version || this.endpoint.expected_part_catalog_hash !== undefined && discovery.part_catalog_hash !== this.endpoint.expected_part_catalog_hash || this.endpoint.expected_sdk_worker_build_hash !== undefined && discovery.sdk_worker_build_hash !== this.endpoint.expected_sdk_worker_build_hash || discovery.license_status !== "available";
-  }
-  async handle(request) {
-    if (request.method !== "POST")
-      return responseError("METHOD_NOT_ALLOWED", "POST required", 405);
-    const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-    if (contentType !== "application/json")
-      return responseError("UNSUPPORTED_MEDIA_TYPE", "application/json required", 415);
-    let e;
-    try {
-      e = await request.json();
-    } catch {
-      return responseError("INVALID_JSON", "request body must be JSON", 400);
-    }
-    const invalid = this.validateEnvelope(e);
-    if (invalid)
-      return invalid;
-    const fingerprint = sha256(JSON.stringify({ ...e, correlation_id: undefined }));
-    const key = `${e.project_id}:${e.classification}:${e.actor.actor_type}:${e.actor.actor_id}:${e.idempotency_key}`;
-    const prior = this.keys.get(key);
-    if (prior)
-      return prior.fingerprint === fingerprint ? Response.json(prior.body, { status: prior.status }) : responseError("IDEMPOTENCY_CONFLICT", "idempotency key was used with a different request", 409);
-    try {
-      const out = await this.route(new URL(request.url).pathname, e);
-      this.keys.set(key, { fingerprint, status: out.status, body: out.body });
-      return this.ok(out.body, out.status);
-    } catch (cause) {
-      const code = cause instanceof Error ? cause.message : "WORKER_ERROR";
-      const status = code === "JOB_NOT_FOUND" || code === "EVIDENCE_NOT_AVAILABLE" || code === "NOT_FOUND" ? 404 : code === "EVIDENCE_CORRUPT" ? 422 : code === "EVIDENCE_LIMIT_EXCEEDED" ? 413 : code === "UNSUPPORTED_VIVADO" ? 501 : code === "IDEMPOTENCY_CONFLICT" ? 409 : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
-      return responseError(code, code, status);
-    }
-  }
-  validateEnvelope(v) {
-    if (!v || typeof v !== "object")
-      return responseError("INVALID_ENVELOPE", "object required", 400);
-    const e = v;
-    if (e.schema_version !== REMOTE_SCHEMA_VERSION)
-      return responseError("UNSUPPORTED_PROTOCOL", "connector.remote.v1 required", 400);
-    if (!good(e.correlation_id) || !good(e.idempotency_key) || !good(e.project_id) || !good(e.capability_version))
-      return responseError("INVALID_ENVELOPE", "required envelope fields are missing", 400);
-    if (!e.actor || e.actor.actor_type !== "user" && e.actor.actor_type !== "service" || !good(e.actor.actor_id))
-      return responseError("INVALID_ENVELOPE", "actor is invalid", 400);
-    if (!classes.includes(e.classification))
-      return responseError("INVALID_ENVELOPE", "classification is invalid", 400);
-    if (!this.endpoint.project_scope.includes(e.project_id))
-      return responseError("PROJECT_NOT_ALLOWED", "PROJECT_NOT_ALLOWED", 403);
-    if (!this.endpoint.data_classification_scope.includes(e.classification))
-      return responseError("CLASSIFICATION_NOT_ALLOWED", "CLASSIFICATION_NOT_ALLOWED", 403);
-    return;
-  }
-  async route(path, e) {
-    const p = e.payload && typeof e.payload === "object" && !Array.isArray(e.payload) ? e.payload : {};
-    if (path === "/registration") {
-      if (this.endpoint.registration_state === "revoked")
-        throw new Error("ENDPOINT_REVOKED");
-      this.registration = { ...copy(this.endpoint), registration_state: "approved" };
-      return { status: 200, body: this.envelope(e, this.registration) };
-    }
-    if (path === "/discover") {
-      this.discovery = await this.execution.discover();
-      return { status: 200, body: this.envelope(e, this.discovery) };
-    }
-    if (path === "/heartbeat") {
-      if (!this.registration)
-        throw new Error("NOT_REGISTERED");
-      if (this.endpoint.registration_state === "revoked")
-        throw new Error("ENDPOINT_REVOKED");
-      if (!this.discovery)
-        this.discovery = await this.execution.discover();
-      const now = this.clock();
-      const drift = this.hasDrift(this.discovery);
-      const ready = this.discoveryReady() && !drift;
-      this.leaseExpiresAt = now.getTime() + this.endpoint.lease_seconds * 1000;
-      this.registration = { ...this.registration, registration_state: ready ? "ready" : "degraded", discovered: copy(this.discovery), last_heartbeat_at: now.toISOString(), lease_expires_at: new Date(this.leaseExpiresAt).toISOString(), capability_drift: drift };
-      return { status: 200, body: this.envelope(e, this.registration) };
-    }
-    if (path === "/jobs/submit") {
-      if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) {
-        this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration;
-        throw new Error("LEASE_EXPIRED");
-      }
-      return this.submit(e, p.request, p.approval);
-    }
-    const jobId = p.job_id;
-    if (!good(jobId))
-      throw new Error("INVALID_JOB_ID");
-    const job = this.jobs.get(jobId);
-    const binding = this.jobBindings.get(jobId);
-    if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification)
-      throw new Error("JOB_NOT_FOUND");
-    if (path === "/jobs/status")
-      return { status: 200, body: this.envelope(e, copy(job)) };
-    if (path === "/jobs/cancel") {
-      if (!terminal.has(job.state))
-        job.state = "cancelled";
-      return { status: 200, body: this.envelope(e, copy(job)) };
-    }
-    if (path === "/jobs/evidence") {
-      if (!job.evidence)
-        throw new Error("EVIDENCE_NOT_AVAILABLE");
-      this.assertEvidenceLimits(job.evidence);
-      return { status: 200, body: this.envelope(e, copy(job.evidence)) };
-    }
-    if (path === "/jobs/evidence/content") {
-      const name = p.name;
-      if (typeof name !== "string" || !evidenceNameRe.test(name))
-        throw new Error("EVIDENCE_NOT_AVAILABLE");
-      return this.evidenceContent(e, job, name, p.complete === true);
-    }
-    throw new Error("NOT_FOUND");
-  }
-  submit(e, request, approval) {
-    const capability = this.discovery?.capabilities.find((c) => c.operation === request?.operation);
-    if (!this.registration || this.registration.registration_state !== "ready" || this.registration.capability_drift === true)
-      throw new Error("ENDPOINT_NOT_APPROVED");
-    if (!request || request.projectId !== e.project_id || !good(request.idempotencyKey) || !good(request.operation) || !good(request.input) || !good(request.correlationId))
-      throw new Error("INVALID_JOB_REQUEST");
-    if (!this.endpoint.allowed_capability_ids.includes(request.operation) || !capability || capability.version !== e.capability_version || !capability.runClasses.includes(request.runClass))
-      throw new Error("CAPABILITY_UNAVAILABLE");
-    if (request.runClass === "gate_check" && !good(approval?.gateSubmissionId))
-      throw new Error("GATE_SUBMISSION_REQUIRED");
-    if (request.runClass === "formal" && (approval?.inputApproved !== true || !good(approval?.baselineId) && !good(approval?.approvedGateResultId)))
-      throw new Error("FORMAL_GATE_REQUIRED");
-    if (request.runClass === "formal" && request.input.startsWith("candidate:"))
-      throw new Error("CANDIDATE_FORMAL_REJECTED");
-    const jobId = request.jobId ?? `job-${crypto.randomUUID()}`;
-    if (!idRe.test(jobId))
-      throw new Error("INVALID_JOB_ID");
-    const fingerprint = sha256(JSON.stringify(request));
-    const old = this.jobs.get(jobId);
-    if (old) {
-      const binding = this.jobBindings.get(jobId);
-      if (!binding || binding.projectId !== e.project_id || binding.classification !== e.classification)
-        throw new Error("JOB_NOT_FOUND");
-      if (sha256(JSON.stringify(old.request)) !== fingerprint)
-        throw new Error("IDEMPOTENCY_CONFLICT");
-      return { status: 200, body: this.envelope(e, copy(old)) };
-    }
-    const job = { id: jobId, request: { ...request, jobId }, state: "submitted", inputSha256: sha256(request.input) };
-    this.jobs.set(jobId, job);
-    this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification });
-    this.pending.push(jobId);
-    this.pump();
-    return { status: 202, body: this.envelope(e, copy(job)) };
-  }
-  async pump() {
-    while (this.active < this.endpoint.max_concurrency && this.pending.length) {
-      const jobId = this.pending.shift();
-      const job = this.jobs.get(jobId);
-      if (!job || terminal.has(job.state))
-        continue;
-      this.active++;
-      this.run(job).finally(() => {
-        this.active--;
-        this.pump();
-      });
-    }
-  }
-  async run(job) {
-    const workspace = join(this.root, job.id);
-    try {
-      await mkdir(workspace, { recursive: true });
-      await writeFile(join(workspace, "request-input.txt"), job.request.input, "utf8");
-      job.state = "preparing";
-      job.state = "running";
-      const result = await this.execution.execute(copy(job.request), workspace);
-      if (this.jobs.get(job.id)?.state === "cancelled")
-        return;
-      job.state = result.outcome === "success" ? "succeeded" : result.outcome === "timeout" ? "timeout" : result.outcome === "lost" ? "lost" : result.outcome === "unknown_effect" ? "unknown_effect" : "failed";
-      if (result.error_code)
-        job.errorCode = result.error_code;
-      if (result.output !== undefined) {
-        job.outputSha256 = sha256(result.output);
-        const outputPath = join(workspace, "output", "worker-result.json");
-        await mkdir(join(workspace, "output"), { recursive: true });
-        await writeFile(outputPath, result.output, "utf8");
-        const outputEntry = { name: "worker-result.json", uri: `workspace://${job.id}/output/worker-result.json`, sha256: job.outputSha256, sizeBytes: new TextEncoder().encode(result.output).byteLength, mediaType: "application/json" };
-        job.evidence = { jobId: job.id, entries: [...result.evidence?.entries ?? [], outputEntry] };
-      } else if (result.evidence)
-        job.evidence = result.evidence;
-    } catch {
-      if (this.jobs.get(job.id)?.state === "cancelled")
-        return;
-      job.state = "failed";
-      if (!job.errorCode)
-        job.errorCode = "WORKER_EXECUTION_ERROR";
-    }
-  }
-  async evidenceContent(e, job, name, complete = false) {
-    if (!job.evidence)
-      throw new Error("EVIDENCE_NOT_AVAILABLE");
-    this.assertEvidenceLimits(job.evidence);
-    const entry = job.evidence.entries.find((x) => x.name === name);
-    if (!entry)
-      throw new Error("EVIDENCE_NOT_AVAILABLE");
-    const filePath = join(this.root, job.id, "output", name);
-    let buf;
-    try {
-      const details = await stat(filePath);
-      if (details.size > MAX_EVIDENCE_ENTRY_BYTES)
-        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
-      if (!details.isFile() || details.size !== entry.sizeBytes)
-        throw new Error("EVIDENCE_CORRUPT");
-      buf = await readFile(filePath);
-    } catch (error) {
-      if (error instanceof Error && error.message === "EVIDENCE_LIMIT_EXCEEDED")
-        throw error;
-      throw new Error("EVIDENCE_CORRUPT");
-    }
-    if (sha256(buf) !== entry.sha256)
-      throw new Error("EVIDENCE_CORRUPT");
-    let contentBytes = buf;
-    let truncated = false;
-    if (!complete && buf.byteLength > MAX_CONTENT_BYTES) {
-      truncated = true;
-      const omitted = buf.byteLength - CONTENT_WINDOW_BYTES * 2;
-      contentBytes = Buffer.concat([buf.subarray(0, CONTENT_WINDOW_BYTES), Buffer.from(`
-…[${omitted} bytes omitted]…
-`, "utf8"), buf.subarray(buf.byteLength - CONTENT_WINDOW_BYTES)]);
-    }
-    return { status: 200, body: this.envelope(e, { name: entry.name, sha256: entry.sha256, sizeBytes: buf.byteLength, mediaType: entry.mediaType, content_base64: Buffer.from(contentBytes).toString("base64"), truncated }) };
-  }
-  assertEvidenceLimits(manifest) {
-    if (manifest.entries.length > MAX_EVIDENCE_ENTRIES)
-      throw new Error("EVIDENCE_LIMIT_EXCEEDED");
-    let total = 0;
-    for (const entry of manifest.entries) {
-      if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || entry.sizeBytes > MAX_EVIDENCE_ENTRY_BYTES)
-        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
-      total += entry.sizeBytes;
-      if (!Number.isSafeInteger(total) || total > MAX_EVIDENCE_TOTAL_BYTES)
-        throw new Error("EVIDENCE_LIMIT_EXCEEDED");
-    }
-  }
-  envelope(e, payload) {
-    return { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: e.correlation_id, causation_id: e.correlation_id, idempotency_key: e.idempotency_key, actor: e.actor, project_id: e.project_id, classification: e.classification, capability_version: e.capability_version, payload };
-  }
-  jobIdFrom(v) {
-    return v && typeof v === "object" && "id" in v && typeof v.id === "string" ? v.id : "worker";
-  }
-  ok(body, status) {
-    return Response.json(body, { status });
-  }
-}
-
-// connector/vivado.ts
-import { createHash as createHash2 } from "node:crypto";
-import { access, constants } from "node:fs/promises";
-import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
-import { spawn, spawnSync } from "node:child_process";
-import { dirname, join as join2, resolve } from "node:path";
-
-// connector/log-digest.ts
-var LOG_DIGEST_FILE_NAME = "log-digest.json";
-var MAX_FAILURE_LINES = 20;
-var MAX_WARNING_LINES = 15;
-var MAX_PASS_LINES = 10;
-var LINE_CHAR_CAP = 400;
-var CONTEXT_LINE_CHAR_CAP = 200;
-var CONTEXT_LINES = 2;
-var FAILURE_LINE_RE = /^\s*(?:ERROR\b|Fatal:|\*\s*Error|FAIL\b|\[\s*FAIL\s*\])|\bFAIL\s*\(/;
-var SIMULATOR_FAILURE_RE = /(?:\$fatal|\bFatal:)/;
-var WARNING_LINE_RE = /^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/;
-var PASS_LINE_RE = /\bPASS/;
-var PHASE_MARKER_RE = /^(?:PHASE=\S+|PHASE_EXIT_CODE=\d+|SOURCE_VALIDATION_OK|SIMULATION_OK|SYNTHIA_DRC_FAILED|SYNTHIA_TIMING_FAILED|SYNTHIA_TIMING_UNCONSTRAINED)$/;
-function capLine(line, cap) {
-  return line.length <= cap ? line : `${line.slice(0, cap)}…`;
-}
-function isFailureLine(line, source) {
-  if (FAILURE_LINE_RE.test(line))
-    return true;
-  return source === "simulator" && SIMULATOR_FAILURE_RE.test(line);
-}
-function isPassLine(line, source) {
-  return source === "simulator" && PASS_LINE_RE.test(line) && !isFailureLine(line, source);
-}
-function stdoutSimulatorRegion(stdout) {
-  const lines = stdout.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.includes("SIMULATOR_OUTPUT_BEGIN"));
-  if (start === -1)
-    return;
-  let end = -1;
-  for (let i = lines.length - 1;i > start; i--) {
-    if (lines[i].includes("SIMULATOR_OUTPUT_END")) {
-      end = i;
-      break;
-    }
-  }
-  return end > start ? { start, end } : undefined;
-}
-function scanStream(text, source, skipTbRegion, region) {
-  const lines = text.split(/\r?\n/);
-  const failure = [];
-  const warning = [];
-  const pass = [];
-  const phaseMarkers = [];
-  let failureTotal = 0;
-  let warningTotal = 0;
-  let passTotal = 0;
-  let truncated = false;
-  for (let i = 0;i < lines.length; i++) {
-    const line = lines[i];
-    if (source === "stdout" && PHASE_MARKER_RE.test(line)) {
-      phaseMarkers.push(capLine(line, LINE_CHAR_CAP));
-      continue;
-    }
-    const inSimulatorRegion = skipTbRegion && region !== undefined && i >= region.start && i <= region.end;
-    if (inSimulatorRegion)
-      continue;
-    if (isFailureLine(line, source)) {
-      failureTotal++;
-      if (failure.length < MAX_FAILURE_LINES) {
-        const contextBefore = [];
-        for (let j = i - 1;j >= 0 && contextBefore.length < CONTEXT_LINES; j--) {
-          const prev = lines[j];
-          if (prev.trim().length > 0)
-            contextBefore.unshift(capLine(prev, CONTEXT_LINE_CHAR_CAP));
-        }
-        failure.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP), ...contextBefore.length > 0 ? { contextBefore } : {} });
-      } else {
-        truncated = true;
-      }
-    } else if (WARNING_LINE_RE.test(line)) {
-      warningTotal++;
-      if (warning.length < MAX_WARNING_LINES)
-        warning.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
-      else
-        truncated = true;
-    } else if (isPassLine(line, source)) {
-      passTotal++;
-      if (pass.length < MAX_PASS_LINES)
-        pass.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
-      else
-        truncated = true;
-    }
-  }
-  return {
-    failure,
-    warning,
-    pass,
-    phaseMarkers,
-    truncated,
-    counts: { failure: failureTotal, warning: warningTotal, pass: passTotal }
-  };
-}
-function buildLogDigest(operation, streams) {
-  const stdout = streams.stdout ?? "";
-  const stderr = streams.stderr ?? "";
-  const simulator = streams.simulator;
-  const region = simulator !== undefined ? stdoutSimulatorRegion(stdout) : undefined;
-  const out = scanStream(stdout, "stdout", simulator !== undefined, region);
-  const err = scanStream(stderr, "stderr", false, undefined);
-  const sim = simulator !== undefined ? scanStream(simulator, "simulator", false, undefined) : undefined;
-  return {
-    schema: "synthia-log-digest.v1",
-    operation,
-    counts: {
-      failure: out.counts.failure + err.counts.failure + (sim?.counts.failure ?? 0),
-      warning: out.counts.warning + err.counts.warning + (sim?.counts.warning ?? 0),
-      pass: out.counts.pass + err.counts.pass + (sim?.counts.pass ?? 0)
-    },
-    failureLines: [...sim?.failure ?? [], ...out.failure, ...err.failure],
-    warningLines: [...out.warning, ...err.warning, ...sim?.warning ?? []],
-    passLines: [...sim?.pass ?? [], ...out.pass, ...err.pass],
-    phaseMarkers: out.phaseMarkers,
-    scanned: {
-      stdout: stdout.length,
-      stderr: stderr.length,
-      ...simulator !== undefined ? { simulator: simulator.length } : {}
-    },
-    truncated: out.truncated || err.truncated || (sim?.truncated ?? false)
-  };
-}
-
-// connector/vivado.ts
-var VIVADO_CAPABILITY_VERSION = "vivado-batch-1";
-var VIVADO_CAPABILITIES = [
-  ["discover_toolchain", "node", "toolchain_snapshot"],
-  ["query_parts", "part_query", "part_list"],
-  ["validate_sources", "source_manifest", "source_validation"],
-  ["simulate", "simulation_request", "simulation_result"],
-  ["synthesize", "synthesis_request", "synthesis_result"],
-  ["implement", "implementation_request", "bitstream_artifact"],
-  ["report_drc", "design_request", "drc_report"],
-  ["report_sta", "design_request", "sta_report"],
-  ["report_resources", "design_request", "resource_report"]
-].map(([operation, inputKind, outputKind]) => ({ operation, version: VIVADO_CAPABILITY_VERSION, runClasses: ["exploratory", "gate_check", "formal"], inputKind, outputKind, execution: "vivado_batch" }));
-var VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-var VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-var XSIM_RUNTIME_CAP = "100ms";
-var idRe2 = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-var hash = (data) => createHash2("sha256").update(data).digest("hex");
-function reject(code) {
-  throw new Error(`VIVADO_POLICY_REJECTED:${code}`);
-}
-var WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;
-function safePath(path) {
-  if (!path || Buffer.byteLength(path, "utf8") > 512 || path !== path.normalize("NFC") || path.startsWith("/") || path.startsWith("\\") || path.includes("\\") || path.includes("\x00"))
-    reject("UNSAFE_PATH");
-  const segments = path.split("/");
-  if (segments.length === 0 || segments.length > 32)
-    reject("UNSAFE_PATH");
-  for (const segment of segments) {
-    if (!segment || segment === "." || segment === ".." || Buffer.byteLength(segment, "utf8") > 255 || /[\u0000-\u001f\u007f:*?"<>|]/u.test(segment) || /[ .]$/.test(segment))
-      reject("UNSAFE_PATH");
-    const deviceName = segment.split(".", 1)[0].replace(/[ .]+$/u, "");
-    if (WINDOWS_RESERVED_NAME.test(deviceName))
-      reject("UNSAFE_PATH");
-  }
-}
-function portablePathKey(path) {
-  return path.normalize("NFC").toLowerCase();
-}
-function assertDistinctPortablePaths(paths) {
-  const seen = new Set;
-  for (const path of paths) {
-    const key = portablePathKey(path);
-    if (seen.has(key))
-      reject("PATH_COLLISION");
-    seen.add(key);
-  }
-}
-function safeToken(value, name) {
-  if (!value || value.length > 256 || /[\0\r\n{}\[\]$;]/.test(value))
-    reject(`UNSAFE_${name.toUpperCase()}`);
-}
-function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var VERILOG_MEDIA_TYPES = { "text/verilog": true, "text/x-verilog": true, "text/systemverilog": true, "application/systemverilog": true };
-function assertSourceLanguage(source) {
-  const lower = source.path.toLowerCase();
-  const extOk = lower.endsWith(".v") || lower.endsWith(".sv") || lower.endsWith(".vh") || lower.endsWith(".svh");
-  const mediaOk = source.mediaType === undefined || VERILOG_MEDIA_TYPES[source.mediaType] === true;
-  if (!extOk || !mediaOk)
-    reject("UNSUPPORTED_SOURCE_LANGUAGE");
-}
-function stripVerilogLexical(text) {
-  let out = "";
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    const next = i + 1 < n ? text[i + 1] : "";
-    if (c === "/" && next === "/") {
-      i += 2;
-      while (i < n && text[i] !== `
-`)
-        i++;
-      continue;
-    }
-    if (c === "/" && next === "*") {
-      i += 2;
-      while (i < n && !(text[i] === "*" && i + 1 < n && text[i + 1] === "/"))
-        i++;
-      i += 2;
-      continue;
-    }
-    if (c === '"') {
-      i += 1;
-      while (i < n && text[i] !== '"') {
-        if (text[i] === "\\" && i + 1 < n)
-          i += 2;
-        else
-          i += 1;
-      }
-      if (i < n)
-        i += 1;
-      continue;
-    }
-    out += c;
-    i += 1;
-  }
-  return out;
-}
-var moduleDeclRe = /\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b/g;
-function declaredModules(source) {
-  const text = stripVerilogLexical(typeof source.content === "string" ? source.content : Buffer.from(source.content).toString("utf8"));
-  const names = [];
-  let m;
-  moduleDeclRe.lastIndex = 0;
-  while ((m = moduleDeclRe.exec(text)) !== null)
-    names.push(m[1]);
-  return names;
-}
-function assertSimulateModules(request) {
-  const totals = new Map;
-  for (const source of request.sources)
-    for (const name of declaredModules(source))
-      totals.set(name, (totals.get(name) ?? 0) + 1);
-  const topCount = totals.get(request.top) ?? 0;
-  const tbCount = totals.get(request.testbench) ?? 0;
-  if (topCount === 0 || tbCount === 0)
-    reject("MISSING_TOP_MODULE");
-  if (topCount > 1 || tbCount > 1)
-    reject("AMBIGUOUS_TOP_MODULE");
-  for (const source of request.sources) {
-    const names = new Set(declaredModules(source));
-    if (names.has(request.top) && names.has(request.testbench))
-      reject("AMBIGUOUS_SOURCE_ROLE");
-  }
-}
-var XDC_COMMANDS = new Set([
-  "create_clock",
-  "create_generated_clock",
-  "set_case_analysis",
-  "set_clock_groups",
-  "set_clock_latency",
-  "set_clock_transition",
-  "set_clock_uncertainty",
-  "set_disable_timing",
-  "set_false_path",
-  "set_input_delay",
-  "set_input_transition",
-  "set_io",
-  "set_load",
-  "set_location",
-  "set_max_capacitance",
-  "set_max_delay",
-  "set_max_fanout",
-  "set_max_transition",
-  "set_min_delay",
-  "set_multicycle_path",
-  "set_output_delay",
-  "set_property"
-]);
-var XDC_QUERY_COMMANDS = new Set(["current_design", "get_cells", "get_clocks", "get_drc_checks", "get_nets", "get_pins", "get_ports"]);
-function assertXdcLine(line) {
-  if (/\\[ \t]*$/.test(line))
-    reject("XDC_LINE_CONTINUATION");
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#"))
-    return;
-  if (/\bset_property\b/i.test(trimmed) && /\bSEVERITY\b/i.test(trimmed) && /\bget_drc_checks\b/i.test(trimmed) && /\b(?:NSTD-1|UCIO-1)\b/i.test(trimmed))
-    reject("UNSAFE_XDC_DRC_SEVERITY_OVERRIDE");
-  if (trimmed.includes("$") || trimmed.includes(";") || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(trimmed))
-    reject("UNSAFE_XDC_COMMAND");
-  let remainder = "";
-  for (let cursor = 0;cursor < trimmed.length; ) {
-    const open = trimmed.indexOf("[", cursor);
-    const strayClose = trimmed.indexOf("]", cursor);
-    if (strayClose !== -1 && (open === -1 || strayClose < open))
-      reject("UNSAFE_XDC_COMMAND");
-    if (open === -1) {
-      remainder += trimmed.slice(cursor);
-      break;
-    }
-    remainder += trimmed.slice(cursor, open);
-    const close = trimmed.indexOf("]", open + 1);
-    if (close === -1 || trimmed.slice(open + 1, close).includes("[") || trimmed.slice(open + 1, close).includes("]"))
-      reject("UNSAFE_XDC_COMMAND");
-    const query = trimmed.slice(open + 1, close).trim();
-    const command2 = query.match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
-    if (!command2 || !XDC_QUERY_COMMANDS.has(command2))
-      reject("UNSAFE_XDC_QUERY");
-    remainder += " __SYNTHIA_QUERY__ ";
-    cursor = close + 1;
-  }
-  if (remainder.includes("[") || remainder.includes("]"))
-    reject("UNSAFE_XDC_COMMAND");
-  const command = remainder.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
-  if (!command || !XDC_COMMANDS.has(command))
-    reject("UNSAFE_XDC_COMMAND");
-}
-function assertXdcPolicy(content) {
-  let text;
-  try {
-    text = typeof content === "string" ? content : new TextDecoder("utf-8", { fatal: true }).decode(content);
-  } catch {
-    reject("INVALID_CONSTRAINT_ENCODING");
-  }
-  const normalized = text.replace(/\r\n/g, `
-`);
-  if (normalized.includes("\r"))
-    reject("INVALID_CONSTRAINT_ENCODING");
-  for (const line of normalized.split(`
-`))
-    assertXdcLine(line);
-}
-function validateVivadoRequest(request) {
-  if (!isPlainObject(request))
-    reject("INVALID_REQUEST");
-  if (typeof request.jobId !== "string" || typeof request.projectId !== "string" || !idRe2.test(request.jobId) || !idRe2.test(request.projectId))
-    reject("INVALID_ID");
-  if (request.runClass !== "exploratory" && request.runClass !== "gate_check" && request.runClass !== "formal")
-    reject("INVALID_RUN_CLASS");
-  if (request.inputHash !== undefined && (typeof request.inputHash !== "string" || !/^[0-9a-f]{64}$/.test(request.inputHash)))
-    reject("INVALID_INPUT_HASH");
-  if (request.toolchainHash !== undefined && (typeof request.toolchainHash !== "string" || !/^[0-9a-f]{64}$/.test(request.toolchainHash)))
-    reject("INVALID_TOOLCHAIN_HASH");
-  if (request.runClass === "formal" && (!request.inputHash || !request.toolchainHash))
-    reject("FORMAL_BINDING_REQUIRED");
-  if (request.timeoutMs !== undefined) {
-    const t = request.timeoutMs;
-    if (typeof t !== "number" || !Number.isFinite(t) || !Number.isInteger(t) || t <= 0 || t > VIVADO_MAX_TIMEOUT_MS)
-      reject("INVALID_TIMEOUT");
-  }
-  if (!VIVADO_CAPABILITIES.some((c) => c.operation === request.operation))
-    reject("CAPABILITY_UNAVAILABLE");
-  if (request.toolchain !== undefined) {
-    if (!isPlainObject(request.toolchain))
-      reject("INVALID_TOOLCHAIN");
-    if (request.toolchain.vivadoBinary !== undefined && typeof request.toolchain.vivadoBinary !== "string")
-      reject("INVALID_TOOLCHAIN");
-    if (request.toolchain.requiredLicense !== undefined && typeof request.toolchain.requiredLicense !== "string")
-      reject("INVALID_TOOLCHAIN");
-    if (request.toolchain.part !== undefined && typeof request.toolchain.part !== "string")
-      reject("INVALID_TOOLCHAIN");
-    if (request.toolchain.profileHash !== undefined && typeof request.toolchain.profileHash !== "string")
-      reject("INVALID_TOOLCHAIN");
-    if (request.toolchain.vivadoBinary)
-      safeToken(request.toolchain.vivadoBinary, "binary");
-    if (request.toolchain.part)
-      safeToken(request.toolchain.part, "part");
-    if (request.toolchain.profileHash !== undefined && !/^[0-9a-f]{64}$/.test(request.toolchain.profileHash))
-      reject("INVALID_TOOLCHAIN");
-    if (request.runClass === "formal" && request.toolchain.profileHash !== undefined && request.toolchain.profileHash !== request.toolchainHash)
-      reject("FORMAL_TOOLCHAIN_MISMATCH");
-  }
-  if ("part" in request) {
-    if (typeof request.part !== "string")
-      reject("INVALID_PART");
-    safeToken(request.part, "part");
-  }
-  if ("top" in request) {
-    if (typeof request.top !== "string")
-      reject("INVALID_TOP");
-    safeToken(request.top, "top");
-  }
-  if ("stopBeforeBitstream" in request && request.stopBeforeBitstream !== undefined) {
-    if (request.operation !== "implement" || typeof request.stopBeforeBitstream !== "boolean")
-      reject("INVALID_STOP_BEFORE_BITSTREAM");
-  }
-  if (request.operation === "simulate") {
-    const tb = request.testbench;
-    if (tb === undefined)
-      reject("NO_TESTBENCH");
-    if (typeof tb !== "string")
-      reject("INVALID_TESTBENCH");
-    safeToken(tb, "testbench");
-    if (request.top === tb)
-      reject("SAME_TOP_TESTBENCH");
-  }
-  if ("pattern" in request && request.pattern) {
-    if (typeof request.pattern !== "string")
-      reject("INVALID_PATTERN");
-    safeToken(request.pattern, "pattern");
-  }
-  if ("family" in request && request.family) {
-    if (typeof request.family !== "string")
-      reject("INVALID_FAMILY");
-    safeToken(request.family, "family");
-  }
-  if ("sources" in request) {
-    if (!Array.isArray(request.sources))
-      reject("INVALID_SOURCES");
-    if (!request.sources.length)
-      reject("NO_SOURCES");
-    for (const source of request.sources) {
-      if (!isPlainObject(source))
-        reject("INVALID_SOURCE");
-      if (typeof source.path !== "string")
-        reject("INVALID_SOURCE_PATH");
-      safePath(source.path);
-      if (typeof source.content !== "string" && !(source.content instanceof Uint8Array))
-        reject("INVALID_SOURCE_CONTENT");
-      if (source.mediaType !== undefined && typeof source.mediaType !== "string")
-        reject("INVALID_SOURCE_MEDIA_TYPE");
-      assertSourceLanguage(source);
-      const size = typeof source.content === "string" ? Buffer.byteLength(source.content) : source.content.byteLength;
-      if (!size)
-        reject("EMPTY_SOURCE");
-      if (size > 16 * 1024 * 1024)
-        reject("SOURCE_TOO_LARGE");
-    }
-    if (request.operation === "simulate")
-      assertSimulateModules(request);
-  }
-  if ("constraints" in request && request.constraints !== undefined) {
-    if (!Array.isArray(request.constraints))
-      reject("INVALID_CONSTRAINTS");
-    for (const constraint of request.constraints) {
-      if (!isPlainObject(constraint))
-        reject("INVALID_CONSTRAINT");
-      if (typeof constraint.path !== "string")
-        reject("INVALID_CONSTRAINT_PATH");
-      safePath(constraint.path);
-      if (!constraint.path.toLowerCase().endsWith(".xdc"))
-        reject("UNSUPPORTED_CONSTRAINT_FORMAT");
-      if (typeof constraint.content !== "string" && !(constraint.content instanceof Uint8Array))
-        reject("INVALID_CONSTRAINT_CONTENT");
-      if (constraint.mediaType !== undefined && typeof constraint.mediaType !== "string")
-        reject("INVALID_CONSTRAINT_MEDIA_TYPE");
-      const size = typeof constraint.content === "string" ? Buffer.byteLength(constraint.content) : constraint.content.byteLength;
-      if (!size)
-        reject("EMPTY_CONSTRAINT");
-      if (size > 4 * 1024 * 1024)
-        reject("CONSTRAINT_TOO_LARGE");
-      assertXdcPolicy(constraint.content);
-    }
-  }
-  const paths = [
-    ..."sources" in request && Array.isArray(request.sources) ? request.sources.map((source) => source.path) : [],
-    ..."constraints" in request && Array.isArray(request.constraints) ? request.constraints.map((constraint) => constraint.path) : []
-  ];
-  assertDistinctPortablePaths(paths);
-  if ("part" in request && request.toolchain?.part !== undefined && request.part !== request.toolchain.part)
-    reject("TOOLCHAIN_PART_MISMATCH");
-}
-function tclQuote(value) {
-  return `{${value.replace(/[{}]/g, (c) => `\\${c}`)}}`;
-}
-function readSourceLine(source, inputDir) {
-  const target = tclQuote(join2(inputDir, source.path));
-  const isSystemVerilog = source.path.toLowerCase().endsWith(".sv") || source.mediaType === "text/systemverilog" || source.mediaType === "application/systemverilog";
-  return isSystemVerilog ? `read_verilog -sv ${target}` : `read_verilog ${target}`;
-}
-function scriptFor(request, inputDir, outputDir) {
-  const sources = "sources" in request ? request.sources.map((s) => readSourceLine(s, inputDir)).join(`
-`) : "";
-  const top = "top" in request && typeof request.top === "string" ? `-top ${tclQuote(request.top)}` : "";
-  const part = "part" in request && typeof request.part === "string" ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
-  if (request.operation === "discover_toolchain")
-    return `puts [version -short]
-puts [join [get_parts *] \\"\\n\\"]`;
-  if (request.operation === "query_parts")
-    return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
-  if (request.operation === "validate_sources") {
-    for (const src of "sources" in request ? request.sources : []) {
-      if (/^\s*\\/m.test(src.content) || /\\`/.test(src.content))
-        reject(`SUSPICIOUS_ESCAPE_ARTIFACT:${src.path}: leading backslash or escaped backtick — shell-escaping artifact that xvlog tolerates but synthesis rejects`);
-    }
-    return `${sources}
-puts SOURCE_VALIDATION_OK`;
-  }
-  if (request.operation === "simulate") {
-    const designPaths = [];
-    const simPaths = [];
-    for (const source of request.sources) {
-      const target = tclQuote(join2(inputDir, source.path));
-      const testSource = declaredModules(source).includes(request.testbench) || /(^|\/)(?:tb|test|tests|testbench)(?:\/|$)/i.test(source.path);
-      (testSource ? simPaths : designPaths).push(target);
-    }
-    const designFiles = designPaths.join(" ");
-    const simFiles = simPaths.join(" ");
-    const project = tclQuote(join2(resolve(inputDir, ".."), "vivado-project"));
-    const projectPart = tclQuote(request.toolchain?.part ?? "xc7k70tfbv676-1");
-    const topQ = tclQuote(request.top);
-    const tbQ = tclQuote(request.testbench);
-    return `${sources}
-create_project synthia_batch ${project} -part ${projectPart} -force
-add_files -fileset sources_1 ${designFiles}
-add_files -fileset sim_1 ${simFiles}
-set_property top ${topQ} [get_filesets sources_1]
-set_property top ${tbQ} [get_filesets sim_1]
-set_property xsim.simulate.runtime {${XSIM_RUNTIME_CAP}} [get_filesets sim_1]
+import{createRequire as Wt}from"node:module";var bt=Wt(import.meta.url);import{createServer as Ge}from"node:https";import{createHash as Et,randomUUID as ze}from"node:crypto";import{readFile as U}from"node:fs/promises";import{access as Ye,constants as Xe}from"node:fs/promises";import{execFile as Ke}from"node:child_process";import{promisify as Ze}from"node:util";import{mkdir as et,readFile as Nt,stat as Yt,writeFile as nt}from"node:fs/promises";import{join as j}from"node:path";import{createHash as Jt,randomUUID as cn}from"node:crypto";function vt(t){let e=Jt("sha256");if(typeof t==="string")e.update(t,"utf8");else if(t instanceof ArrayBuffer)e.update(new Uint8Array(t));else e.update(t);return e.digest("hex")}function Gt(t){return vt(zt(t))}function zt(t){return JSON.stringify(q(t))}function q(t){if(Array.isArray(t))return t.map(q);if(t!==null&&typeof t==="object"){let e=t,n={};for(let i of Object.keys(e).sort())n[i]=q(e[i]);return n}return t}var V=vt;var wt=Gt;var R="connector.remote.v1",tt=67108864,Tt=64,St=134217728;var it=new Set(["succeeded","failed","cancelled","timeout","lost","unknown_effect"]),Ot=/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,Xt=["public","internal","confidential","restricted"],Kt=262144,ot=131072,Zt=/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/,Qt={async discover(){return{connector_id:"unavailable",connector_protocol_version:R,capability_map_version:"none",vivado_version:"unavailable",vivado_patch:"unavailable",part_catalog_hash:"unavailable",sdk_worker_build_hash:"unavailable",capabilities:[],toolchain_profile_hash:"unavailable",license_status:"unknown",unsupported:["vivado_discovery","vivado_execution"]}},async execute(){return{outcome:"failure",error_code:"UNSUPPORTED_VIVADO"}}};function v(t){return typeof t==="string"&&t.trim().length>0}function S(t,e,n){return Response.json({error_code:t,message:e},{status:n})}function C(t){return structuredClone(t)}class rt{endpoint;root;execution;clock;registration;discovery;active=0;leaseExpiresAt;jobs=new Map;activeControllers=new Map;jobBindings=new Map;keys=new Map;pending=[];restorePromise;constructor(t){if(this.endpoint=C(t.endpoint),this.root=t.workspaceRoot,this.execution=t.execution??Qt,this.clock=t.now??(()=>new Date),!Ot.test(this.endpoint.connector_id)||this.endpoint.protocol_version!==R||this.endpoint.max_concurrency<1)throw Error("CONFIG_INVALID");this.restorePromise=this.restoreRegistry()}registryPath(){return j(this.root,"jobs-registry.json")}snapshotChain=Promise.resolve();snapshotRegistry(){return this.snapshotChain=this.snapshotChain.then(()=>this.writeSnapshot()),this.snapshotChain}async writeSnapshot(){try{let t=[...this.jobs.values()].slice(-512),e=new Set(t.map((o)=>o.id)),n=[...this.jobBindings.entries()].filter(([o])=>e.has(o)),i={schema:"synthia-worker-jobs-registry.v1",jobs:t,bindings:n};await et(this.root,{recursive:!0}),await nt(this.registryPath(),JSON.stringify(i),"utf8")}catch{}}async restoreRegistry(){try{let t=await Nt(this.registryPath(),"utf8"),e=JSON.parse(t);if(!Array.isArray(e.jobs)||!Array.isArray(e.bindings))return;for(let n of e.jobs){if(!n||typeof n!=="object"||typeof n.id!=="string")continue;let i=C(n);if(!it.has(i.state))i.state="lost";this.jobs.set(i.id,i)}for(let[n,i]of e.bindings)if(typeof n==="string"&&i&&typeof i==="object"&&typeof i.projectId==="string")this.jobBindings.set(n,i)}catch{}}discoveryReady(){return this.discovery?.license_status==="available"&&this.discovery.capabilities.length>0&&this.discovery.unsupported?.length===void 0}leaseReady(){let t=this.registration?.registration_state==="ready"&&this.leaseExpiresAt!==void 0&&this.clock().getTime()<this.leaseExpiresAt;if(!t&&this.registration?.registration_state==="ready")this.registration={...this.registration,registration_state:"offline"};return t}hasDrift(t){return t.connector_protocol_version!==this.endpoint.protocol_version||t.toolchain_profile_hash!==this.endpoint.toolchain_profile_hash||this.endpoint.expected_capability_map_version!==void 0&&t.capability_map_version!==this.endpoint.expected_capability_map_version||this.endpoint.expected_part_catalog_hash!==void 0&&t.part_catalog_hash!==this.endpoint.expected_part_catalog_hash||this.endpoint.expected_sdk_worker_build_hash!==void 0&&t.sdk_worker_build_hash!==this.endpoint.expected_sdk_worker_build_hash||t.license_status!=="available"}async handle(t){if(await this.restorePromise,t.method!=="POST")return S("METHOD_NOT_ALLOWED","POST required",405);if(t.headers.get("content-type")?.split(";",1)[0]?.trim().toLowerCase()!=="application/json")return S("UNSUPPORTED_MEDIA_TYPE","application/json required",415);let n=new URL(t.url).pathname,i;try{i=await t.json()}catch{return S("INVALID_JSON","request body must be JSON",400)}let o=this.validateEnvelope(i);if(o)return o;let r=V(JSON.stringify({...i,correlation_id:void 0})),c=`${i.project_id}:${i.classification}:${i.actor.actor_type}:${i.actor.actor_id}:${i.idempotency_key}`,a=this.keys.get(c);if(a)return a.fingerprint===r?Response.json(a.body,{status:a.status}):S("IDEMPOTENCY_CONFLICT","idempotency key was used with a different request",409);try{let s=await this.route(n,i);return this.keys.set(c,{fingerprint:r,status:s.status,body:s.body}),this.ok(s.body,s.status)}catch(s){let l=s instanceof Error?s.message:"WORKER_ERROR",u=l==="JOB_NOT_FOUND"||l==="EVIDENCE_NOT_AVAILABLE"||l==="NOT_FOUND"||l==="EVOLUTION_EVAL_EVIDENCE_NOT_AVAILABLE"?404:l==="EVIDENCE_CORRUPT"||l==="EVOLUTION_EVAL_EVIDENCE_CORRUPT"?422:l==="EVIDENCE_LIMIT_EXCEEDED"||l==="EVOLUTION_EVAL_RESOURCE_LIMIT"||l==="EVOLUTION_EVAL_EVIDENCE_LIMIT_EXCEEDED"?413:l==="UNSUPPORTED_VIVADO"?501:l==="IDEMPOTENCY_CONFLICT"||l.includes("BINDING_CONFLICT")||l==="EVOLUTION_EVAL_REMOTE_ATTESTATION_MISMATCH"?409:l==="EVOLUTION_EVAL_SPOOL_FULL"||l==="EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE"?503:l==="PROJECT_NOT_ALLOWED"||l==="CLASSIFICATION_NOT_ALLOWED"?403:400;return S(l,l,u)}}validateEnvelope(t){if(!t||typeof t!=="object")return S("INVALID_ENVELOPE","object required",400);let e=t;if(e.schema_version!==R)return S("UNSUPPORTED_PROTOCOL","connector.remote.v1 required",400);if(!v(e.correlation_id)||!v(e.idempotency_key)||!v(e.project_id)||!v(e.capability_version))return S("INVALID_ENVELOPE","required envelope fields are missing",400);if(!e.actor||e.actor.actor_type!=="user"&&e.actor.actor_type!=="service"||!v(e.actor.actor_id))return S("INVALID_ENVELOPE","actor is invalid",400);if(!Xt.includes(e.classification))return S("INVALID_ENVELOPE","classification is invalid",400);if(!this.endpoint.project_scope.includes(e.project_id))return S("PROJECT_NOT_ALLOWED","PROJECT_NOT_ALLOWED",403);if(!this.endpoint.data_classification_scope.includes(e.classification))return S("CLASSIFICATION_NOT_ALLOWED","CLASSIFICATION_NOT_ALLOWED",403);return}async route(t,e){let n=e.payload&&typeof e.payload==="object"&&!Array.isArray(e.payload)?e.payload:{};if(t==="/registration"){if(this.endpoint.registration_state==="revoked")throw Error("ENDPOINT_REVOKED");return this.registration={...C(this.endpoint),registration_state:"approved"},{status:200,body:this.envelope(e,this.registration)}}if(t==="/discover")return this.discovery=await this.execution.discover(),{status:200,body:this.envelope(e,this.discovery)};if(t==="/heartbeat"){if(!this.registration)throw Error("NOT_REGISTERED");if(this.endpoint.registration_state==="revoked")throw Error("ENDPOINT_REVOKED");this.discovery=await this.execution.discover();let c=this.clock(),a=this.hasDrift(this.discovery),s=this.discoveryReady()&&!a;return this.leaseExpiresAt=c.getTime()+this.endpoint.lease_seconds*1000,this.registration={...this.registration,registration_state:s?"ready":"degraded",discovered:C(this.discovery),last_heartbeat_at:c.toISOString(),lease_expires_at:new Date(this.leaseExpiresAt).toISOString(),capability_drift:a},{status:200,body:this.envelope(e,this.registration)}}if(t==="/jobs/submit"){if(this.leaseExpiresAt!==void 0&&this.clock().getTime()>=this.leaseExpiresAt)throw this.registration=this.registration?{...this.registration,registration_state:"offline"}:this.registration,Error("LEASE_EXPIRED");return this.submit(e,n.request,n.approval)}let i=n.job_id;if(!v(i))throw Error("INVALID_JOB_ID");let o=this.jobs.get(i),r=this.jobBindings.get(i);if(!o||!r||r.projectId!==e.project_id||r.classification!==e.classification)throw Error("JOB_NOT_FOUND");if(t==="/jobs/status")return{status:200,body:this.envelope(e,C(o))};if(t==="/jobs/cancel"){if(!it.has(o.state)){let c=this.activeControllers.get(i);if(c)o.state="cancelling",c.abort();else o.state="cancelled";this.snapshotRegistry()}return{status:200,body:this.envelope(e,C(o))}}if(t==="/jobs/evidence"){if(!o.evidence)throw Error("EVIDENCE_NOT_AVAILABLE");return this.assertEvidenceLimits(o.evidence),{status:200,body:this.envelope(e,C(o.evidence))}}if(t==="/jobs/evidence/content"){let c=n.name;if(typeof c!=="string"||!Zt.test(c))throw Error("EVIDENCE_NOT_AVAILABLE");return this.evidenceContent(e,o,c,n.complete===!0)}throw Error("NOT_FOUND")}submit(t,e,n){let i=this.discovery?.capabilities.find((s)=>s.operation===e?.operation);if(!this.registration||this.registration.registration_state!=="ready"||this.registration.capability_drift===!0)throw Error("ENDPOINT_NOT_APPROVED");if(!e||e.projectId!==t.project_id||!v(e.idempotencyKey)||!v(e.operation)||!v(e.input)||!v(e.correlationId))throw Error("INVALID_JOB_REQUEST");if(!this.endpoint.allowed_capability_ids.includes(e.operation)||!i||i.version!==t.capability_version||!i.runClasses.includes(e.runClass))throw Error("CAPABILITY_UNAVAILABLE");if(e.runClass==="gate_check"&&!v(n?.gateSubmissionId))throw Error("GATE_SUBMISSION_REQUIRED");if(e.runClass==="formal"&&(n?.inputApproved!==!0||!v(n?.baselineId)&&!v(n?.approvedGateResultId)))throw Error("FORMAL_GATE_REQUIRED");if(e.runClass==="formal"&&e.input.startsWith("candidate:"))throw Error("CANDIDATE_FORMAL_REJECTED");let o=e.jobId??`job-${crypto.randomUUID()}`;if(!Ot.test(o))throw Error("INVALID_JOB_ID");let r=V(JSON.stringify(e)),c=this.jobs.get(o);if(c){let s=this.jobBindings.get(o);if(!s||s.projectId!==t.project_id||s.classification!==t.classification)throw Error("JOB_NOT_FOUND");if(V(JSON.stringify(c.request))!==r)throw Error("IDEMPOTENCY_CONFLICT");return{status:200,body:this.envelope(t,C(c))}}let a={id:o,request:{...e,jobId:o},state:"submitted",inputSha256:V(e.input)};return this.jobs.set(o,a),this.jobBindings.set(o,{projectId:t.project_id,classification:t.classification}),this.pending.push(o),this.snapshotRegistry(),this.pump(),{status:202,body:this.envelope(t,C(a))}}async pump(){while(this.active<this.endpoint.max_concurrency&&this.pending.length){let t=this.pending.shift(),e=this.jobs.get(t);if(!e||it.has(e.state))continue;this.active++,this.run(e).finally(()=>{this.active--,this.pump()})}}async run(t){let e=j(this.root,t.id),n=new AbortController;this.activeControllers.set(t.id,n);try{await et(e,{recursive:!0}),await nt(j(e,"request-input.txt"),t.request.input,"utf8"),t.state="preparing",t.state="running";let i=await this.execution.execute(C(t.request),e,n.signal);if(this.jobs.get(t.id)?.state==="cancelled"||this.jobs.get(t.id)?.state==="cancelling"){t.state="cancelled",await this.snapshotRegistry();return}if(t.state=i.outcome==="success"?"succeeded":i.outcome==="timeout"?"timeout":i.outcome==="lost"?"lost":i.outcome==="unknown_effect"?"unknown_effect":"failed",i.error_code)t.errorCode=i.error_code;if(i.output!==void 0){t.outputSha256=V(i.output);let o=j(e,"output","worker-result.json");await et(j(e,"output"),{recursive:!0}),await nt(o,i.output,"utf8");let r={name:"worker-result.json",uri:`workspace://${t.id}/output/worker-result.json`,sha256:t.outputSha256,sizeBytes:new TextEncoder().encode(i.output).byteLength,mediaType:"application/json"};t.evidence={jobId:t.id,entries:[...i.evidence?.entries??[],r]}}else if(i.evidence)t.evidence=i.evidence;await this.snapshotRegistry()}catch{if(this.jobs.get(t.id)?.state==="cancelled"||this.jobs.get(t.id)?.state==="cancelling"){t.state="cancelled",await this.snapshotRegistry();return}if(t.state="failed",!t.errorCode)t.errorCode="WORKER_EXECUTION_ERROR"}finally{this.activeControllers.delete(t.id)}}async evidenceContent(t,e,n,i=!1){if(!e.evidence)throw Error("EVIDENCE_NOT_AVAILABLE");this.assertEvidenceLimits(e.evidence);let o=e.evidence.entries.find((l)=>l.name===n);if(!o)throw Error("EVIDENCE_NOT_AVAILABLE");let r=j(this.root,e.id,"output",n),c;try{let l=await Yt(r);if(l.size>tt)throw Error("EVIDENCE_LIMIT_EXCEEDED");if(!l.isFile()||l.size!==o.sizeBytes)throw Error("EVIDENCE_CORRUPT");c=await Nt(r)}catch(l){if(l instanceof Error&&l.message==="EVIDENCE_LIMIT_EXCEEDED")throw l;throw Error("EVIDENCE_CORRUPT")}if(V(c)!==o.sha256)throw Error("EVIDENCE_CORRUPT");let a=c,s=!1;if(!i&&c.byteLength>Kt){s=!0;let l=c.byteLength-ot*2;a=Buffer.concat([c.subarray(0,ot),Buffer.from(`
+…[${l} bytes omitted]…
+`,"utf8"),c.subarray(c.byteLength-ot)])}return{status:200,body:this.envelope(t,{name:o.name,sha256:o.sha256,sizeBytes:c.byteLength,mediaType:o.mediaType,content_base64:Buffer.from(a).toString("base64"),truncated:s})}}assertEvidenceLimits(t){if(t.entries.length>Tt)throw Error("EVIDENCE_LIMIT_EXCEEDED");let e=0;for(let n of t.entries){if(!Number.isSafeInteger(n.sizeBytes)||n.sizeBytes<0||n.sizeBytes>tt)throw Error("EVIDENCE_LIMIT_EXCEEDED");if(e+=n.sizeBytes,!Number.isSafeInteger(e)||e>St)throw Error("EVIDENCE_LIMIT_EXCEEDED")}}envelope(t,e){return{schema_version:R,correlation_id:t.correlation_id,causation_id:t.correlation_id,idempotency_key:t.idempotency_key,actor:t.actor,project_id:t.project_id,classification:t.classification,capability_version:t.capability_version,payload:e}}jobIdFrom(t){return t&&typeof t==="object"&&"id"in t&&typeof t.id==="string"?t.id:"worker"}ok(t,e){return Response.json(t,{status:e})}}import{createHash as se,randomBytes as Dt}from"node:crypto";import{access as Pt,constants as ae}from"node:fs/promises";import{realpathSync as z,statSync as pt}from"node:fs";import{chmod as ce,mkdir as dt,readFile as P,readdir as de,stat as xt,unlink as Vt,writeFile as O}from"node:fs/promises";import{spawn as le,spawnSync as J}from"node:child_process";import{dirname as kt,isAbsolute as Mt,join as f,resolve as _t,sep as ue}from"node:path";var at="log-digest.json";var qt=/^\s*(?:ERROR\b|FATAL:|\*\s*Error|FAIL\b)/i,te=/(?:\$fatal|\bFatal:)/i,ee=/^\s*(?:CRITICAL WARNING\b|WARNING\b|WARN\b)/,ne=/\bPASS/,ie=/^(?:PHASE=\S+|PHASE_EXIT_CODE=\d+|SOURCE_VALIDATION_OK|SIMULATION_OK|SYNTHIA_DRC_FAILED|SYNTHIA_TIMING_FAILED|SYNTHIA_TIMING_UNCONSTRAINED)$/;function F(t,e){return t.length<=e?t:`${t.slice(0,e)}…`}function Ct(t,e){if(qt.test(t))return!0;return e==="simulator"&&te.test(t)}function oe(t,e){return e==="simulator"&&ne.test(t)&&!Ct(t,e)}function re(t){let e=t.split(/\r?\n/),n=e.findIndex((o)=>o.includes("SIMULATOR_OUTPUT_BEGIN"));if(n===-1)return;let i=-1;for(let o=e.length-1;o>n;o--)if(e[o].includes("SIMULATOR_OUTPUT_END")){i=o;break}return i>n?{start:n,end:i}:void 0}function st(t,e,n,i){let o=t.split(/\r?\n/),r=[],c=[],a=[],s=[],l=0,u=0,h=0,I=!1;for(let _=0;_<o.length;_++){let g=o[_];if(e==="stdout"&&ie.test(g)){s.push(F(g,400));continue}if(n&&i!==void 0&&_>=i.start&&_<=i.end)continue;if(Ct(g,e))if(l++,r.length<20){let m=[];for(let p=_-1;p>=0&&m.length<2;p--){let w=o[p];if(w.trim().length>0)m.unshift(F(w,200))}r.push({source:e,index:_+1,line:F(g,400),...m.length>0?{contextBefore:m}:{}})}else I=!0;else if(ee.test(g))if(u++,c.length<15)c.push({source:e,index:_+1,line:F(g,400)});else I=!0;else if(oe(g,e))if(h++,a.length<10)a.push({source:e,index:_+1,line:F(g,400)});else I=!0}return{failure:r,warning:c,pass:a,phaseMarkers:s,truncated:I,counts:{failure:l,warning:u,pass:h}}}function ct(t,e){let n=e.stdout??"",i=e.stderr??"",o=e.simulator,r=o!==void 0?re(n):void 0,c=st(n,"stdout",o!==void 0,r),a=st(i,"stderr",!1,void 0),s=o!==void 0?st(o,"simulator",!1,void 0):void 0;return{schema:"synthia-log-digest.v1",operation:t,counts:{failure:c.counts.failure+a.counts.failure+(s?.counts.failure??0),warning:c.counts.warning+a.counts.warning+(s?.counts.warning??0),pass:c.counts.pass+a.counts.pass+(s?.counts.pass??0)},failureLines:[...s?.failure??[],...c.failure,...a.failure],warningLines:[...c.warning,...a.warning,...s?.warning??[]],passLines:[...s?.pass??[],...c.pass,...a.pass],phaseMarkers:c.phaseMarkers,scanned:{stdout:n.length,stderr:i.length,...o!==void 0?{simulator:o.length}:{}},truncated:c.truncated||a.truncated||(s?.truncated??!1)}}var pe="vivado-batch-1",K=[["discover_toolchain","node","toolchain_snapshot"],["query_parts","part_query","part_list"],["validate_sources","source_manifest","source_validation"],["simulate","simulation_request","simulation_result"],["synthesize","synthesis_request","synthesis_result"],["implement","implementation_request","bitstream_artifact"],["report_drc","design_request","drc_report"],["report_sta","design_request","sta_report"],["report_resources","design_request","resource_report"]].map(([t,e,n])=>({operation:t,version:pe,runClasses:["exploratory","gate_check","formal",...["validate_sources","simulate","synthesize","implement"].includes(t)?["evolution_eval"]:[]],inputKind:e,outputKind:n,execution:"vivado_batch"})),_e=1800000,fe=7200000,Ut="all",he=4194304;function Ie(t){return`set wave_open 0
+if {[catch {
+  open_vcd ${A(f(t,"waveform.vcd"))}
+  set wave_open 1
+  limit_vcd ${he}
+  log_vcd [get_objects -r /*]
+} wave_error]} { puts "SYNTHIA_WAVEFORM_EXPORT_UNAVAILABLE: $wave_error" }
+set run_code [catch {run ${Ut}} run_error run_options]
+if {$wave_open} { catch {flush_vcd}; catch {close_vcd} }
+if {$run_code} { return -options $run_options $run_error }
+quit
+`}var ft=/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,Z=(t)=>se("sha256").update(t).digest("hex");function d(t){throw Error(`VIVADO_POLICY_REJECTED:${t}`)}var ye=/^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;function X(t){if(!t||Buffer.byteLength(t,"utf8")>512||t!==t.normalize("NFC")||t.startsWith("/")||t.startsWith("\\")||t.includes("\\")||t.includes("\x00"))d("UNSAFE_PATH");let e=t.split("/");if(e.length===0||e.length>32)d("UNSAFE_PATH");for(let n of e){if(!n||n==="."||n===".."||Buffer.byteLength(n,"utf8")>255||/[\u0000-\u001f\u007f:*?"<>|]/u.test(n)||/[ .]$/.test(n))d("UNSAFE_PATH");let i=n.split(".",1)[0].replace(/[ .]+$/u,"");if(ye.test(i))d("UNSAFE_PATH")}}function ge(t){return t.normalize("NFC").toLowerCase()}function me(t){let e=new Set;for(let n of t){let i=ge(n);if(e.has(i))d("PATH_COLLISION");e.add(i)}}function k(t,e){if(!t||t.length>256||/[\0\r\n{}\[\]$;]/.test(t))d(`UNSAFE_${e.toUpperCase()}`)}function M(t){return typeof t==="object"&&t!==null&&!Array.isArray(t)}var Ee={"text/verilog":!0,"text/x-verilog":!0,"text/systemverilog":!0,"text/x-systemverilog":!0,"application/systemverilog":!0};function Ae(t){let e=t.path.toLowerCase(),n=e.endsWith(".v")||e.endsWith(".vh")||e.endsWith(".sv")||e.endsWith(".svh"),i=t.mediaType===void 0||Ee[t.mediaType]===!0;if(!n||!i)d("UNSUPPORTED_SOURCE_LANGUAGE")}function be(t){let e="",n=0,i=t.length;while(n<i){let o=t[n],r=n+1<i?t[n+1]:"";if(o==="/"&&r==="/"){n+=2;while(n<i&&t[n]!==`
+`)n++;continue}if(o==="/"&&r==="*"){n+=2;while(n<i&&!(t[n]==="*"&&n+1<i&&t[n+1]==="/"))n++;n+=2;continue}if(o==='"'){n+=1;while(n<i&&t[n]!=='"')if(t[n]==="\\"&&n+1<i)n+=2;else n+=1;if(n<i)n+=1;continue}e+=o,n+=1}return e}var Rt=/\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b/g;function ht(t){let e=be(typeof t.content==="string"?t.content:Buffer.from(t.content).toString("utf8")),n=[],i;Rt.lastIndex=0;while((i=Rt.exec(e))!==null)n.push(i[1]);return n}function ve(t){let e=new Map;for(let o of t.sources)for(let r of ht(o))e.set(r,(e.get(r)??0)+1);let n=e.get(t.top)??0,i=e.get(t.testbench)??0;if(n===0||i===0)d("MISSING_TOP_MODULE");if(n>1||i>1)d("AMBIGUOUS_TOP_MODULE");for(let o of t.sources){let r=new Set(ht(o));if(r.has(t.top)&&r.has(t.testbench))d("AMBIGUOUS_SOURCE_ROLE")}}var we=new Set(["create_clock","create_generated_clock","set_case_analysis","set_clock_groups","set_clock_latency","set_clock_transition","set_clock_uncertainty","set_disable_timing","set_false_path","set_input_delay","set_input_transition","set_io","set_load","set_location","set_max_capacitance","set_max_delay","set_max_fanout","set_max_transition","set_min_delay","set_multicycle_path","set_output_delay","set_property"]),Te=new Set(["current_design","get_cells","get_clocks","get_drc_checks","get_nets","get_pins","get_ports"]);function Se(t){if(/\\[ \t]*$/.test(t))d("XDC_LINE_CONTINUATION");let e=t.trim();if(!e||e.startsWith("#"))return;if(/\bset_property\b/i.test(e)&&/\bSEVERITY\b/i.test(e)&&/\bget_drc_checks\b/i.test(e)&&/\b(?:NSTD-1|UCIO-1)\b/i.test(e))d("UNSAFE_XDC_DRC_SEVERITY_OVERRIDE");if(e.includes("$")||e.includes(";")||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(e))d("UNSAFE_XDC_COMMAND");let n="";for(let o=0;o<e.length;){let r=e.indexOf("[",o),c=e.indexOf("]",o);if(c!==-1&&(r===-1||c<r))d("UNSAFE_XDC_COMMAND");if(r===-1){n+=e.slice(o);break}n+=e.slice(o,r);let a=e.indexOf("]",r+1);if(a===-1||e.slice(r+1,a).includes("[")||e.slice(r+1,a).includes("]"))d("UNSAFE_XDC_COMMAND");let l=e.slice(r+1,a).trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];if(!l||!Te.has(l))d("UNSAFE_XDC_QUERY");n+=" __SYNTHIA_QUERY__ ",o=a+1}if(n.includes("[")||n.includes("]"))d("UNSAFE_XDC_COMMAND");let i=n.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];if(!i||!we.has(i))d("UNSAFE_XDC_COMMAND")}function Ne(t){let e;try{e=typeof t==="string"?t:new TextDecoder("utf-8",{fatal:!0}).decode(t)}catch{d("INVALID_CONSTRAINT_ENCODING")}let n=e.replace(/\r\n/g,`
+`);if(n.includes("\r"))d("INVALID_CONSTRAINT_ENCODING");for(let i of n.split(`
+`))Se(i)}function It(t){if(!M(t))d("INVALID_REQUEST");if(typeof t.jobId!=="string"||typeof t.projectId!=="string"||!ft.test(t.jobId)||!ft.test(t.projectId))d("INVALID_ID");if(t.runClass!=="exploratory"&&t.runClass!=="gate_check"&&t.runClass!=="formal"&&t.runClass!=="evolution_eval")d("INVALID_RUN_CLASS");if(t.runClass==="evolution_eval"&&!["validate_sources","simulate","synthesize","implement"].includes(t.operation))d("CAPABILITY_UNAVAILABLE");if(t.inputHash!==void 0&&(typeof t.inputHash!=="string"||!/^[0-9a-f]{64}$/.test(t.inputHash)))d("INVALID_INPUT_HASH");if(t.toolchainHash!==void 0&&(typeof t.toolchainHash!=="string"||!/^[0-9a-f]{64}$/.test(t.toolchainHash)))d("INVALID_TOOLCHAIN_HASH");if(t.runClass==="formal"&&(!t.inputHash||!t.toolchainHash))d("FORMAL_BINDING_REQUIRED");if(t.timeoutMs!==void 0){let n=t.timeoutMs;if(typeof n!=="number"||!Number.isFinite(n)||!Number.isInteger(n)||n<=0||n>fe)d("INVALID_TIMEOUT")}if(!K.some((n)=>n.operation===t.operation))d("CAPABILITY_UNAVAILABLE");if(t.toolchain!==void 0){if(!M(t.toolchain))d("INVALID_TOOLCHAIN");if(t.toolchain.vivadoBinary!==void 0&&typeof t.toolchain.vivadoBinary!=="string")d("INVALID_TOOLCHAIN");if(t.toolchain.requiredLicense!==void 0&&typeof t.toolchain.requiredLicense!=="string")d("INVALID_TOOLCHAIN");if(t.toolchain.part!==void 0&&typeof t.toolchain.part!=="string")d("INVALID_TOOLCHAIN");if(t.toolchain.profileHash!==void 0&&typeof t.toolchain.profileHash!=="string")d("INVALID_TOOLCHAIN");if(t.toolchain.vivadoBinary)k(t.toolchain.vivadoBinary,"binary");if(t.toolchain.part)k(t.toolchain.part,"part");if(t.toolchain.profileHash!==void 0&&!/^[0-9a-f]{64}$/.test(t.toolchain.profileHash))d("INVALID_TOOLCHAIN");if(t.runClass==="formal"&&t.toolchain.profileHash!==void 0&&t.toolchain.profileHash!==t.toolchainHash)d("FORMAL_TOOLCHAIN_MISMATCH")}if("part"in t){if(typeof t.part!=="string")d("INVALID_PART");k(t.part,"part")}if("top"in t){if(typeof t.top!=="string")d("INVALID_TOP");k(t.top,"top")}if("stopBeforeBitstream"in t&&t.stopBeforeBitstream!==void 0){if(t.operation!=="implement"||typeof t.stopBeforeBitstream!=="boolean")d("INVALID_STOP_BEFORE_BITSTREAM")}if(t.operation==="simulate"){let n=t.testbench;if(n===void 0)d("NO_TESTBENCH");if(typeof n!=="string")d("INVALID_TESTBENCH");if(k(n,"testbench"),t.top===n)d("SAME_TOP_TESTBENCH")}if(t.operation==="implement"&&t.generateTrialBitstream!==void 0&&typeof t.generateTrialBitstream!=="boolean")d("INVALID_TRIAL_BITSTREAM_POLICY");if("pattern"in t&&t.pattern){if(typeof t.pattern!=="string")d("INVALID_PATTERN");k(t.pattern,"pattern")}if("family"in t&&t.family){if(typeof t.family!=="string")d("INVALID_FAMILY");k(t.family,"family")}if("sources"in t){if(!Array.isArray(t.sources))d("INVALID_SOURCES");if(!t.sources.length)d("NO_SOURCES");for(let n of t.sources){if(!M(n))d("INVALID_SOURCE");if(typeof n.path!=="string")d("INVALID_SOURCE_PATH");if(X(n.path),typeof n.content!=="string"&&!(n.content instanceof Uint8Array))d("INVALID_SOURCE_CONTENT");if(n.mediaType!==void 0&&typeof n.mediaType!=="string")d("INVALID_SOURCE_MEDIA_TYPE");Ae(n);let i=typeof n.content==="string"?Buffer.byteLength(n.content):n.content.byteLength;if(!i)d("EMPTY_SOURCE");if(i>16777216)d("SOURCE_TOO_LARGE")}if(t.operation==="simulate")ve(t)}if("constraints"in t&&t.constraints!==void 0){if(!Array.isArray(t.constraints))d("INVALID_CONSTRAINTS");for(let n of t.constraints){if(!M(n))d("INVALID_CONSTRAINT");if(typeof n.path!=="string")d("INVALID_CONSTRAINT_PATH");if(X(n.path),!n.path.toLowerCase().endsWith(".xdc"))d("UNSUPPORTED_CONSTRAINT_FORMAT");if(typeof n.content!=="string"&&!(n.content instanceof Uint8Array))d("INVALID_CONSTRAINT_CONTENT");if(n.mediaType!==void 0&&typeof n.mediaType!=="string")d("INVALID_CONSTRAINT_MEDIA_TYPE");let i=typeof n.content==="string"?Buffer.byteLength(n.content):n.content.byteLength;if(!i)d("EMPTY_CONSTRAINT");if(i>4194304)d("CONSTRAINT_TOO_LARGE");Ne(n.content)}}let e=[..."sources"in t&&Array.isArray(t.sources)?t.sources.map((n)=>n.path):[],..."constraints"in t&&Array.isArray(t.constraints)?t.constraints.map((n)=>n.path):[]];if(me(e),"part"in t&&t.toolchain?.part!==void 0&&t.part!==t.toolchain.part)d("TOOLCHAIN_PART_MISMATCH")}function Oe(t){if(!M(t))d("INVALID_REQUEST");let e=t,n=e.operation;if(!(n==="validate_sources"||n==="simulate"||n==="synthesize"||n==="implement"))d("CAPABILITY_UNAVAILABLE");let i={validate_sources:["deadlineAt","dispatchRequestHash","evalJobId","jobId","operation","projectId","runClass","schema","sealedInputProjectionHash","sources","timeoutMs","toolchainProfileHash","top","workspaceManifestHash"],simulate:["deadlineAt","dispatchRequestHash","evalJobId","jobId","operation","projectId","runClass","schema","sealedInputProjectionHash","sources","testbench","timeoutMs","toolchainProfileHash","top","workspaceManifestHash"],synthesize:["deadlineAt","dispatchRequestHash","evalJobId","jobId","operation","part","projectId","runClass","schema","sealedInputProjectionHash","sources","timeoutMs","toolchainProfileHash","top","workspaceManifestHash"],implement:["constraints","deadlineAt","dispatchRequestHash","evalJobId","generateTrialBitstream","jobId","operation","part","projectId","runClass","schema","sealedInputProjectionHash","sources","timeoutMs","toolchainProfileHash","top","workspaceManifestHash"]},o=Reflect.ownKeys(e),r=i[n];if(o.some((a)=>typeof a!=="string")||o.length!==r.length||[...o].sort().some((a,s)=>a!==[...r].sort()[s]))d("INVALID_REQUEST");if(e.schema!=="evolution-eval-vivado-request.v1"||e.runClass!=="evolution_eval")d("INVALID_RUN_CLASS");if(!Array.isArray(e.sources)||e.sources.length<1||e.sources.length>512)d("INVALID_SOURCES");for(let a of e.sources)if(!M(a)||Reflect.ownKeys(a).length!==3||!["content","mediaType","path"].every((s)=>Object.prototype.hasOwnProperty.call(a,s)))d("INVALID_SOURCE");if(n==="implement"){if(!Array.isArray(e.constraints)||e.constraints.length>128)d("INVALID_CONSTRAINTS");for(let a of e.constraints)if(!M(a)||Reflect.ownKeys(a).length!==3||!["content","mediaType","path"].every((s)=>Object.prototype.hasOwnProperty.call(a,s)))d("INVALID_CONSTRAINT")}for(let a of["dispatchRequestHash","workspaceManifestHash","sealedInputProjectionHash","toolchainProfileHash"])if(typeof e[a]!=="string"||!/^[0-9a-f]{64}$/.test(e[a]))d("INVALID_INPUT_HASH");if(typeof e.deadlineAt!=="string"||!e.deadlineAt.endsWith("Z")||!Number.isFinite(Date.parse(e.deadlineAt)))d("INVALID_TIMEOUT");let c=n==="validate_sources"?{operation:n,jobId:e.jobId,projectId:e.projectId,runClass:e.runClass,sources:e.sources,...e.top===null?{}:{top:e.top},inputHash:e.workspaceManifestHash,toolchainHash:e.toolchainProfileHash,timeoutMs:e.timeoutMs}:n==="simulate"?{operation:n,jobId:e.jobId,projectId:e.projectId,runClass:e.runClass,sources:e.sources,top:e.top,testbench:e.testbench,inputHash:e.workspaceManifestHash,toolchainHash:e.toolchainProfileHash,timeoutMs:e.timeoutMs}:n==="synthesize"?{operation:n,jobId:e.jobId,projectId:e.projectId,runClass:e.runClass,sources:e.sources,top:e.top,part:e.part,inputHash:e.workspaceManifestHash,toolchainHash:e.toolchainProfileHash,timeoutMs:e.timeoutMs}:{operation:n,jobId:e.jobId,projectId:e.projectId,runClass:e.runClass,sources:e.sources,constraints:e.constraints,top:e.top,part:e.part,generateTrialBitstream:e.generateTrialBitstream,inputHash:e.workspaceManifestHash,toolchainHash:e.toolchainProfileHash,timeoutMs:e.timeoutMs};if(It(c),typeof e.evalJobId!=="string"||!ft.test(e.evalJobId))d("INVALID_ID");return structuredClone(t)}function A(t){return`{${t.replace(/[{}]/g,(e)=>`\\${e}`)}}`}function Ce(t,e){let n=A(f(e,t.path));return t.path.toLowerCase().endsWith(".sv")||t.mediaType==="text/systemverilog"||t.mediaType==="application/systemverilog"?`read_verilog -sv ${n}`:`read_verilog ${n}`}function Re(t,e,n){let i="sources"in t?t.sources.map((a)=>Ce(a,e)).join(`
+`):"",o="top"in t&&typeof t.top==="string"?`-top ${A(t.top)}`:"",r="part"in t&&typeof t.part==="string"?`-part ${A(t.part)}`:t.toolchain?.part?`-part ${A(t.toolchain.part)}`:"";if(t.operation==="discover_toolchain")return`puts [version -short]
+puts [join [get_parts *] \\"\\n\\"]`;if(t.operation==="query_parts")return`puts [join [get_parts ${A(t.pattern??"*")}] "\\n"]`;if(t.operation==="validate_sources")return`${i}
+puts SOURCE_VALIDATION_OK`;if(t.operation==="simulate"){let a=[],s=[];for(let b of t.sources){let m=A(f(e,b.path));(ht(b).includes(t.testbench)||/(^|\/)(?:tb|test|tests|testbench)(?:\/|$)/i.test(b.path)?s:a).push(m)}let l=a.join(" "),u=s.join(" "),h=A(f(_t(e,".."),"vivado-project")),I=A(t.toolchain?.part??"xc7k70tfbv676-1"),_=A(t.top),g=A(t.testbench);return`${i}
+create_project synthia_batch ${h} -part ${I} -force
+add_files -fileset sources_1 ${l}
+add_files -fileset sim_1 ${u}
+set_property top ${_} [get_filesets sources_1]
+set_property top ${g} [get_filesets sim_1]
+set_property xsim.simulate.runtime {${Ut}} [get_filesets sim_1]
+set_property xsim.simulate.custom_tcl [file normalize ${A(f(n,"waveform.tcl"))}] [get_filesets sim_1]
 update_compile_order -fileset sources_1
 update_compile_order -fileset sim_1
 launch_simulation -mode behavioral -scripts_only -absolute_path
-set simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]
+set simRoot [file normalize [file join ${h} "synthia_batch.sim" "sim_1" "behav" "xsim"]]
 cd $simRoot
 proc phaseExitCode {options} {
   if {[dict exists $options -errorcode]} {
@@ -864,498 +51,179 @@ puts "PHASE_EXIT_CODE=0"
 puts "SIMULATOR_OUTPUT_BEGIN"
 puts $sim_output
 puts "SIMULATOR_OUTPUT_END"
-puts SIMULATION_OK`;
-  }
-  if (request.operation === "synthesize")
-    return `${sources}
-synth_design ${part} ${top}
-report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
-  if (request.operation === "implement") {
-    const constraints = (request.constraints ?? []).map((c) => `read_xdc ${tclQuote(join2(inputDir, c.path))}`).join(`
-`);
-    const out = (name) => tclQuote(join2(outputDir, name));
-    return [sources, constraints, `synth_design ${part} ${top}`, `write_checkpoint -force ${out("synth.dcp")}`, "opt_design", "place_design", "route_design", `report_methodology -file ${out("methodology.rpt")}`, `report_cdc -details -file ${out("cdc.rpt")}`, `report_drc -file ${out("drc.rpt")}`, `report_timing_summary -file ${out("sta.rpt")}`, `report_utilization -file ${out("resources.rpt")}`, "set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]", 'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }', "set timingClocks [get_clocks -quiet]", 'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }', "set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]", 'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }', `write_checkpoint -force ${out("routed.dcp")}`, request.stopBeforeBitstream ? "puts BITSTREAM_GENERATION_SKIPPED" : `write_bitstream -force ${out("synthia.bit")}`, "puts IMPLEMENT_OK"].filter(Boolean).join(`
-`);
-  }
-  const report = request.operation === "report_drc" ? `report_drc -file ${tclQuote(join2(outputDir, "drc.rpt"))}` : request.operation === "report_sta" ? `report_timing_summary -file ${tclQuote(join2(outputDir, "sta.rpt"))}` : `report_utilization -file ${tclQuote(join2(outputDir, "resources.rpt"))}`;
-  return `${sources}
-synth_design ${part} ${top}
-${report}`;
-}
-function inputMember(source) {
-  const bytes = typeof source.content === "string" ? new TextEncoder().encode(source.content) : source.content;
-  return {
-    path: source.path,
-    sha256: hash(bytes),
-    sizeBytes: bytes.byteLength,
-    mediaType: source.mediaType ?? "application/octet-stream"
-  };
-}
-function evidenceInputManifest(request) {
-  return {
-    schema: "vivado-input-manifest.v1",
-    jobId: request.jobId,
-    projectId: request.projectId,
-    operation: request.operation,
-    runClass: request.runClass,
-    inputHash: request.inputHash ?? null,
-    toolchainHash: request.toolchainHash ?? request.toolchain?.profileHash ?? null,
-    top: "top" in request ? request.top : null,
-    testbench: request.operation === "simulate" ? request.testbench : null,
-    part: request.operation === "synthesize" || request.operation === "implement" ? "part" in request ? request.part : request.toolchain?.part ?? null : null,
-    stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
-    sources: "sources" in request ? request.sources.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : [],
-    constraints: "constraints" in request && request.constraints ? request.constraints.map(inputMember).sort((a, b) => String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0) : []
-  };
-}
-var RESULT_FILE_BY_OPERATION = {
-  validate_sources: "validation-result.json",
-  simulate: "simulation-result.json",
-  synthesize: "synthesis-result.json",
-  implement: "implementation-result.json"
-};
-async function writeExecutionEvidence(outputDir, request, result, status, details = {}) {
-  const stdout = result.stdout ?? "";
-  const stderr = result.stderr ?? "";
-  await Promise.all([
-    writeFile2(join2(outputDir, "stdout.log"), stdout, "utf8"),
-    writeFile2(join2(outputDir, "stderr.log"), stderr, "utf8"),
-    writeFile2(join2(outputDir, "tool.log"), `${stdout}${stdout && stderr ? `
-` : ""}${stderr}`, "utf8")
-  ]);
-  const resultName = RESULT_FILE_BY_OPERATION[request.operation];
-  if (resultName) {
-    await writeFile2(join2(outputDir, resultName), JSON.stringify({
-      schema: `${request.operation}-result.v1`,
-      passed: status === "succeeded",
-      status,
-      exitCode: result.exitCode,
-      timedOut: result.timedOut === true,
-      ...details
-    }, null, 2), "utf8");
-  }
-}
-async function evidence(workspace, jobId, omittedNames = new Set) {
-  const output = join2(workspace, "output");
-  const entries = [];
-  for (const name of (await readdir(output)).sort()) {
-    safePath(name);
-    if (omittedNames.has(name))
-      continue;
-    const bytes = await readFile2(join2(output, name));
-    const mediaType = name.endsWith(".json") ? "application/json" : name.endsWith(".rpt") || name.endsWith(".log") || name.endsWith(".tcl") ? "text/plain" : "application/octet-stream";
-    entries.push({ name, uri: `workspace://${jobId}/output/${name}`, sha256: hash(bytes), sizeBytes: (await stat2(join2(output, name))).size, mediaType });
-  }
-  return { jobId, entries };
-}
-function terminateProcessTree(pid) {
-  try {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-  } catch {}
-}
-var defaultRunner = (command, args, cwd, timeoutMs) => {
-  const { promise, resolve: resolve2, reject: reject2 } = Promise.withResolvers();
-  const lower = command.toLowerCase();
-  const isBatch = lower.endsWith(".bat") || lower.endsWith(".cmd");
-  const child = isBatch ? spawn("cmd.exe", ["/d", "/s", "/c", `"${command}"`, ...args], { cwd, stdio: ["ignore", "pipe", "pipe"], windowsVerbatimArguments: true }) : spawn(command, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-  let stdout = "", stderr = "", timedOut = false;
-  child.stdout.on("data", (d) => stdout += d);
-  child.stderr.on("data", (d) => stderr += d);
-  const timer = setTimeout(() => {
-    timedOut = true;
-    if (child.pid)
-      terminateProcessTree(child.pid);
-  }, timeoutMs);
-  child.once("error", reject2);
-  child.once("close", (exitCode) => {
-    clearTimeout(timer);
-    resolve2({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout, stderr, timedOut, signal: timedOut ? "SIGTERM" : null });
-  });
-  return promise;
-};
-function parseSimulatePhases(text) {
-  const phaseMatch = text.match(/^PHASE=(\S+)/m);
-  const exitMatch = text.match(/^PHASE_EXIT_CODE=(\d+)/m);
-  const beginIdx = text.indexOf("SIMULATOR_OUTPUT_BEGIN");
-  const endIdx = text.lastIndexOf("SIMULATOR_OUTPUT_END");
-  const simulatorStdout = beginIdx !== -1 && endIdx !== -1 ? text.slice(beginIdx + "SIMULATOR_OUTPUT_BEGIN".length, endIdx).trim() : undefined;
-  return { phase: phaseMatch?.[1], phaseExitCode: exitMatch ? Number(exitMatch[1]) : undefined, simulatorStdout };
-}
-function judgeSimulation(simulatorStdout, phaseExitCode, exitCode) {
-  const region = simulatorStdout ?? "";
-  if (/\bFatal:/i.test(region) || /\$fatal/i.test(region) || /^\s*FAIL\b/m.test(region) || /^\s*\[\s*FAIL\s*\]/m.test(region) || /\bFAIL\s*\(/m.test(region))
-    return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
-  if ((phaseExitCode ?? exitCode) !== 0 || exitCode !== 0)
-    return { status: "failed", errorCode: "VIVADO_SIMULATION_FAILED" };
-  if (/\bPASS\b/.test(region))
-    return { status: "succeeded" };
-  return { status: "failed", errorCode: "VIVADO_SIMULATION_INCONCLUSIVE" };
-}
-var PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS = ["synth.dcp", "methodology.rpt", "cdc.rpt", "drc.rpt", "sta.rpt", "resources.rpt", "routed.dcp"];
-var FAILED_IMPLEMENTATION_OMISSIONS = new Set(["synthia.bit"]);
-function judgeDrcReport(report) {
-  const finished = report.match(/DRC finished with\s+(\d+)\s+Errors?/i);
-  if (finished)
-    return Number(finished[1]) === 0 ? "passed" : "failed";
-  if (!/\bReport DRC\b/i.test(report))
-    return "inconclusive";
-  const found = report.match(/Violations found:\s*(\d+)/i);
-  const rows = [...report.matchAll(/^\|\s*[^|]+\|\s*(Error|Critical Warning|Warning|Advisory)\s*\|[^|]*\|\s*(\d+)\s*\|\s*$/gim)];
-  if (rows.some((row) => row[1]?.toLowerCase() === "error") || /^\S+#\d+\s+Error\s*$/im.test(report))
-    return "failed";
-  if (!found)
-    return "inconclusive";
-  const violationCount = Number(found[1]);
-  if (violationCount === 0)
-    return "passed";
-  const summarizedCount = rows.reduce((total, row) => total + Number(row[2]), 0);
-  return rows.length > 0 && summarizedCount === violationCount ? "passed" : "inconclusive";
-}
-function judgeStaReport(report) {
-  if (/There are\s+[1-9]\d*\s+register\/latch pins with no clock driven/i.test(report) || /There are no user specified timing constraints\./i.test(report) || /\bno clocks? found\b/i.test(report) || /\bno timing constraints?\b/i.test(report))
-    return "unconstrained";
-  if (/timing constraints are not met/i.test(report) || /Slack\s*\(VIOLATED\)/i.test(report))
-    return "failed";
-  const lines = report.split(/\r?\n/);
-  const summaryHeader = lines.findIndex((line) => /\bWNS\(ns\)/.test(line) && /\bTNS\(ns\)/.test(line));
-  let summary;
-  if (summaryHeader !== -1) {
-    for (const line of lines.slice(summaryHeader + 1, summaryHeader + 8)) {
-      const values = line.trim().split(/\s+/);
-      if (values.length >= 2 && values.every((value) => /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value))) {
-        summary = values.map(Number);
-        break;
-      }
-    }
-  }
-  if (summary) {
-    const slackAndViolationIndexes = summary.length >= 10 ? [0, 1, 4, 5, 8, 9] : [0, 1];
-    if (slackAndViolationIndexes.some((index) => (summary?.[index] ?? 0) < 0))
-      return "failed";
-  }
-  if (!/All user specified timing constraints are met\./i.test(report) || !summary)
-    return "inconclusive";
-  return "passed";
-}
-async function implementationVerdict(outputDir, exitCode, text, stopBeforeBitstream) {
-  let drc;
-  let sta;
-  try {
-    drc = await readFile2(join2(outputDir, "drc.rpt"), "utf8");
-  } catch {}
-  try {
-    sta = await readFile2(join2(outputDir, "sta.rpt"), "utf8");
-  } catch {}
-  if (drc !== undefined && judgeDrcReport(drc) === "failed" || /SYNTHIA_DRC_FAILED/.test(text))
-    return { status: "failed", errorCode: "VIVADO_DRC_FAILED" };
-  if (sta !== undefined && judgeStaReport(sta) === "unconstrained" || /SYNTHIA_TIMING_UNCONSTRAINED/.test(text))
-    return { status: "failed", errorCode: "VIVADO_TIMING_UNCONSTRAINED" };
-  if (sta !== undefined && judgeStaReport(sta) === "failed" || /SYNTHIA_TIMING_FAILED/.test(text))
-    return { status: "failed", errorCode: "VIVADO_TIMING_FAILED" };
-  if (exitCode !== 0)
-    return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_FAILED" };
-  if (drc === undefined || sta === undefined || judgeDrcReport(drc) !== "passed" || judgeStaReport(sta) !== "passed")
-    return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
-  for (const name of [...PRE_BITSTREAM_IMPLEMENTATION_OUTPUTS, ...stopBeforeBitstream ? [] : ["synthia.bit"]]) {
-    try {
-      const details = await stat2(join2(outputDir, name));
-      if (!details.isFile() || details.size === 0)
-        return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
-    } catch {
-      return { status: "failed", errorCode: "VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE" };
-    }
-  }
-  if (stopBeforeBitstream) {
-    try {
-      await access(join2(outputDir, "synthia.bit"));
-      return { status: "failed", errorCode: "VIVADO_UNEXPECTED_BITSTREAM" };
-    } catch {}
-  }
-  return { status: "succeeded" };
-}
-async function failedImplementationEvidence(workspace, jobId) {
-  try {
-    await unlink(join2(workspace, "output", "synthia.bit"));
-  } catch {}
-  return evidence(workspace, jobId, FAILED_IMPLEMENTATION_OMISSIONS);
-}
+puts SIMULATION_OK`}if(t.operation==="synthesize")return`${i}
+synth_design ${r} ${o}
+report_utilization -file ${A(f(n,"resources.rpt"))}`;if(t.operation==="implement"){let a=(t.constraints??[]).map((l)=>`read_xdc ${A(f(e,l.path))}`).join(`
+`),s=(l)=>A(f(n,l));return[i,a,`synth_design ${r} ${o}`,`write_checkpoint -force ${s("synth.dcp")}`,"opt_design","place_design","route_design",`report_methodology -file ${s("methodology.rpt")}`,`report_cdc -details -file ${s("cdc.rpt")}`,`report_drc -file ${s("drc.rpt")}`,`report_timing_summary -file ${s("sta.rpt")}`,`report_utilization -file ${s("resources.rpt")}`,"set drcErrors [get_drc_violations -quiet -filter {SEVERITY == Error}]",'if {[llength $drcErrors] > 0} { error "SYNTHIA_DRC_FAILED" }',"set timingClocks [get_clocks -quiet]",'if {[llength $timingClocks] == 0} { error "SYNTHIA_TIMING_UNCONSTRAINED" }',"set failingPaths [get_timing_paths -quiet -max_paths 1 -slack_lesser_than 0]",'if {[llength $failingPaths] > 0} { error "SYNTHIA_TIMING_FAILED" }',`write_checkpoint -force ${s("routed.dcp")}`,t.stopBeforeBitstream?"puts BITSTREAM_GENERATION_SKIPPED":t.generateTrialBitstream===!1?"":`write_bitstream -force ${s("synthia.bit")}`,"puts IMPLEMENT_OK"].filter(Boolean).join(`
+`)}let c=t.operation==="report_drc"?`report_drc -file ${A(f(n,"drc.rpt"))}`:t.operation==="report_sta"?`report_timing_summary -file ${A(f(n,"sta.rpt"))}`:`report_utilization -file ${A(f(n,"resources.rpt"))}`;return`${i}
+synth_design ${r} ${o}
+${c}`}function Lt(t){let e=typeof t.content==="string"?new TextEncoder().encode(t.content):t.content;return{path:t.path,sha256:Z(e),sizeBytes:e.byteLength,mediaType:t.mediaType??"application/octet-stream"}}function Le(t){return{schema:"vivado-input-manifest.v1",jobId:t.jobId,projectId:t.projectId,operation:t.operation,runClass:t.runClass,inputHash:t.inputHash??null,toolchainHash:t.toolchainHash??t.toolchain?.profileHash??null,top:"top"in t?t.top:null,testbench:t.operation==="simulate"?t.testbench:null,part:t.operation==="synthesize"||t.operation==="implement"?"part"in t?t.part:t.toolchain?.part??null:null,stopBeforeBitstream:t.operation==="implement"?t.stopBeforeBitstream===!0:null,sources:"sources"in t?t.sources.map(Lt).sort((e,n)=>String(e.path)<String(n.path)?-1:String(e.path)>String(n.path)?1:0):[],constraints:"constraints"in t&&t.constraints?t.constraints.map(Lt).sort((e,n)=>String(e.path)<String(n.path)?-1:String(e.path)>String(n.path)?1:0):[]}}var De={validate_sources:"validation-result.json",simulate:"simulation-result.json",synthesize:"synthesis-result.json",implement:"implementation-result.json"};async function lt(t,e,n,i,o={}){let r=n.stdout??"",c=n.stderr??"";const Qe=5242880,Zt=(x)=>x.length>Qe?x.slice(0,Qe)+"\n[TRUNCATED: evidence capped at 5MB]\n":x;await Promise.all([O(f(t,"stdout.log"),Zt(r),"utf8"),O(f(t,"stderr.log"),Zt(c),"utf8"),O(f(t,"tool.log"),Zt(`${r}${r&&c?`
+`:""}${c}`),"utf8")]);let a=De[e.operation];if(a)await O(f(t,a),JSON.stringify({schema:`${e.operation}-result.v1`,passed:i==="succeeded",status:i,exitCode:n.exitCode,timedOut:n.timedOut===!0,...o},null,2),"utf8")}async function D(t,e,n=new Set){let i=f(t,"output"),o=[];for(let r of(await de(i)).sort()){if(X(r),n.has(r))continue;let c=await P(f(i,r)),a=r.endsWith(".json")?"application/json":r.endsWith(".rpt")||r.endsWith(".log")||r.endsWith(".tcl")||r.endsWith(".vcd")?"text/plain":"application/octet-stream";o.push({name:r,uri:`workspace://${e}/output/${r}`,sha256:Z(c),sizeBytes:(await xt(f(i,r))).size,mediaType:a})}return{jobId:e,entries:o}}function ut(t){if(process.platform==="win32"){try{J("taskkill",["/PID",String(t),"/T","/F"],{stdio:"ignore",windowsHide:!0})}catch{}return}try{process.kill(-t,"SIGTERM")}catch{try{process.kill(t,"SIGTERM")}catch{}}setTimeout(()=>{try{process.kill(-t,"SIGKILL")}catch{try{process.kill(t,"SIGKILL")}catch{}}},1000).unref()}var Pe=String.raw`
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+$identityPid = [int]$env:SYNTHIA_PROCESS_IDENTITY_PID
+$process = Get-Process -Id $identityPid
+$operatingSystem = Get-CimInstance Win32_OperatingSystem
+$cimProcess = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $identityPid)
+if ($null -eq $cimProcess -or [string]::IsNullOrWhiteSpace([string]$cimProcess.CommandLine)) { exit 19 }
+$facts = $operatingSystem.LastBootUpTime.ToUniversalTime().Ticks.ToString() + ':' +
+  $process.StartTime.ToUniversalTime().Ticks.ToString() + ':' + [string]$cimProcess.CommandLine
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($facts))
+[Console]::Out.Write('SYNTHIA_PROCESS_IDENTITY:' + $env:SYNTHIA_PROCESS_IDENTITY_NONCE + ':' + $encoded)
+`;function xe(t){if(!Number.isSafeInteger(t)||t<1)return null;let e=Dt(16).toString("hex"),n=J("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-EncodedCommand",Buffer.from(Pe,"utf16le").toString("base64")],{encoding:"utf8",windowsHide:!0,env:{...process.env,SYNTHIA_PROCESS_IDENTITY_PID:String(t),SYNTHIA_PROCESS_IDENTITY_NONCE:e}});if(n.error||n.status!==0||n.stderr.trim()!=="")return null;let i=`SYNTHIA_PROCESS_IDENTITY:${e}:`;if(!n.stdout.startsWith(i))return null;let o=n.stdout.slice(i.length);if(!/^[A-Za-z0-9+/]+={0,2}$/.test(o))return null;let r=Buffer.from(o,"base64");if(r.toString("base64")!==o)return null;let c;try{c=new TextDecoder("utf-8",{fatal:!0}).decode(r)}catch{return null}return/^\d+:\d+:.+$/s.test(c)?c:null}async function Ve(t){let e="";if(process.platform==="linux"){let n=await P(`/proc/${t}/stat`,"utf8"),i=n.slice(n.lastIndexOf(")")+2).trim().split(/\s+/),o=(await P("/proc/sys/kernel/random/boot_id","utf8")).trim();if(!i[19]||!o)throw Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");e=`${o}:${t}:${i[19]}`}else if(process.platform==="win32"){let n=xe(t);if(!n)throw Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");e=`${t}:${n}`}else{let n=J("sysctl",["-n","kern.boottime"],{encoding:"utf8"}),i=J("ps",["-o","lstart=","-o","command=","-p",String(t)],{encoding:"utf8"}),o=n.stdout.trim(),r=i.stdout.trim();if(n.error||n.status!==0||i.error||i.status!==0||!o||!r)throw Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");e=`${o}:${t}:${r}`}if(!e.trim())throw Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");return Z(e)}var ke=String.raw`
+const { spawn } = require("node:child_process");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  if (!input) process.exit(125);
+  let request;
+  try { request = JSON.parse(input); } catch { process.exit(125); }
+  const lower = String(request.command).toLowerCase();
+  const isBatch = process.platform === "win32" && (lower.endsWith(".bat") || lower.endsWith(".cmd"));
+  const child = isBatch
+    ? spawn("cmd.exe", ["/d", "/s", "/c", '"' + request.command + '"', ...request.args], { cwd: request.cwd, stdio: ["ignore", "inherit", "inherit"], windowsVerbatimArguments: true })
+    : spawn(request.command, request.args, { cwd: request.cwd, stdio: ["ignore", "inherit", "inherit"] });
+  child.once("error", () => process.exit(126));
+  child.once("exit", (code, signal) => process.exit(code == null ? (signal ? 128 : 1) : code));
+});
+process.stdin.resume();
+`,Me=String.raw`
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 
-class VivadoBatchAdapter {
-  run;
-  root;
-  defaultBinary;
-  configuredPart;
-  configuredProfileHash;
-  injected;
-  constructor(options) {
-    this.root = resolve(options.workspaceRoot);
-    this.defaultBinary = options.binary ?? "vivado";
-    this.configuredPart = options.part;
-    this.configuredProfileHash = options.profileHash;
-    this.injected = options.commandRunner !== undefined;
-    this.run = options.commandRunner ?? defaultRunner;
-  }
-  capabilities() {
-    return VIVADO_CAPABILITIES;
-  }
-  async execute(request) {
-    validateVivadoRequest(request);
-    if (request.toolchain?.vivadoBinary !== undefined && request.toolchain.vivadoBinary !== this.defaultBinary)
-      reject("TOOLCHAIN_BINARY_MISMATCH");
-    if (this.configuredPart !== undefined && (("part" in request) && request.part !== this.configuredPart || request.toolchain?.part !== undefined && request.toolchain.part !== this.configuredPart))
-      reject("TOOLCHAIN_PART_MISMATCH");
-    if (this.configuredProfileHash !== undefined && (request.toolchainHash !== undefined && request.toolchainHash !== this.configuredProfileHash || request.toolchain?.profileHash !== undefined && request.toolchain.profileHash !== this.configuredProfileHash))
-      reject("TOOLCHAIN_PROFILE_MISMATCH");
-    const effectiveToolchain = {
-      ...request.toolchain ?? {},
-      vivadoBinary: this.defaultBinary,
-      ...this.configuredPart !== undefined ? { part: this.configuredPart } : {},
-      ...this.configuredProfileHash !== undefined ? { profileHash: this.configuredProfileHash } : {}
-    };
-    const effectiveRequest = { ...request, toolchain: effectiveToolchain };
-    const workspace = join2(this.root, request.jobId);
-    const inputDir = join2(workspace, "input");
-    const outputDir = join2(workspace, "output");
-    await mkdir2(inputDir, { recursive: true });
-    await mkdir2(outputDir, { recursive: true });
-    if (request.operation === "implement" && request.stopBeforeBitstream === true) {
-      try {
-        await unlink(join2(outputDir, "synthia.bit"));
-      } catch {}
-    }
-    if ("sources" in request)
-      for (const source of request.sources) {
-        safePath(source.path);
-        const target = join2(inputDir, source.path);
-        await mkdir2(dirname(target), { recursive: true });
-        await writeFile2(target, source.content);
-      }
-    if ("constraints" in request && request.constraints)
-      for (const constraint of request.constraints) {
-        safePath(constraint.path);
-        const target = join2(inputDir, constraint.path);
-        await mkdir2(dirname(target), { recursive: true });
-        await writeFile2(target, constraint.content);
-      }
-    const inputSha256 = hash(JSON.stringify(effectiveRequest));
-    const binary = this.defaultBinary;
-    const command = [binary, "-mode", "batch", "-nolog", "-nojournal", "-notrace", "-source", join2(workspace, "run.tcl")];
-    const base = { jobId: request.jobId, operation: request.operation, command, inputSha256, workspace, toolchain: { binary, licenseStatus: "unknown", part: "part" in request ? request.part : effectiveRequest.toolchain?.part, profileHash: effectiveRequest.toolchain?.profileHash ?? request.toolchainHash }, evidence: { jobId: request.jobId, entries: [] } };
-    try {
-      if (!this.injected && (binary.includes("/") || binary.includes("\\")))
-        await access(binary, constants.X_OK);
-    } catch {
-      return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE" };
-    }
-    const runScript = scriptFor(effectiveRequest, inputDir, outputDir);
-    await Promise.all([
-      writeFile2(join2(workspace, "run.tcl"), runScript, "utf8"),
-      writeFile2(join2(outputDir, "run.tcl"), runScript, "utf8"),
-      writeFile2(join2(outputDir, "input-manifest.json"), JSON.stringify(evidenceInputManifest(effectiveRequest), null, 2), "utf8")
-    ]);
-    const effectiveTimeout = request.timeoutMs ?? VIVADO_DEFAULT_TIMEOUT_MS;
-    let result;
-    try {
-      result = await this.run(binary, command.slice(1), workspace, effectiveTimeout);
-    } catch (error) {
-      const code = error?.code;
-      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
-      if (code === "ENOENT" || code === "EACCES")
-        return { ...base, status: "unsupported", unsupportedReason: "BINARY_UNAVAILABLE", evidence: ev2 };
-      return { ...base, status: "lost", evidence: ev2 };
-    }
-    if (result.timedOut) {
-      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
-      return { ...base, status: "timeout", timedOut: true, signal: result.signal ?? null, exitCode: result.exitCode, timeoutMs: effectiveTimeout, evidence: ev2 };
-    }
-    const text = `${result.stdout}
-${result.stderr}`;
-    const baseDigest = buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr });
-    await writeFile2(join2(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(baseDigest, null, 2), "utf8");
-    const licenseSuccess = /\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(text);
-    const licenseFailure = !licenseSuccess && result.exitCode !== 0 && /\b(?:license|licence)\b/i.test(text);
-    if (licenseFailure) {
-      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
-      return { ...base, status: "unsupported", unsupportedReason: "LICENSE_UNAVAILABLE", exitCode: result.exitCode, toolchain: { ...base.toolchain, licenseStatus: "unavailable" }, evidence: ev2 };
-    }
-    if (/part.*(not found|does not exist|unknown)/i.test(text)) {
-      const ev2 = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);
-      return { ...base, status: "unsupported", unsupportedReason: "PART_UNAVAILABLE", exitCode: result.exitCode, evidence: ev2 };
-    }
-    const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" : base.toolchain.licenseStatus };
-    if (request.operation === "simulate") {
-      const sim = parseSimulatePhases(result.stdout);
-      const verdict = judgeSimulation(sim.simulatorStdout, sim.phaseExitCode, result.exitCode);
-      await writeExecutionEvidence(outputDir, request, result, verdict.status, {
-        phase: sim.phase ?? null,
-        phaseExitCode: sim.phaseExitCode ?? null,
-        simulatorVerdict: verdict.errorCode ?? "passed"
-      });
-      const digest = sim.simulatorStdout !== undefined ? buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr, simulator: sim.simulatorStdout }) : baseDigest;
-      await writeFile2(join2(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(digest, null, 2), "utf8");
-      const ev2 = await evidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode, logDigest: digest };
-    }
-    if (request.operation === "implement") {
-      const stopBeforeBitstream = request.stopBeforeBitstream === true;
-      const verdict = await implementationVerdict(outputDir, result.exitCode, text, stopBeforeBitstream);
-      let drcVerdict = "inconclusive";
-      let timingVerdict = "inconclusive";
-      try {
-        drcVerdict = judgeDrcReport(await readFile2(join2(outputDir, "drc.rpt"), "utf8"));
-      } catch {}
-      try {
-        timingVerdict = judgeStaReport(await readFile2(join2(outputDir, "sta.rpt"), "utf8"));
-      } catch {}
-      await writeExecutionEvidence(outputDir, request, result, verdict.status, {
-        drcVerdict,
-        timingVerdict,
-        bitstreamGenerated: stopBeforeBitstream ? false : verdict.status === "succeeded",
-        stopBeforeBitstream,
-        errorCode: verdict.errorCode ?? null
-      });
-      const ev2 = verdict.status === "succeeded" ? await evidence(workspace, request.jobId) : await failedImplementationEvidence(workspace, request.jobId);
-      return { ...base, status: verdict.status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev2, errorCode: verdict.errorCode, logDigest: baseDigest };
-    }
-    const status = result.exitCode === 0 ? "succeeded" : "failed";
-    await writeExecutionEvidence(outputDir, request, result, status);
-    const ev = await evidence(workspace, request.jobId);
-    return { ...base, status, exitCode: result.exitCode, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, logDigest: baseDigest };
-  }
-}
+public static class SynthiaJobGuardian {
+  const uint CREATE_SUSPENDED = 0x00000004;
+  const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+  const uint STARTF_USESTDHANDLES = 0x00000100;
+  const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+  const int JobObjectExtendedLimitInformation = 9;
+  const int JobObjectBasicAccountingInformation = 1;
+  static readonly IntPtr PROC_THREAD_ATTRIBUTE_JOB_LIST = new IntPtr(0x0002000D);
 
-// connector/server.ts
-function required(value, name) {
-  if (typeof value !== "string" || !value.trim())
-    throw new Error(`CONFIG_INVALID:${name}`);
-  return value;
-}
-function workerRequestBindingMatches(request, candidate, toolchainProfileHash, configured) {
-  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
-    return false;
-  const binding = candidate;
-  const identityBinding = binding.jobId === request.jobId && binding.projectId === request.projectId && binding.operation === request.operation && binding.runClass === request.runClass;
-  const inputBinding = request.runClass === "formal" ? binding.inputHash === request.input : binding.inputHash === undefined || binding.inputHash === request.input;
-  const toolchainBinding = request.runClass !== "formal" || binding.toolchainHash === toolchainProfileHash;
-  const nested = binding.toolchain === undefined ? undefined : binding.toolchain && typeof binding.toolchain === "object" && !Array.isArray(binding.toolchain) ? binding.toolchain : null;
-  if (nested === null)
-    return false;
-  const profileBinding = nested?.profileHash === undefined || nested.profileHash === toolchainProfileHash;
-  const configuredBinding = configured === undefined || (nested?.vivadoBinary === undefined || nested.vivadoBinary === configured.vivadoBinary) && (nested?.part === undefined || nested.part === configured.part) && (binding.part === undefined || binding.part === configured.part);
-  return identityBinding && inputBinding && toolchainBinding && profileBinding && configuredBinding;
-}
-async function loadConfig(path = process.env.SYNTHIA_WORKER_CONFIG ?? "D:/synthia-worker/config.json") {
-  const config = JSON.parse(await readFile3(path, "utf8"));
-  for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "vivado_part", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"])
-    required(config[name], name);
-  if (config.protocol_version !== REMOTE_SCHEMA_VERSION || config.transport_mode !== "direct_https" || config.auth_mode !== "mtls")
-    throw new Error("CONFIG_INVALID:protocol");
-  if (!Number.isInteger(config.listen_port) || config.listen_port < 1 || config.listen_port > 65535)
-    throw new Error("CONFIG_INVALID:listen_port");
-  return config;
-}
-function execution(config) {
-  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, part: config.vivado_part, profileHash: config.toolchain_profile_hash });
-  return {
-    async discover() {
+  [StructLayout(LayoutKind.Sequential)] struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO {
+    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars;
+    public int dwFillAttribute; public uint dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+    public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+  [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public uint dwProcessId; public uint dwThreadId; }
+  [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }
+  [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+    public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+    public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+    public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+  }
+
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length, IntPtr returnedLength);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcess(
+    string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles,
+    uint creationFlags, IntPtr environment, string currentDirectory, ref STARTUPINFOEX startupInfo, out PROCESS_INFORMATION processInformation);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint exitCode);
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+
+  static void Win(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  static string Quote(string value) {
+    if (value.Length > 0 && value.IndexOfAny(new[]{' ', '\t', '"'}) < 0) return value;
+    var b = new StringBuilder("\""); int slashes = 0;
+    foreach (char c in value) {
+      if (c == '\\') { slashes++; continue; }
+      if (c == '"') { b.Append('\\', slashes * 2 + 1).Append('"'); slashes = 0; continue; }
+      b.Append('\\', slashes).Append(c); slashes = 0;
+    }
+    return b.Append('\\', slashes * 2).Append('"').ToString();
+  }
+  static string CommandLine(string application, string[] args) {
+    var b = new StringBuilder(Quote(application)); foreach (var arg in args) b.Append(' ').Append(Quote(arg)); return b.ToString();
+  }
+
+  public static int Run(string application, string[] args, string cwd) {
+    return RunTail(application, args, cwd, null);
+  }
+
+  public static int RunTail(string application, string[] args, string cwd, string rawTail) {
+    IntPtr job = IntPtr.Zero, limits = IntPtr.Zero, list = IntPtr.Zero, jobValue = IntPtr.Zero;
+    PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+    try {
+      job = CreateJobObject(IntPtr.Zero, null); Win(job != IntPtr.Zero);
+      var policy = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+      policy.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      int policySize = Marshal.SizeOf(policy); limits = Marshal.AllocHGlobal(policySize); Marshal.StructureToPtr(policy, limits, false);
+      Win(SetInformationJobObject(job, JobObjectExtendedLimitInformation, limits, (uint)policySize));
+
+      IntPtr listSize = IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref listSize);
+      list = Marshal.AllocHGlobal(listSize); Win(InitializeProcThreadAttributeList(list, 1, 0, ref listSize));
+      jobValue = Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(jobValue, job);
+      Win(UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobValue, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero));
+
+      var si = new STARTUPINFOEX(); si.StartupInfo.cb = Marshal.SizeOf(si); si.lpAttributeList = list;
+      si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+      si.StartupInfo.hStdInput = GetStdHandle(-10); si.StartupInfo.hStdOutput = GetStdHandle(-11); si.StartupInfo.hStdError = GetStdHandle(-12);
+      var line = new StringBuilder(CommandLine(application, args));
+      if (rawTail != null) line.Append(' ').Append(rawTail);
+      Win(CreateProcess(application, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, cwd, ref si, out pi));
+      if (ResumeThread(pi.hThread) == 0xFFFFFFFF) { TerminateProcess(pi.hProcess, 126); throw new Win32Exception(Marshal.GetLastWin32Error()); }
+      WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
+      uint code; Win(GetExitCodeProcess(pi.hProcess, out code));
+      int accountingSize = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+      IntPtr accounting = Marshal.AllocHGlobal(accountingSize);
       try {
-        await access2(config.vivado_binary, constants2.X_OK);
-      } catch {
-        return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "unavailable", vivado_patch: "unavailable", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: [], toolchain_profile_hash: config.toolchain_profile_hash, license_status: "unavailable", unsupported: ["vivado_binary"] };
-      }
-      return { connector_id: config.connector_id, connector_protocol_version: REMOTE_SCHEMA_VERSION, capability_map_version: config.capability_map_version, vivado_version: "2021.1", vivado_patch: "3247384", part_catalog_hash: config.part_catalog_hash, sdk_worker_build_hash: config.sdk_worker_build_hash, capabilities: VIVADO_CAPABILITIES, toolchain_profile_hash: config.toolchain_profile_hash, license_status: "available" };
-    },
-    async execute(request, _workspace) {
-      const candidate = request.parameters;
-      if (!candidate || typeof candidate !== "object")
-        return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
-      if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: config.vivado_part })) {
-        const jobId = request.jobId ?? "worker";
-        return { outcome: "failure", error_code: "FORMAL_BINDING_MISMATCH", output: JSON.stringify({ status: "rejected", jobId, errorCode: "FORMAL_BINDING_MISMATCH" }), evidence: { jobId, entries: [] } };
-      }
-      const vivadoRequest = {
-        ...candidate,
-        toolchain: {
-          requiredLicense: candidate.toolchain?.requiredLicense,
-          vivadoBinary: config.vivado_binary,
-          part: config.vivado_part,
-          profileHash: config.toolchain_profile_hash
+        while (true) {
+          Win(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, accounting, (uint)accountingSize, IntPtr.Zero));
+          var state = (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(accounting, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+          if (state.ActiveProcesses == 0) break;
+          Thread.Sleep(10);
         }
-      };
-      let result;
-      try {
-        result = await adapter.execute(vivadoRequest);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "VIVADO_EXECUTION_ERROR";
-        const errorCode2 = message.startsWith("VIVADO_POLICY_REJECTED:") ? message : "VIVADO_EXECUTION_ERROR";
-        const jobId = request.jobId ?? "worker";
-        return { outcome: "failure", error_code: errorCode2, output: JSON.stringify({ status: "rejected", jobId, errorCode: errorCode2 }), evidence: { jobId, entries: [] } };
-      }
-      const outcome = result.status === "succeeded" ? "success" : result.status === "timeout" ? "timeout" : result.status === "lost" ? "lost" : result.status === "unknown_effect" ? "unknown_effect" : "failure";
-      const meta = { jobId: result.jobId, operation: result.operation, status: result.status, command: result.command, inputSha256: result.inputSha256, workspace: result.workspace, toolchain: result.toolchain };
-      if (result.exitCode !== undefined)
-        meta.exitCode = result.exitCode;
-      if (result.phase !== undefined)
-        meta.phase = result.phase;
-      if (result.phaseExitCode !== undefined)
-        meta.phaseExitCode = result.phaseExitCode;
-      if (result.simulatorStdout !== undefined)
-        meta.simulatorStdout = result.simulatorStdout;
-      if (result.logDigest !== undefined)
-        meta.logDigest = result.logDigest;
-      if (result.stdout !== undefined)
-        meta.stdout = result.stdout;
-      if (result.stderr !== undefined)
-        meta.stderr = result.stderr;
-      if (result.errorCode !== undefined)
-        meta.errorCode = result.errorCode;
-      if (result.timeoutMs !== undefined)
-        meta.timeoutMs = result.timeoutMs;
-      if (result.timedOut !== undefined)
-        meta.timedOut = result.timedOut;
-      if (result.signal !== undefined)
-        meta.signal = result.signal;
-      if (result.unsupportedReason !== undefined)
-        meta.unsupportedReason = result.unsupportedReason;
-      if (result.output && typeof result.output === "object") {
-        const o = result.output;
-        if (o.stdout !== undefined)
-          meta.output = o;
-      }
-      const errorCode = result.errorCode ?? (result.status === "unsupported" ? result.unsupportedReason ?? "VIVADO_UNSUPPORTED" : undefined);
-      return { outcome, error_code: errorCode, output: JSON.stringify(meta, null, 2), evidence: result.evidence, stdout: result.stdout, stderr: result.stderr };
+      } finally { Marshal.FreeHGlobal(accounting); }
+      return unchecked((int)code);
+    } finally {
+      if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+      if (list != IntPtr.Zero) DeleteProcThreadAttributeList(list); if (list != IntPtr.Zero) Marshal.FreeHGlobal(list);
+      if (jobValue != IntPtr.Zero) Marshal.FreeHGlobal(jobValue); if (limits != IntPtr.Zero) Marshal.FreeHGlobal(limits);
+      if (job != IntPtr.Zero) CloseHandle(job);
     }
-  };
+  }
 }
-async function startWorker(configPath) {
-  const config = await loadConfig(configPath);
-  const privateKey = config.server_private_key_path.toLowerCase().endsWith(".pfx") || config.server_private_key_path.toLowerCase().endsWith(".p12");
-  const tls = privateKey ? { pfx: await readFile3(config.server_private_key_path), passphrase: required(process.env.SYNTHIA_WORKER_PFX_PASSWORD, "SYNTHIA_WORKER_PFX_PASSWORD"), ca: await readFile3(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true } : { cert: await readFile3(config.server_certificate_path), key: await readFile3(config.server_private_key_path), ca: await readFile3(config.trusted_client_ca_path), requestCert: true, rejectUnauthorized: true };
-  const options = { endpoint: config, workspaceRoot: config.workspace_root, execution: execution(config) };
-  const runtime = new WorkerRuntime(options);
-  const handler = runtime.handle.bind(runtime);
-  const server = createServer(tls, async (req, res) => {
-    const chunks = [];
-    for await (const chunk of req)
-      chunks.push(Buffer.from(chunk));
-    const request = new Request(`https://${req.headers.host ?? `${config.listen_host}:${config.listen_port}`}${req.url ?? "/"}`, { method: req.method, headers: Object.entries(req.headers).filter((entry) => typeof entry[1] === "string"), body: chunks.length ? Buffer.concat(chunks) : undefined });
-    const response = await handler(request);
-    res.writeHead(response.status, Object.fromEntries(response.headers));
-    res.end(Buffer.from(await response.arrayBuffer()));
-  });
-  await new Promise((resolve2, reject2) => {
-    server.once("error", reject2);
-    server.listen(config.listen_port, config.listen_host, resolve2);
-  });
-  return { server, config };
+'@
+$raw = [Console]::In.ReadToEnd()
+if ([string]::IsNullOrWhiteSpace($raw)) { exit 125 }
+$request = $raw | ConvertFrom-Json
+$application = [string]$request.command
+[string[]]$arguments = @($request.args | ForEach-Object { [string]$_ })
+if ($application.ToLowerInvariant().EndsWith('.bat') -or $application.ToLowerInvariant().EndsWith('.cmd')) {
+  # cmd /S strips exactly the outermost quotes of the /c payload, so the whole
+  # hand-built command line is passed as a raw tail instead of a quoted argv
+  # element (the CLR quoting escapes inner quotes in a way cmd cannot parse).
+  $joined = '"' + $application + '" ' + (($arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"','""') + '"' } else { $_ } }) -join ' ')
+  $application = [string]$request.command_interpreter
+  $arguments = @('/d', '/s', '/c')
+  exit [SynthiaJobGuardian]::RunTail($application, $arguments, [string]$request.cwd, ('"' + $joined + '"'))
 }
-if (__require.main == __require.module) {
-  startWorker().then(({ config }) => console.log(`synthia-worker listening on ${config.listen_host}:${config.listen_port} connector=${config.connector_id}`)).catch((error) => {
-    console.error(`synthia-worker failed: ${error instanceof Error ? error.message : "startup"}`);
-    process.exitCode = 1;
-  });
-}
-export {
-  workerRequestBindingMatches,
-  startWorker
-};
+exit [SynthiaJobGuardian]::Run($application, $arguments, [string]$request.cwd)
+`;function Bt(t){let e=process.env.SystemRoot??process.env.SYSTEMROOT;if(!e||!Mt(e))throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");let n=z(f(e,"System32",t));if(!pt(n).isFile())throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");return n}function Ue(t){if(Mt(t)){let r=z(t);if(!pt(r).isFile())throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");return r}if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(t))throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");let e=Bt("where.exe"),n=J(e,[t],{cwd:kt(e),encoding:"utf8",windowsHide:!0});if(n.error||n.status!==0||n.stderr.trim()!=="")throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");let i=[...new Set(n.stdout.split(/\r?\n/).map((r)=>r.trim()).filter(Boolean).map((r)=>z(r)).map((r)=>r.toLowerCase()))];if(i.length!==1)throw Error("VIVADO_EXECUTABLE_AMBIGUOUS");let o=z(i[0]);if(!pt(o).isFile())throw Error("VIVADO_EXECUTABLE_UNAVAILABLE");return o}function Be(t,e,n){let i=Ue(t);return{command:i,args:[...e],cwd:n,command_interpreter:/\.(?:bat|cmd)$/i.test(i)?Bt("cmd.exe"):null}}var je=(t,e,n,i,o,r)=>{let{promise:c,resolve:a,reject:s}=Promise.withResolvers(),l=Dt(16).toString("hex"),u=`${Me}
+# ${l}`,h=process.platform==="win32"?"powershell.exe":process.execPath,I=process.platform==="win32"?["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-EncodedCommand",Buffer.from(u,"utf16le").toString("base64")]:["-e",ke,l],_=le(h,I,{cwd:n,stdio:["pipe","pipe","pipe"],detached:process.platform!=="win32"}),g="",b="",m=!1;if(!_.pid)return s(Error("VIVADO_PROCESS_ID_UNAVAILABLE")),c;let p=Ve(_.pid).then(async(T)=>{let H={pid:_.pid,processGroupId:_.pid,startToken:T};if(await r?.(H)===!1)throw Error("VIVADO_PROCESS_IDENTITY_NOT_DURABLE");if(o?.aborted)throw Error("VIVADO_PROCESS_LAUNCH_CANCELLED");return _.stdin.end(JSON.stringify(process.platform==="win32"?Be(t,e,n):{command:t,args:[...e],cwd:n})),H}).catch((T)=>{throw ut(_.pid),T});_.stdout.on("data",(T)=>{if(g.length<5242880)g+=T;else if(g.length===5242880){g+="\n[SYNTHIA OUTPUT TRUNCATED AT 5MB - harness H32]\n";g+=T.slice(0,0)}}),_.stderr.on("data",(T)=>{if(b.length<5242880)b+=T});let w=setTimeout(()=>{if(m=!0,_.pid)ut(_.pid)},i),L=()=>{if(_.pid)ut(_.pid)};if(o?.aborted)L();else o?.addEventListener("abort",L,{once:!0});return _.once("error",s),_.once("close",(T,H)=>{clearTimeout(w),o?.removeEventListener("abort",L),p.then(()=>a({exitCode:T??(m?124:1),stdout:g,stderr:b,timedOut:m,signal:H}),s)}),c};function $e(t){let e=t.match(/^PHASE=(\S+)/m),n=t.match(/^PHASE_EXIT_CODE=(\d+)/m),i=t.indexOf("SIMULATOR_OUTPUT_BEGIN"),o=t.lastIndexOf("SIMULATOR_OUTPUT_END"),r=i!==-1&&o!==-1?t.slice(i+22,o).trim():void 0;return{phase:e?.[1],phaseExitCode:n?Number(n[1]):void 0,simulatorStdout:r}}function He(t,e,n){let i=t??"";if(/\bFatal:/i.test(i)||/\$fatal/i.test(i)||/(?:^\s*(?:\[FAIL\]|FAIL\b)|\bFAIL\s*[:(])/im.test(i))return{status:"failed",errorCode:"VIVADO_SIMULATION_FAILED"};if((e??n)!==0||n!==0)return{status:"failed",errorCode:"VIVADO_SIMULATION_FAILED"};if(/^\s*\$finish called at time\s*:/m.test(i)&&/\bPASS\b/.test(i))return{status:"succeeded"};return{status:"failed",errorCode:"VIVADO_SIMULATION_INCONCLUSIVE"}}var Fe=["synth.dcp","methodology.rpt","cdc.rpt","drc.rpt","sta.rpt","resources.rpt","routed.dcp"],We=new Set(["synthia.bit"]);function yt(t){let e=t.match(/DRC finished with\s+(\d+)\s+Errors?/i);if(e)return Number(e[1])===0?"passed":"failed";if(!/\bReport DRC\b/i.test(t))return"inconclusive";let n=t.match(/Violations found:\s*(\d+)/i),i=[...t.matchAll(/^\|\s*[^|]+\|\s*(Error|Critical Warning|Warning|Advisory)\s*\|[^|]*\|\s*(\d+)\s*\|\s*$/gim)];if(i.some((c)=>c[1]?.toLowerCase()==="error")||/^\S+#\d+\s+Error\s*$/im.test(t))return"failed";if(!n)return"inconclusive";let o=Number(n[1]);if(o===0)return"passed";let r=i.reduce((c,a)=>c+Number(a[2]),0);return i.length>0&&r===o?"passed":"inconclusive"}function Y(t){if(/There are\s+[1-9]\d*\s+register\/latch pins with no clock driven/i.test(t)||/There are no user specified timing constraints\./i.test(t)||/\bno clocks? found\b/i.test(t)||/\bno timing constraints?\b/i.test(t))return"unconstrained";if(/timing constraints are not met/i.test(t)||/Slack\s*\(VIOLATED\)/i.test(t))return"failed";let e=t.split(/\r?\n/),n=e.findIndex((o)=>/\bWNS\(ns\)/.test(o)&&/\bTNS\(ns\)/.test(o)),i;if(n!==-1)for(let o of e.slice(n+1,n+8)){let r=o.trim().split(/\s+/);if(r.length>=2&&r.every((c)=>/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(c))){i=r.map(Number);break}}if(i){if((i.length>=10?[0,1,4,5,8,9]:[0,1]).some((r)=>(i?.[r]??0)<0))return"failed"}if(!/All user specified timing constraints are met\./i.test(t)||!i)return"inconclusive";return"passed"}async function Je(t,e,n,i){let o,r;try{o=await P(f(t,"drc.rpt"),"utf8")}catch{}try{r=await P(f(t,"sta.rpt"),"utf8")}catch{}if(o!==void 0&&yt(o)==="failed"||/SYNTHIA_DRC_FAILED/.test(n))return{status:"failed",errorCode:"VIVADO_DRC_FAILED"};if(r!==void 0&&Y(r)==="unconstrained"||/SYNTHIA_TIMING_UNCONSTRAINED/.test(n))return{status:"failed",errorCode:"VIVADO_TIMING_UNCONSTRAINED"};if(r!==void 0&&Y(r)==="failed"||/SYNTHIA_TIMING_FAILED/.test(n))return{status:"failed",errorCode:"VIVADO_TIMING_FAILED"};if(e!==0)return{status:"failed",errorCode:"VIVADO_IMPLEMENTATION_FAILED"};if(o===void 0||r===void 0||yt(o)!=="passed"||Y(r)!=="passed")return{status:"failed",errorCode:"VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE"};for(let c of[...Fe,...i?[]:["synthia.bit"]])try{let a=await xt(f(t,c));if(!a.isFile()||a.size===0)return{status:"failed",errorCode:"VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE"}}catch{return{status:"failed",errorCode:"VIVADO_IMPLEMENTATION_EVIDENCE_INCOMPLETE"}}if(i)try{return await Pt(f(t,"synthia.bit")),{status:"failed",errorCode:"VIVADO_UNEXPECTED_BITSTREAM"}}catch{}return{status:"succeeded"}}async function W(t,e){try{await Vt(f(t,"output","synthia.bit"))}catch{}return D(t,e,We)}class gt{run;root;defaultBinary;configuredPart;configuredProfileHash;injected;constructor(t){this.root=_t(t.workspaceRoot),this.defaultBinary=t.binary??"vivado",this.configuredPart=t.part,this.configuredProfileHash=t.profileHash,this.injected=t.commandRunner!==void 0,this.run=t.commandRunner??je}capabilities(){return K}async execute(t,e){if(It(t),t.runClass==="evolution_eval")d("EVOLUTION_EVAL_DEDICATED_ROUTE_REQUIRED");return this.executeRequest(t,e)}async executeEvolutionEval(t,e,n,i,o){let r=Oe(t),c={jobId:r.jobId,projectId:r.projectId,runClass:r.runClass,inputHash:r.workspaceManifestHash,toolchainHash:r.toolchainProfileHash,timeoutMs:r.timeoutMs},a=r.operation==="validate_sources"?{...c,operation:r.operation,sources:r.sources,...r.top===null?{}:{top:r.top}}:r.operation==="simulate"?{...c,operation:r.operation,sources:r.sources,top:r.top,testbench:r.testbench}:r.operation==="synthesize"?{...c,operation:r.operation,sources:r.sources,top:r.top,part:r.part}:{...c,operation:r.operation,sources:r.sources,constraints:r.constraints,top:r.top,part:r.part,generateTrialBitstream:r.generateTrialBitstream};return this.executeRequest(a,e,n,i,o)}async executeRequest(t,e,n,i,o){if(It(t),t.toolchain?.vivadoBinary!==void 0&&t.toolchain.vivadoBinary!==this.defaultBinary)d("TOOLCHAIN_BINARY_MISMATCH");if(this.configuredPart!==void 0&&(("part"in t)&&t.part!==this.configuredPart||t.toolchain?.part!==void 0&&t.toolchain.part!==this.configuredPart))d("TOOLCHAIN_PART_MISMATCH");if(this.configuredProfileHash!==void 0&&(t.toolchainHash!==void 0&&t.toolchainHash!==this.configuredProfileHash||t.toolchain?.profileHash!==void 0&&t.toolchain.profileHash!==this.configuredProfileHash))d("TOOLCHAIN_PROFILE_MISMATCH");let r={...t.toolchain??{},vivadoBinary:this.defaultBinary,...this.configuredPart!==void 0?{part:this.configuredPart}:{},...this.configuredProfileHash!==void 0?{profileHash:this.configuredProfileHash}:{}},c={...t,toolchain:r},a=i===void 0?f(this.root,t.jobId):_t(i);if(i!==void 0&&t.runClass!=="evolution_eval")d("SEALED_WORKSPACE_FORBIDDEN");if(i!==void 0&&a!==this.root&&!a.startsWith(`${this.root}${ue}`))d("UNSAFE_WORKSPACE");let s=f(a,"input"),l=f(a,"output");if(await dt(s,{recursive:!0}),await dt(l,{recursive:!0}),t.operation==="implement"&&(t.stopBeforeBitstream===!0||t.generateTrialBitstream===!1))try{await Vt(f(l,"synthia.bit"))}catch{}let u=async(y)=>{X(y.path);let E=f(s,y.path);if(i===void 0)await dt(kt(E),{recursive:!0}),await O(E,y.content);else{let N;try{N=await P(E)}catch{d("SEALED_INPUT_MISSING")}let B=typeof y.content==="string"?Buffer.from(y.content):Buffer.from(y.content);if(!Buffer.from(N).equals(B))d("SEALED_INPUT_DRIFT")}if(t.runClass==="evolution_eval")await ce(E,256)};if("sources"in t)for(let y of t.sources)await u(y);if("constraints"in t&&t.constraints)for(let y of t.constraints)await u(y);let h=Z(JSON.stringify(c)),I=this.defaultBinary,_=[I,"-mode","batch","-nolog","-nojournal","-notrace","-source",f(a,"run.tcl")],g={jobId:t.jobId,operation:t.operation,command:_,inputSha256:h,workspace:a,toolchain:{binary:I,licenseStatus:"unknown",part:"part"in t?t.part:c.toolchain?.part,profileHash:c.toolchain?.profileHash??t.toolchainHash},evidence:{jobId:t.jobId,entries:[]}};try{if(!this.injected&&(I.includes("/")||I.includes("\\")))await Pt(I,ae.X_OK)}catch{return{...g,status:"unsupported",unsupportedReason:"BINARY_UNAVAILABLE"}}let b=Re(c,s,l);if(await Promise.all([O(f(a,"run.tcl"),b,"utf8"),O(f(l,"run.tcl"),b,"utf8"),O(f(l,"input-manifest.json"),JSON.stringify(Le(c),null,2),"utf8")]),t.operation==="simulate")await O(f(l,"waveform.tcl"),Ie(l),"utf8");let m=t.timeoutMs??_e,p;try{p=await(o??this.run)(I,_.slice(1),a,m,e,o?void 0:n)}catch(y){let E=y?.code,N=t.operation==="implement"?await W(a,t.jobId):await D(a,t.jobId);if(E==="ENOENT"||E==="EACCES")return{...g,status:"unsupported",unsupportedReason:"BINARY_UNAVAILABLE",evidence:N};return{...g,status:"lost",evidence:N}}if(p.timedOut){let y=t.operation==="implement"?await W(a,t.jobId):await D(a,t.jobId);return{...g,status:"timeout",timedOut:!0,signal:p.signal??null,exitCode:p.exitCode,timeoutMs:m,evidence:y}}let w=`${p.stdout}
+${p.stderr}`,L=ct(t.operation,{stdout:p.stdout,stderr:p.stderr});await O(f(l,at),JSON.stringify(L,null,2),"utf8");let T=/\b(?:checkout|feature)\b.*\b(?:succe\w*|granted|checked[\s-]*out)\b|\b(?:license|licence)\b.*\b(?:granted|checked[\s-]*out|succe\w*)\b|\bgot\s+(?:a\s+)?(?:license|licence)\b/i.test(w);if(!T&&p.exitCode!==0&&/\b(?:license|licence)\b/i.test(w)){let y=t.operation==="implement"?await W(a,t.jobId):await D(a,t.jobId);return{...g,status:"unsupported",unsupportedReason:"LICENSE_UNAVAILABLE",exitCode:p.exitCode,toolchain:{...g.toolchain,licenseStatus:"unavailable"},evidence:y}}if(/part.*(not found|does not exist|unknown)/i.test(w)){let y=t.operation==="implement"?await W(a,t.jobId):await D(a,t.jobId);return{...g,status:"unsupported",unsupportedReason:"PART_UNAVAILABLE",exitCode:p.exitCode,evidence:y}}let Q={...g.toolchain,licenseStatus:T?"available":g.toolchain.licenseStatus};if(t.operation==="simulate"){let y=$e(p.stdout),E=He(y.simulatorStdout,y.phaseExitCode,p.exitCode);await lt(l,t,p,E.status,{phase:y.phase??null,phaseExitCode:y.phaseExitCode??null,simulatorVerdict:E.errorCode??"passed"});let N=y.simulatorStdout!==void 0?ct(t.operation,{stdout:p.stdout,stderr:p.stderr,simulator:y.simulatorStdout}):L;await O(f(l,at),JSON.stringify(N,null,2),"utf8");let B=await D(a,t.jobId);return{...g,status:E.status,exitCode:p.exitCode,phase:y.phase,phaseExitCode:y.phaseExitCode,simulatorStdout:y.simulatorStdout,toolchain:Q,timeoutMs:m,stdout:p.stdout,stderr:p.stderr,output:{stdout:p.stdout,stderr:p.stderr},evidence:B,errorCode:E.errorCode,logDigest:N}}if(t.operation==="implement"){let y=t.stopBeforeBitstream===!0||t.generateTrialBitstream===!1,E=await Je(l,p.exitCode,w,y),N="inconclusive",B="inconclusive";try{N=yt(await P(f(l,"drc.rpt"),"utf8"))}catch{}try{B=Y(await P(f(l,"sta.rpt"),"utf8"))}catch{}await lt(l,t,p,E.status,{drcVerdict:N,timingVerdict:B,bitstreamGenerated:y?!1:E.status==="succeeded",stopBeforeBitstream:y,errorCode:E.errorCode??null});let Ft=E.status==="succeeded"?await D(a,t.jobId):await W(a,t.jobId);return{...g,status:E.status,exitCode:p.exitCode,toolchain:Q,timeoutMs:m,stdout:p.stdout,stderr:p.stderr,output:{stdout:p.stdout,stderr:p.stderr},evidence:Ft,errorCode:E.errorCode,logDigest:L}}let At=p.exitCode===0?"succeeded":"failed";await lt(l,t,p,At);let Ht=await D(a,t.jobId);return{...g,status:At,exitCode:p.exitCode,toolchain:Q,timeoutMs:m,stdout:p.stdout,stderr:p.stderr,output:{stdout:p.stdout,stderr:p.stderr},evidence:Ht,logDigest:L}}}var Qe=Object.freeze(K.map((t)=>({operation:t.operation,version:t.version,runClasses:Object.freeze([...t.runClasses])}))),x=/^[0-9a-f]{64}$/,mt=/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,Zn=Ze(Ke);function G(t,e){return typeof t==="string"&&t.length>0&&Buffer.byteLength(t,"utf8")<=e&&!/[\u0000-\u001f\u007f]/u.test(t)}function jt(t,e){if(typeof t!=="string"||!t.trim())throw Error(`CONFIG_INVALID:${e}`);return t}function qe(t,e,n,i){if(!e||typeof e!=="object"||Array.isArray(e))return!1;let o=e,r=o.jobId===t.jobId&&o.projectId===t.projectId&&o.operation===t.operation&&o.runClass===t.runClass,c=t.runClass==="formal"?o.inputHash===t.input:o.inputHash===void 0||o.inputHash===t.input,a=t.runClass!=="formal"||o.toolchainHash===n,s=o.toolchain===void 0?void 0:o.toolchain&&typeof o.toolchain==="object"&&!Array.isArray(o.toolchain)?o.toolchain:null;if(s===null)return!1;let l=s?.profileHash===void 0||s.profileHash===n,u=i===void 0||(s?.vivadoBinary===void 0||s.vivadoBinary===i.vivadoBinary)&&(s?.part===void 0||s.part===i.part)&&(o.part===void 0||o.part===i.part);return r&&c&&a&&l&&u}function tn(t){for(let e of["connector_id","endpoint_url","protocol_version","transport_mode","auth_mode","workspace_root","evidence_root","server_certificate_path","server_private_key_path","trusted_client_ca_path","vivado_binary","vivado_part","toolchain_profile_hash","part_catalog_hash","sdk_worker_build_hash"])jt(t[e],e);if(t.protocol_version!==R||t.transport_mode!=="direct_https"||t.auth_mode!=="mtls")throw Error("CONFIG_INVALID:protocol");if(!Number.isInteger(t.listen_port)||t.listen_port<1||t.listen_port>65535)throw Error("CONFIG_INVALID:listen_port");return t}async function $t(t){let e=await U(t);return{config:tn(JSON.parse(e.toString("utf8"))),sha256:Et("sha256").update(e).digest("hex")}}async function Qn(t=process.env.SYNTHIA_WORKER_CONFIG??"D:/synthia-worker/config.json"){return(await $t(t)).config}async function en(t){let e=JSON.parse(await U(t,"utf8")),n=(u)=>u!==null&&typeof u==="object"&&!Array.isArray(u),i=(u,h)=>n(u)&&Object.keys(u).sort().length===h.length&&Object.keys(u).sort().every((I,_)=>I===[...h].sort()[_]),o=Object.keys(e).sort(),r=["bundle","expected","git_commit","git_status_sha256","manifest_hash","release_files","runtime","schema","source_state","sources"];if(o.length!==r.length||o.some((u,h)=>u!==r[h]))throw Error("RELEASE_MANIFEST_INVALID:shape");if(e.schema!=="synthia-worker-release-manifest.v1"||typeof e.git_commit!=="string"||!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(e.git_commit)||e.source_state!=="clean"&&e.source_state!=="dirty"||typeof e.git_status_sha256!=="string"||!x.test(e.git_status_sha256)||e.source_state==="clean"&&e.git_status_sha256!==Et("sha256").update("").digest("hex")||e.source_state==="dirty"&&e.git_status_sha256===Et("sha256").update("").digest("hex")||!i(e.bundle,["path","size_bytes","sha256"])||e.bundle.path!=="server.bundle.mjs"||!Number.isSafeInteger(e.bundle.size_bytes)||Number(e.bundle.size_bytes)<1||typeof e.bundle.sha256!=="string"||!x.test(e.bundle.sha256)||!i(e.runtime,["kind","version","executable_name","sha256"])||e.runtime.kind!=="bun"||e.runtime.version!=="1.4.1"||e.runtime.executable_name!=="bun.exe"||typeof e.runtime.sha256!=="string"||!x.test(e.runtime.sha256)||!i(e.release_files,["config_template_sha256","launcher_sha256","windows_certifier_sha256"])||Object.values(e.release_files).some((u)=>typeof u!=="string"||!x.test(u)))throw Error("RELEASE_MANIFEST_INVALID:shape");if(!Array.isArray(e.sources)||e.sources.length<1)throw Error("RELEASE_MANIFEST_INVALID:sources");let c=[];for(let u of e.sources){if(!i(u,["path","sha256"])||!G(u.path,512)||u.path.startsWith("/")||u.path.includes("\\")||!/^[\x20-\x7e]+$/.test(u.path)||u.path.split("/").some((h)=>!h||h==="."||h==="..")||typeof u.sha256!=="string"||!x.test(u.sha256))throw Error("RELEASE_MANIFEST_INVALID:sources");c.push(u.path)}if(c.some((u,h)=>h>0&&c[h-1]>=u))throw Error("RELEASE_MANIFEST_INVALID:sources");if(!i(e.expected,["capabilities","capability_map_version","part","part_catalog_hash","protocol_version","sdk_worker_build_hash","toolchain_profile_hash","vivado_patch","vivado_version"])||e.expected.protocol_version!=="connector.remote.v1"||e.expected.sdk_worker_build_hash!==e.bundle.sha256||!G(e.expected.capability_map_version,128)||typeof e.expected.part_catalog_hash!=="string"||!x.test(e.expected.part_catalog_hash)||typeof e.expected.toolchain_profile_hash!=="string"||!x.test(e.expected.toolchain_profile_hash)||!G(e.expected.vivado_version,64)||!G(e.expected.vivado_patch,64)||!G(e.expected.part,128)||!Array.isArray(e.expected.capabilities)||e.expected.capabilities.length===0)throw Error("RELEASE_MANIFEST_INVALID:expected");let a="";for(let u of e.expected.capabilities){let h=u&&typeof u==="object"&&"run_classes"in u&&Array.isArray(u.run_classes)?u.run_classes:void 0;if(!i(u,["operation","run_classes","version"])||typeof u.operation!=="string"||!mt.test(u.operation)||u.operation<=a||typeof u.version!=="string"||!mt.test(u.version)||!h||h.length===0||h.some((I,_)=>typeof I!=="string"||!mt.test(I)||_>0&&typeof h[_-1]==="string"&&h[_-1]>=I))throw Error("RELEASE_MANIFEST_INVALID:capabilities");a=u.operation}let s=e.manifest_hash;if(typeof s!=="string"||!x.test(s))throw Error("RELEASE_MANIFEST_INVALID:manifest_hash");let l={...e};if(delete l.manifest_hash,wt(l)!==s)throw Error("RELEASE_MANIFEST_INVALID:canonical_hash");return s}function nn(t,e){let n=new gt({workspaceRoot:t.workspace_root,binary:t.vivado_binary,part:t.vivado_part,profileHash:t.toolchain_profile_hash});return{async discover(){let i={active_config_sha256:e.activeConfigSha256,worker_process_instance_id:e.workerProcessInstanceId};try{await Ye(t.vivado_binary,Xe.X_OK)}catch{return{connector_id:t.connector_id,connector_protocol_version:R,capability_map_version:t.capability_map_version,vivado_version:"unavailable",vivado_patch:"unavailable",part_catalog_hash:t.part_catalog_hash,sdk_worker_build_hash:t.sdk_worker_build_hash,...i,capabilities:[],toolchain_profile_hash:t.toolchain_profile_hash,license_status:"unavailable",unsupported:["vivado_binary"]}}return{connector_id:t.connector_id,connector_protocol_version:R,capability_map_version:t.capability_map_version,vivado_version:"2021.1",vivado_patch:"3247384",part_catalog_hash:t.part_catalog_hash,sdk_worker_build_hash:t.sdk_worker_build_hash,...i,capabilities:Qe,toolchain_profile_hash:t.toolchain_profile_hash,license_status:"available"}},async execute(i,o,r){let c=i.parameters;if(!c||typeof c!=="object")return{outcome:"failure",error_code:"VIVADO_PARAMETERS_REQUIRED",output:JSON.stringify({status:"rejected",errorCode:"VIVADO_PARAMETERS_REQUIRED"}),evidence:{jobId:i.jobId??"worker",entries:[]}};if(!qe(i,c,t.toolchain_profile_hash,{vivadoBinary:t.vivado_binary,part:t.vivado_part})){let I=i.jobId??"worker";return{outcome:"failure",error_code:"FORMAL_BINDING_MISMATCH",output:JSON.stringify({status:"rejected",jobId:I,errorCode:"FORMAL_BINDING_MISMATCH"}),evidence:{jobId:I,entries:[]}}}let a={...c,toolchain:{requiredLicense:c.toolchain?.requiredLicense,vivadoBinary:t.vivado_binary,part:t.vivado_part,profileHash:t.toolchain_profile_hash}},s;try{s=await n.execute(a,r)}catch(I){let _=I instanceof Error?I.message:"VIVADO_EXECUTION_ERROR",g=_.startsWith("VIVADO_POLICY_REJECTED:")?_:"VIVADO_EXECUTION_ERROR",b=i.jobId??"worker";return{outcome:"failure",error_code:g,output:JSON.stringify({status:"rejected",jobId:b,errorCode:g}),evidence:{jobId:b,entries:[]}}}let l=s.status==="succeeded"?"success":s.status==="timeout"?"timeout":s.status==="lost"?"lost":s.status==="unknown_effect"?"unknown_effect":"failure",u={jobId:s.jobId,operation:s.operation,status:s.status,command:s.command,inputSha256:s.inputSha256,workspace:s.workspace,toolchain:s.toolchain};if(s.exitCode!==void 0)u.exitCode=s.exitCode;if(s.phase!==void 0)u.phase=s.phase;if(s.phaseExitCode!==void 0)u.phaseExitCode=s.phaseExitCode;if(s.simulatorStdout!==void 0)u.simulatorStdout=s.simulatorStdout;if(s.logDigest!==void 0)u.logDigest=s.logDigest;if(s.stdout!==void 0)u.stdout=s.stdout;if(s.stderr!==void 0)u.stderr=s.stderr;if(s.errorCode!==void 0)u.errorCode=s.errorCode;if(s.timeoutMs!==void 0)u.timeoutMs=s.timeoutMs;if(s.timedOut!==void 0)u.timedOut=s.timedOut;if(s.signal!==void 0)u.signal=s.signal;if(s.unsupportedReason!==void 0)u.unsupportedReason=s.unsupportedReason;if(s.output&&typeof s.output==="object"){let I=s.output;if(I.stdout!==void 0)u.output=I}let h=s.errorCode??(s.status==="unsupported"?s.unsupportedReason??"VIVADO_UNSUPPORTED":void 0);return{outcome:l,error_code:h,output:JSON.stringify(u,null,2),evidence:s.evidence,stdout:s.stdout,stderr:s.stderr}}}}async function on(t){let e=t??process.env.SYNTHIA_WORKER_CONFIG??"D:/synthia-worker/config.json",n=await $t(e),i=n.config,o=ze();if(process.env.SYNTHIA_WORKER_VERIFY_BUNDLE==="1")await verifyConfiguredBundleIdentity(i,process.argv[1]??"");let c=i.server_private_key_path.toLowerCase().endsWith(".pfx")||i.server_private_key_path.toLowerCase().endsWith(".p12")?{pfx:await U(i.server_private_key_path),passphrase:jt(process.env.SYNTHIA_WORKER_PFX_PASSWORD,"SYNTHIA_WORKER_PFX_PASSWORD"),ca:await U(i.trusted_client_ca_path),requestCert:!0,rejectUnauthorized:!0}:{cert:await U(i.server_certificate_path),key:await U(i.server_private_key_path),ca:await U(i.trusted_client_ca_path),requestCert:!0,rejectUnauthorized:!0},a={endpoint:i,workspaceRoot:i.workspace_root,execution:nn(i,{activeConfigSha256:n.sha256,workerProcessInstanceId:o})},s=new rt(a),l=s.handle.bind(s),u=Ge(c,async(h,I)=>{let _=[],g=0;for await(let p of h){let w=Buffer.from(p);g+=w.byteLength,_.push(w)}let b=new Request(`https://${h.headers.host??`${i.listen_host}:${i.listen_port}`}${h.url??"/"}`,{method:h.method,headers:Object.entries(h.headers).filter((p)=>typeof p[1]==="string"),body:_.length?Buffer.concat(_):void 0}),m=await l(b);I.writeHead(m.status,Object.fromEntries(m.headers)),I.end(Buffer.from(await m.arrayBuffer()))});return await new Promise((h,I)=>{u.once("error",I),u.listen(i.listen_port,i.listen_host,h)}),{server:u,config:i}}if(bt.main==bt.module){let[t,e,n]=process.argv.slice(2);(t==="--verify-release-manifest"?en(e??"").then((o)=>console.log(`synthia-worker release manifest verified hash=${o}`)):t===void 0?on().then(({config:o})=>console.log(`synthia-worker listening on ${o.listen_host}:${o.listen_port} connector=${o.connector_id}`)):Promise.reject(Error("CONFIG_INVALID:command"))).catch((o)=>{console.error(`synthia-worker failed: ${o instanceof Error?o.message:"startup"}`),process.exitCode=1})}export{Qn as loadWorkerConfig,on as startWorker,en as verifyWorkerReleaseManifest,qe as workerRequestBindingMatches};

@@ -73,6 +73,7 @@ class FakeConnector implements ConnectorPort {
   contentOverride: ((jobId: string, name: string) => EvidenceContent | null) | null = null;
   /** Captures the last submit parameters (for assertion). */
   lastSubmit: SubmitJobParams | null = null;
+  lastContentOptions: { requireFull?: boolean } | undefined;
   submitCount = 0;
   /** When true, submitJob simulates the Worker's VIVADO_PARAMETERS_REQUIRED
    *  rejection: params.parameters must be a non-empty object. */
@@ -141,7 +142,8 @@ class FakeConnector implements ConnectorPort {
     };
   }
 
-  async fetchEvidenceContent(_projectId: string, jobId: string, name: string): Promise<EvidenceContent> {
+  async fetchEvidenceContent(_projectId: string, jobId: string, name: string, options?: { requireFull?: boolean }): Promise<EvidenceContent> {
+    this.lastContentOptions = options;
     if (this.contentOverride) {
       const c = this.contentOverride(jobId, name);
       if (!c) throw new ConnectorError("EVIDENCE_NOT_AVAILABLE", "evidence content not available");
@@ -681,6 +683,22 @@ describe.skipIf(!DATABASE_URL)("run/job API — real PostgreSQL + fake Connector
       expect(data.sha256).toBe("b".repeat(64));
       expect(data.truncated).toBe(false);
       expect(data.mediaType).toBe("text/plain");
+    });
+
+    test("waveforms request full bytes and reject oversized or absent manifest entries", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      fake.setJob(jobId, { state: "succeeded" });
+      const entry = { name: "waveform.vcd", sha256: "a".repeat(64), sizeBytes: 300000, mediaType: "text/plain" };
+      fake.evidenceOverride = () => ({ jobId, entries: [entry] });
+      const path = `/api/v1/projects/${pid}/jobs/${jobId}/evidence/content?name=waveform.vcd`;
+      const full = await callApi(path, { token: ids.humanToken });
+      expect(full.status).toBe(200);
+      expect(fake.lastContentOptions).toEqual({ requireFull: true });
+      entry.sizeBytes = 8 * 1024 * 1024 + 1;
+      expect((await callApi(path, { token: ids.humanToken })).status).toBe(400);
+      fake.evidenceOverride = () => ({ jobId, entries: [] });
+      expect((await callApi(path, { token: ids.humanToken })).status).toBe(404);
     });
 
     test("ownership: job belonging to another project → 404 not_found", async () => {

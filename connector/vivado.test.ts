@@ -312,7 +312,7 @@ All user specified timing constraints are met.
 
 describe("Vivado simulate contract", () => {
   const simulateRequest = (overrides: Partial<SimulateRequest> = {}): SimulateRequest => ({ operation: "simulate", jobId: "sim-1", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }], top: "dut", testbench: "tb", ...overrides });
-  const passSimStdout = "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n";
+  const passSimStdout = "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\n$finish called at time : 100 ns\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n";
   const countingAdapter = (root: string) => { let calls = 0; const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => { calls++; return { exitCode: 0, stdout: passSimStdout, stderr: "" }; } }); return { adapter, calls: () => calls }; };
 
   test("run.tcl binds the controlled DUT top and testbench and reads mixed .v/.sv sources", async () => {
@@ -328,15 +328,39 @@ describe("Vivado simulate contract", () => {
       expect(tcl).toContain("set_property top {dut} [get_filesets sources_1]");
       expect(tcl).toContain("set_property top {tb} [get_filesets sim_1]");
       expect(tcl).toContain("update_compile_order -fileset sim_1");
-      // XSim runtime cap overrides the project default (1000ns) so long TBs
+      // Run-to-finish overrides the project default (1000ns) so long TBs
       // run to their $finish instead of stopping prematurely.
-      expect(tcl).toContain("set_property xsim.simulate.runtime {100ms} [get_filesets sim_1]");
+      expect(tcl).toContain("set_property xsim.simulate.runtime {all} [get_filesets sim_1]");
       expect(tcl).toContain("launch_simulation -mode behavioral");
+      expect(tcl).toContain(`set_property xsim.simulate.custom_tcl [file normalize {${join(result.workspace, "output", "waveform.tcl")}}] [get_filesets sim_1]`);
+      const wave = await readFile(join(result.workspace, "output", "waveform.tcl"), "utf8");
+      expect(wave).toContain("limit_vcd 4194304");
+      expect(wave.indexOf("open_vcd")).toBeLessThan(wave.indexOf("run all"));
+      expect(wave).toContain("log_vcd [get_objects -r /*]");
+      expect(wave).toContain("return -options $run_options $run_error");
+
       // Mixed sources: .v -> read_verilog, .sv -> read_verilog -sv (no free-form paths)
       expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/dut.v")}}`);
       expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "tb/tb.sv")}}`);
       // Validated mediaType selects SystemVerilog parsing regardless of extension
       expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "rtl/sv_as_v.v")}}`);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("failed simulations retain real VCD bytes in hashed evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-wave-"));
+    try {
+      const bytes = "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n0!\n#5\n1!\n";
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async (_cmd, _args, cwd) => {
+        await writeFile(join(cwd, "output", "waveform.vcd"), bytes);
+        return { exitCode: 0, stdout: passSimStdout.replace("PASS", "FAIL assertion"), stderr: "" };
+      } });
+      const result = await adapter.execute(simulateRequest());
+      expect(result.status).toBe("failed");
+      const entry = result.evidence.entries.find((e) => e.name === "waveform.vcd")!;
+      expect(entry.mediaType).toBe("text/plain");
+      expect(entry.sizeBytes).toBe(Buffer.byteLength(bytes));
+      expect(entry.sha256).toBe(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -479,9 +503,25 @@ describe("Vivado simulation judgment (fail-closed on exit-code-0 failures)", () 
   });
 
   test("PASS inside the simulator output region with exit code 0 succeeds", async () => {
-    const r = await run(simWith("checks complete\nPASS"));
+    const r = await run(simWith("checks complete\nPASS\n$finish called at time : 100 ns"));
     expect(r.status).toBe("succeeded");
     expect(r.errorCode).toBeUndefined();
+  });
+
+  test("partial scenario PASS followed by a runtime cap is inconclusive", async () => {
+    const r = await run(simWith("[PASS] (a) reset\n[PASS] (g) irq\n## quit"));
+    expect(r.status).toBe("failed");
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_INCONCLUSIVE");
+  });
+
+  test("finish without a success verdict is inconclusive", async () => {
+    const r = await run(simWith("$finish called at time : 100 ns"));
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_INCONCLUSIVE");
+  });
+
+  test("a named probe failure overrides a completed PASS", async () => {
+    const r = await run(simWith("x_probe FAIL(first=z)\nPASS\n$finish called at time : 100 ns"));
+    expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
   });
 
   test("PASS outside the simulator output region does not count as proof", async () => {
@@ -503,16 +543,16 @@ describe("Vivado simulation judgment (fail-closed on exit-code-0 failures)", () 
     expect(r.errorCode).toBe("VIVADO_SIMULATION_FAILED");
   });
 });
-describe("Vivado simulation runtime cap (run-to-finish, not 1000ns)", () => {
+describe("Vivado simulation run-to-finish policy", () => {
   const request: SimulateRequest = { operation: "simulate", jobId: "sim-rt", projectId: "project-1", runClass: "exploratory", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule\n" }, { path: "tb/tb.sv", content: "module tb; endmodule\n" }], top: "dut", testbench: "tb" };
 
-  test("sets xsim.simulate.runtime before launch_simulation so scripts bake 100ms, not the 1000ns default", async () => {
+  test("sets xsim.simulate.runtime before launch_simulation so scripts bake all, not the 1000ns default", async () => {
     const root = await mkdtemp(join(tmpdir(), "synthia-rt-"));
     try {
-      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n", stderr: "" }) });
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({ exitCode: 0, stdout: "Vivado v2025.1\nSIMULATOR_OUTPUT_BEGIN\nPASS\n$finish called at time : 100 ns\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n", stderr: "" }) });
       await adapter.execute(request);
       const tcl = await readFile(join(root, "sim-rt", "run.tcl"), "utf8");
-      const rtIdx = tcl.indexOf("set_property xsim.simulate.runtime {100ms} [get_filesets sim_1]");
+      const rtIdx = tcl.indexOf("set_property xsim.simulate.runtime {all} [get_filesets sim_1]");
       const launchIdx = tcl.indexOf("launch_simulation -mode behavioral");
       expect(rtIdx).toBeGreaterThan(-1);
       // The runtime property MUST precede launch_simulation -scripts_only,

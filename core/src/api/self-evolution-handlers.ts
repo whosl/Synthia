@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { EVOLUTION_ACTIVE_GAP_CAP_SECONDS, readEvolutionEfficiency } from "../services/evolution-efficiency.ts";
 import {
   appendOutboxEventInTx,
   withTransaction,
@@ -288,8 +289,9 @@ async function appendEvolutionOutbox(
 
 async function metricRows(query: QueryClient, versionId: string): Promise<SkillMetricObservation[]> {
   const result = await query.query(
-    `SELECT sas.role,a.state,a.started_at,a.closed_at,a.human_corrections,
-            current_eval.outcome
+    `SELECT sas.role,a.state,a.human_corrections,
+            current_eval.outcome,
+            active.active_ms
        FROM skill_application_skill sas
        JOIN skill_application a ON a.id=sas.application_id
        LEFT JOIN LATERAL (
@@ -302,18 +304,71 @@ async function metricRows(query: QueryClient, versionId: string): Promise<SkillM
             )
           ORDER BY ce.created_at DESC,ce.id DESC LIMIT 1
        ) current_eval ON true
+       LEFT JOIN LATERAL (
+         SELECT floor(COALESCE(sum(least(gap.gap_seconds, $2)), 0) * 1000)::bigint AS active_ms
+           FROM (
+             SELECT EXTRACT(EPOCH FROM (ev.created_at - LAG(ev.created_at) OVER (ORDER BY ev.sequence))) AS gap_seconds
+               FROM task_conversation_event ev
+              WHERE ev.task_id=a.task_id
+                AND ev.sequence>=a.start_event_sequence
+                AND ev.sequence<=a.end_event_sequence
+           ) gap
+          WHERE gap.gap_seconds IS NOT NULL
+            AND gap.gap_seconds > 0
+       ) active ON (a.end_event_sequence IS NOT NULL)
       WHERE sas.version_id=$1`,
-    [versionId],
+    [versionId, ACTIVE_GAP_CAP_SECONDS],
   );
   return (result.rows as Row[]).map((row) => ({
     role: row.role as "primary" | "supporting",
     applicationState: row.state as SkillMetricObservation["applicationState"],
     outcome: (row.outcome ?? null) as EvaluationOutcome | null,
-    durationMs: row.closed_at === null
+    // Same gap-clipped active measure as the baseline arm, so the two arms
+    // of the efficiency comparison are like for like.
+    durationMs: row.active_ms === null || row.active_ms === undefined
       ? null
-      : Math.max(0, new Date(String(row.closed_at)).getTime() - new Date(String(row.started_at)).getTime()),
+      : Math.max(0, Number(row.active_ms)),
     humanCorrections: row.human_corrections === null ? null : Number(row.human_corrections),
   }));
+}
+
+/**
+ * Gap-clipped active duration: inter-event time counts at most
+ * ACTIVE_GAP_CAP_SECONDS each, so human-away stretches between rounds
+ * (tasks sit awaiting_user for days) do not masquerade as effort while
+ * genuine model/tool round-trips and permission waits still count.
+ */
+const ACTIVE_GAP_CAP_SECONDS = EVOLUTION_ACTIVE_GAP_CAP_SECONDS;
+
+/**
+ * The "hard way" arm: the gap-clipped active span of the origin episode —
+ * the version-1 distillation source trajectory, task-wide up to the seal
+ * point. NOT scoped to the episode's own turn (methods crystallize over a
+ * task's whole exploration: the validate-sources origin is a 1-minute final
+ * turn at the end of a 12-turn exploration) and NOT raw wall-clock
+ * (multi-day tasks would report 4+ day baselines that are mostly human
+ * idle). This is the cost the skill actually amortizes.
+ */
+async function baselineDurationMs(query: QueryClient, skillId: string): Promise<number | null> {
+  const result = await query.query(
+    `SELECT floor(COALESCE(sum(least(gap.gap_seconds, $2)), 0) * 1000)::bigint AS baseline_ms
+       FROM learned_skill s
+       JOIN learned_skill_version v ON v.skill_id=s.id AND v.version_no=1
+       JOIN distillation_run d ON d.id=v.distillation_run_id
+       JOIN learning_episode e ON e.id=d.episode_id
+      CROSS JOIN LATERAL (
+        SELECT EXTRACT(EPOCH FROM (ev.created_at - LAG(ev.created_at) OVER (ORDER BY ev.sequence))) AS gap_seconds
+          FROM task_conversation_event ev
+         WHERE ev.task_id=e.task_id
+           AND ev.sequence<=e.end_event_sequence
+      ) gap
+      WHERE s.id=$1
+        AND gap.gap_seconds IS NOT NULL
+        AND gap.gap_seconds > 0`,
+    [skillId, ACTIVE_GAP_CAP_SECONDS],
+  );
+  const row = result.rows[0] as Row | undefined;
+  return row === undefined ? null : Number(row.baseline_ms);
 }
 
 async function skillSummary(query: QueryClient, skillId: string): Promise<Record<string, unknown>> {
@@ -336,7 +391,10 @@ async function skillSummary(query: QueryClient, skillId: string): Promise<Record
     qualityState: quality,
   });
   const metrics = row.active_version_id
-    ? computeSkillMetrics(await metricRows(query, String(row.active_version_id)))
+    ? computeSkillMetrics(
+      await metricRows(query, String(row.active_version_id)),
+      { durationMs: await baselineDurationMs(query, String(row.id)) },
+    )
     : computeSkillMetrics([]);
   return {
     schema: "learned-skill-summary.v1",
@@ -401,6 +459,7 @@ async function overview(query: QueryClient, ctx: RequestContext): Promise<Record
     learned_skills_enabled: settings.learned_skills_enabled,
     settings_revision: Number(settings.revision),
     skill_counts: counts,
+    efficiency: await readEvolutionEfficiency(query),
     pending_applications: Number((pendingResult.rows[0] as Row).count),
     curator: {
       last_run_at: nullableIso(lastRun),

@@ -2159,6 +2159,28 @@ export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResul
     [projectId, limit],
   );
 
+  // One metadata-only read for project history; never fetch artifact bytes or
+  // contact the Worker for every row while opening the project.
+  const evidenceByJob = new Map<string, unknown>();
+  if (ctx.url.searchParams.get("include_evidence") === "1" && rows.length) {
+    const metadata = await ctx.pool.query(
+      `SELECT t.id, t.input_hash, t.created_at,
+              CASE WHEN m.id IS NOT NULL THEN COALESCE((
+                SELECT jsonb_agg(jsonb_build_object('name', e.name, 'sha256', e.sha256,
+                  'sizeBytes', e.size_bytes, 'mediaType', e.media_type) ORDER BY e.name)
+                FROM tool_run_evidence_entry e
+                WHERE e.project_id = t.project_id AND e.manifest_id = m.id
+              ), '[]'::jsonb) ELSE t.evidence->'entries' END AS entries
+       FROM tool_run t
+       LEFT JOIN tool_run_evidence_manifest m ON m.project_id = t.project_id AND m.tool_run_id = t.id
+       WHERE t.project_id = $1 AND t.id = ANY($2::text[])`,
+      [projectId, rows.map((row) => row.id)],
+    );
+    for (const row of metadata.rows) evidenceByJob.set(row.id, {
+      inputSha256: row.input_hash, createdAt: row.created_at, evidenceEntries: row.entries,
+    });
+  }
+
   const data = rows.map((row: Record<string, unknown>) => {
     const item: Record<string, unknown> = {
       id: row.id,
@@ -2168,6 +2190,7 @@ export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResul
       startTime: row.start_time,
       endTime: row.end_time,
     };
+    Object.assign(item, evidenceByJob.get(String(row.id)));
     if (row.error_code !== null && row.error_code !== undefined) item.errorCode = row.error_code;
     return item;
   });
@@ -2335,7 +2358,14 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
 
   let content;
   try {
-    content = await connector.fetchEvidenceContent(projectId, jobId, name);
+    const waveform = name.toLowerCase().endsWith(".vcd");
+    if (waveform) {
+      const manifest = await connector.fetchEvidence(projectId, jobId);
+      const entry = manifest.entries.find((entry) => entry.name === name);
+      if (!entry) throw notFoundError(`evidence entry not found: ${name}`);
+      if (entry.sizeBytes > 8 * 1024 * 1024) throw validationError("波形超过 8 MiB 查看上限，请缩小信号范围或仿真窗口");
+    }
+    content = await connector.fetchEvidenceContent(projectId, jobId, name, waveform ? { requireFull: true } : undefined);
   } catch (err) {
     throw mapConnectorError(err);
   }

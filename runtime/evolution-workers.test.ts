@@ -150,6 +150,9 @@ function metrics() {
     median_duration_ms: null,
     human_corrections: null,
     first_solved_problem_families: null,
+    baseline_duration_ms: null,
+    efficiency_saved_ms: null,
+    efficiency_speedup: null,
   };
 }
 
@@ -376,7 +379,7 @@ describe("DistillerWorker", () => {
     const model = new FakeModel();
     model.responses.push(
       { action: "create", skill: validSkill(false) },
-      { action: "patch", skill: validSkill(true) },
+      { action: "patch", skill: { ...validSkill(false), slug: "skill-1" } },
     );
     const worker = new DistillerWorker(client, model, { workerId: "distiller-1" });
     await worker.runOnce();
@@ -391,10 +394,38 @@ describe("DistillerWorker", () => {
       action: "patch",
       expected_parent_version_id: "version-1",
       expected_control_revision: 4,
-      skill: { skill_id: "skill-1" },
+      skill: { skill_id: "skill-1", slug: "skill-1" },
     });
     expect(client.completes[1]!.input_hash).toBe(client.completes[0]!.input_hash);
     expect(client.completes[1]!.prompt_hash).toBe(client.completes[0]!.prompt_hash);
+  });
+
+  test("patch accepts an echoed skill_id only when it matches the slug-resolved target", async () => {
+    const client = new FakeDistillerClient();
+    client.claims.push(distillationClaim());
+    const model = new FakeModel();
+    model.responses.push({ action: "patch", skill: { ...validSkill(true), slug: "skill-1" } });
+    await new DistillerWorker(client, model, { workerId: "distiller-1" }).runOnce();
+    expect(client.completes[0]).toMatchObject({ action: "patch", skill: { skill_id: "skill-1" } });
+  });
+
+  test("patch with an unknown slug or a conflicting skill_id fails closed", async () => {
+    const worker = async (response: unknown) => {
+      const client = new FakeDistillerClient();
+      client.claims.push(distillationClaim());
+      const model = new FakeModel();
+      model.responses.push(response);
+      const result = await new DistillerWorker(client, model, { workerId: "distiller-1" }).runOnce();
+      return { result, failures: client.failures };
+    };
+
+    const unknownSlug = await worker({ action: "patch", skill: validSkill(false) });
+    expect(unknownSlug.result.state).toBe("failed");
+    expect(unknownSlug.failures[0]).toMatchObject({ error_code: "MALFORMED_MODEL_OUTPUT" });
+
+    const conflictingId = await worker({ action: "patch", skill: { ...validSkill(true), slug: "skill-1", skill_id: "skill-2" } });
+    expect(conflictingId.result.state).toBe("failed");
+    expect(conflictingId.failures[0]).toMatchObject({ error_code: "MALFORMED_MODEL_OUTPUT" });
   });
 
   test("malformed output fails closed without renewing or completing", async () => {

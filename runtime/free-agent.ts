@@ -246,6 +246,8 @@ export interface FreeAgentDeps {
   contextPolicy?: ContextPolicy;
   /** 需要用户裁决的工具名单（红线工具不在此列——那些由 beforeToolCall 硬拦）。 */
   permissionTools?: readonly string[];
+  /** 单轮 prompt() 的工具轮次上限；0（默认）= 不限制。 */
+  maxToolRounds?: number;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -456,7 +458,13 @@ export class FreeAgentAbortedError extends Error {
 // ---------------------------------------------------------------------------
 
 /** Safety bound: a single prompt() may not spin more tool rounds than this. */
-const MAX_TOOL_ROUNDS = 50;
+/**
+ * 单轮 prompt() 的工具轮次上限；0 = 不限制（默认，按用户要求放开——基准
+ * agent 的长任务可能合法地连续调用远超 50 次工具）。真死循环的兜底交给
+ * 调用方（abort）与上游超时，而不是这里硬切。部署仍可用
+ * SYNTHIA_AGENT_MAX_TOOL_ROUNDS 恢复一个上限。
+ */
+const DEFAULT_MAX_TOOL_ROUNDS = 0;
 
 /** 工具入参/结果上流前的截断上限（字符）。SSE 是给人看的实时视图，完整内容
  *  在会话消息与运行记录里；不截断的话一次 Vivado 日志就能把流灌爆。 */
@@ -995,13 +1003,14 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   /**
    * chat → (tool_calls? execute each →回填) → chat, until the model returns a
    * plain-text reply. Aborts and steer-injections are checked at every tool
-   * boundary. Bounded by {@link MAX_TOOL_ROUNDS}.
+   * boundary. Optionally bounded by deps.maxToolRounds (0 = unbounded).
    */
   private async runLoop(opts: PromptStreamOptions = {}): Promise<string> {
     // 防呆 2：本 prompt() 内完成声明被拦截的次数（重试上限 MAX_CLAIM_RETRIES）。
     let claimRetries = 0;
     let emptyReplyRetries = 0;
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const maxRounds = this.deps.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+    for (let round = 0; maxRounds === 0 || round < maxRounds; round++) {
       this.checkAbort();
 
       if (this.consumeSteer()) await this.persist();
@@ -1211,9 +1220,10 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       // Loop back: the next model call sees the tool results.
     }
 
-    // Safety valve: the model kept calling tools without converging.
+    // Safety valve (only when maxToolRounds > 0): the model kept calling
+    // tools without converging.
     throw new Error(
-      `free-agent: exceeded ${MAX_TOOL_ROUNDS} tool rounds without a text reply — possible infinite loop`,
+      `free-agent: exceeded ${maxRounds} tool rounds without a text reply — possible infinite loop`,
     );
   }
 
