@@ -8,12 +8,15 @@ const data = shallowRef<VcdData | null>(null);
 const error = ref("");
 const loading = ref(false);
 const search = ref("");
+const signalPage = ref(0);
+const SIGNAL_PAGE_SIZE = 200;
 const selected = ref<string[]>([]);
 const start = ref(0), span = ref(1), cursor = ref(0);
 const radix = ref<"hex" | "bin" | "dec">("hex");
 let worker: Worker | null = null;
 watch(() => [props.content, props.truncated] as const, ([content, truncated]) => {
   worker?.terminate(); data.value = null; error.value = ""; loading.value = false;
+  search.value = ""; signalPage.value = 0;
   if (truncated) { error.value = "波形内容被截断，无法可靠显示。请重新获取完整文件。"; return; }
   if (content.length > MAX_VCD_BYTES) { error.value = "波形超过 8 MiB 查看上限"; return; }
   loading.value = true;
@@ -31,7 +34,13 @@ watch(() => [props.content, props.truncated] as const, ([content, truncated]) =>
   worker.postMessage(content);
 }, { immediate: true });
 onBeforeUnmount(() => worker?.terminate());
-const filtered = computed(() => data.value?.signals.filter((s) => s.name.toLowerCase().includes(search.value.toLowerCase())) ?? []);
+const filtered = computed(() => {
+  const query = search.value.trim().toLowerCase();
+  return data.value?.signals.filter((s) => s.name.toLowerCase().includes(query)) ?? [];
+});
+watch(search, () => { signalPage.value = 0; }, { flush: "sync" });
+const signalPageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / SIGNAL_PAGE_SIZE)));
+const pagedSignals = computed(() => filtered.value.slice(signalPage.value * SIGNAL_PAGE_SIZE, (signalPage.value + 1) * SIGNAL_PAGE_SIZE));
 const visible = computed(() => data.value?.signals.filter((s) => selected.value.includes(s.name)) ?? []);
 const end = computed(() => start.value + span.value);
 const duration = computed(() => Math.max(1, data.value?.endTime ?? 1));
@@ -128,7 +137,12 @@ function download(): void {
       <details class="signal-picker">
         <summary>选择信号 · {{ selected.length }} / {{ data.signals.length }} <small>最多同时显示 24 条</small></summary>
         <input v-model="search" type="search" aria-label="筛选波形信号" placeholder="搜索信号或层级名称…" />
-        <div class="signal-options"><label v-for="signal in filtered" :key="signal.name" :title="signal.name"><input type="checkbox" :checked="selected.includes(signal.name)" :disabled="selected.length >= 24 && !selected.includes(signal.name)" @change="toggle(signal.name)" /><span>{{ signal.name }}</span><small>{{ signal.width }} bit</small></label><p v-if="!filtered.length">没有匹配的信号</p></div>
+        <div class="signal-pagination" v-if="filtered.length">
+          <span>匹配 {{ filtered.length }} 条 · 第 {{ signalPage + 1 }} / {{ signalPageCount }} 页</span>
+          <button type="button" aria-label="上一页信号" :disabled="signalPage === 0" @click="signalPage--">上一页</button>
+          <button type="button" aria-label="下一页信号" :disabled="signalPage + 1 >= signalPageCount" @click="signalPage++">下一页</button>
+        </div>
+        <div class="signal-options"><label v-for="signal in pagedSignals" :key="signal.name" :title="signal.name"><input type="checkbox" :checked="selected.includes(signal.name)" :disabled="selected.length >= 24 && !selected.includes(signal.name)" @change="toggle(signal.name)" /><span>{{ signal.name }}</span><small>{{ signal.width }} bit</small></label><p v-if="!filtered.length">没有匹配的信号</p></div>
       </details>
       <div class="wave-scroll">
         <div class="wave-table">
@@ -152,6 +166,7 @@ function download(): void {
 </template>
 
 <style scoped>
+.signal-pagination { display: flex; align-items: center; gap: 6px; margin: 8px 0; color: var(--text-muted); }.signal-pagination > span { margin-right: auto; }
 .waveform-viewer { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; overflow: auto; background: var(--surface-base); color: var(--text-primary); font-size: 12px; }
 .wave-header { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 14px 16px 8px; }.wave-header > svg { color: var(--accent); }.wave-header strong { overflow-wrap: anywhere; }.wave-header > span { color: var(--text-muted); font-size: 10px; }.wave-header button { margin-left: auto; }
 button, select { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 5px; background: var(--surface-panel); color: var(--text-secondary); cursor: pointer; font-size: 11px; }button:hover { border-color: var(--accent); }button:disabled { opacity: .5; cursor: default; }

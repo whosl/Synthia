@@ -1,5 +1,6 @@
 /** Bounded digital VCD reader. Unknown values and capture limits are never hidden. */
 export const MAX_VCD_BYTES = 8 * 1024 * 1024;
+export const MAX_VCD_SIGNALS = 65_536;
 export interface VcdChange { time: number; value: string; }
 export interface VcdSignal { id: string; name: string; width: number; type: string; changes: VcdChange[]; }
 export interface VcdData { signals: VcdSignal[]; endTime: number; timescale: number; unit: string; warnings: string[]; }
@@ -29,7 +30,7 @@ export function parseVcd(text: string): VcdData {
       const unsized = b[0] === "parameter" && declaredWidth === 0;
       const width = unsized ? 1 : declaredWidth;
       if (!id || !b[3] || !Number.isInteger(width) || width < 1 || width > 4096) throw new Error("VCD 信号声明无效或位宽超过 4096");
-      if (signals.length >= 4096) throw new Error("信号超过 4096 个，请缩小采集范围");
+      if (signals.length >= MAX_VCD_SIGNALS) throw new Error(`信号超过 ${MAX_VCD_SIGNALS} 个，请缩小采集范围或下载原始 VCD 查看`);
       const changes = byId.get(id) ?? []; byId.set(id, changes);
       const signal = { id, name: [...scopes, b.slice(3).join("")].join("."), width, type: b[0]!, changes };
       signals.push(signal);

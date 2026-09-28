@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { changeIndex, parseVcd, signalValue, MAX_VCD_BYTES } from "../src/domain/vcd.ts";
+import { changeIndex, parseVcd, signalValue, MAX_VCD_BYTES, MAX_VCD_SIGNALS } from "../src/domain/vcd.ts";
 const header = `$timescale 10 ps $end
 $scope module tb $end
 $var wire 1 ! clk $end
@@ -64,6 +64,16 @@ $enddefinitions $end
     expect(limited.endTime).toBe(1);
     expect(limited.warnings.some(w => w.includes("50 万"))).toBe(true);
     expect(limited.signals[0]!.changes).toEqual([{ time: 0, value: "0" }, { time: 1, value: "1" }]);
-    expect(() => parseVcd("$var wire 1 ! clk $end\n".repeat(4097))).toThrow("4096");
+    expect(() => parseVcd("$var wire 1 ! clk $end\n".repeat(MAX_VCD_SIGNALS + 1))).toThrow(String(MAX_VCD_SIGNALS));
+  });
+  test("large designs retain every signal and aliases beyond the old declaration limit", () => {
+    const declarations = Array.from({ length: 20_000 }, (_, i) => `$var wire 1 s${i} signal_${i} $end`).join("\n");
+    const values = Array.from({ length: 20_000 }, (_, i) => `0s${i}`).join("\n");
+    const v = parseVcd(`$timescale 1ps $end\n${declarations}\n$var wire 1 s19999 last_alias $end\n$enddefinitions $end\n${values}\n#5\n1s19999`);
+    expect(v.signals).toHaveLength(20_001);
+    expect(signalValue(v.signals[19_999]!, 0, "bin")).toBe("0");
+    expect(signalValue(v.signals[19_999]!, 5, "bin")).toBe("1");
+    expect(v.signals[20_000]!.changes).toBe(v.signals[19_999]!.changes);
+    expect(v.endTime).toBe(5);
   });
 });
