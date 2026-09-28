@@ -41,3 +41,6 @@ env.real
 *.pid
 __pycache__/
 *.pyc
+
+# Production dist may be a symlink to an immutable web release
+/web/dist

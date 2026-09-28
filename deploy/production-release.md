@@ -38,3 +38,20 @@ Connector H32 原先只修改 bundle；本次把 5 MiB 输出/证据上限、Win
 已知失败涉及：旧 fixture 未填写当前 Project Agent 角色/输入 manifest 字段；M4F 消融后仍引用已删除表和 trigger；能力令牌拒绝预期 401、实际 403；任务提交已改为事务提交后派发，而旧测试仍要求失败回滚；fresh schema 与完整迁移链遗留差异。此次没有通过放宽业务权限或修改生产 schema 来消除这些失败。
 
 平台 Node bundle 和全功能 Web 已构建。独立 Node 沙箱继续使用 `deploy/platform`；本次发布目标是上述本机正式站点。
+
+
+## 本次上线结果
+
+2026-09-28，统一业务代码 `27e4c05` 已在本机正式站点上线；随后部署了 Worker 启动身份校验修复 `911a545`。`main`、`platform-golden`、本机发布分支采用相同代码，远程 `main` 和 `platform-golden` 已推送。
+
+- 四个 systemd 服务运行正常，19 个 Runtime Agent 均恢复为 `awaiting_user`。
+- 正式库备份恢复到临时 PostgreSQL 后，使用现有管理员身份读取项目、任务、历史、自进化接口成功，新 Runtime 独立端口启动成功。
+- 真实 Chrome 检查项目列表、自进化页和 p27 工作台，无 JavaScript 异常；站点版本、项目列表、自进化概览、任务、运行历史、资源摘要六个请求均为 200。
+- p27 有 8 个历史任务证据请求在发布前后均为 404，未作为本次新增问题或通过项。
+- Core、Runtime、Connector 均无 TypeScript 诊断；最终 Connector 回归 76 pass。
+- Worker 66（8443）确认无活动 Vivado/XSim 进程后更新，注册/心跳/发现均 200；Vivado 2021.1、license available。
+- Worker bundle SHA-256：`cff06e379acfd2b35ea6ad66354b5aebcbc47e3cccaf7c20e3e3b52ff1d0f0dc`，服务端与本机 Connector 构建元数据已同步。
+- 没有发起新的正式 FPGA Run、生成正式码流或执行上板；执行端验收范围为启动、协议和发现。
+- 本机回滚备份：`~/.synthia/backups/unified-main-20260928/`；包含正式库 dump、项目工作区、Runtime 状态、旧前端、服务配置、测试日志和前后浏览器截图。
+- Windows 执行端备份：`D:/synthia-worker/backup-unified-20260928/`；含旧 bundle、配置和 jobs registry。
+- 平台沙箱包：整合 worktree 下 `dist/synthia-platform-20260928.tar.gz`，已按最终源码重新构建；本次未部署 Daytona。
