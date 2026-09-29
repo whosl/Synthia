@@ -13,6 +13,7 @@ html{scroll-behavior:smooth;scroll-padding-top:82px}body{background:var(--paper)
 .site-nav{position:sticky;top:0;z-index:30;display:flex;justify-content:space-between;align-items:center;gap:20px;background:#f6f7f3f5;backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:16px max(24px,calc((100vw - 1296px)/2));font-size:14px}.site-nav a{color:var(--ink);text-decoration:none;white-space:nowrap}.site-nav .links{display:flex;gap:22px;align-items:center}.site-nav a:hover{color:var(--accent)}.nav-brand{font-weight:750;letter-spacing:2px}
 .slide{position:relative;inset:auto;--section-inline:max(36px,calc((100vw - 1296px)/2));padding:64px var(--section-inline);min-height:680px;scroll-margin-top:65px;border-bottom:1px solid var(--line);display:flex}.slide .topline{margin-bottom:35px}.hero-grid{margin:10px 0 25px;min-height:480px}.footer{margin-top:32px;padding-top:20px}.dark .footer{border-top:1px solid #ffffff20}.footer .footnote{max-width:1200px}.pain-grid{margin-bottom:25px}.slide h1{font-size:clamp(40px,4.4vw,64px)}.slide h2{font-size:clamp(30px,3.1vw,48px)}
 .live-preview{margin-top:32px;width:100%;border:1px solid #bccfc3;border-radius:12px;overflow:hidden;background:white;box-shadow:0 16px 48px #102e3810}.browser-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#e9eee8;border-bottom:1px solid var(--line);padding:12px 18px}.browser-label{font-size:15px;font-weight:600;display:flex;align-items:center;gap:10px}.browser-label i{width:8px;height:8px;border-radius:50%;background:var(--accent)}.preview-actions{display:flex;align-items:center;gap:8px}.preview-actions button,.preview-actions a{font:13px inherit;color:var(--ink);background:#f9faf7;border:1px solid #c7d7cc;border-radius:5px;padding:8px 12px;text-decoration:none;white-space:nowrap;cursor:pointer}.frame-area{height:760px;position:relative;background:#f3f5f0}.frame-area iframe{position:relative;width:100%;height:100%;border:0;display:block;background:transparent;z-index:1}.loading-message{position:absolute;inset:0;display:grid;place-content:center;color:var(--muted);font-size:18px;padding:24px}.preview-hint{font-size:13px;color:var(--muted);padding:12px 18px;background:#f6f7f3;border-top:1px solid var(--line);line-height:1.7}.live-preview.expanded{position:fixed;inset:14px;z-index:100;display:flex;flex-direction:column;width:auto;margin:0;box-shadow:0 0 0 30px #112e3acc}.live-preview.expanded .frame-area{height:auto;flex:1;min-height:0}body.preview-open{overflow:hidden}.source-note{font-size:14px;line-height:1.8;margin-top:20px;color:var(--muted)}.ending{padding:28px;text-align:center;font-size:14px;color:var(--muted)}.ending a{color:var(--accent)}
+.preview-tabs{display:flex;gap:6px;align-items:center}.preview-tabs button{border:1px solid transparent;border-radius:6px;padding:10px 16px;background:transparent;color:var(--muted);font-size:15px;font-weight:600;white-space:nowrap}.preview-tabs button:hover{background:#dbe6de}.preview-tabs button[aria-selected="true"]{background:var(--accent);color:#fff;border-color:var(--accent)}
 @media screen{.live-preview:not(.expanded){--preview-gutter:24px;width:calc(100% + var(--section-inline) + var(--section-inline) - var(--preview-gutter) - var(--preview-gutter));margin-inline:calc(var(--preview-gutter) - var(--section-inline));}}
 @media screen and (max-width:700px){.live-preview:not(.expanded){--preview-gutter:12px;}}
 @media(min-width:1700px){.frame-area{height:850px}}
@@ -21,7 +22,7 @@ html{scroll-behavior:smooth;scroll-padding-top:82px}body{background:var(--paper)
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 @media print{.site-nav,.preview-actions,.preview-hint{display:none}.slide{min-height:auto;break-inside:avoid;padding:35px;print-color-adjust:exact;-webkit-print-color-adjust:exact}.frame-area{height:650px}.live-preview{box-shadow:none}.dark{background:#112e3a!important}.slide h1{font-size:42px}.slide h2{font-size:32px}}
 </style></head><body>
-<nav class="site-nav" aria-label="展示导航"><a class="nav-brand" href="#intro">SYNTHIA / 平台展示</a><div class="links"><a href="#problems">攻关问题</a><a href="#workflow">自动开发</a><a href="#can">CAN 实例</a><a href="#evolution">自进化</a><a href="#governance">过程管控</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台 ↗</a></div></nav><main><section id="intro" class="slide dark" data-title="攻关目标" aria-labelledby="s1-title">
+<nav class="site-nav" aria-label="展示导航"><a class="nav-brand" href="#intro">SYNTHIA / 平台展示</a><div class="links"><a href="#problems">攻关问题</a><a href="#can">CAN 实例</a><a href="#evolution">自进化</a><a href="#governance">过程管控</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台 ↗</a></div></nav><main><section id="intro" class="slide dark" data-title="攻关目标" aria-labelledby="s1-title">
         <div class="topline"><span class="brand"><b></b>SYNTHIA</span><span class="series">FPGA 智能开发平台 · 成果汇报</span></div>
         <div class="hero-grid"><div><p class="eyebrow">工业 EDA × 智能体</p><h1 id="s1-title">让 FPGA 开发更快<br>让工程经验<span class="accent">留下来</span></h1><p class="hero-note">从自然语言需求，到可验证的电路设计。<br>提高工程师使用工业 EDA 的开发效率。</p><div class="hero-values"><span>自动开发</span><span>经验复用</span><span>过程可控</span></div></div><div class="chip-scene" role="img" aria-label="用代码描述电路，经 EDA 验证与实现，形成 FPGA 设计"><span class="scene-label top">投币 → 出货 → 找零</span><div class="chip"><strong>FPGA</strong><small>用代码描述电路</small></div><span class="scene-label bottom">代码 → EDA → 电路</span></div></div>
         <div class="footer"><span>以工程结果验证智能体能力</span></div>
@@ -30,17 +31,18 @@ html{scroll-behavior:smooth;scroll-padding-top:82px}body{background:var(--paper)
         <p class="eyebrow">复杂的工程，三个共同瓶颈</p><h2 id="s2-title">效率问题，贯穿整个项目生命周期</h2>
         <div class="pain-grid"><article class="pain"><div class="index">01</div><h3>开发慢</h3><p>专业工具门槛高<br>跨阶段调试反复<br>高可靠设计更复杂</p><div class="response">对应能力 → 自动开发闭环</div></article><article class="pain"><div class="index">02</div><h3>经验难复用</h3><p>经验分散在个人脑中<br>适用条件不明确<br>相似问题重复探索</p><div class="response">对应能力 → 技能沉淀与复用</div></article><article class="pain"><div class="index">03</div><h3>流程管理复杂</h3><p>阶段多、协同成本高<br>执行与交付需要证据<br>模型错误需要被拦截</p><div class="response">对应能力 → 里程碑与人工审核</div></article></div>
         <div class="footer"><span>把重复操作交给智能体，把关键决策留给工程师</span></div>
-      </section><section id="workflow" class="slide" data-title="自动开发闭环" aria-labelledby="s3-title">
-        <div class="topline"><span class="brand"><b></b>SYNTHIA</span><span class="series">能力 01 / 自动开发</span></div>
-        <p class="eyebrow">从需求到结果，形成可验证闭环</p><h2 id="s3-title">智能体持续开发，EDA 给出真实反馈</h2><p class="subtitle">将 FPGA 领域知识与工具操作沉淀为技能，支撑连续执行。</p>
-        <div class="workflow"><div class="step"><small>INPUT</small><h3>明确需求</h3><p>自然语言需求<br>器件与时钟约束</p></div><div class="step"><small>DESIGN</small><h3>生成设计</h3><p>电路描述代码<br>测试与验证材料</p></div><div class="step"><small>EXECUTE</small><h3>调用 EDA</h3><p>仿真 · 综合 · 实现<br>远程工具执行</p></div><div class="step"><small>VERIFY</small><h3>检查证据</h3><p>功能 · 时序 · 资源<br>报告与波形</p></div></div>
-        <div class="feedback">← 根据工具结果定位问题、修改设计、再次验证</div>
-        <div class="split-info"><div><h3>智能体承担</h3><p>编写代码、操作工具、分析报告、迭代修复</p></div><div><h3>工程师聚焦</h3><p>需求边界、关键决策、结果审核</p></div></div>
-        <div class="footer"><span>已在选定基准项目中跑通自动开发与验证闭环</span></div>
       </section><section id="can" class="slide" data-title="CAN 案例" aria-labelledby="s4-title">
         <div class="topline"><span class="brand"><b></b>SYNTHIA</span><span class="series">成果 / CAN 2.0B 控制器</span></div>
         <p class="eyebrow">同需求 · 同器件约束 · 同工具链</p><h2 id="s4-title">从需求独立开发，用工程指标检验</h2>
-        <p class="subtitle">直接查看智能体的开发过程、验证结果与工程报告。</p><div class="live-preview" data-path="/projects/p20"><div class="browser-bar"><span class="browser-label"><i></i>CAN 控制器 · 智能体项目 p20</span><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p20" target="_blank" rel="noopener">独立打开 ↗</a></div></div><div class="frame-area"><p class="loading-message" role="status">正在加载 CAN 控制器 · 智能体项目 p20…</p><iframe title="CAN 控制器 · 智能体项目 p20实时网页" name="can-preview" allow="fullscreen" loading="eager"></iframe></div><p class="preview-hint">真实平台页面，可直接操作。首次使用若显示登录页，请在此登录。<span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p></div>
+        <p class="subtitle">对照查看 CAN 盲测与黄金基线的开发过程、验证结果和工程报告。</p><div class="live-preview" data-path="/projects/p20">
+          <div class="browser-bar"><div class="preview-tabs" role="tablist" aria-label="CAN 项目对比">
+            <button type="button" id="can-blind-tab" role="tab" aria-selected="true" aria-controls="can-blind-panel" data-tab="can-blind-panel">CAN 盲测</button>
+            <button type="button" id="can-golden-tab" role="tab" aria-selected="false" aria-controls="can-golden-panel" tabindex="-1" data-tab="can-golden-panel">CAN 黄金基线</button>
+          </div><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p20" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
+          <div class="frame-area" id="can-blind-panel" role="tabpanel" aria-labelledby="can-blind-tab" data-path="/projects/p20"><p class="loading-message" role="status">正在加载 CAN 盲测 p20…</p><iframe title="CAN 盲测 p20 实时网页" name="can-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <div class="frame-area" id="can-golden-panel" role="tabpanel" aria-labelledby="can-golden-tab" data-path="/projects/p19" hidden><p class="loading-message" role="status">正在加载 CAN 黄金基线 p19…</p><iframe title="CAN 黄金基线 p19 实时网页" name="can-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <p class="preview-hint">真实平台页面，可直接操作。首次使用若显示登录页，请在此登录。<span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
+        </div>
         <div class="footer"><span class="footnote">来源：bench-lib T2 对比报告。活跃时长为扣除停等后的估算；验证止于实现，未生成比特流、未上板。</span></div>
       </section><section id="evolution" class="slide" data-title="经验复用" aria-labelledby="s5-title">
         <div class="topline"><span class="brand"><b></b>SYNTHIA</span><span class="series">能力 02 / 经验沉淀与自进化</span></div>
@@ -62,19 +64,77 @@ function collapsePreviews() {
   document.body.classList.remove("preview-open");
 }
 for (const panel of document.querySelectorAll(".live-preview")) {
-  const frame=panel.querySelector("iframe"), message=panel.querySelector(".loading-message"), hint=panel.querySelector(".connection-hint");
-  const url=new URL(panel.dataset.path.slice(1), platformBase).href;
-  panel.querySelector("[data-open]").href=url;
-  let timeout;
-  function load() {
-    clearTimeout(timeout); message.hidden=false; hint.hidden=true;
-    frame.src=url;
-    timeout=setTimeout(()=>{hint.hidden=false;},15000);
+  const hint = panel.querySelector(".connection-hint");
+  const tabs = [...panel.querySelectorAll("[data-tab]")];
+  const states = [...panel.querySelectorAll(".frame-area")].map(area => {
+    const state = {
+      area,
+      frame: area.querySelector("iframe"),
+      message: area.querySelector(".loading-message"),
+      url: new URL((area.dataset.path || panel.dataset.path).slice(1), platformBase).href,
+      started: false,
+      slow: false,
+      timeout: null,
+    };
+    state.frame.addEventListener("load", () => {
+      if (!state.started) return;
+      state.message.hidden = true;
+      state.slow = false;
+      clearTimeout(state.timeout);
+      if (!state.area.hidden) hint.hidden = true;
+    });
+    return state;
+  });
+  let active = states.find(state => !state.area.hidden);
+  function load(state) {
+    clearTimeout(state.timeout);
+    state.message.hidden = false;
+    state.slow = false;
+    state.started = true;
+    hint.hidden = true;
+    state.frame.src = state.url;
+    state.timeout = setTimeout(() => {
+      state.slow = true;
+      if (state === active) hint.hidden = false;
+    }, 15000);
   }
-  frame.addEventListener("load",()=>{message.hidden=true;clearTimeout(timeout);});
-  panel.querySelector("[data-reload]").addEventListener("click",load);
-  panel.querySelector("[data-expand]").addEventListener("click",()=>{const expand=!panel.classList.contains("expanded");collapsePreviews();if(expand){panel.classList.add("expanded");document.body.classList.add("preview-open");panel.querySelector("[data-expand]").textContent="收起预览";}});
-  load();
+  function select(state) {
+    active = state;
+    states.forEach(item => { item.area.hidden = item !== active; });
+    tabs.forEach(tab => {
+      const selected = tab.dataset.tab === active.area.id;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    });
+    panel.querySelector("[data-open]").href = active.url;
+    hint.hidden = !active.slow;
+    if (!active.started) load(active);
+  }
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => select(states.find(state => state.area.id === tab.dataset.tab)));
+    tab.addEventListener("keydown", event => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next].focus();
+      tabs[next].click();
+    });
+  });
+  panel.querySelector("[data-reload]").addEventListener("click", () => load(active));
+  panel.querySelector("[data-expand]").addEventListener("click", () => {
+    const expand = !panel.classList.contains("expanded");
+    collapsePreviews();
+    if (expand) {
+      panel.classList.add("expanded");
+      document.body.classList.add("preview-open");
+      panel.querySelector("[data-expand]").textContent = "收起预览";
+    }
+  });
+  select(active);
 }
 document.addEventListener("keydown",event=>{if(event.key==="Escape")collapsePreviews();});
 </script></body></html>
