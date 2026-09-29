@@ -21,6 +21,7 @@ puts SOURCE_VALIDATION_OK`;if(t.operation==="simulate"){let a=[],s=[];for(let b 
 create_project synthia_batch ${h} -part ${I} -force
 add_files -fileset sources_1 ${l}
 add_files -fileset sim_1 ${u}
+set_property source_mgmt_mode None [current_project]
 update_compile_order -fileset sources_1
 update_compile_order -fileset sim_1
 set_property top ${_} [get_filesets sources_1]
