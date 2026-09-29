@@ -116,88 +116,88 @@ export async function loadProjectOverview(
     if (!options.isDisposed?.()) options.onProgress?.([...rows]);
   };
   publish();
-  // Bound cross-project fan-out while allowing independent facts to load together.
-  for (let offset = 0; offset < projects.length; offset += 4) {
-    if (options.isDisposed?.()) return rows;
-    await Promise.all(
-      projects
-        .slice(offset, offset + 4)
-        .map(async (project, index): Promise<void> => {
-          const engineering = projectType(project) === "engineering";
-          const modern =
-            engineering &&
-            (project.process_profile_id ?? project.process_version_id) ===
-              GJB_REF_V1_ID;
-          const [submissionResult, taskResult, processResult] =
-            await Promise.allSettled([
-              engineering
-                ? listGateSubmissions(client, project.id)
-                : Promise.resolve([]),
-              listTasks(client, project.id),
-              modern
-                ? Promise.all([
-                    profile(),
-                    getProcessState(client, project.id),
-                  ])
-                : Promise.resolve(null),
-            ]);
-          const issues: OverviewIssue[] = [];
-          const submissions =
-            submissionResult.status === "fulfilled"
-              ? submissionResult.value
-              : [];
-          const tasks =
-            taskResult.status === "fulfilled"
-              ? taskResult.value.agents.filter((task) => task.kind !== "side")
-              : [];
-          if (submissionResult.status === "rejected")
-            issues.push({
-              label: "待审批记录",
-              error: submissionResult.reason,
-            });
-          if (taskResult.status === "rejected")
-            issues.push({ label: "任务状态", error: taskResult.reason });
-          let stage = engineering
-            ? isLegacyCompatProject(project)
-              ? "兼容旧流程"
-              : "流程状态暂不可用"
-            : "自由探索 · 无固定阶段";
-          let gateNames: Record<string, string> = {};
-          let progress: ProjectOverview["progress"] = null;
-          if (modern) {
-            try {
-              if (processResult.status === "rejected")
-                throw processResult.reason;
-              const [definition, rawState] = processResult.value!;
-              gateNames = Object.fromEntries(
-                definition.nodes.map((node) => [node.id, node.name]),
-              );
-              const state = parseProcessState(rawState, project.id);
-              const chain = deriveProcessGateChain(definition, state)!;
-              const current = currentProcessGate(chain)!;
-              stage = state.completed
-                ? "实现与交付已完成"
-                : `${current.node.id} · ${current.node.name}`;
-              progress = processProgress(chain);
-            } catch (error) {
-              issues.push({ label: "正式流程状态", error });
-            }
-          }
-          rows[offset + index] = {
-            project,
-            pending: false,
-            submissions,
-            tasks,
-            issues,
-            stage,
-            gateNames,
-            progress,
-            updatedAt: project.last_activity_at ?? project.created_at,
-          };
-          publish();
-        }),
-    );
+  // Four continuous workers: a slow project does not block the other slots.
+  // Each slot owns an original row index, so completion order never moves cards.
+  let nextIndex = 0;
+  async function loadNext(): Promise<void> {
+    while (!options.isDisposed?.() && nextIndex < projects.length) {
+      const index = nextIndex++;
+      const project = projects[index]!;
+      const engineering = projectType(project) === "engineering";
+      const modern =
+        engineering &&
+        (project.process_profile_id ?? project.process_version_id) ===
+          GJB_REF_V1_ID;
+      const [submissionResult, taskResult, processResult] =
+        await Promise.allSettled([
+          engineering
+            ? listGateSubmissions(client, project.id)
+            : Promise.resolve([]),
+          listTasks(client, project.id),
+          modern
+            ? Promise.all([
+                profile(),
+                getProcessState(client, project.id),
+              ])
+            : Promise.resolve(null),
+        ]);
+      const issues: OverviewIssue[] = [];
+      const submissions =
+        submissionResult.status === "fulfilled"
+          ? submissionResult.value
+          : [];
+      const tasks =
+        taskResult.status === "fulfilled"
+          ? taskResult.value.agents.filter((task) => task.kind !== "side")
+          : [];
+      if (submissionResult.status === "rejected")
+        issues.push({
+          label: "待审批记录",
+          error: submissionResult.reason,
+        });
+      if (taskResult.status === "rejected")
+        issues.push({ label: "任务状态", error: taskResult.reason });
+      let stage = engineering
+        ? isLegacyCompatProject(project)
+          ? "兼容旧流程"
+          : "流程状态暂不可用"
+        : "自由探索 · 无固定阶段";
+      let gateNames: Record<string, string> = {};
+      let progress: ProjectOverview["progress"] = null;
+      if (modern) {
+        try {
+          if (processResult.status === "rejected")
+            throw processResult.reason;
+          const [definition, rawState] = processResult.value!;
+          gateNames = Object.fromEntries(
+            definition.nodes.map((node) => [node.id, node.name]),
+          );
+          const state = parseProcessState(rawState, project.id);
+          const chain = deriveProcessGateChain(definition, state)!;
+          const current = currentProcessGate(chain)!;
+          stage = state.completed
+            ? "实现与交付已完成"
+            : `${current.node.id} · ${current.node.name}`;
+          progress = processProgress(chain);
+        } catch (error) {
+          issues.push({ label: "正式流程状态", error });
+        }
+      }
+      rows[index] = {
+        project,
+        pending: false,
+        submissions,
+        tasks,
+        issues,
+        stage,
+        gateNames,
+        progress,
+        updatedAt: project.last_activity_at ?? project.created_at,
+      };
+      publish();
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(4, projects.length) }, () => loadNext()));
   // Keep the list snapshot stable while details arrive (including failures).
   // Older Core versions retain their creation order until the next reload.
   return rows;

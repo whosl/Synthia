@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** Project workspace: main conversation, files, approvals, and governed delivery. */
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import LoadingPlaceholder from "../components/layout/LoadingPlaceholder.vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
@@ -2709,7 +2710,7 @@ function onToggleChatOverlay(): void {
       </TopBar>
     </header>
     <div v-if="loadErrorText" class="flex flex-none items-center justify-between gap-3 bg-danger/12 px-4 py-2 text-xs text-danger" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
-    <div v-if="loading" class="grid flex-1 place-items-center text-fg-secondary" role="status">正在准备项目工作区…</div>
+    <LoadingPlaceholder v-if="loading" workspace label="正在准备项目工作区…" />
 
     <ResizablePanelGroup
       v-else-if="project"

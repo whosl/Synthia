@@ -20,4 +20,12 @@ if (import.meta.env.VITE_MOCK === "1") {
 const app = createApp(App);
 app.use(createPinia());
 app.use(router);
-app.mount("#app");
+// Keep the HTML skeleton visible until the initial route chunk is ready.
+void router.isReady().then(() => {
+  app.mount("#app");
+}).catch(() => {
+  const message = document.getElementById("boot-message");
+  if (message) message.textContent = "页面加载失败，请检查网络后刷新重试。";
+  const retry = document.getElementById("boot-retry");
+  if (retry) retry.hidden = false;
+});

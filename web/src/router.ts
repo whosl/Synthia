@@ -2,9 +2,10 @@
 import { createRouter, createWebHashHistory, createWebHistory } from "vue-router";
 import { readToken } from "./stores/auth.ts";
 import { PLATFORM_PREVIEW } from "./api/platform.ts";
+import { routeLoading, routeLoadError } from "./domain/route-loading.ts";
+import ProjectsView from "./views/ProjectListView.vue";
 
 const LoginView = () => import("./views/LoginView.vue");
-const ProjectsView = () => import("./views/ProjectListView.vue");
 const ProjectView = () => import("./views/ProjectView.vue");
 const EvolutionView = () => import("./views/EvolutionView.vue");
 
@@ -29,9 +30,17 @@ export const router = createRouter({
 });
 
 router.beforeEach((to) => {
+  routeLoading.value = true;
+  routeLoadError.value = "";
   if (to.meta.public) return true;
   if (!readToken()) {
     return { name: "login", query: to.fullPath !== "/projects" ? { redirect: to.fullPath } : {} };
   }
   return true;
+});
+
+router.afterEach(() => { routeLoading.value = false; });
+router.onError(() => {
+  routeLoading.value = false;
+  routeLoadError.value = "页面加载失败，请检查网络后重试。";
 });

@@ -94,6 +94,40 @@ function clientFor(
 }
 
 describe("project overview business flow", () => {
+  test("a slow detail does not block the next project, while concurrency stays bounded", async () => {
+    const projects = Array.from({ length: 6 }, (_, index) => ({ ...free, id: `free-${index}` }));
+    const { client } = clientFor(Object.fromEntries([
+      ["/api/v1/projects", projects],
+      ...projects.map((project) => [`/api/v1/projects/${project.id}/tasks`, { agents: [] }]),
+    ]));
+    const releases = new Map<string, () => void>();
+    let active = 0, peak = 0;
+    const slowClient: typeof client = async (path, options) => {
+      if (path.endsWith("/tasks")) {
+        active++; peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => { releases.set(path.split("/")[4]!, resolve); });
+        active--;
+      }
+      return client(path, options);
+    };
+    const result = loadProjectOverview(slowClient);
+    const started = async (id: string) => {
+      for (let i = 0; i < 100 && !releases.has(id); i++) await Bun.sleep(1);
+      expect(releases.has(id)).toBe(true);
+    };
+    await started("free-3");
+    expect(releases.size).toBe(4);
+    releases.get("free-1")!();
+    await started("free-4");
+    releases.get("free-4")!();
+    await started("free-5");
+    for (const release of releases.values()) release();
+    const rows = await result;
+    expect(peak).toBe(4);
+    expect(rows.map((row) => row.project.id)).toEqual(projects.map((project) => project.id));
+    expect(rows.every((row) => row.pending === false)).toBe(true);
+  });
+
   test("activity order and timestamps stay identical through slow or failed detail loading", async () => {
     const projects = [
       { ...free, last_activity_at: "2026-09-08T10:00:00Z" },

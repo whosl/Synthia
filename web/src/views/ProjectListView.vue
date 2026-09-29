@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, shallowRef, ref, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import {
   LayoutGrid,
@@ -23,7 +23,7 @@ import {
 } from "../domain/project.ts";
 import { PROJECT_STATUS_TEXT } from "../domain/gates.ts";
 import PageShell from "../components/layout/PageShell.vue";
-import CreateProjectDialog from "../components/projects/CreateProjectDialog.vue";
+import CreateProjectLoading from "../components/projects/CreateProjectLoading.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
 import Badge from "../components/ui/AppBadge.vue";
 import Button from "../components/ui/AppButton.vue";
@@ -38,6 +38,18 @@ import {
 } from "../components/ui/empty";
 
 const router = useRouter();
+const createLoadError = ref(false);
+const CreateProjectDialog = shallowRef<typeof import("../components/projects/CreateProjectDialog.vue")["default"] | null>(null);
+async function openCreate(): Promise<void> {
+  createLoadError.value = false;
+  showCreate.value = true;
+  try {
+    CreateProjectDialog.value ??= (await import("../components/projects/CreateProjectDialog.vue")).default;
+  } catch {
+    createLoadError.value = true;
+    showCreate.value = false;
+  }
+}
 const {
   rows,
   loading,
@@ -83,7 +95,7 @@ function projectCreated(id: string) {
   <PageShell section="projects">
     <header class="ax-page-heading">
       <div><p class="ax-eyebrow">ENGINEERING WORKSPACE</p><h1>项目工作台</h1><p>继续设计，验证进展，完成下一次交付。</p></div>
-      <Button variant="primary" class="h-9 gap-2" @click="showCreate = true"><Plus :size="16" />新建项目</Button>
+      <Button variant="primary" class="h-9 gap-2" @click="openCreate"><Plus :size="16" />新建项目</Button>
     </header>
 
     <section class="ax-workspace-stats" aria-label="工作空间概况">
@@ -93,6 +105,7 @@ function projectCreated(id: string) {
     </section>
 
     <ErrorNotice v-if="error" :error="error" />
+    <p v-if="createLoadError" role="alert" class="ax-load-notice">新建项目表单加载失败，请检查网络后重试。</p>
     <div v-if="incompleteRows.length" class="ax-load-notice" role="status"><Inbox :size="18" /><div>{{ incompleteRows.length }} 个项目的部分状态未能加载，数量可能不完整。<details><summary>查看详情</summary><p v-for="row in incompleteRows" :key="row.project.id">{{ row.project.name }}：{{ row.issues.map(issue => issue.label).join('、') }}</p></details></div><Button :loading="refreshing" @click="reload">重试</Button></div>
 
     <section class="projects-section" aria-labelledby="projects-title">
@@ -103,7 +116,7 @@ function projectCreated(id: string) {
       </div>
       <div v-if="loading" class="ax-project-grid" role="status" aria-label="正在加载项目"><div v-for="n in 6" :key="n" class="ax-project-skeleton"><Skeleton class="size-10 rounded-xl" /><Skeleton class="h-4 w-3/4" /><Skeleton class="h-3 w-1/2" /></div></div>
       <Empty v-else-if="error && !rows.length" class="min-h-[250px] border"><EmptyHeader><EmptyMedia variant="icon"><RefreshCw :size="20" /></EmptyMedia><EmptyTitle>项目暂时无法加载</EmptyTitle><EmptyDescription>连接恢复后可以重试。</EmptyDescription></EmptyHeader><EmptyContent><Button :loading="refreshing" @click="reload">重新加载</Button></EmptyContent></Empty>
-      <Empty v-else-if="!rows.length" class="min-h-[250px] border"><EmptyHeader><EmptyMedia variant="icon"><Folder :size="20" /></EmptyMedia><EmptyTitle>你的第一个项目，从这里开始</EmptyTitle><EmptyDescription>选择自由探索，或按照工程流程推进。</EmptyDescription></EmptyHeader><EmptyContent><Button variant="primary" @click="showCreate = true">新建项目</Button></EmptyContent></Empty>
+      <Empty v-else-if="!rows.length" class="min-h-[250px] border"><EmptyHeader><EmptyMedia variant="icon"><Folder :size="20" /></EmptyMedia><EmptyTitle>你的第一个项目，从这里开始</EmptyTitle><EmptyDescription>选择自由探索，或按照工程流程推进。</EmptyDescription></EmptyHeader><EmptyContent><Button variant="primary" @click="openCreate">新建项目</Button></EmptyContent></Empty>
       <Empty v-else-if="!visibleRows.length" class="min-h-[250px] border"><EmptyHeader><EmptyMedia variant="icon"><Search :size="20" /></EmptyMedia><EmptyTitle>没有找到匹配的项目</EmptyTitle><EmptyDescription>试试其他名称、器件，或调整项目类型。</EmptyDescription></EmptyHeader><EmptyContent><Button @click="query = ''; type = 'all'">清除筛选</Button></EmptyContent></Empty>
       <div v-else class="ax-project-grid" :class="{ 'is-list': layout === 'list' }">
         <router-link v-for="row in visibleRows" :key="row.project.id" :to="{ name: 'project', params: { id: row.project.id }, query: type === 'review' ? { sub: row.submissions.find(sub => sub.state === 'in_review')?.id } : {} }" class="ax-project-card" :aria-label="`进入项目：${row.project.name}`">
@@ -118,7 +131,8 @@ function projectCreated(id: string) {
       <p v-if="detailsLoading">正在读取任务状态…</p><p v-else-if="!activeTasks.length">{{ incompleteRows.length || error ? '已加载的项目中暂无活跃主任务。' : '目前没有运行中的主任务，可以进入项目开始新的工作。' }}</p>
       <div v-else class="ax-active-grid"><router-link v-for="item in activeTasks" :key="`${item.project.id}:${item.task.agent_id}`" :to="{ name: 'project', params: { id: item.project.id }, query: { run: item.task.agent_id } }"><Sparkles :size="16" /><span>{{ item.project.name }}</span><Badge size="sm" variant="dot" :tone="item.task.status === 'awaiting_approval' ? 'warn' : 'accent'">{{ item.task.status === 'awaiting_approval' ? '等待确认' : '进行中' }}</Badge><ArrowRight :size="14" /></router-link></div>
     </section>
-    <CreateProjectDialog v-if="showCreate" @close="showCreate = false" @created="projectCreated" />
+    <component :is="CreateProjectDialog" v-if="showCreate && CreateProjectDialog" @close="showCreate = false" @created="projectCreated" />
+    <CreateProjectLoading v-else-if="showCreate" @close="showCreate = false" />
   </PageShell>
 </template>
 <style scoped>

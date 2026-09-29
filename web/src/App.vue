@@ -15,8 +15,10 @@ import "vue-sonner/style.css";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { viewKey } from "./domain/navigation.ts";
 import { initTheme } from "./domain/theme.ts";
+import { routeLoading, routeLoadError } from "./domain/route-loading.ts";
 
 const route = useRoute();
+function reloadPage(): void { window.location.reload(); }
 
 onMounted(() => {
   initTheme();
@@ -24,6 +26,8 @@ onMounted(() => {
 </script>
 
 <template>
+  <div v-if="routeLoading" class="route-notice" role="status">正在加载页面…</div>
+  <div v-else-if="routeLoadError" class="route-notice" role="alert">{{ routeLoadError }} <button type="button" @click="reloadPage">重新加载</button></div>
   <TooltipProvider>
     <router-view :key="viewKey(route)" />
   </TooltipProvider>
@@ -40,3 +44,8 @@ onMounted(() => {
     }"
   />
 </template>
+
+<style scoped>
+.route-notice { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 500; padding: 10px 18px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 3px 18px #0002; font-size: 13px; }
+.route-notice button { margin-left: 12px; text-decoration: underline; cursor: pointer; }
+</style>
