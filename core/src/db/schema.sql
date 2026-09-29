@@ -3277,6 +3277,13 @@ CREATE TABLE IF NOT EXISTS learned_skill (
     UNIQUE (id, active_version_id)
 );
 
+CREATE INDEX IF NOT EXISTS learned_skill_name_trgm_idx
+  ON learned_skill USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS learned_skill_summary_trgm_idx
+  ON learned_skill USING gin (summary gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS learned_skill_applicability_trgm_idx
+  ON learned_skill USING gin (applicability_summary gin_trgm_ops);
+
 CREATE TABLE IF NOT EXISTS curator_run (
     id                    text PRIMARY KEY,
     mode                  text NOT NULL CHECK (mode IN ('run','dry_run')),
@@ -3334,7 +3341,14 @@ CREATE TABLE IF NOT EXISTS learned_skill_version (
     UNIQUE (id, skill_id),
     UNIQUE (skill_id, version_no),
     UNIQUE (distillation_run_id),
-    CHECK (num_nonnulls(distillation_run_id, curator_run_id) = 1),
+    CONSTRAINT learned_skill_version_origin_check CHECK (
+      num_nonnulls(distillation_run_id, curator_run_id) = 1
+      OR (
+        num_nonnulls(distillation_run_id, curator_run_id) = 0
+        AND created_by_type = 'human'
+        AND parent_version_id IS NOT NULL
+      )
+    ),
     FOREIGN KEY (parent_version_id, skill_id)
       REFERENCES learned_skill_version(id, skill_id)
 );

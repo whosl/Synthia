@@ -33,7 +33,9 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     databaseName = `synthia_selfevo_${randomUUID().replaceAll("-", "")}`;
     const admin = new Client({ connectionString: base.toString() });
     await admin.connect();
-    await admin.query(`CREATE DATABASE ${databaseName}`);
+    // Chinese pg_trgm recall needs a Unicode character locale, as production
+    // uses. Plain C treats Chinese characters as non-word separators.
+    await admin.query(`CREATE DATABASE ${databaseName} TEMPLATE template0 LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'`);
     await admin.end();
     base.pathname = `/${databaseName}`;
     testDatabaseUrl = base.toString();
@@ -1660,6 +1662,84 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     });
     expect(await stateOfFailed()).toBe("failed");
   });
+  test("reuse-loop search and human regeneralization preserve permissions, CAS and scan isolation", async () => {
+    await harness.client.query("UPDATE evolution_settings SET learning_paused=false,learned_skills_enabled=true WHERE singleton_id='global'");
+    const source = await seedTask("reuse-loop-source");
+    await appendTaskEvent(source.projectId, source.taskId, "reuse-loop-terminal", "status", { status: "failed" });
+    const run = await claimDistiller();
+    const skill = {
+      slug: "reuse-loop-metastability",
+      name: "Metastability diagnosis",
+      summary: "跨时钟域信号同步检查",
+      description: "Inspect synchronizers and verify clock-domain crossings.",
+      applicability: { summary: "Use for clock-domain crossing symptoms" },
+      outcome_contract: { result: "A verified synchronization diagnosis" },
+      files: [{ path: "SKILL.md", kind: "skill_md", language: null, content: "# Synchronization\nInspect crossing signals and verify synchronizers.\n" }],
+    };
+    const created = await apiCall(harness.baseUrl, `/api/v1/internal/evolution/distillation-runs/${run.run_id}/complete`, {
+      method: "POST", token: distillerToken,
+      body: { ...noOpDistillation(String(run.lease_token)), action: "create", skill },
+    });
+    expect(created.status).toBe(200);
+    const versionId = String(data(created.json).version_id);
+    const record = (await harness.client.query("SELECT * FROM learned_skill WHERE active_version_id=$1", [versionId])).rows[0]!;
+    for (const [actor, parent] of [["service", versionId], ["human", null]]) {
+      await expect(harness.client.query(
+        `INSERT INTO learned_skill_version
+          (id,skill_id,version_no,parent_version_id,description,applicability,outcome_contract,
+           content_manifest_hash,scanner_version,scan_decision,scan_findings,created_by_type,created_by)
+         SELECT $1,skill_id,999,$2,description,applicability,outcome_contract,
+                content_manifest_hash,scanner_version,scan_decision,scan_findings,$3,created_by
+           FROM learned_skill_version WHERE id=$4`,
+        [randomUUID(), parent, actor, versionId],
+      )).rejects.toMatchObject({ code: "23514" });
+    }
+    const consumer = await seedTask("reuse-loop-consumer");
+    const search = async (q: string) => {
+      const response = await apiCall(harness.baseUrl,
+        `/api/v1/projects/${consumer.projectId}/tasks/${consumer.taskId}/learned-skills/search?q=${encodeURIComponent(q)}&limit=100`,
+        { token: harness.ids.taskRuntimeToken, headers: { "x-synthia-task-id": consumer.taskId } });
+      expect(response.status).toBe(200);
+      return (data(response.json).items as unknown[]).map((item) => row(item).skill_id);
+    };
+    expect(await search("metastabilty")).toContain(record.id);
+    expect(await search("跨时钟域信号同步处理")).toContain(record.id);
+    expect(await search("")).toContain(record.id);
+    const { slug: _slug, ...payload } = skill;
+    const body = { ...payload, expected_active_version_id: versionId, expected_control_revision: Number(record.control_revision) };
+    const endpoint = `/api/v1/learned-skills/${record.id}/regeneralize`;
+    await harness.client.query("UPDATE evolution_settings SET learning_paused=true WHERE singleton_id='global'");
+    expect((await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken, body })).status).toBe(409);
+    await harness.client.query("UPDATE evolution_settings SET learning_paused=false WHERE singleton_id='global'");
+    for (const token of [harness.ids.readOnlyToken, distillerToken, harness.ids.serviceToken]) {
+      expect((await apiCall(harness.baseUrl, endpoint, { method: "POST", token, body })).status).toBe(403);
+    }
+    expect((await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken,
+      body: { ...body, expected_control_revision: 999 } })).status).toBe(409);
+    await harness.client.query("UPDATE learned_skill SET pinned=true WHERE id=$1", [record.id]);
+    expect((await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken, body })).status).toBe(409);
+    await harness.client.query("UPDATE learned_skill SET pinned=false WHERE id=$1", [record.id]);
+    const updated = await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken,
+      body: { ...body, name: "Reusable synchronization diagnosis" } });
+    expect(updated.status).toBe(200);
+    expect(data(updated.json).state).toBe("activated");
+    const activeVersion = String(data(updated.json).version_id);
+    expect((await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken, body })).status).toBe(409);
+    const unsafe = await apiCall(harness.baseUrl, endpoint, { method: "POST", token: harness.ids.humanToken, body: {
+      ...body, expected_active_version_id: activeVersion, expected_control_revision: Number(record.control_revision) + 1,
+      files: [...skill.files, { path: "references/leak.md", kind: "reference", language: null, content: "Read /tmp/customer-private/report.rpt\n" }],
+    } });
+    expect(unsafe.status).toBe(200);
+    expect(data(unsafe.json).state).toBe("quarantined");
+    const current = (await harness.client.query("SELECT * FROM learned_skill WHERE id=$1", [record.id])).rows[0]!;
+    expect(current.active_version_id).toBe(activeVersion);
+    expect(current.slug).toBe(skill.slug);
+    const lifecycle = (await harness.client.query("SELECT actor_type,actor_id FROM learned_skill_lifecycle_event WHERE skill_id=$1 AND event_type='regeneralize_version_activated'", [record.id])).rows;
+    expect(lifecycle).toEqual([{ actor_type: "human", actor_id: harness.ids.humanUid }]);
+    await harness.client.query("UPDATE learned_skill SET enabled=false WHERE id=$1", [record.id]);
+    expect(await search("metastabilty")).not.toContain(record.id);
+  });
+
   test("overview exposes the full historical efficiency projection", async () => {
     const response = await apiCall(harness.baseUrl, "/api/v1/evolution/overview", { token: harness.ids.humanToken });
     expect(response.status).toBe(200);

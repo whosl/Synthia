@@ -2415,6 +2415,8 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         payload: { turn_id: episode.turnId, status: "awaiting_user" },
       });
       expect(model.calls[0]!.tools.map(tool => tool.name)).toContain("learned_skill_search");
+      expect(model.calls[0]!.messages.some(message => message.role === "system"
+        && JSON.stringify(message.content).includes("【自进化技能库】"))).toBe(true);
     } finally {
       await server.stop();
     }
