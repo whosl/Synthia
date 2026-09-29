@@ -1544,7 +1544,7 @@ async function validateToolCall(
   } else {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
-  if (row.role !== undefined && row.role !== expected.role) {
+  if ((row.role === undefined ? "primary" : row.role) !== expected.role) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
   if (expected.applicationId === null) {
@@ -1552,8 +1552,8 @@ async function validateToolCall(
   } else if (row.application_id !== expected.applicationId) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
-  if (row.reason_codes !== undefined
-    && canonicalRequestHash(row.reason_codes) !== canonicalRequestHash(expected.reasonCodes)) {
+  if (canonicalRequestHash(row.reason_codes === undefined ? [] : row.reason_codes)
+    !== canonicalRequestHash(expected.reasonCodes)) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
   return event;

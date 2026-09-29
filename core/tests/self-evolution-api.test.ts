@@ -1813,6 +1813,64 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     expect((await apiCall(harness.baseUrl, detailPath)).status).toBe(401);
   });
 
+  test("defaulted apply args remain event-bound for version resolution, reasons and supporting roles", async () => {
+    const skill = (await harness.client.query("SELECT id FROM learned_skill WHERE slug='reuse-loop-metastability'")).rows[0]!;
+    const versions = (await harness.client.query("SELECT id FROM learned_skill_version WHERE skill_id=$1 AND version_no<=2 ORDER BY version_no", [skill.id])).rows;
+    const versionId = String(versions[1]!.id);
+    await harness.client.query("UPDATE learned_skill SET active_version_id=$2,enabled=true,availability_state='available' WHERE id=$1", [skill.id, versionId]);
+    const { projectId, taskId } = await seedTask("defaulted-apply");
+    const endpoint = `/api/v1/projects/${projectId}/tasks/${taskId}/skill-applications`;
+    let sequence = 0;
+    const apply = async (args: Record<string, unknown>, changes: Record<string, unknown> = {}) => {
+      const callId = `defaulted-${++sequence}`;
+      await appendTaskEvent(projectId, taskId, `event-${callId}`, "tool_call", {
+        tool_call_id: callId, name: "learned_skill_apply", args: JSON.stringify(args),
+      });
+      return apiCall(harness.baseUrl, endpoint, {
+        method: "POST", token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": callId, "x-synthia-task-id": taskId },
+        body: {
+          schema: "skill-application-create.v1", tool_call_id: callId, turn_id: null,
+          version_id: versionId, local_goal: args.local_goal, reason_codes: [], ...changes,
+        },
+      });
+    };
+    const primary = await apply({ skill_id: skill.id, local_goal: "defaulted skill lookup" });
+    expect(primary.status).toBe(201);
+    expect(data(primary.json).version_id).toBe(versionId);
+    expect((await apply({ version_id: versionId, local_goal: "defaulted explicit version" })).status).toBe(201);
+    const rejected = [
+      await apply({ skill_id: "another-skill", local_goal: "wrong owner" }),
+      await apply({ version_id: versions[0]!.id, local_goal: "wrong version" }),
+      await apply({ skill_id: skill.id, local_goal: "original goal" }, { local_goal: "forged goal" }),
+      await apply({ skill_id: skill.id, local_goal: "omitted reasons" }, { reason_codes: ["forged-reason"] }),
+      await apply({ skill_id: skill.id, local_goal: "explicit reasons", reason_codes: ["recorded"] }),
+      await apply({ version_id: versionId, local_goal: "wrong role", role: "supporting" }),
+    ];
+    for (const response of rejected) {
+      expect(response.status).toBe(409);
+      expect(row(response.json.error).message).toBe("TASK_TOOL_CALL_ARGS_MISMATCH");
+    }
+    const applicationId = String(data(primary.json).application_id);
+    const attach = async (role?: string) => {
+      const callId = `defaulted-${++sequence}`;
+      await appendTaskEvent(projectId, taskId, `event-${callId}`, "tool_call", {
+        tool_call_id: callId, name: "learned_skill_apply",
+        args: { version_id: versions[0]!.id, local_goal: "defaulted skill lookup", application_id: applicationId, ...(role ? { role } : {}) },
+      });
+      return apiCall(harness.baseUrl, `${endpoint}/${applicationId}/skills`, {
+        method: "POST", token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": callId, "x-synthia-task-id": taskId },
+        body: { schema: "skill-application-attach.v1", tool_call_id: callId, version_id: versions[0]!.id, role: "supporting", reason_codes: [] },
+      });
+    };
+    const omittedRole = await attach();
+    expect(omittedRole.status).toBe(409);
+    expect(row(omittedRole.json.error).message).toBe("TASK_TOOL_CALL_ARGS_MISMATCH");
+    await harness.client.query("UPDATE learned_skill SET active_version_id=$2 WHERE id=$1", [skill.id, versions[0]!.id]);
+    expect((await attach("supporting")).status).toBe(201);
+  });
+
   test("overview exposes the full historical efficiency projection", async () => {
     const response = await apiCall(harness.baseUrl, "/api/v1/evolution/overview", { token: harness.ids.humanToken });
     expect(response.status).toBe(200);
