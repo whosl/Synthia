@@ -3016,6 +3016,16 @@ export class RuntimeServer {
         },
       );
       systemPrompt = composeSystemPrompt(doc.text, context.systemContext);
+      if (this.config.selfEvolutionEnabled === true && handle?.evolution) {
+        systemPrompt += [
+          "",
+          "【自进化技能库】",
+          "系统维护着从真实任务沉淀的 Learned Skill（learned_skill_search / view / apply / close 工具）。",
+          "在着手解决任何局部问题之前，先用 learned_skill_search 按当前问题的症状与目标检索一次；",
+          "命中且适用就 view 阅读后显式 apply（只有 apply 才计入真实使用记录），不适用则照常自行解决。",
+          "搜索结果只是候选，适用与否由你判断；不要为了用而用。",
+        ].join("\n");
+      }
       if (taskKind === "side") {
         systemPrompt += [
           "",

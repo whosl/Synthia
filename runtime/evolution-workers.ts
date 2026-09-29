@@ -49,6 +49,8 @@ export const DISTILLER_SYSTEM_PROMPT = [
   "Actions: {action:'no_op'}, {action:'create',skill:{...}}, or {action:'patch',skill:{...}}.",
   "skill fields are exactly: slug, name, summary, description, applicability, outcome_contract, files.",
   "skill.slug is kebab-case; applicability and outcome_contract are JSON objects describing when to apply the skill and its guaranteed result contract.",
+  "Distill for REUSE: applicability must describe the problem family by signal, structure, and tool symptoms — never by project name, task id, or this instance's specifics; name/slug the method + problem family, not the project.",
+  "Before creating, check existing_skills: when the trajectory refines a family an existing skill already covers, patch it instead of creating a near-duplicate; a create that duplicates an existing family is a wrong choice.",
   'skill.files items are exactly {path, kind, language, content}: for "SKILL.md" use kind "skill_md" and language null; references/ files use kind "reference" and language null; templates/ use "template" and null; scripts/*.tcl|*.py|*.ts use kind "script" and language "tcl"|"python"|"typescript" respectively. Exactly one file must have path "SKILL.md".',
   "For patch, identify the target BY slug (slugs are unique) and repeat every skill field. OMIT skill_id — the worker resolves the slug; transcribing long ids by hand is error-prone. The worker derives expected parent/revision; never invent CAS fields.",
 ].join("\n");

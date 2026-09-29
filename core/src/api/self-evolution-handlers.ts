@@ -1144,25 +1144,41 @@ export async function taskSearchLearnedSkillsHandler(ctx: RequestContext): Promi
   const q = (ctx.url.searchParams.get("q") ?? "").trim();
   const limit = pageLimit(ctx.url);
   // Agent callers send natural-language queries ("UART baud_gen 编译前检查…").
-  // A whole-phrase ILIKE matches nothing for them, so match on whitespace-split
-  // terms instead: a skill is a hit when ANY term matches ANY text column.
+  // Recall is hybrid: whitespace-split terms keep disjoint keyword hits
+  // (ANY term vs ANY text column), while pg_trgm similarity on the full
+  // query bridges Chinese symptom phrasing to the Chinese summaries
+  // distillation writes — an exact-substring match alone never crosses
+  // that gap. A name hit on any term still outranks fuzzy matches (1.0).
   const terms = [...new Set(q.split(/\s+/u).map((t) => t.trim()).filter((t) => t.length >= 2))].slice(0, 8);
   const clauses: string[] = [];
   const params: string[] = [];
+  const nameHits: string[] = [];
   for (const term of terms) {
     const ph = `$${params.length + 1}`;
     params.push(term);
     clauses.push(`(s.name ILIKE '%' || ${ph} || '%' OR s.summary ILIKE '%' || ${ph} || '%' OR s.applicability_summary ILIKE '%' || ${ph} || '%')`);
+    nameHits.push(`s.name ILIKE '%' || ${ph} || '%'`);
   }
+  const fullPh = `$${params.length + 1}`;
+  params.push(q);
+  const SIMILARITY_FLOOR = 0.12;
+  clauses.push(
+    `similarity(s.name,${fullPh}) >= ${SIMILARITY_FLOOR}`,
+    `similarity(s.summary,${fullPh}) >= ${SIMILARITY_FLOOR}`,
+    `similarity(s.applicability_summary,${fullPh}) >= ${SIMILARITY_FLOOR}`,
+  );
+  const score = `GREATEST(CASE WHEN ${nameHits.length > 0 ? nameHits.join(" OR ") : "false"} THEN 1.0 ELSE 0 END,
+    similarity(s.name,${fullPh}), similarity(s.summary,${fullPh}), similarity(s.applicability_summary,${fullPh}))`;
   params.push(String(limit));
-  const termFilter = clauses.length > 0 ? ` AND (${clauses.join(" OR ")})` : "";
+  // Empty q lists all eligible skills, as it always has.
+  const termFilter = q === "" ? "" : ` AND (${clauses.join(" OR ")})`;
   const result = await ctx.pool.query(
-    `SELECT s.id,s.active_version_id,vs.quality_state
+    `SELECT s.id,s.active_version_id,vs.quality_state,${score} AS score
        FROM learned_skill s
        JOIN learned_skill_version_status vs ON vs.version_id=s.active_version_id
       WHERE s.enabled=true AND s.availability_state='available'
         AND vs.quality_state <> 'quarantined'${termFilter}
-      ORDER BY CASE WHEN s.name ILIKE '%' || ${terms.length > 0 ? `$1` : `''`} || '%' THEN 0 ELSE 1 END,s.id
+      ORDER BY score DESC,s.id
       LIMIT $${params.length}`,
     params,
   );
@@ -1979,19 +1995,8 @@ interface DistillationSkillPayload {
   readonly files: LearnedSkillFileInput[];
 }
 
-function distillationSkill(value: unknown): DistillationSkillPayload {
-  const skill = asObject(value, "skill");
-  exactFields(
-    skill,
-    ["skill_id", "slug", "name", "summary", "description", "applicability", "outcome_contract", "files"],
-    ["slug", "name", "summary", "description", "applicability", "outcome_contract", "files"],
-  );
-  const skillId = skill.skill_id === undefined ? null : nullableTextField(skill, "skill_id");
-  const slug = textField(skill, "slug");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
-    throw validationError("field 'skill.slug' must be kebab-case");
-  }
-  const files = jsonArrayField(skill, "files", 64).map((raw, index) => {
+function distillationFiles(value: unknown): LearnedSkillFileInput[] {
+  return jsonArrayField({ files: value }, "files", 64).map((raw, index) => {
     const file = asObject(raw, `skill.files[${index}]`);
     exactFields(file, ["path", "kind", "language", "content"]);
     const kind = enumField(file, "kind", new Set(["skill_md", "reference", "template", "script"] as const));
@@ -2005,6 +2010,20 @@ function distillationSkill(value: unknown): DistillationSkillPayload {
       content: textField(file, "content"),
     };
   });
+}
+
+function distillationSkill(value: unknown): DistillationSkillPayload {
+  const skill = asObject(value, "skill");
+  exactFields(
+    skill,
+    ["skill_id", "slug", "name", "summary", "description", "applicability", "outcome_contract", "files"],
+    ["slug", "name", "summary", "description", "applicability", "outcome_contract", "files"],
+  );
+  const skillId = skill.skill_id === undefined ? null : nullableTextField(skill, "skill_id");
+  const slug = textField(skill, "slug");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    throw validationError("field 'skill.slug' must be kebab-case");
+  }
   return {
     skillId,
     slug,
@@ -2013,8 +2032,168 @@ function distillationSkill(value: unknown): DistillationSkillPayload {
     description: textField(skill, "description"),
     applicability: structuredJsonField(skill, "applicability"),
     outcomeContract: structuredJsonField(skill, "outcome_contract"),
-    files,
+    files: distillationFiles(skill.files),
   };
+}
+
+/**
+ * Human-controlled maintenance mint: rewrite an existing skill's
+ * name/summary/applicability (and files wording) into the generalized
+ * problem-family register without an episode. Mirrors the distiller patch
+ * path — same scanner, same CAS on (active_version_id, control_revision),
+ * same immutable-version chain — but records a human actor and the
+ * regeneralize lifecycle event. Slug is identity and stays immutable.
+ */
+export async function regeneralizeLearnedSkillHandler(ctx: RequestContext): Promise<HandlerResult> {
+  requireHumanControl(ctx);
+  requireRollout(ctx);
+  const body = asObject(ctx.body);
+  exactFields(body, [
+    "name",
+    "summary",
+    "description",
+    "applicability",
+    "outcome_contract",
+    "files",
+    "expected_active_version_id",
+    "expected_control_revision",
+  ]);
+  const skillId = ctx.params.skillId!;
+  const expectedParent = textField(body, "expected_active_version_id");
+  const expectedRevision = integerField(body, "expected_control_revision", 1);
+  const payload = {
+    name: textField(body, "name"),
+    summary: textField(body, "summary"),
+    description: textField(body, "description"),
+    applicability: structuredJsonField(body, "applicability"),
+    outcomeContract: structuredJsonField(body, "outcome_contract"),
+    files: distillationFiles(body.files),
+  };
+  if (payload.files.length === 0) throw validationError("field 'files' must not be empty");
+  const scan = scanLearnedSkillPackage(payload.files, {
+    name: payload.name,
+    summary: payload.summary,
+    description: payload.description,
+    applicability: payload.applicability,
+    outcomeContract: payload.outcomeContract,
+  });
+  const conn = await ctx.pool.connect();
+  try {
+    const result = await withTransaction(conn as unknown as TransactionClient, async (tx) => {
+      await requireLearningWritable(ctx, tx);
+      const existingResult = await tx.query("SELECT * FROM learned_skill WHERE id=$1 FOR UPDATE", [skillId]);
+      const existing = existingResult.rows[0] as Row | undefined;
+      if (!existing) throw notFoundError(`learned skill not found: ${skillId}`);
+      if (
+        existing.active_version_id !== expectedParent
+        || Number(existing.control_revision) !== expectedRevision
+      ) {
+        throw conflictApiError("EVOLUTION_CAS_CONFLICT");
+      }
+      if (existing.pinned === true || existing.enabled !== true || existing.availability_state !== "available") {
+        throw conflictApiError("SKILL_NOT_AVAILABLE");
+      }
+      const versionResult = await tx.query(
+        "SELECT COALESCE(max(version_no),0)+1 AS version_no FROM learned_skill_version WHERE skill_id=$1",
+        [skillId],
+      );
+      const versionNo = Number((versionResult.rows[0] as Row).version_no);
+      const fromProjection = {
+        active_version_id: existing.active_version_id,
+        control_revision: Number(existing.control_revision),
+      };
+      const versionId = id("lsv");
+      await tx.query(
+        `INSERT INTO learned_skill_version
+          (id,skill_id,version_no,parent_version_id,description,applicability,outcome_contract,
+           content_manifest_hash,scanner_version,scan_decision,scan_findings,
+           created_by_type,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11::jsonb,$12,$13)`,
+        [
+          versionId,
+          skillId,
+          versionNo,
+          expectedParent,
+          payload.description,
+          JSON.stringify(payload.applicability),
+          JSON.stringify(payload.outcomeContract),
+          scan.contentManifestHash,
+          scan.scannerVersion,
+          scan.decision,
+          JSON.stringify(scan.findings),
+          ctx.identity.actorType,
+          ctx.identity.actorId,
+        ],
+      );
+      await tx.query(
+        `INSERT INTO learned_skill_version_status(version_id,quality_state)
+         VALUES ($1,$2)`,
+        [versionId, scan.decision === "pass" ? "active_unproven" : "quarantined"],
+      );
+      for (const file of scan.files) {
+        await tx.query(
+          `INSERT INTO learned_skill_file
+            (id,version_id,path,kind,language,sha256,size_bytes,media_type,content)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            id("lsf"),
+            versionId,
+            file.path,
+            file.kind,
+            file.language,
+            file.sha256,
+            file.sizeBytes,
+            file.mediaType,
+            file.content,
+          ],
+        );
+      }
+      let revision = expectedRevision;
+      if (scan.decision === "pass") {
+        revision += 1;
+        await tx.query(
+          `UPDATE learned_skill
+              SET name=$2,summary=$3,applicability_summary=$4,active_version_id=$5,
+                  control_revision=$6,updated_at=now()
+            WHERE id=$1`,
+          [
+            skillId,
+            payload.name,
+            payload.summary,
+            applicabilitySummary(payload.applicability),
+            versionId,
+            revision,
+          ],
+        );
+      }
+      await appendLifecycle(tx, ctx, {
+        skillId,
+        versionId,
+        eventType: scan.decision === "pass" ? "regeneralize_version_activated" : "candidate_quarantined",
+        from: fromProjection,
+        to: {
+          active_version_id: scan.decision === "pass" ? versionId : expectedParent,
+          control_revision: revision,
+          quality_state: scan.decision === "pass" ? "active_unproven" : "quarantined",
+        },
+        reason: scan.decision === "pass"
+          ? "manual regeneralization (problem-family register)"
+          : "deterministic scan failed",
+        controlRevision: revision,
+      });
+      return {
+        schema: "learned-skill-regeneralize.v1",
+        skill_id: skillId,
+        version_id: versionId,
+        version_no: versionNo,
+        state: scan.decision === "pass" ? "activated" : "quarantined",
+        scan_findings: scan.findings,
+      };
+    });
+    return { status: 200, data: result };
+  } finally {
+    conn.release();
+  }
 }
 
 function applicabilitySummary(applicability: unknown): string {

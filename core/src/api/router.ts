@@ -159,6 +159,7 @@ import {
   ensureScheduledCuratorRunHandler,
   listLearnedSkillApplicationsHandler,
   listLearnedSkillsHandler,
+  regeneralizeLearnedSkillHandler,
   renewCuratorLeaseHandler,
   renewDistillationLeaseHandler,
   taskSearchLearnedSkillsHandler,
@@ -417,6 +418,13 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
         handler: listLearnedSkillApplicationsHandler,
         params: { skillId: segments[1]! },
         requiredScope: "core:read",
+      };
+    }
+    if (segments.length === 3 && segments[2] === "regeneralize" && method === "POST") {
+      return {
+        handler: regeneralizeLearnedSkillHandler,
+        params: { skillId: segments[1]! },
+        requiredScope: "core:admin",
       };
     }
     if (
