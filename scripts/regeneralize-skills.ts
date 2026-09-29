@@ -62,6 +62,7 @@ const SYSTEM_PROMPT = [
   "Rules:",
   "- applicability must describe WHEN to apply the method by signal, structure, and tool symptoms — never by project name, task id, or one instance's specifics.",
   "- name/summary describe the method + problem family; drop project-bound qualifiers.",
+  "- Retrieval keys: every Chinese symptom/tool term in the original (e.g. 波形, 不确定, 时序, 竞争, 盲测, 判卷) MUST remain present somewhere in your output text (name, summary, or applicability fields); rephrase around them, never drop them — agents search in Chinese and match on these 2-char windows.",
   "- Keep the technical substance of files byte-for-byte where it is already general; only generalize wording that hardcodes the originating instance.",
   "- files keep exactly the same paths, kinds, and languages; exactly one root SKILL.md stays.",
   "Output shape: {name, summary, description, applicability, outcome_contract, files:[{path,kind,language,content}]}.",
