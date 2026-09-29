@@ -18,6 +18,8 @@ import { initTheme } from "./domain/theme.ts";
 import { routeLoading, routeLoadError } from "./domain/route-loading.ts";
 
 const route = useRoute();
+const isEmbedded = window.self !== window.top;
+const presentationUrl = `${import.meta.env.BASE_URL}presentation/index.html`;
 function reloadPage(): void { window.location.reload(); }
 
 onMounted(() => {
@@ -31,6 +33,13 @@ onMounted(() => {
   <TooltipProvider>
     <router-view :key="viewKey(route)" />
   </TooltipProvider>
+  <a
+    v-if="route.name !== 'login' && !isEmbedded"
+    :href="presentationUrl"
+    class="presentation-entry"
+    aria-label="平台展示"
+    title="平台展示"
+  >?</a>
   <!-- 全局通知（迁移计划 §4：后续阶段把三处 setTimeout 横幅 notice 接到 toast()） -->
   <Toaster
     position="top-right"
@@ -46,6 +55,9 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.presentation-entry { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 40; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--border-subtle); border-radius: 50%; background: var(--surface-panel); color: var(--text-secondary); box-shadow: var(--shadow-low); font-size: 20px; font-weight: 600; text-decoration: none; }
+.presentation-entry:hover { color: var(--text-primary); background: var(--surface-hover); }
+.presentation-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .route-notice { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 500; padding: 10px 18px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 3px 18px #0002; font-size: 13px; }
 .route-notice button { margin-left: 12px; text-decoration: underline; cursor: pointer; }
 </style>
