@@ -117,18 +117,20 @@ function applyTool(): AgentTool {
   return {
     name: APPLY_TOOL,
     description:
-      "显式采用一个已查看的精确 Learned Skill 版本。第一次调用为局部目标创建 primary application；" +
-      "同一局部目标的其它 Skill 必须用 application_id 作为 supporting attach。每个局部目标只能有一个 primary。",
+      "显式采用一个 Learned Skill。第一次调用为局部目标创建 primary application；" +
+      "同一局部目标的其它 Skill 必须用 application_id 作为 supporting attach。每个局部目标只能有一个 primary。" +
+      "version_id 可省略——改传 skill_id 时自动解析当前 active 版本；role 默认 primary，reason_codes 默认 []。",
     parameters: {
       type: "object",
       properties: {
-        version_id: { type: "string" },
+        version_id: { type: "string", description: "search/view 返回的精确版本 id；与 skill_id 二选一。" },
+        skill_id: { type: "string", description: "技能 id；缺 version_id 时解析其 active 版本。" },
         local_goal: { type: "string" },
         reason_codes: { type: "array", items: { type: "string" }, maxItems: 20 },
         role: { type: "string", enum: ["primary", "supporting"] },
         application_id: { type: "string" },
       },
-      required: ["version_id", "local_goal", "reason_codes", "role"],
+      required: ["local_goal"],
       additionalProperties: false,
     },
     async execute(args, ctx) {
@@ -137,13 +139,31 @@ function applyTool(): AgentTool {
       const callId = identifier(ctx.toolCallId);
       if (!callId) return fail("missing_runtime_binding", "Runtime 没有注入 toolCallId，拒绝伪造 application");
       const row = plainObject(args);
-      const versionId = identifier(row?.version_id);
+      // 生产实测模型两次都倒在四字段硬校验上（version_id/local_goal/reason_codes/role），
+      // 除 local_goal 外全部给默认或替代路径——决定"用"这个动作不该被表格填写拦住。
       const localGoal = nonEmpty(row?.local_goal);
-      const reasonCodes = stringList(row?.reason_codes);
-      const role = row?.role;
+      if (!localGoal) return fail("invalid_arguments", "local_goal 必须是非空字符串");
+      const versionIdRaw = identifier(row?.version_id);
+      const skillIdRaw = identifier(row?.skill_id);
+      let versionId = versionIdRaw;
+      if (!versionId) {
+        if (!skillIdRaw) {
+          return fail("invalid_arguments", "version_id 与 skill_id 至少提供一个");
+        }
+        try {
+          const listing = await client.search("", 100);
+          const resolved = listing.items.find((item) => item.skillId === skillIdRaw);
+          if (!resolved) return fail("invalid_arguments", `skill_id 不是可用技能：${skillIdRaw}`);
+          versionId = resolved.versionId;
+        } catch (error) {
+          return caught(error);
+        }
+      }
+      const reasonCodes = row?.reason_codes === undefined ? [] : stringList(row?.reason_codes);
+      const role = row?.role === undefined ? "primary" : row?.role;
       const applicationId = row?.application_id === undefined ? null : identifier(row.application_id);
-      if (!versionId || !localGoal || reasonCodes === null || (role !== "primary" && role !== "supporting")) {
-        return fail("invalid_arguments", "version_id/local_goal/reason_codes/role 不合法");
+      if (reasonCodes === null || (role !== "primary" && role !== "supporting")) {
+        return fail("invalid_arguments", "reason_codes 必须是字符串数组、role 只能是 primary/supporting");
       }
       if (role === "primary" && applicationId !== null) {
         return fail("invalid_application_shape", "primary 必须创建新 application，不能传 application_id");

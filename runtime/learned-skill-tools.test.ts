@@ -161,6 +161,54 @@ describe("Learned Skill tools", () => {
     expect(JSON.parse(extra.content).error).toBe("invalid_application_shape");
   });
 
+  test("apply forgives the model: skill_id resolves the active version, role/reason_codes default", async () => {
+    let captured: unknown;
+    const evolution = fakeClient({
+      search: async () => ({
+        learnedSkillsEnabled: true,
+        items: [
+          {
+            skillId: "skill-9",
+            versionId: "version-9",
+            name: "Waveform triage",
+            summary: "s",
+            applicabilitySummary: "a",
+            qualityState: "active_unproven",
+            recommended: true,
+          },
+        ],
+      }),
+      createApplication: async (input) => {
+        captured = input;
+        return await fakeClient().createApplication(input);
+      },
+    });
+    const result = await tools().learned_skill_apply!.execute(
+      { skill_id: "skill-9", local_goal: "排查波形读回恒零" },
+      context(evolution),
+    );
+    expect(result.isError).toBeUndefined();
+    expect(captured).toMatchObject({ versionId: "version-9", localGoal: "排查波形读回恒零" });
+
+    const unknownSkill = await tools().learned_skill_apply!.execute(
+      { skill_id: "skill-missing", local_goal: "x" },
+      context(evolution),
+    );
+    expect(JSON.parse(unknownSkill.content).error).toBe("invalid_arguments");
+
+    const badRole = await tools().learned_skill_apply!.execute(
+      { version_id: "version-1", local_goal: "x", role: "main" },
+      context(evolution),
+    );
+    expect(JSON.parse(badRole.content).error).toBe("invalid_arguments");
+
+    const neither = await tools().learned_skill_apply!.execute(
+      { local_goal: "x" },
+      context(evolution),
+    );
+    expect(JSON.parse(neither.content).error).toBe("invalid_arguments");
+  });
+
   test("close uses the committed tool event sequence and does not claim success", async () => {
     let captured: unknown;
     const evolution = fakeClient({
