@@ -68,6 +68,8 @@ export interface LearnedSkillSummaryV1 {
   readonly recommended: boolean;
   readonly control_revision: number;
   readonly last_used_at: string | null;
+  /** Older Core releases report only the active version. */
+  readonly metrics_scope?: "all_versions" | "active_version";
   readonly metrics: SkillMetricsV1;
 }
 
@@ -153,6 +155,8 @@ export interface LearnedSkillVersionV1 {
     readonly description: string;
     readonly applicability: unknown;
     readonly outcome_contract: unknown;
+    /** Absent on older Core releases; never substitute skill-wide metrics. */
+    readonly metrics?: SkillMetricsV1 | null;
     readonly content_manifest_hash: string;
     readonly created_at: string;
     readonly files: readonly LearnedSkillFileV1[];

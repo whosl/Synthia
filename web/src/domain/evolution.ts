@@ -242,6 +242,9 @@ export function parseLearnedSkillSummary(value: unknown, label = "learned skill"
     recommended: boolean(row.recommended, `${label}.recommended`),
     control_revision: integer(row.control_revision, `${label}.control_revision`),
     last_used_at: nullableIsoTime(row.last_used_at, `${label}.last_used_at`),
+    metrics_scope: row.metrics_scope === undefined
+      ? "active_version"
+      : oneOf(row.metrics_scope, new Set(["all_versions", "active_version"] as const), `${label}.metrics_scope`),
     metrics: parseMetrics(row.metrics, `${label}.metrics`),
   };
 }
@@ -399,6 +402,7 @@ export function parseLearnedSkillVersion(value: unknown): LearnedSkillVersionV1 
       description: string(version.description, "learned skill version.description"),
       applicability: version.applicability,
       outcome_contract: version.outcome_contract,
+      metrics: version.metrics == null ? null : parseMetrics(version.metrics, "learned skill version.metrics"),
       content_manifest_hash: hash(version.content_manifest_hash, "learned skill version.content_manifest_hash"),
       created_at: isoTime(version.created_at, "learned skill version.created_at"),
       files: version.files.map((item, index) => parseFile(item, `learned skill version.files[${index}]`)),
