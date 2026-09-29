@@ -110,7 +110,7 @@ export async function loadProjectOverview(
     stage: projectType(project) === "engineering" ? "正在读取流程状态…" : "自由探索 · 无固定阶段",
     gateNames: {},
     progress: null,
-    updatedAt: project.created_at,
+    updatedAt: project.last_activity_at ?? project.created_at,
   }));
   const publish = () => {
     if (!options.isDisposed?.()) options.onProgress?.([...rows]);
@@ -183,16 +183,6 @@ export async function loadProjectOverview(
               issues.push({ label: "正式流程状态", error });
             }
           }
-          const dates = [
-            project.created_at,
-            ...submissions.map((sub) => sub.submitted_at ?? sub.created_at),
-            ...tasks.map((task) => task.created_at),
-          ];
-          const updatedAt = dates.reduce(
-            (latest, date) =>
-              Date.parse(date) > Date.parse(latest) ? date : latest,
-            project.created_at,
-          );
           rows[offset + index] = {
             project,
             pending: false,
@@ -202,13 +192,15 @@ export async function loadProjectOverview(
             stage,
             gateNames,
             progress,
-            updatedAt,
+            updatedAt: project.last_activity_at ?? project.created_at,
           };
           publish();
         }),
     );
   }
-  return rows.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  // Keep the list snapshot stable while details arrive (including failures).
+  // Older Core versions retain their creation order until the next reload.
+  return rows;
 }
 
 export function filterProjects(

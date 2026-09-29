@@ -2,6 +2,16 @@
 
 正式站点 `https://synthia.wenzhuolin.xyz` 使用本机 Bun 服务，平台沙箱是独立的可选部署目标。
 
+## 2026-09-29 项目列表活动排序修复
+
+项目列表曾先按创建时间展示，逐个加载详情后再按任务/审批时间排序，导致卡片跳位。Core 列表接口现在返回 `last_activity_at` 并确定完整顺序，前端在一次加载期间保留该顺序和时间。新快照仅在刷新时采用；兼容旧 Core 时保持其返回顺序。活动计算口径见 `specs/project-model-contract-v1.md`。
+
+无数据库迁移或依赖变化，发布范围是 Core 和 Web，保留 Runtime、Connector 和执行中的状态。
+
+- Web 592 项测试、Core/Web 类型检查、正式 Web 构建通过。
+- 独立临时 PostgreSQL：接口回归 19 项、项目模型与权限回归 21 项通过。
+- 使用正式库备份的隔离副本和真实 Chrome：34 个项目，首次加载、手动刷新、窗口 focus 刷新共三次列表请求，详情补齐没有改变卡片顺序或活动时间，无 API 失败或 JavaScript 异常。
+
 ## 当前运行布局
 
 - 代码目录：`/data3/dev/synthia-golden`，发布时将 `release/webui-v-astrys` 快进到已验证的 `main`。

@@ -94,6 +94,35 @@ function clientFor(
 }
 
 describe("project overview business flow", () => {
+  test("activity order and timestamps stay identical through slow or failed detail loading", async () => {
+    const projects = [
+      { ...free, last_activity_at: "2026-09-08T10:00:00Z" },
+      { ...engineering, last_activity_at: "2026-09-07T10:00:00Z" },
+    ];
+    const { client } = clientFor({
+      "/api/v1/projects": projects,
+      "/api/v1/projects/engineering/tasks": { agents: [{ ...task, created_at: "2026-09-09T10:00:00Z" }] },
+    }, ["/api/v1/projects/free/tasks"]);
+    const snapshots: (readonly ProjectOverview[])[] = [];
+    const result = await loadProjectOverview(client, { onProgress: (rows) => snapshots.push(rows) });
+    for (const rows of [...snapshots, result]) {
+      expect(rows.map((row) => row.project.id)).toEqual(["free", "engineering"]);
+      expect(rows.map((row) => row.updatedAt)).toEqual(projects.map((project) => project.last_activity_at));
+    }
+    expect(result[0]!.issues[0]!.label).toBe("任务状态");
+    expect(result[1]!.pending).toBe(false);
+  });
+
+  test("older Core keeps creation timestamps and list order without a late reshuffle", async () => {
+    const { client } = clientFor({ "/api/v1/projects": [free, engineering] });
+    const snapshots: (readonly ProjectOverview[])[] = [];
+    const result = await loadProjectOverview(client, { onProgress: (rows) => snapshots.push(rows) });
+    for (const rows of [...snapshots, result]) {
+      expect(rows.map((row) => row.project.id)).toEqual(["free", "engineering"]);
+      expect(rows.map((row) => row.updatedAt)).toEqual([free.created_at, engineering.created_at]);
+    }
+  });
+
   test("project links arrive before slow statistics without claiming complete counts", async () => {
     const { client } = clientFor();
     let release!: () => void;

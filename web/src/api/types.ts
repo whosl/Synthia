@@ -29,6 +29,8 @@ export interface Project {
   readonly data_classification: string;
   readonly created_at: string;
   readonly project_type: ProjectType;
+  /** Core's activity snapshot for list ordering; absent on older Core versions. */
+  readonly last_activity_at?: string;
   readonly process_version_id: string | null;
   readonly process_profile_id: string | null;
   readonly process_profile_name: string | null;

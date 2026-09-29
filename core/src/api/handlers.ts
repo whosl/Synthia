@@ -974,15 +974,32 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
 
 /**
  * GET /projects — list all projects (core:read). Returns the stable contract
- * fields, ordered by created_at descending (newest first).
+ * fields and a durable activity timestamp. The first list response is already
+ * in display order; clients must not re-sort it as detail requests complete.
  */
 export async function getProjects(ctx: RequestContext): Promise<HandlerResult> {
   const { rows } = await ctx.pool.query(
     `SELECT p.id, p.name, p.status, p.data_classification, p.created_at,
             p.project_type, p.target_part, p.process_profile_id,
             p.process_profile_version, p.process_profile_name,
-            p.process_version_id
+            p.process_version_id,
+            GREATEST(p.created_at, activity.last_activity_at) AS last_activity_at
        FROM project p
+       LEFT JOIN (
+         SELECT project_id, MAX(activity_at) AS last_activity_at
+           FROM (
+             SELECT project_id, occurred_at AS activity_at FROM outbox_events
+             UNION ALL
+             SELECT project_id, GREATEST(created_at, updated_at, finished_at) FROM agent_task
+             UNION ALL
+             SELECT project_id, created_at FROM task_conversation_event
+             UNION ALL
+             SELECT project_id, GREATEST(created_at, submitted_at) FROM gate_submission
+             UNION ALL
+             SELECT project_id, GREATEST(created_at, start_time, end_time) FROM tool_run
+           ) facts
+          GROUP BY project_id
+       ) activity ON activity.project_id = p.id
       WHERE NOT (
               p.project_type = 'engineering'
           AND p.process_version_id = 'GJB_REF_V1'
@@ -1006,7 +1023,7 @@ export async function getProjects(ctx: RequestContext): Promise<HandlerResult> {
                    AND task.status = ANY($5::text[])
               )
             )
-      ORDER BY p.created_at DESC`,
+      ORDER BY last_activity_at DESC, p.created_at DESC, p.id ASC`,
     [
       ctx.identity.scopes.includes("core:admin"),
       ctx.identity.actorType,

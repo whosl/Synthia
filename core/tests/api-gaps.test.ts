@@ -2,7 +2,7 @@
  * Synthia Core — Web UI-1 API gaps integration tests (real PostgreSQL)
  *
  * Covers the Core-side contract items the Web UI-1 slice depends on:
- *   1. GET /projects — project list (core:read, created_at descending)
+ *   1. GET /projects — project list (core:read, durable activity descending)
  *   2. GET /projects/:id/gate-submissions?state= — submission list (core:read)
  *   3. GET /projects/:id/artifacts + GET .../revisions — product-library reads
  *   4. POST .../revisions inline content (server-computed content_hash, ≤1MiB,
@@ -166,7 +166,7 @@ describe.skipIf(!DATABASE_URL)("api gaps — Web UI-1 slice (real PostgreSQL)", 
   // ══ 1. GET /projects ═══════════════════════════════════════════════════════
 
   describe("GET /projects", () => {
-    test("returns contract fields ordered by created_at descending", async () => {
+    test("new projects return activity timestamps in newest-first order", async () => {
       const a = await createProject("Alpha");
       // Force an earlier created_at so the ordering is observable at second resolution.
       await harness.client.query("UPDATE project SET created_at = now() - interval '2 seconds' WHERE id = $1", [a]);
@@ -182,13 +182,79 @@ describe.skipIf(!DATABASE_URL)("api gaps — Web UI-1 slice (real PostgreSQL)", 
       expect(ids.indexOf(b)).toBeLessThan(ids.indexOf(a));
 
       for (const r of rows.slice(0, 3)) {
-        for (const f of ["id", "name", "status", "data_classification", "created_at"]) {
+        for (const f of ["id", "name", "status", "data_classification", "created_at", "last_activity_at"]) {
           expect(f in r).toBe(true);
         }
       }
       const alpha = rows.find((r) => r.id === a)!;
       expect(alpha.status).toBe("active");
       expect(alpha.data_classification).toBe("D2");
+    });
+
+    test("tool completion and persisted business events rank old projects ahead of newer ones", async () => {
+      const old = await createProject("Old but active");
+      const newer = await createProject("Newer");
+      await harness.client.query(
+        `INSERT INTO tool_run (id,project_id,operation,run_class,correlation_id,created_at,start_time,end_time)
+         VALUES ($1,$2,'simulate','exploratory',$1,'2099-01-01T00:00:00Z','2099-01-02T00:00:00Z','2099-01-03T00:00:00Z')`,
+        [randomUUID(), old],
+      );
+      let res = await apiCall(baseUrl, "/api/v1/projects", { token: readOnlyToken });
+      expect(res.status).toBe(200);
+      let rows = envelopeData(res.json) as Record<string, unknown>[];
+      expect(rows[0]!.id).toBe(old);
+      expect(rows[0]!.last_activity_at).toBe("2099-01-03T00:00:00.000Z");
+      await harness.client.query(
+        `INSERT INTO outbox_events (event_id,aggregate_type,aggregate_id,sequence,event_type,project_id,payload,correlation_id,classification,occurred_at)
+         VALUES ($1,'project',$2,99,'project.updated',$2,'{}',$3,'D2','2099-01-04T00:00:00Z')`,
+        [randomUUID(), newer, randomUUID()],
+      );
+      res = await apiCall(baseUrl, "/api/v1/projects", { token: readOnlyToken });
+      rows = envelopeData(res.json) as Record<string, unknown>[];
+      expect(rows[0]!.id).toBe(newer);
+      expect(rows[0]!.last_activity_at).toBe("2099-01-04T00:00:00.000Z");
+    });
+
+    test("task updates and conversation events advance the list activity snapshot", async () => {
+      const projectId = `free_${randomUUID()}`;
+      const created = await apiCall(baseUrl, "/api/v1/projects", {
+        method: "POST", body: { id: projectId, name: "Task activity", project_type: "free" },
+        token: humanToken, headers: { "idempotency-key": projectId },
+      });
+      expect(created.status).toBe(201);
+      const taskId = randomUUID();
+      await harness.client.query(
+        `INSERT INTO agent_task (id,project_id,project_type,kind,runtime_actor_id,objective,authorization_scope,input_hash,created_by_type,created_by,created_at,updated_at)
+         VALUES ($1,$2,'free','main',$5,'Test','{}',$3,'human',$4,'2099-02-01T00:00:00Z','2099-02-02T00:00:00Z')`,
+        [taskId, projectId, sha256Hex("input"), humanUid, harness.ids.serviceUid],
+      );
+      const list = async () => {
+        const res = await apiCall(baseUrl, "/api/v1/projects", { token: humanToken });
+        expect(res.status).toBe(200);
+        return (envelopeData(res.json) as Record<string, unknown>[]).find((row) => row.id === projectId)!;
+      };
+      expect((await list()).last_activity_at).toBe("2099-02-02T00:00:00.000Z");
+      await harness.client.query(
+        `INSERT INTO task_conversation_event (id,project_id,task_id,sequence,event_kind,payload,payload_hash,actor_type,actor_id,created_at)
+         VALUES ($1,$2,$3,1,'user_message','{}',$4,'human',$5,'2099-02-03T00:00:00Z')`,
+        [randomUUID(), projectId, taskId, sha256Hex("{}"), humanUid],
+      );
+      expect((await list()).last_activity_at).toBe("2099-02-03T00:00:00.000Z");
+    });
+
+    test("approval activity uses submission time and ties have deterministic project order", async () => {
+      const graph = await buildSubmissionGraph({ submit: true });
+      await harness.client.query("UPDATE gate_submission SET submitted_at='2099-03-01T00:00:00Z' WHERE id=$1", [graph.submissionId]);
+      const other = await createProject("Same activity");
+      const active = await apiCall(baseUrl, "/api/v1/projects", { token: humanToken });
+      expect((envelopeData(active.json) as Record<string, unknown>[])[0]).toMatchObject({
+        id: graph.projectId, last_activity_at: "2099-03-01T00:00:00.000Z",
+      });
+      await harness.client.query("UPDATE project SET created_at='2099-03-01T00:00:00Z' WHERE id=ANY($1::text[])", [[graph.projectId, other]]);
+      const res = await apiCall(baseUrl, "/api/v1/projects", { token: humanToken });
+      const rows = envelopeData(res.json) as Record<string, unknown>[];
+      expect(rows.map((row) => row.id)).toEqual([graph.projectId, other].sort());
+      expect(rows.every((row) => row.last_activity_at === "2099-03-01T00:00:00.000Z")).toBe(true);
     });
 
     test("read-only token (core:read) can list", async () => {

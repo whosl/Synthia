@@ -160,7 +160,11 @@
 
 ### 5.4 查询项目
 
-`GET /api/v1/projects` 返回项目数组，按创建时间倒序；每项包含 `project_type`、流程快照、`target_part` 和 `process_instances`。
+`GET /api/v1/projects` 返回项目数组，每项包含 `project_type`、流程快照、`target_part`、`process_instances` 和 `last_activity_at`。按 `last_activity_at` 倒序，再按创建时间倒序、项目 ID 升序确定稳定顺序。
+
+`last_activity_at` 是本次列表查询的活动快照：取项目创建时间、Core 业务事件发生时间、任务创建/更新/完成时间、已持久化的任务对话时间、审批提交创建/提交时间和工具运行创建/开始/结束时间的最大值。它不依赖 Runtime 在线状态，也不代表未写入 Core 的历史 Runtime 活动。读取列表本身不会更新活动时间。
+
+Web 首屏使用该快照的顺序与时间，后续分批加载任务、审批和流程状态时只补充详情，不重新排列卡片或替换活动时间；再次刷新列表才采用新快照。兼容旧 Core 时保留接口返回的顺序和项目创建时间。
 
 `GET /api/v1/projects/:id` 返回同样的模型，并增加 `scope`、数据分类、标准版本、工具链配置和完整流程实例时间字段。例如：
 
