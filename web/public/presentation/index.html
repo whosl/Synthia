@@ -142,6 +142,8 @@ for (const panel of document.querySelectorAll(".live-preview")) {
     }
   });
   select(active);
+  // Warm both CAN projects immediately; switching tabs preserves their loaded state.
+  states.filter(state => !state.started).forEach(load);
 }
 document.addEventListener("keydown",event=>{if(event.key==="Escape")collapsePreviews();});
 </script></body></html>
