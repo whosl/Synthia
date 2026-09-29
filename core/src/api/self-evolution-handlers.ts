@@ -1167,7 +1167,34 @@ export async function taskSearchLearnedSkillsHandler(ctx: RequestContext): Promi
     `similarity(s.summary,${fullPh}) >= ${SIMILARITY_FLOOR}`,
     `similarity(s.applicability_summary,${fullPh}) >= ${SIMILARITY_FLOOR}`,
   );
+  // pg_trgm similarity collapses for "short CJK query vs long mixed-language
+  // summary" (observed 0.000-0.017 in production), so Chinese symptom
+  // queries also match on CJK bigrams: each 2-char window must appear in
+  // the skill text, and the fraction present becomes a score arm. Bigrams
+  // are pure CJK by construction, so LIKE metacharacters cannot occur.
+  const bigrams = [...new Set(
+    (q.match(/[一-鿿]{2,}/gu) ?? []).flatMap((segment) => {
+      const out: string[] = [];
+      for (let i = 0; i + 2 <= segment.length; i += 1) out.push(segment.slice(i, i + 2));
+      return out;
+    }),
+  )].slice(0, 16);
+  const bigramHits: string[] = [];
+  for (const bigram of bigrams) {
+    const ph = `$${params.length + 1}`;
+    params.push(bigram);
+    bigramHits.push(`(coalesce(s.name,'')||' '||coalesce(s.summary,'')||' '||coalesce(s.applicability_summary,'')) LIKE '%' || ${ph} || '%'`);
+  }
+  // 0.2 admits "≥2 content bigrams" on short symptom queries (filler bigrams
+  // like 怎么/排查 dilute the fraction; observed real hits at 2/7 ≈ 0.29)
+  // while still excluding single incidental 2-char overlaps.
+  const BIGRAM_FRACTION_FLOOR = 0.2;
+  const bigramScore = bigramHits.length === 0 ? "0" : `(${bigramHits.map((hit) => `CASE WHEN ${hit} THEN 1 ELSE 0 END`).join(" + ")})::float / ${bigramHits.length}`;
+  if (bigramHits.length > 0) {
+    clauses.push(`${bigramScore} >= ${BIGRAM_FRACTION_FLOOR}`);
+  }
   const score = `GREATEST(CASE WHEN ${nameHits.length > 0 ? nameHits.join(" OR ") : "false"} THEN 1.0 ELSE 0 END,
+    ${bigramScore},
     similarity(s.name,${fullPh}), similarity(s.summary,${fullPh}), similarity(s.applicability_summary,${fullPh}))`;
   params.push(String(limit));
   // Empty q lists all eligible skills, as it always has.
