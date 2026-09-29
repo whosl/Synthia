@@ -1486,7 +1486,13 @@ async function validateToolCall(
   task: BoundTaskRow,
   toolCallId: string,
   turnId: string | null,
-  expectedArgs: Record<string, unknown>,
+  expected: {
+    readonly versionId: string;
+    readonly localGoal: string;
+    readonly reasonCodes: readonly string[];
+    readonly role: "primary" | "supporting";
+    readonly applicationId: string | null;
+  },
 ): Promise<Row> {
   const result = await tx.query(
     `SELECT sequence,payload,created_at FROM task_conversation_event
@@ -1513,8 +1519,41 @@ async function validateToolCall(
       args = null;
     }
   }
-  asObject(args, "tool call args");
-  if (canonicalRequestHash(args) !== canonicalRequestHash(expectedArgs)) {
+  const row = asObject(args, "tool call args");
+  // The apply tool forgives the model (defaults for role/reason_codes,
+  // skill_id in place of version_id), so exact-args hashing would reject
+  // every defaulted call. Anti-forgery is semantic instead: every field the
+  // model DID emit must match the submitted application, an omitted
+  // version_id is only accepted when the submitted version belongs to the
+  // named skill, and omitted fields must equal their defaults.
+  if (row.local_goal !== expected.localGoal) {
+    throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  }
+  if (typeof row.version_id === "string") {
+    if (row.version_id !== expected.versionId) {
+      throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+    }
+  } else if (typeof row.skill_id === "string") {
+    const owner = await tx.query(
+      `SELECT 1 FROM learned_skill_version v
+         JOIN learned_skill s ON s.id=v.skill_id
+        WHERE v.id=$1 AND s.id=$2`,
+      [expected.versionId, row.skill_id],
+    );
+    if (owner.rows.length === 0) throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  } else {
+    throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  }
+  if (row.role !== undefined && row.role !== expected.role) {
+    throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  }
+  if (expected.applicationId === null) {
+    if (row.application_id !== undefined) throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  } else if (row.application_id !== expected.applicationId) {
+    throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
+  }
+  if (row.reason_codes !== undefined
+    && canonicalRequestHash(row.reason_codes) !== canonicalRequestHash(expected.reasonCodes)) {
     throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
   }
   return event;
@@ -1540,10 +1579,11 @@ export async function createSkillApplicationHandler(ctx: RequestContext): Promis
       const task = await requireTaskBound(ctx, tx, true);
       const observationKey = taskObservationKey(task, turnId);
       const event = await validateToolCall(tx, task, toolCallId, turnId, {
-        version_id: versionId,
-        local_goal: localGoal,
-        reason_codes: reasonCodes,
+        versionId,
+        localGoal,
+        reasonCodes,
         role: "primary",
+        applicationId: null,
       });
       const version = await loadUsableVersion(tx, versionId, true);
       const applicationId = id("app");
@@ -1637,11 +1677,11 @@ export async function attachSkillApplicationHandler(ctx: RequestContext): Promis
           ? String(application.observation_key).slice("turn:".length)
           : null,
         {
-          version_id: versionId,
-          local_goal: application.local_goal,
-          reason_codes: reasonCodes,
+          versionId,
+          localGoal: String(application.local_goal),
+          reasonCodes,
           role: "supporting",
-          application_id: applicationId,
+          applicationId,
         },
       );
       const version = await loadUsableVersion(tx, versionId, true);
