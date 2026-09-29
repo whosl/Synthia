@@ -287,7 +287,7 @@ async function appendEvolutionOutbox(
   });
 }
 
-async function metricRows(query: QueryClient, versionId: string): Promise<SkillMetricObservation[]> {
+async function metricRows(query: QueryClient, skillId: string, versionId?: string): Promise<SkillMetricObservation[]> {
   const result = await query.query(
     `SELECT sas.role,a.state,a.human_corrections,
             current_eval.outcome,
@@ -316,8 +316,8 @@ async function metricRows(query: QueryClient, versionId: string): Promise<SkillM
           WHERE gap.gap_seconds IS NOT NULL
             AND gap.gap_seconds > 0
        ) active ON (a.end_event_sequence IS NOT NULL)
-      WHERE sas.version_id=$1`,
-    [versionId, ACTIVE_GAP_CAP_SECONDS],
+      WHERE sas.skill_id=$1${versionId ? " AND sas.version_id=$3" : ""}`,
+    versionId ? [skillId, ACTIVE_GAP_CAP_SECONDS, versionId] : [skillId, ACTIVE_GAP_CAP_SECONDS],
   );
   return (result.rows as Row[]).map((row) => ({
     role: row.role as "primary" | "supporting",
@@ -390,12 +390,12 @@ async function skillSummary(query: QueryClient, skillId: string): Promise<Record
     freshnessState: freshness,
     qualityState: quality,
   });
-  const metrics = row.active_version_id
-    ? computeSkillMetrics(
-      await metricRows(query, String(row.active_version_id)),
-      { durationMs: await baselineDurationMs(query, String(row.id)) },
-    )
-    : computeSkillMetrics([]);
+  // Version activation must not erase the skill's historical reuse evidence.
+  // Recompute rates and medians from observations, never from version averages.
+  const metrics = computeSkillMetrics(
+    await metricRows(query, skillId),
+    { durationMs: await baselineDurationMs(query, skillId) },
+  );
   return {
     schema: "learned-skill-summary.v1",
     skill_id: row.id,
@@ -415,6 +415,7 @@ async function skillSummary(query: QueryClient, skillId: string): Promise<Record
     recommended: visibility.recommended,
     control_revision: Number(row.control_revision),
     last_used_at: nullableIso(row.last_used_at),
+    metrics_scope: "all_versions",
     metrics,
   };
 }
@@ -594,6 +595,10 @@ async function versionDto(
       description: row.description,
       applicability: row.applicability,
       outcome_contract: row.outcome_contract,
+      metrics: computeSkillMetrics(
+        await metricRows(query, skillId, versionId),
+        { durationMs: await baselineDurationMs(query, skillId) },
+      ),
       content_manifest_hash: row.content_manifest_hash,
       created_at: iso(row.created_at),
       files: (filesResult.rows as Row[]).map((file) => ({

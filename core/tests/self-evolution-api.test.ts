@@ -1740,6 +1740,79 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     expect(await search("metastabilty")).not.toContain(record.id);
   });
 
+  test("skill metrics combine version observations, preserve supersession and survive active-version removal", async () => {
+    const skill = (await harness.client.query("SELECT id,active_version_id FROM learned_skill WHERE slug='reuse-loop-metastability'")).rows[0]!;
+    const versions = (await harness.client.query(
+      "SELECT id FROM learned_skill_version WHERE skill_id=$1 AND version_no<=2 ORDER BY version_no", [skill.id],
+    )).rows;
+    const observations = [
+      { version: 0, outcome: "success" },
+      { version: 0, outcome: "success" },
+      { version: 0, outcome: "execution_failure" },
+      { version: 0, outcome: "inconclusive" },
+      { version: 0, outcome: null },
+      { version: 1, outcome: "success" },
+    ];
+    for (const [index, observation] of observations.entries()) {
+      const versionId = String(versions[observation.version]!.id);
+      await harness.client.query("UPDATE learned_skill SET enabled=true,active_version_id=$2 WHERE id=$1", [skill.id, versionId]);
+      const applicationId = await seedPendingApplication(`all-versions-${index}`, versionId);
+      if (index === 0) {
+        // The same skill also supported the application via another version;
+        // only its one primary attribution belongs in the cumulative metrics.
+        await harness.client.query(
+          `INSERT INTO skill_application_skill(id,application_id,skill_id,version_id,role,tool_call_id)
+           VALUES ($1,$2,$3,$4,'supporting',$1)`,
+          [randomUUID(), applicationId, skill.id, versions[1]!.id],
+        );
+      }
+      if (observation.outcome === null) continue;
+      await harness.client.query("UPDATE skill_application SET state='evaluated' WHERE id=$1", [applicationId]);
+      const previousId = randomUUID();
+      for (const revision of index === 0 ? [0, 1] : [0]) {
+        await harness.client.query(
+          `INSERT INTO curator_evaluation
+            (id,application_id,skill_id,version_id,evidence_snapshot_hash,outcome,confidence,reason,supersedes_id,evaluator_type,evaluator_version)
+           VALUES ($1,$2,$3,$4,$5,$6,1,'test observation',$7,'human',$8)`,
+          [revision === 0 ? previousId : randomUUID(), applicationId, skill.id, versionId, hash(applicationId),
+            index === 0 && revision === 0 ? "execution_failure" : observation.outcome,
+            revision === 1 ? previousId : null, `metrics-${revision}`],
+        );
+      }
+    }
+    const detailPath = `/api/v1/learned-skills/${skill.id}`;
+    const readDetail = async () => {
+      const response = await apiCall(harness.baseUrl, detailPath, { token: harness.ids.humanToken });
+      expect(response.status).toBe(200);
+      return data(response.json);
+    };
+    const detail = await readDetail();
+    expect(detail.metrics_scope).toBe("all_versions");
+    expect(detail.metrics).toMatchObject({
+      primary_applied: 6, evaluated: 5, pending: 1, success: 3,
+      execution_failure: 1, inconclusive: 1, success_rate: 0.75,
+      human_corrections: 0,
+    });
+    for (const [index, version] of versions.entries()) {
+      const response = await apiCall(harness.baseUrl, `${detailPath}/versions/${version.id}`, { token: harness.ids.humanToken });
+      expect(response.status).toBe(200);
+      const dto = data(response.json);
+      expect(row(dto.skill).metrics).toEqual(detail.metrics);
+      expect(row(dto.version).metrics).toMatchObject({
+        primary_applied: index === 0 ? 5 : 1,
+        success_rate: index === 0 ? 2 / 3 : 1,
+      });
+    }
+    const unused = (await harness.client.query("SELECT id FROM learned_skill_version WHERE skill_id=$1 AND version_no=3", [skill.id])).rows[0]!;
+    const unusedResponse = await apiCall(harness.baseUrl, `${detailPath}/versions/${unused.id}`, { token: harness.ids.humanToken });
+    expect(row(data(unusedResponse.json).version).metrics).toMatchObject({ primary_applied: 0, success_rate: null });
+    const list = await apiCall(harness.baseUrl, "/api/v1/learned-skills?limit=100", { token: harness.ids.humanToken });
+    expect((data(list.json).items as Record<string, unknown>[]).find((item) => item.skill_id === skill.id)?.metrics).toEqual(detail.metrics);
+    await harness.client.query("UPDATE learned_skill SET active_version_id=NULL,enabled=false,availability_state='archived' WHERE id=$1", [skill.id]);
+    expect((await readDetail()).metrics).toEqual(detail.metrics);
+    expect((await apiCall(harness.baseUrl, detailPath)).status).toBe(401);
+  });
+
   test("overview exposes the full historical efficiency projection", async () => {
     const response = await apiCall(harness.baseUrl, "/api/v1/evolution/overview", { token: harness.ids.humanToken });
     expect(response.status).toBe(200);

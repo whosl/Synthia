@@ -67,7 +67,7 @@ const emit = defineEmits<{ select: [skillId: string] }>();
       >
         <span class="flex min-w-0 flex-wrap items-center justify-between gap-2">
           <strong class="line-clamp-2 min-w-0 flex-1 text-xs leading-relaxed" :title="skill.name">{{ skillDisplayName(skill.name) }}</strong>
-          <span class="text-xs text-fg-secondary">v{{ skill.active_version_no ?? "—" }}</span>
+          <span class="text-xs text-fg-secondary">当前 v{{ skill.active_version_no ?? "—" }}</span>
         </span>
         <span class="flex min-w-0 flex-wrap items-center gap-2">
           <Badge
@@ -84,6 +84,7 @@ const emit = defineEmits<{ select: [skillId: string] }>();
           <span>解决率 {{ successRateText(skill.metrics) }}</span>
           <span>{{ skill.metrics.primary_applied }} 次主用</span>
         </span>
+        <span class="text-[10px] text-fg-muted">{{ skill.metrics_scope === 'all_versions' ? '全部版本累计' : '当前版本统计' }}</span>
       </button>
       <p v-if="visibleItems.length === 0" class="p-4 text-xs text-fg-muted">没有匹配的技能</p>
       <p v-if="truncated" class="m-0 px-4 py-3 text-center text-xs text-fg-secondary" role="status">

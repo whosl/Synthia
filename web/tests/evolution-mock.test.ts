@@ -3,6 +3,7 @@ import { createClient } from "../src/api/client.ts";
 import {
   createCuratorRun,
   getEvolutionOverview,
+  getLearnedSkillVersion,
   getSkillApplication,
   listLearnedSkills,
   listSkillApplications,
@@ -33,6 +34,16 @@ const disabledClient = createClient({ fetchImpl: disabledFetch });
 beforeEach(() => resetMockEvolutionState());
 
 describe("self-evolution mock follows the frozen Core contract", () => {
+  test("a new unused version retains skill-wide evidence without inheriting version outcomes", async () => {
+    const previous = await getLearnedSkillVersion(client, "skill-multiple-driver", "skill-version-multiple-driver-v1");
+    const current = await getLearnedSkillVersion(client, "skill-multiple-driver", "skill-version-multiple-driver-v2");
+    expect(current.skill.metrics_scope).toBe("all_versions");
+    expect(current.skill.metrics).toEqual(previous.skill.metrics);
+    expect(current.skill.metrics.primary_applied).toBe(8);
+    expect(previous.version.metrics?.primary_applied).toBe(8);
+    expect(current.version.metrics).toMatchObject({ primary_applied: 0, success_rate: null });
+  });
+
   test("overview, observed metrics, and unknown metrics are all represented", async () => {
     const [overview, list] = await Promise.all([
       getEvolutionOverview(client),

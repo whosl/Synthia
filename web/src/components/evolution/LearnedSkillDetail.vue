@@ -232,6 +232,7 @@ function shortHash(value: string): string {
         <button v-for="(tab, index) in tabs" :id="`skill-tab-${tab.id}`" :key="tab.id" type="button" role="tab" :tabindex="activeTab === tab.id ? 0 : -1" :aria-selected="activeTab === tab.id" :aria-controls="`skill-panel-${tab.id}`" @keydown="onTabKey($event, index)" @click="activeTab = tab.id">{{ tab.label }}</button>
       </div>
       <section v-if="activeTab === 'overview'" id="skill-panel-overview" role="tabpanel" aria-labelledby="skill-tab-overview" class="grid min-w-0 gap-4">
+      <p class="m-0 text-xs text-fg-secondary">{{ detail.metrics_scope === 'all_versions' ? `全部版本累计 · ${detail.versions.length} 个版本，升级后保留历史调用效果` : '当前版本统计' }}</p>
       <section class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1" aria-label="Skill 真实调用指标">
         <StatCard
           label="目标解决率"
@@ -322,6 +323,11 @@ function shortHash(value: string): string {
           <span class="visually-hidden">版本内容加载中…</span>
         </div>
         <template v-else>
+          <section v-if="version.version.metrics" class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1" aria-label="所选版本调用指标">
+            <StatCard label="本版本目标解决率" :value="successRateText(version.version.metrics)" :hint="`仅 v${version.version.version_no} · ${version.version.metrics.success} 成功 / ${version.version.metrics.evaluated - version.version.metrics.inconclusive} 有效评价`" />
+            <StatCard label="本版本主用 / 待评价" :value="`${version.version.metrics.primary_applied} / ${version.version.metrics.pending}`" hint="全部版本累计效果见概览" />
+          </section>
+          <p v-else class="m-0 text-xs text-fg-secondary">本版本统计暂不可用。</p>
           <div class="flex flex-wrap gap-x-4 gap-y-2 text-xs text-fg-secondary">
             <span>parent：{{ version.version.parent_version_id ?? "首版" }}</span>
             <span :title="version.version.content_manifest_hash">manifest：{{ shortHash(version.version.content_manifest_hash) }}</span>
