@@ -73,6 +73,7 @@ function initialSkills(): LearnedSkillSummaryV1[] {
       recommended: true,
       control_revision: 4,
       last_used_at: "2026-08-25T03:20:00.000Z",
+      metrics_scope: "all_versions",
       metrics: observedMetrics,
     },
     {
@@ -92,6 +93,7 @@ function initialSkills(): LearnedSkillSummaryV1[] {
       recommended: true,
       control_revision: 1,
       last_used_at: "2026-08-24T06:10:00.000Z",
+      metrics_scope: "all_versions",
       metrics: unknownMetrics,
     },
   ];
@@ -315,6 +317,9 @@ function versionDetail(skillId: string, versionId: string): LearnedSkillVersionV
     skill,
     version: {
       ...version,
+      metrics: multipleDriver
+        ? version.version_no === 1 ? observedMetrics : { ...unknownMetrics, primary_applied: 0, pending: 0 }
+        : unknownMetrics,
       description: multipleDriver
         ? "按错误对象逐层定位重复驱动，并在修复后确认原错误族消失。"
         : "检查派生时钟约束与 Vivado 时序报告的一致性。",
@@ -352,7 +357,7 @@ const applicationDetails: Readonly<Record<string, SkillApplicationDetailV1>> = {
     skills: [
       {
         skill_id: "skill-multiple-driver",
-        version_id: "skill-version-multiple-driver-v2",
+        version_id: "skill-version-multiple-driver-v1",
         role: "primary",
         reason_codes: ["matching_error_family", "matching_rtl_structure"],
       },
@@ -407,7 +412,7 @@ const applicationDetails: Readonly<Record<string, SkillApplicationDetailV1>> = {
     skills: [
       {
         skill_id: "skill-multiple-driver",
-        version_id: "skill-version-multiple-driver-v2",
+        version_id: "skill-version-multiple-driver-v1",
         role: "primary",
         reason_codes: ["matching_error_family"],
       },

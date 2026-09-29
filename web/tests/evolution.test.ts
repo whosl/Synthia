@@ -86,6 +86,13 @@ function learnedSkill(metrics: SkillMetricsV1): unknown {
   };
 }
 
+test("skill metric scope remains explicit and older Core statistics are not labelled cumulative", () => {
+  const legacy = learnedSkill(unknownMetrics()) as Record<string, unknown>;
+  expect(parseLearnedSkillSummary(legacy).metrics_scope).toBe("active_version");
+  expect(parseLearnedSkillSummary({ ...legacy, metrics_scope: "all_versions" }).metrics_scope).toBe("all_versions");
+  expect(() => parseLearnedSkillSummary({ ...legacy, metrics_scope: "invalid" })).toThrow(EvolutionContractError);
+});
+
 function application(evaluations: unknown[]): unknown {
   return {
     schema: "skill-application-detail.v1",
