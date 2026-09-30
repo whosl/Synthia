@@ -615,6 +615,37 @@ describe("CuratorWorker", () => {
     expect(client.log).toEqual(["claim", "renew", "complete"]);
   });
 
+  test("a stale primary version passes through instead of killing the run's evaluations", async () => {
+    // The distiller minted a newer version after the agent applied: the
+    // claim's skill summary and its application bundle disagree. The model
+    // cannot see this race; Core degrades the mismatched CAS to a recorded
+    // cas_conflict skip, so the worker must complete with the evaluations.
+    const claim = curatorClaim(1);
+    const skill = claim.run!.applications[0]!.primary_version.skill;
+    claim.run!.applications[0]!.primary_version.skill = { ...skill, active_version_id: "version-newer" };
+    const client = new FakeCuratorClient();
+    client.claims.push(claim);
+    const model = new FakeModel();
+    model.responses.push({
+      evaluations: [{
+        application_id: "app-1",
+        outcome: "success",
+        confidence: 0.95,
+        reason: "Evidence proves the local goal",
+        evidence_refs: ["evidence-1"],
+        supersedes_id: null,
+      }],
+      remediations: [{ skill_id: "skill-1", action: "no_op" }],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    expect(client.completes[0]!.evaluations).toHaveLength(1);
+    expect(client.completes[0]!.remediations[0]).toMatchObject({
+      skill_id: "skill-1",
+      expected_active_version_id: "version-1",
+    });
+  });
+
   test("low-confidence attributable output is malformed and never completes", async () => {
     const client = new FakeCuratorClient();
     client.claims.push(curatorClaim(1));

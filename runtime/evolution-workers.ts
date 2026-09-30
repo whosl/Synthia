@@ -673,14 +673,16 @@ function parseRemediation(
     : identifier(row.skill_id, `${label}.skill_id`);
   const bundle = expected.get(skillId);
   if (!bundle) malformed(`${label}.skill_id was not claimed`);
-  const skill = bundle.primary_version.skill;
-  if (skill.active_version_id !== bundle.primary_version.version_id) {
-    malformed(`${label} primary version is no longer the claimed active version`);
-  }
+  // A stale primary (the distiller minted a newer version after the agent
+  // applied — observed: fpga-final-chain-closeout v3→v4 mid-window,
+  // 2026-09-29) is NOT malformed output: the CAS fields below are derived
+  // from the claim, and Core's remediation path already degrades a
+  // mismatched CAS to a recorded cas_conflict skip. Failing here used to
+  // kill the whole run's evaluations for a race the model cannot see.
   const base = {
     skill_id: skillId,
     expected_active_version_id: bundle.primary_version.version_id,
-    expected_control_revision: skill.control_revision,
+    expected_control_revision: bundle.primary_version.skill.control_revision,
     action,
   };
   if (action === "no_op") return base;
