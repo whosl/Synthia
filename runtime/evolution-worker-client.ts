@@ -274,6 +274,14 @@ export interface CuratorClaimV1 {
         readonly summary: string;
         readonly content: string | null;
       }[];
+      /** Bounded tool-event excerpts of the application window (Core-supplied). */
+      readonly evidence_content: readonly {
+        readonly sequence: number;
+        readonly kind: string;
+        readonly tool: string | null;
+        readonly args_excerpt: string | null;
+        readonly result_excerpt: string | null;
+      }[];
     }[];
   };
 }
@@ -965,6 +973,19 @@ function parseCuratorApplication(
         content: nullableText(item.content, `${path}.evidence[${index}].content`, true),
       };
     }),
+    // Absent on older Core payloads; the excerpts are advisory verification
+    // input, never a CAS fact.
+    evidence_content: (row.evidence_content === undefined ? [] : requireArray(row.evidence_content, `${path}.evidence_content`))
+      .map((raw, index) => {
+        const item = record(raw, `${path}.evidence_content[${index}]`);
+        return {
+          sequence: requireNonNegativeInteger(item.sequence, `${path}.evidence_content[${index}].sequence`),
+          kind: requireText(item.kind, `${path}.evidence_content[${index}].kind`),
+          tool: nullableText(item.tool, `${path}.evidence_content[${index}].tool`, true),
+          args_excerpt: nullableText(item.args_excerpt, `${path}.evidence_content[${index}].args_excerpt`, true),
+          result_excerpt: nullableText(item.result_excerpt, `${path}.evidence_content[${index}].result_excerpt`, true),
+        };
+      }),
   };
 }
 
