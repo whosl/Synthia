@@ -668,7 +668,13 @@ function parseRemediation(
     malformed(`${label}.skill_id is required`);
   }
   let action = actionRaw;
-  const payloadKey = action === "state_action" ? "state_action" : action === "patch" ? "patch" : null;
+  // scope_change carries its payload in the patch field (see the return
+  // below), so it degrades through the same forgiveness.
+  const payloadKey = action === "state_action"
+    ? "state_action"
+    : action === "patch" || action === "scope_change"
+      ? "patch"
+      : null;
   const payloadUsable = payloadKey === null
     || (row[payloadKey] !== null && typeof row[payloadKey] === "object" && !Array.isArray(row[payloadKey]));
   if (payloadKey !== null && !payloadUsable) {
