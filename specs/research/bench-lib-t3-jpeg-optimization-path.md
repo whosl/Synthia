@@ -80,6 +80,35 @@
 | **面积** | —（超容量） | ✅ FF 6,082（24% 预算内） |
 | **制作耗时** | 黄金基线+TB 约 ~1.5 天 | 活跃 ~20h（含优化） |
 
+## 160T 器件放大的对照实验（p29 黄金 / p30 盲测，2026-09-30 收口）
+
+为了回答「更大器件能否改变黄金/盲测的对比形态」，把两侧源集原封不动搬到 xc7k160tffg676-1（同速度级 -1，worker 切件后跑，跑完切回 70T）。
+
+**p29 黄金侧 160T：四步全绿（会话驱动，任务 task-7bdd64ca）**
+
+| 步骤 | jobId | 结果 |
+|---|---|---|
+| validate | job-a9585445 | succeeded（20 干净源；排除 2 损坏文件） |
+| simulate | job-09bc10f3 | succeeded（13 场景全 PASS，镜像 oracle） |
+| synthesize | job-ffaa1ad6 | succeeded（LUT 25,176 / DSP 396 综合态） |
+| implement | job-66c94d29 | **succeeded：WNS +0.354 / WHS +0.012 / MET**（fmax≈103.7MHz，routed LUT 21,755 / FF 33,099 / DSP 396 / BRAM 12.5） |
+
+**p30 盲测侧 160T**：R10 时点首版 RTL 综合绿（job-cde9ee0f）但 implement VIVADO_TIMING_FAILED（WNS −7.379 ≈ 70T 同期 −7.4）——**器件放大不修复时序**，收敛差距是微架构级而非容量级。盲测最终版已在更小的 70T 收敛（+0.658），p30 到此为止即结论。
+
+**160T 上的对比终表**：
+
+| 维度 | 黄金 160T | 盲测 70T（p28 终版） |
+|---|---|---|
+| 时序 @100MHz | MET（WNS +0.354） | MET（WNS +0.658） |
+| DSP | 396（66%） | 23（9.6%）——**17.2×** |
+| FF | 33,099（16.3%） | 6,082——5.4× |
+| LUT | 21,755（21.5%） | 12,979（31.7%，70T 口径） |
+| 黄金侧瓶颈 | 高扇出 CE 控制网（fo=1331，route 占 97%）非 DSP 级联 | — |
+
+结论：①更大器件解决黄金侧**容量**问题（70T 上 DSP 396>240 超容 → 160T 66%），且黄金参考也能在 100MHz 收敛（+0.354）；②但**面积效率差距不随器件变化**——参考实现固定消耗 17× DSP、5× FF，模型实现的密度优势是结构性的；③两侧 slack 差（+0.658 vs +0.354）说明盲测终版微架构（BRAM 行缓冲 + 23 DSP 流水）在时序上反而更从容。
+
+**p29 会话治理亮点**：对操作者转述的综合读数「先实读证据后采信」；对我先行 implement 的两处提交错误（XDC 误入 sources → UNSUPPORTED_SOURCE_LANGUAGE；XDC 未附 → TIMING_UNCONSTRAINED）自行诊断并以正确 constraints 形态重提成功；报告登记遇 fpga-sim-run 上游类型门槛（RTL_SOURCE_SET vs REFERENCE_IMPLEMENTATION）fail-closed 拒收后停手请裁，经裁决走文档类制品登记收口（doc/baseline-summary.md，rev-6e5c677c）。
+
 ## 关键发现（T3 差距形态数据）
 
 1. **模型的面积效率远高于参考实现**：16k 行参考 vs 2k 行自研实现同等功能——参考的三并行流水线用 240 DSP 和 47k LUT，模型用 23 DSP 和 13k LUT
