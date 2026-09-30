@@ -1711,6 +1711,43 @@ export async function attachSkillApplicationHandler(ctx: RequestContext): Promis
   return { status: 201, data: { ...(write.result as Row), replayed: write.replayed } };
 }
 
+/**
+ * Lazy closes used to seal applications with empty refs (observed: a
+ * one-minute probe close citing nothing), leaving the curator no citable
+ * anchor and forcing low-confidence inconclusive verdicts. When the model
+ * supplied no refs, collect the window's job/revision ids from committed
+ * tool_result events — deterministic Core facts, never invented.
+ */
+async function collectWindowEvidenceCandidates(
+  tx: TransactionClient,
+  taskId: string,
+  startSequence: number,
+  endSequence: number,
+): Promise<{ readonly jobRefs: string[]; readonly revisionRefs: string[] }> {
+  const result = await tx.query(
+    `SELECT DISTINCT m[1] AS ref
+       FROM task_conversation_event ev,
+            regexp_matches(
+              ev.payload::text,
+              '((?:job|rev)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+              'g'
+            ) m
+      WHERE ev.task_id=$1
+        AND ev.sequence BETWEEN $2 AND $3
+        AND ev.event_kind='tool_result'
+      LIMIT 100`,
+    [taskId, startSequence, endSequence],
+  );
+  const jobRefs: string[] = [];
+  const revisionRefs: string[] = [];
+  for (const row of result.rows as Row[]) {
+    const ref = String(row.ref);
+    if (ref.startsWith("job-")) jobRefs.push(ref);
+    else revisionRefs.push(ref);
+  }
+  return { jobRefs, revisionRefs };
+}
+
 export async function closeSkillApplicationHandler(ctx: RequestContext): Promise<HandlerResult> {
   const body = asObject(ctx.body);
   exactFields(body, [
@@ -1777,6 +1814,16 @@ export async function closeSkillApplicationHandler(ctx: RequestContext): Promise
         throw conflictApiError("TASK_TOOL_CALL_ARGS_MISMATCH");
       }
       const state = application.episode_id === null ? "closed_pending_episode" : "pending_evaluation";
+      const collected = await collectWindowEvidenceCandidates(
+        tx,
+        taskId,
+        Number(application.start_event_sequence),
+        endSequence,
+      );
+      // Enrichment happens after the args check and only fills EMPTY lists:
+      // an explicit model choice is never diluted or replaced.
+      const finalEvidenceRefs = evidenceRefs.length > 0 ? evidenceRefs : collected.revisionRefs;
+      const finalToolRunRefs = toolRunRefs.length > 0 ? toolRunRefs : collected.jobRefs;
       await tx.query(
         `UPDATE skill_application
             SET state=$2,end_event_sequence=$3,outcome_claim=$4,human_corrections=$5,
@@ -1788,8 +1835,8 @@ export async function closeSkillApplicationHandler(ctx: RequestContext): Promise
           endSequence,
           outcomeClaim,
           corrections,
-          JSON.stringify(evidenceRefs),
-          JSON.stringify(toolRunRefs),
+          JSON.stringify(finalEvidenceRefs),
+          JSON.stringify(finalToolRunRefs),
           endEvent.created_at,
         ],
       );
@@ -1802,6 +1849,10 @@ export async function closeSkillApplicationHandler(ctx: RequestContext): Promise
         application_id: applicationId,
         state,
         replayed: false,
+        auto_collected: {
+          evidence_refs: evidenceRefs.length > 0 ? [] : collected.revisionRefs,
+          tool_run_refs: toolRunRefs.length > 0 ? [] : collected.jobRefs,
+        },
       };
     },
   );

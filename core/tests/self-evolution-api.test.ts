@@ -1880,6 +1880,158 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     expect(unauthorized.status).toBe(401);
   });
 
+  test("close auto-collects window job/revision refs only when the model supplied none", async () => {
+    const skill = (await harness.client.query("SELECT active_version_id FROM learned_skill WHERE slug='timing-diagnosis'")).rows[0]!;
+    const versionId = String(skill.active_version_id);
+    const { projectId, taskId } = await seedTask("close-collect");
+
+    const applyArgs = {
+      version_id: versionId,
+      local_goal: "collect window evidence refs",
+      reason_codes: [],
+      role: "primary",
+    };
+    await appendTaskEvent(projectId, taskId, "event-cc-apply", "tool_call", {
+      tool_call_id: "call-cc-apply",
+      name: "learned_skill_apply",
+      args: applyArgs,
+    });
+    const create = await apiCall(
+      harness.baseUrl,
+      `/api/v1/projects/${projectId}/tasks/${taskId}/skill-applications`,
+      {
+        method: "POST",
+        token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": "cc-apply", "x-synthia-task-id": taskId },
+        body: {
+          schema: "skill-application-create.v1",
+          tool_call_id: "call-cc-apply",
+          turn_id: null,
+          version_id: versionId,
+          local_goal: applyArgs.local_goal,
+          reason_codes: applyArgs.reason_codes,
+        },
+      },
+    );
+    expect(create.status).toBe(201);
+    const applicationId = String(data(create.json).application_id);
+
+    // Window facts: a tool_result whose payload carries job-/rev- shaped ids.
+    await appendTaskEvent(projectId, taskId, "event-cc-evidence", "tool_result", {
+      tool_call_id: "call-cc-apply",
+      name: "vivado_run",
+      result: JSON.stringify({
+        job_id: "job-1e2d3c4b-1111-2222-3333-444455556666",
+        revisions: ["rev-0f1e2d3c-1111-2222-3333-444455556666"],
+      }),
+    });
+
+    const lazyCloseArgs = {
+      application_id: applicationId,
+      outcome_claim: "local goal done",
+      human_corrections: 0,
+      evidence_refs: [] as string[],
+      tool_run_refs: [] as string[],
+    };
+    const closeEvent = await appendTaskEvent(projectId, taskId, "event-cc-close", "tool_call", {
+      tool_call_id: "call-cc-close",
+      name: "learned_skill_close",
+      args: lazyCloseArgs,
+    });
+    const closed = await apiCall(
+      harness.baseUrl,
+      `/api/v1/projects/${projectId}/tasks/${taskId}/skill-applications/${applicationId}/close`,
+      {
+        method: "POST",
+        token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": "cc-close", "x-synthia-task-id": taskId },
+        body: {
+          schema: "skill-application-close.v1",
+          end_event_sequence: closeEvent.sequence,
+          outcome_claim: lazyCloseArgs.outcome_claim,
+          human_corrections: lazyCloseArgs.human_corrections,
+          evidence_refs: [],
+          tool_run_refs: [],
+        },
+      },
+    );
+    expect(closed.status).toBe(200);
+    expect(data(closed.json).auto_collected).toEqual({
+      evidence_refs: ["rev-0f1e2d3c-1111-2222-3333-444455556666"],
+      tool_run_refs: ["job-1e2d3c4b-1111-2222-3333-444455556666"],
+    });
+    const enriched = (await harness.client.query(
+      "SELECT evidence_refs,tool_run_refs FROM skill_application WHERE id=$1",
+      [applicationId],
+    )).rows[0]!;
+    expect(enriched.tool_run_refs).toEqual(["job-1e2d3c4b-1111-2222-3333-444455556666"]);
+    expect(enriched.evidence_refs).toEqual(["rev-0f1e2d3c-1111-2222-3333-444455556666"]);
+
+    // Explicit model choices are never diluted: a second application citing
+    // its own refs keeps them verbatim and reports nothing auto-collected.
+    await appendTaskEvent(projectId, taskId, "event-cc-apply-2", "tool_call", {
+      tool_call_id: "call-cc-apply-2",
+      name: "learned_skill_apply",
+      args: { ...applyArgs, local_goal: "explicit refs stay" },
+    });
+    const create2 = await apiCall(
+      harness.baseUrl,
+      `/api/v1/projects/${projectId}/tasks/${taskId}/skill-applications`,
+      {
+        method: "POST",
+        token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": "cc-apply-2", "x-synthia-task-id": taskId },
+        body: {
+          schema: "skill-application-create.v1",
+          tool_call_id: "call-cc-apply-2",
+          turn_id: null,
+          version_id: versionId,
+          local_goal: "explicit refs stay",
+          reason_codes: [],
+        },
+      },
+    );
+    expect(create2.status).toBe(201);
+    const application2 = String(data(create2.json).application_id);
+    const explicitArgs = {
+      application_id: application2,
+      outcome_claim: "kept my refs",
+      human_corrections: 0,
+      evidence_refs: ["evidence-explicit"],
+      tool_run_refs: ["tool-explicit"],
+    };
+    const close2 = await appendTaskEvent(projectId, taskId, "event-cc-close-2", "tool_call", {
+      tool_call_id: "call-cc-close-2",
+      name: "learned_skill_close",
+      args: explicitArgs,
+    });
+    const kept = await apiCall(
+      harness.baseUrl,
+      `/api/v1/projects/${projectId}/tasks/${taskId}/skill-applications/${application2}/close`,
+      {
+        method: "POST",
+        token: harness.ids.taskRuntimeToken,
+        headers: { "idempotency-key": "cc-close-2", "x-synthia-task-id": taskId },
+        body: {
+          schema: "skill-application-close.v1",
+          end_event_sequence: close2.sequence,
+          outcome_claim: explicitArgs.outcome_claim,
+          human_corrections: explicitArgs.human_corrections,
+          evidence_refs: explicitArgs.evidence_refs,
+          tool_run_refs: explicitArgs.tool_run_refs,
+        },
+      },
+    );
+    expect(kept.status).toBe(200);
+    expect(data(kept.json).auto_collected).toEqual({ evidence_refs: [], tool_run_refs: [] });
+    const preserved = (await harness.client.query(
+      "SELECT evidence_refs,tool_run_refs FROM skill_application WHERE id=$1",
+      [application2],
+    )).rows[0]!;
+    expect(preserved.evidence_refs).toEqual(["evidence-explicit"]);
+    expect(preserved.tool_run_refs).toEqual(["tool-explicit"]);
+  });
+
 });
 
 if (!DATABASE_URL) {
