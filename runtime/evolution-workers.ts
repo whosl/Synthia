@@ -531,7 +531,11 @@ export function parseCuratorOutput(
   run: NonNullable<CuratorClaimV1["run"]>,
 ): { evaluations: CuratorEvaluationV1[]; remediations: CuratorRemediationV1[] } {
   const row = modelRecord(raw);
-  exactKeys(row, ["evaluations", "remediations"], "curator output");
+  // Shape forgiveness: the model occasionally adds stray top-level keys;
+  // only the two required ones matter.
+  if (!("evaluations" in row) || !("remediations" in row)) {
+    malformed("curator output must contain evaluations and remediations");
+  }
   const expectedApplications = new Map(
     run.applications.map((bundle) => [bundle.application.application_id, bundle]),
   );
@@ -580,13 +584,16 @@ function parseEvaluation(
   // the model transcribes long ids unreliably (observed one-char substitution).
   const applicationIdOptional = expected.size === 1;
   const evalExpected = ["application_id", "outcome", "confidence", "reason", "evidence_refs", "supersedes_id"];
-  const evalActual = Object.keys(row).sort();
-  const evalCanonical = [...evalExpected].sort();
-  const evalOk = applicationIdOptional
-    ? evalActual.every((key) => evalCanonical.includes(key))
-      && (evalActual.length === evalCanonical.length || evalActual.length === evalCanonical.length - 1)
-    : evalActual.length === evalCanonical.length && evalActual.every((key, index) => key === evalCanonical[index]);
-  if (!evalOk) malformed(`${label} fields must be exactly: ${evalCanonical.join(", ")}`);
+  // Shape forgiveness: unknown extra keys are ignored (live-observed: the
+  // model appending stray fields killed otherwise-parseable evaluations);
+  // required keys must still be present.
+  const evalActual = Object.keys(row);
+  const requiredEval = applicationIdOptional
+    ? evalExpected.filter((key) => key !== "application_id")
+    : evalExpected;
+  if (requiredEval.some((key) => !evalActual.includes(key))) {
+    malformed(`${label} is missing required fields: ${requiredEval.join(", ")}`);
+  }
   const applicationId = row.application_id === undefined
     ? (applicationIdOptional ? [...expected.keys()][0]! : malformed(`${label}.application_id is required`))
     : identifier(row.application_id, `${label}.application_id`);
