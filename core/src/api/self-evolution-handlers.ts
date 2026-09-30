@@ -3282,12 +3282,13 @@ async function applyCuratorEvaluation(
   );
   if (leafResult.rows.length > 1) throw conflictApiError("EVALUATION_LEAF_CONFLICT");
   const currentLeafId = (leafResult.rows[0] as Row | undefined)?.id ?? null;
-  if (
-    (primary.state === "pending_evaluation" && (currentLeafId !== null || evaluation.supersedesId !== null))
-    || (primary.state === "evaluated" && (
-      currentLeafId === null || evaluation.supersedesId !== currentLeafId
-    ))
-  ) {
+  // One invariant covers every state: the new evaluation must supersede the
+  // application's current leaf (and an application with no leaf — the normal
+  // first pass — must not claim to supersede anything). A requeued
+  // pending_evaluation application carries its blind-era leaf, so its
+  // re-evaluation must supersede that leaf exactly; the old rule rejected
+  // any supersedes on pending rows and made re-review unreachable.
+  if (evaluation.supersedesId !== currentLeafId) {
     throw conflictApiError("EVALUATION_SUPERSEDE_MISMATCH");
   }
   const evaluationId = id("cev");

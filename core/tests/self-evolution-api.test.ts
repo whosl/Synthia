@@ -2087,6 +2087,59 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     const claimed = (data(claimResponse.json).run.applications as unknown[])
       .map((item) => row(row(item).application).application_id);
     expect(claimed).toContain(applicationId);
+
+    // The re-evaluation must supersede the blind-era leaf: complete the
+    // claimed run with supersedes_id = the old evaluation and expect success.
+    const claimRun = row(data(claimResponse.json).run);
+    const priorEval = (await harness.client.query(
+      "SELECT id FROM curator_evaluation WHERE application_id=$1 ORDER BY created_at DESC LIMIT 1",
+      [applicationId],
+    )).rows[0]!;
+    const bundles = claimRun.applications as unknown[];
+    const requeuedBundle = bundles
+      .find((item) => row(row(item).application).application_id === applicationId)!;
+    const remediations = bundles.map((rawBundle) => {
+      const summary = row(row(row(rawBundle).primary_version).skill);
+      return {
+        skill_id: summary.skill_id,
+        expected_active_version_id: summary.active_version_id,
+        expected_control_revision: summary.control_revision,
+        action: "no_op",
+      };
+    });
+    const supersededComplete = await apiCall(
+      harness.baseUrl,
+      `/api/v1/internal/evolution/curator-runs/${claimRun.run_id}/complete`,
+      {
+        method: "POST",
+        token: curatorToken,
+        body: {
+          lease_token: claimRun.lease_token,
+          evaluator_version: "curator-reeval-v1",
+          evaluations: bundles.map((rawBundle) => {
+            const appId = row(row(rawBundle).application).application_id;
+            const prior = appId === applicationId ? String(priorEval.id) : null;
+            return {
+              application_id: appId,
+              evidence_snapshot_hash: row(rawBundle).evidence_snapshot_hash,
+              outcome: "success",
+              confidence: 0.9,
+              reason: "re-evaluated with visible evidence",
+              evidence_refs: [],
+              eval_job_refs: [],
+              supersedes_id: prior,
+            };
+          }),
+          remediations,
+        },
+      },
+    );
+    expect(supersededComplete.status).toBe(200);
+    const requeuedState = (await harness.client.query(
+      "SELECT state FROM skill_application WHERE id=$1",
+      [applicationId],
+    )).rows[0]!;
+    expect(requeuedState.state).toBe("evaluated");
   });
 
 
