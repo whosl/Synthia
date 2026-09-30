@@ -615,6 +615,41 @@ describe("CuratorWorker", () => {
     expect(client.log).toEqual(["claim", "renew", "complete"]);
   });
 
+  test("remediation shape is forgiven: bad payload degrades to no_op, extras ignored", async () => {
+    // Live-observed (2026-09-30 re-eval rounds): the model emitted a
+    // state_action remediation whose field set did not match the canonical
+    // shape, killing the whole run. Unknown keys are now ignored and an
+    // unshapable action payload degrades to no_op so the evaluations land.
+    const claim = curatorClaim(1);
+    const client = new FakeCuratorClient();
+    client.claims.push(claim);
+    const model = new FakeModel();
+    model.responses.push({
+      evaluations: [{
+        application_id: "app-1",
+        outcome: "success",
+        confidence: 0.9,
+        reason: "Evidence proves the local goal",
+        evidence_refs: ["evidence-1"],
+        supersedes_id: null,
+      }],
+      remediations: [{
+        skill_id: "skill-1",
+        action: "state_action",
+        state_action: "not-an-object",
+        expected_active_version_id: "model-invented-cas",
+        extra_field: true,
+      }],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    expect(client.completes[0]!.evaluations).toHaveLength(1);
+    expect(client.completes[0]!.remediations[0]).toMatchObject({
+      skill_id: "skill-1",
+      action: "no_op",
+    });
+  });
+
   test("a stale primary version passes through instead of killing the run's evaluations", async () => {
     // The distiller minted a newer version after the agent applied: the
     // claim's skill summary and its application bundle disagree. The model

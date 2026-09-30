@@ -643,31 +643,31 @@ function parseRemediation(
 ): CuratorRemediationV1 {
   const label = `remediations[${index}]`;
   const row = strictRecord(raw, label);
-  const action = oneOf(
+  const actionRaw = oneOf(
     row.action,
     ["no_op", "patch", "scope_change", "state_action"] as const,
     `${label}.action`,
-  );
+  ) as "no_op" | "patch" | "scope_change" | "state_action";
   // The model transcribes 40-char ids unreliably (one observed b6->b5
   // substitution); with exactly one claimed primary skill the id is
   // unambiguous, so it may be omitted and inferred here.
-  const actionKeys = action === "state_action"
-    ? ["state_action"]
-    : action === "patch"
-      ? ["patch"]
-      : [];
-  // skill_id stays accepted; with exactly one claimed primary skill it may be
-  // omitted (the model transcribes long ids unreliably — one observed
-  // b6->b5 substitution — so the worker infers the unambiguous id).
+  // Remediation shape is forgiven the same way apply args are: unknown extra
+  // keys are ignored, and an action whose payload the model failed to shape
+  // (observed live: state_action emitted with a mismatched field set) degrades
+  // to no_op rather than killing the whole run's evaluations — Core records
+  // the no_op and the next cycle can re-remediate with a fresh claim.
   const skillIdOptional = expected.size === 1;
-  const expectedKeys = ["skill_id", "action", ...actionKeys];
-  const actualKeys = Object.keys(row).sort();
-  const canonical = [...expectedKeys].sort();
-  const matches = skillIdOptional
-    ? actualKeys.every((key) => canonical.includes(key))
-      && (actualKeys.length === canonical.length || actualKeys.length === canonical.length - 1)
-    : actualKeys.length === canonical.length && actualKeys.every((key, index) => key === canonical[index]);
-  if (!matches) malformed(`${label} fields must be exactly: ${canonical.join(", ")}`);
+  if (row.skill_id === undefined && !skillIdOptional) {
+    malformed(`${label}.skill_id is required`);
+  }
+  let action = actionRaw;
+  const payloadKey = action === "state_action" ? "state_action" : action === "patch" ? "patch" : null;
+  const payloadUsable = payloadKey === null
+    || (row[payloadKey] !== null && typeof row[payloadKey] === "object" && !Array.isArray(row[payloadKey]));
+  if (payloadKey !== null && !payloadUsable) {
+    action = "no_op";
+  }
+  const actionKeys = action === "state_action" ? ["state_action"] : action === "patch" ? ["patch"] : [];
   const skillId = row.skill_id === undefined
     ? (skillIdOptional ? [...expected.keys()][0]! : malformed(`${label}.skill_id is required`))
     : identifier(row.skill_id, `${label}.skill_id`);
