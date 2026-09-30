@@ -2140,6 +2140,46 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
       [applicationId],
     )).rows[0]!;
     expect(requeuedState.state).toBe("evaluated");
+
+    // A subsequent claim's bundle carries the window's tool-event excerpts:
+    // the evaluator can finally read WHAT the cited work produced.
+    await apiCall(
+      harness.baseUrl,
+      "/api/v1/skill-applications/" + applicationId + "/requeue",
+      { method: "POST", token: harness.ids.humanToken, body: { reason: "verify evidence content" } },
+    );
+    await harness.client.query(
+      `INSERT INTO curator_run
+        (id,mode,state,schedule_bucket,manual_key,reason,created_by_type,created_by)
+       VALUES ('curator-content-verify','run','queued','manual:content-verify','manual:content-verify','test','service',$1)`,
+      [harness.ids.serviceUid],
+    );
+    // Production grants the evaluator a project role so evidence is visible
+    // to it; mirror that here or the excerpts are (correctly) withheld.
+    // serviceUid may be either the user id or its uid string; resolve both.
+    const curatorActor = (await harness.client.query(
+      "SELECT uid FROM user_account WHERE id=$1 OR uid=$1",
+      [harness.ids.serviceUid],
+    )).rows[0]!;
+    const appProject = (await harness.client.query(
+      "SELECT project_id FROM skill_application WHERE id=$1",
+      [applicationId],
+    )).rows[0]!;
+    await harness.client.query(
+      `INSERT INTO role_assignment (id,project_id,actor_type,actor_id,role,permissions)
+       VALUES ('role_content_verify',$1,'service',$2,'quality','{}'::jsonb)`,
+      [String(appProject.project_id), String(curatorActor.uid)],
+    );
+    const contentClaim = await apiCall(
+      harness.baseUrl,
+      "/api/v1/internal/evolution/curator-runs/claim-manual",
+      { method: "POST", token: curatorToken, body: { worker_id: "worker-content-verify", lease_seconds: 60 } },
+    );
+    const contentBundle = (data(contentClaim.json).run.applications as unknown[])
+      .find((item) => row(row(item).application).application_id === applicationId)!;
+    const excerpts = row(contentBundle).evidence_content as Array<Record<string, unknown>>;
+    expect(excerpts.length).toBeGreaterThan(0);
+    expect(excerpts.some((entry) => entry.tool === "learned_skill_apply")).toBe(true);
   });
 
 

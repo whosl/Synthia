@@ -2788,7 +2788,9 @@ async function curatorApplicationBundle(
     [primary.version_id],
   );
   const appResult = await ctx.pool.query(
-    "SELECT project_id,evidence_refs,tool_run_refs FROM skill_application WHERE id=$1",
+    `SELECT project_id,task_id,evidence_refs,tool_run_refs,
+            start_event_sequence,end_event_sequence
+       FROM skill_application WHERE id=$1`,
     [applicationId],
   );
   const app = appResult.rows[0] as Row;
@@ -2797,6 +2799,35 @@ async function curatorApplicationBundle(
     ...(Array.isArray(app.tool_run_refs) ? app.tool_run_refs : []),
   ];
   const sourceVisible = await canViewProject(ctx, String(app.project_id));
+  // The evaluator can enumerate cited ids but could never read what they
+  // produced (every re-review since 2026-09-30 died to "content=null"):
+  // supply bounded excerpts of the application window's committed tool
+  // events — the work record itself (tool names, args, PASS/FAIL result
+  // text) — so outcome-contract conditions become verifiable. Excerpts are
+  // hash-less Core facts: left-bounded text straight from the conversation.
+  let evidenceContent: Array<Record<string, unknown>> = [];
+  if (sourceVisible && app.end_event_sequence !== null) {
+    const eventsResult = await ctx.pool.query(
+      `SELECT sequence,event_kind,
+              left(payload->>'name',120) AS tool,
+              left(payload->>'args',400) AS args_excerpt,
+              left(payload->>'result',2000) AS result_excerpt
+         FROM task_conversation_event
+        WHERE task_id=$1
+          AND sequence BETWEEN $2 AND $3
+          AND event_kind IN ('tool_call','tool_result')
+        ORDER BY sequence
+        LIMIT 64`,
+      [app.task_id, app.start_event_sequence, app.end_event_sequence],
+    );
+    evidenceContent = (eventsResult.rows as Row[]).map((row) => ({
+      sequence: Number(row.sequence),
+      kind: row.event_kind,
+      tool: row.tool ?? null,
+      args_excerpt: row.args_excerpt ?? null,
+      result_excerpt: row.result_excerpt ?? null,
+    }));
+  }
   return {
     application: await applicationDetail(ctx, applicationId),
     primary_version: {
@@ -2815,6 +2846,7 @@ async function curatorApplicationBundle(
       })),
     },
     evidence_snapshot_hash: await applicationSnapshotHash(ctx.pool, applicationId),
+    evidence_content: evidenceContent,
     evidence: refs.map((ref) => {
       const serialized = typeof ref === "string" ? ref : JSON.stringify(ref);
       return {
