@@ -807,6 +807,57 @@ async function applicationDetail(ctx: RequestContext, applicationId: string): Pr
   };
 }
 
+/**
+ * Human-controlled re-evaluation: return an evaluated application to the
+ * pending pool. The next curator run re-evaluates it with its evidence
+ * projection — created for the case where the original verdict was forced
+ * inconclusive because the evaluator could not see the evidence (the
+ * curator identity had no project role; fixed 2026-09-30). The new
+ * evaluation supersedes the old one through the existing supersedes chain;
+ * this endpoint never writes or edits an evaluation itself.
+ */
+export async function requeueSkillApplicationHandler(ctx: RequestContext): Promise<HandlerResult> {
+  requireHumanControl(ctx);
+  requireRollout(ctx);
+  const body = asObject(ctx.body);
+  exactFields(body, ["reason"]);
+  const reason = textField(body, "reason");
+  const applicationId = ctx.params.applicationId!;
+  const conn = await ctx.pool.connect();
+  try {
+    const result = await withTransaction(conn as unknown as TransactionClient, async (tx) => {
+      await requireLearningWritable(ctx, tx);
+      const result = await tx.query(
+        "SELECT id,project_id,state FROM skill_application WHERE id=$1 FOR UPDATE",
+        [applicationId],
+      );
+      const application = result.rows[0] as Row | undefined;
+      if (!application) throw notFoundError(`skill application not found: ${applicationId}`);
+      if (application.state !== "evaluated") {
+        throw conflictApiError("APPLICATION_NOT_EVALUATED");
+      }
+      await tx.query(
+        "UPDATE skill_application SET state='pending_evaluation' WHERE id=$1",
+        [applicationId],
+      );
+      await appendEvolutionOutbox(tx, ctx, "skill_application", applicationId, "evolution.application_requeued", {
+        from_state: "evaluated",
+        to_state: "pending_evaluation",
+        reason,
+      }, String(application.project_id));
+      return {
+        schema: "skill-application-requeue.v1",
+        application_id: applicationId,
+        state: "pending_evaluation",
+        replayed: false,
+      };
+    });
+    return { status: 200, data: result };
+  } finally {
+    conn.release();
+  }
+}
+
 export async function getSkillApplicationHandler(ctx: RequestContext): Promise<HandlerResult> {
   return { status: 200, data: await applicationDetail(ctx, ctx.params.applicationId!) };
 }

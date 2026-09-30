@@ -2032,6 +2032,64 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     expect(preserved.tool_run_refs).toEqual(["tool-explicit"]);
   });
 
+  test("requeue returns an evaluated application to the pending pool for re-evaluation", async () => {
+    const skill = (await harness.client.query("SELECT active_version_id FROM learned_skill WHERE slug='timing-diagnosis'")).rows[0]!;
+    const applicationId = await seedPendingApplication("requeue", String(skill.active_version_id));
+
+    // Only evaluated applications may requeue.
+    const premature = await apiCall(
+      harness.baseUrl,
+      `/api/v1/skill-applications/${applicationId}/requeue`,
+      { method: "POST", token: harness.ids.humanToken, body: { reason: "not yet evaluated" } },
+    );
+    expect(premature.status).toBe(409);
+
+    await runCuratorRemediation("requeue", applicationId, {
+      skill_id: String(skill.id ?? ""),
+      expected_active_version_id: null,
+      expected_control_revision: 0,
+      action: "no_op",
+    });
+    const evaluated = (await harness.client.query(
+      "SELECT state FROM skill_application WHERE id=$1",
+      [applicationId],
+    )).rows[0]!;
+    expect(evaluated.state).toBe("evaluated");
+
+    const requeued = await apiCall(
+      harness.baseUrl,
+      `/api/v1/skill-applications/${applicationId}/requeue`,
+      { method: "POST", token: harness.ids.humanToken, body: { reason: "evidence was redacted to the evaluator" } },
+    );
+    expect(requeued.status).toBe(200);
+    expect(data(requeued.json).state).toBe("pending_evaluation");
+
+    const audit = await harness.client.query(
+      `SELECT 1 FROM outbox_events WHERE aggregate_type='skill_application' AND aggregate_id=$1
+         AND event_type='evolution.application_requeued'`,
+      [applicationId],
+    );
+    expect(audit.rows).toHaveLength(1);
+
+    // The pending pool hands it back to the next curator claim.
+    const runId = `curator-requeue-verify`;
+    await harness.client.query(
+      `INSERT INTO curator_run
+        (id,mode,state,schedule_bucket,manual_key,reason,created_by_type,created_by)
+       VALUES ($1,'run','queued',$1,$1,'test','service',$2)`,
+      [runId, harness.ids.serviceUid],
+    );
+    const claimResponse = await apiCall(
+      harness.baseUrl,
+      "/api/v1/internal/evolution/curator-runs/claim-manual",
+      { method: "POST", token: curatorToken, body: { worker_id: "worker-requeue-verify", lease_seconds: 60 } },
+    );
+    const claimed = (data(claimResponse.json).run.applications as unknown[])
+      .map((item) => row(row(item).application).application_id);
+    expect(claimed).toContain(applicationId);
+  });
+
+
 });
 
 if (!DATABASE_URL) {

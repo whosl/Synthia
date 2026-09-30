@@ -161,6 +161,7 @@ import {
   listLearnedSkillApplicationsHandler,
   listLearnedSkillsHandler,
   regeneralizeLearnedSkillHandler,
+  requeueSkillApplicationHandler,
   renewCuratorLeaseHandler,
   renewDistillationLeaseHandler,
   taskSearchLearnedSkillsHandler,
@@ -439,6 +440,13 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
         requiredScope: "core:write",
       };
     }
+  }
+  if (segments.length === 3 && segments[0] === "skill-applications" && segments[2] === "requeue" && method === "POST") {
+    return {
+      handler: requeueSkillApplicationHandler,
+      params: { applicationId: segments[1]! },
+      requiredScope: "core:admin",
+    };
   }
   if (segments.length === 2 && segments[0] === "skill-applications" && method === "GET") {
     return {
