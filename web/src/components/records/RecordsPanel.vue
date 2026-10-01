@@ -164,12 +164,15 @@ function onViewEntry(jobId: string, name: string): void {
         @update:model-value="onExpandedChange"
       >
         <div
-          v-for="job in jobs"
+          v-for="(job, index) in jobs"
           :key="job.jobId"
           :ref="(el) => setCardEl(job.jobId, el as Element | null)"
           class="rounded-md bg-hover transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)]"
           :class="highlightedJobId === job.jobId ? 'bg-brand-subtle' : ''"
         >
+          <p v-if="job.evidenceScope && (index === 0 || jobs[index - 1]?.configEpoch !== job.configEpoch)" class="border-b border-line px-2 py-2 text-[11px] text-fg-muted">
+            {{ job.configEpoch ? `配置版本 ${job.configEpoch} · ${job.evidenceScope === 'current' ? '当前配置' : '历史配置'}` : '历史记录 · 配置归属待确认' }}
+          </p>
           <AccordionItem :value="job.jobId" class="border-b-0">
             <AccordionTrigger class="w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-2 text-xs font-normal text-fg hover:no-underline">
               <span
@@ -178,6 +181,7 @@ function onViewEntry(jobId: string, name: string): void {
                 aria-hidden="true"
               >▾</span>
               <span class="min-w-0 flex-1 truncate">{{ job.title }} · 第 {{ job.round }} 轮</span>
+              <Badge v-if="job.evidenceScope" tone="neutral" size="sm">{{ job.evidenceScope === 'unattributed' ? '配置归属未确认' : `配置版本 ${job.configEpoch} · ${job.evidenceScope === 'historical' ? '历史' : '当前'}` }}</Badge>
               <Badge :tone="job.ok ? 'ok' : 'danger'" variant="dot" size="sm">{{ statusText(job) }}</Badge>
               <span v-if="job.errorCode" class="flex-none font-mono text-[11px] text-danger">{{ job.errorCode }}</span>
               <template #icon></template>
@@ -187,6 +191,7 @@ function onViewEntry(jobId: string, name: string): void {
               <div class="flex flex-wrap gap-2 text-[11px] text-fg-muted">
                 <span v-if="job.ts" class="tabular-nums">{{ formatTime(job.ts) }}</span>
                 <span class="mono">job:{{ job.jobId }}</span>
+                <span v-if="job.part" class="mono">器件: {{ job.part }}</span>
                 <span v-if="job.inputSha256" class="mono">sha256:{{ shortHash(job.inputSha256) }}</span>
               </div>
 

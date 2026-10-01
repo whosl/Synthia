@@ -1,3 +1,4 @@
+import type { EvidenceRange } from "../core/src/domain/evidence-range.ts";
 /**
  * Synthia Runtime — Core API connector adapter.
  *
@@ -83,6 +84,8 @@ export interface CoreApiConnectorOptions {
    */
   readonly taskId?: string;
   readonly workspaceId?: string;
+  /** Main Project Agent binding; keeps ordinary Core routes and credential. */
+  readonly boundTaskId?: string;
   readonly connectorId?: string;
   /** Inject fetch (tests). Defaults to the global fetch. */
   readonly fetchImpl?: typeof fetch;
@@ -149,6 +152,8 @@ export class CoreApiConnector implements LoopConnector {
   private readonly sleeper: (ms: number) => Promise<void>;
 
   constructor(private readonly opts: CoreApiConnectorOptions) {
+    if (opts.boundTaskId !== undefined) requireTaskBindingIdentifier("boundTaskId", opts.boundTaskId);
+    if (opts.boundTaskId !== undefined && opts.taskId !== undefined) throw new TypeError("main and side task bindings cannot be combined");
     if ((opts.taskId === undefined) !== (opts.workspaceId === undefined)) {
       throw new TypeError("taskId and workspaceId must be supplied together");
     }
@@ -226,12 +231,14 @@ export class CoreApiConnector implements LoopConnector {
     };
   }
 
-  async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+  async fetchEvidenceContent(jobId: string, name: string, range?: EvidenceRange): Promise<EvidenceContent> {
     const data = (await this.request(
       "GET",
-      `${this.jobPath(jobId)}/evidence/content?name=${encodeURIComponent(name)}`,
-    )) as { name: string; content: string; sha256: string; truncated: boolean; mediaType: string };
+      `${this.jobPath(jobId)}/evidence/content?name=${encodeURIComponent(name)}${range ? `&offset=${range.offset}&limit=${range.limit}` : ""}`,
+    )) as EvidenceContent;
     return {
+      ...(data.range ? { range: data.range } : {}),
+      ...(data.sizeBytes !== undefined ? { sizeBytes: data.sizeBytes } : {}),
       content: data.content,
       sha256: data.sha256,
       truncated: data.truncated,
@@ -334,6 +341,7 @@ export class CoreApiConnector implements LoopConnector {
 
   private buildInit(method: "GET" | "POST", body?: unknown, idempotencyKey?: string): RequestInit {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    if (this.opts.boundTaskId) headers["X-Synthia-Task-Id"] = this.opts.boundTaskId;
     if (this.taskId !== undefined && this.workspaceId !== undefined) {
       headers["X-Synthia-Task-Id"] = this.taskId;
       headers["X-Synthia-Workspace-Id"] = this.workspaceId;

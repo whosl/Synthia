@@ -124,3 +124,49 @@ describe("synthia_job_evidence", () => {
     expect(out.content).toContain("JOB_NOT_FOUND");
   });
 });
+
+describe("H37 evidence pagination", () => {
+  test("a 1.19MB VCD is read losslessly in bounded pages with next-read guidance", async () => {
+    const text = "$date test $end\n" + "0!\n1!\n".repeat(200_000);
+    const { evidenceTextPage } = await import("../core/src/domain/evidence-range.ts");
+    let reads = 0;
+    const connector = fakeConnector({ fetchEvidenceContent: async (_job, _name, range) => {
+      reads++;
+      const page = evidenceTextPage(text, range!);
+      return { ...page, sha256: "a".repeat(64), truncated: page.range.nextOffset !== null, mediaType: "text/plain", sizeBytes: Buffer.byteLength(text) };
+    } });
+    const tool = assembleJobEvidenceTool();
+    let args = { job_id: "job-p28", name: "waveform.vcd", offset: 0, limit: 65_536 };
+    let restored = "";
+    while (true) {
+      const result = await tool.execute(args, context(connector));
+      expect(result.isError).toBeUndefined();
+      const page = JSON.parse(result.content);
+      expect(page.content.length).toBeLessThanOrEqual(args.limit);
+      expect(page.range.totalChars).toBe(text.length);
+      expect(page.sizeBytes).toBe(Buffer.byteLength(text));
+      restored += page.content;
+      if (page.next_read === null) break;
+      args = page.next_read;
+    }
+    expect(restored).toBe(text);
+    expect(reads).toBeGreaterThan(1);
+  });
+  test("oversized unpaginated connector content guides reads rather than refusing the artifact", async () => {
+    const tool = assembleJobEvidenceTool();
+    const result = await tool.execute({ job_id: "job-abc", name: "waveform.vcd" }, context(fakeConnector({
+      fetchEvidenceContent: async () => ({ content: "x".repeat(300_000), sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" }),
+    })));
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content).next_read.offset).toBe(65_536);
+  });
+  test("negative offsets, excessive pages, wrong types and ranges on manifests fail before fetch", async () => {
+    const tool = assembleJobEvidenceTool();
+    for (const patch of [{ offset: -1 }, { limit: 262_145 }, { limit: 0 }, { offset: "0" }, { limit: 1.5 }]) {
+      const result = await tool.execute({ job_id: "job-abc", name: "sta.rpt", ...patch }, context(fakeConnector()));
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("EVIDENCE_RANGE_INVALID");
+    }
+    expect((await tool.execute({ job_id: "job-abc", offset: 0 }, context(fakeConnector()))).isError).toBe(true);
+  });
+});

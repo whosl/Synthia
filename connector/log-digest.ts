@@ -39,9 +39,45 @@ export interface LogDigestCounts {
   readonly pass: number;
 }
 
+export interface PerformanceMetric extends LogDigestLine {
+  readonly name: "LINE_RATE_MBPS" | "GOODPUT_MBPS" | "DROPPED_PKTS" | "CYCLES_PER_PIXEL";
+  readonly value: number | null;
+  readonly requirement: string | null;
+  readonly verdict: "pass" | "fail" | "observed";
+}
+
+/** Bench TST-002 contracts: USB PERF-002 >=11.5Mbps; JPEG PERF-002 <=1 cycle/pixel. */
+export interface PerformanceRequirements {
+  readonly minimumGoodputMbps: number;
+  readonly maximumCyclesPerPixel: number;
+}
+export const BENCH_PERFORMANCE_REQUIREMENTS: PerformanceRequirements = {
+  minimumGoodputMbps: 11.5,
+  maximumCyclesPerPixel: 1,
+};
+const MAX_METRICS = 64;
+const METRIC_RE = /^\s*(LINE_RATE_MBPS|GOODPUT_MBPS|DROPPED_PKTS|CYCLES_PER_PIXEL)\s+(\S+)(?:\s.*)?$/;
+
+function performanceMetric(line: string, requirements: PerformanceRequirements): Omit<PerformanceMetric, keyof LogDigestLine> | null {
+  const match = METRIC_RE.exec(line);
+  if (!match) return null;
+  const name = match[1] as PerformanceMetric["name"];
+  const parsed = Number(match[2]);
+  const value = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  const requirement = name === "GOODPUT_MBPS" ? `>= ${requirements.minimumGoodputMbps} Mbps`
+    : name === "DROPPED_PKTS" ? "= 0 packets"
+    : name === "CYCLES_PER_PIXEL" ? `<= ${requirements.maximumCyclesPerPixel} cycles/pixel` : null;
+  const valid = value !== null && (name !== "DROPPED_PKTS" || Number.isInteger(value));
+  const passes = valid && (name === "GOODPUT_MBPS" ? value! >= requirements.minimumGoodputMbps
+    : name === "DROPPED_PKTS" ? value === 0
+    : name === "CYCLES_PER_PIXEL" ? value! > 0 && value! <= requirements.maximumCyclesPerPixel : value! > 0);
+  return { name, value, requirement, verdict: !passes ? "fail" : requirement ? "pass" : "observed" };
+}
+
 export interface LogDigest {
   readonly schema: "synthia-log-digest.v1";
   readonly operation: string;
+  readonly performance?: { readonly requirements: PerformanceRequirements; readonly total: number; readonly metrics: readonly PerformanceMetric[]; readonly failed: boolean };
   /** Total classified line counts before capping. */
   readonly counts: LogDigestCounts;
   readonly failureLines: readonly LogDigestLine[];
@@ -109,6 +145,9 @@ interface Classified {
   phaseMarkers: string[];
   counts: LogDigestCounts;
   truncated: boolean;
+  metrics: PerformanceMetric[];
+  metricsTotal: number;
+  metricsFailed: boolean;
 }
 
 function scanStream(
@@ -116,6 +155,7 @@ function scanStream(
   source: LogDigestSource,
   skipTbRegion: boolean,
   region: { start: number; end: number } | undefined,
+  requirements: PerformanceRequirements,
 ): Classified {
   const lines = text.split(/\r?\n/);
   const failure: LogDigestLine[] = [];
@@ -126,6 +166,9 @@ function scanStream(
   let warningTotal = 0;
   let passTotal = 0;
   let truncated = false;
+  const metrics: PerformanceMetric[] = [];
+  let metricsTotal = 0;
+  let metricsFailed = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -139,7 +182,14 @@ function scanStream(
     const inSimulatorRegion = skipTbRegion && region !== undefined && i >= region.start && i <= region.end;
     if (inSimulatorRegion) continue;
 
-    if (isFailureLine(line, source)) {
+    const metric = performanceMetric(line, requirements);
+    if (metric) {
+      metricsTotal++;
+      metricsFailed ||= metric.verdict === "fail";
+      if (metrics.length < MAX_METRICS) metrics.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP), ...metric });
+      else truncated = true;
+    }
+    if (isFailureLine(line, source) || metric?.verdict === "fail") {
       failureTotal++;
       if (failure.length < MAX_FAILURE_LINES) {
         const contextBefore: string[] = [];
@@ -155,14 +205,14 @@ function scanStream(
       warningTotal++;
       if (warning.length < MAX_WARNING_LINES) warning.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
       else truncated = true;
-    } else if (isPassLine(line, source)) {
+    } else if (isPassLine(line, source) || metric?.verdict === "pass") {
       passTotal++;
       if (pass.length < MAX_PASS_LINES) pass.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
       else truncated = true;
     }
   }
   return {
-    failure, warning, pass, phaseMarkers, truncated,
+    failure, warning, pass, phaseMarkers, truncated, metrics, metricsTotal, metricsFailed,
     counts: { failure: failureTotal, warning: warningTotal, pass: passTotal },
   };
 }
@@ -170,20 +220,29 @@ function scanStream(
 export function buildLogDigest(
   operation: string,
   streams: { stdout?: string; stderr?: string; simulator?: string },
+  requirements: PerformanceRequirements = BENCH_PERFORMANCE_REQUIREMENTS,
 ): LogDigest {
+  if (!Number.isFinite(requirements.minimumGoodputMbps) || requirements.minimumGoodputMbps <= 0
+    || !Number.isFinite(requirements.maximumCyclesPerPixel) || requirements.maximumCyclesPerPixel <= 0) throw new Error("invalid performance requirements");
   const stdout = streams.stdout ?? "";
   const stderr = streams.stderr ?? "";
   const simulator = streams.simulator;
   // Only exclude stdout's simulator region when the dedicated stream carries it.
   const region = simulator !== undefined ? stdoutSimulatorRegion(stdout) : undefined;
 
-  const out = scanStream(stdout, "stdout", simulator !== undefined, region);
-  const err = scanStream(stderr, "stderr", false, undefined);
-  const sim = simulator !== undefined ? scanStream(simulator, "simulator", false, undefined) : undefined;
+  const out = scanStream(stdout, "stdout", simulator !== undefined, region, requirements);
+  const err = scanStream(stderr, "stderr", false, undefined, requirements);
+  const sim = simulator !== undefined ? scanStream(simulator, "simulator", false, undefined, requirements) : undefined;
 
   return {
     schema: "synthia-log-digest.v1",
     operation,
+    performance: {
+      requirements: { ...requirements },
+      total: out.metricsTotal + err.metricsTotal + (sim?.metricsTotal ?? 0),
+      metrics: [...sim?.metrics ?? [], ...out.metrics, ...err.metrics].slice(0, MAX_METRICS),
+      failed: out.metricsFailed || err.metricsFailed || (sim?.metricsFailed ?? false),
+    },
     counts: {
       failure: out.counts.failure + err.counts.failure + (sim?.counts.failure ?? 0),
       warning: out.counts.warning + err.counts.warning + (sim?.counts.warning ?? 0),
@@ -198,6 +257,6 @@ export function buildLogDigest(
       stderr: stderr.length,
       ...(simulator !== undefined ? { simulator: simulator.length } : {}),
     },
-    truncated: out.truncated || err.truncated || (sim?.truncated ?? false),
+    truncated: out.truncated || err.truncated || (sim?.truncated ?? false) || out.metricsTotal + err.metricsTotal + (sim?.metricsTotal ?? 0) > MAX_METRICS,
   };
 }

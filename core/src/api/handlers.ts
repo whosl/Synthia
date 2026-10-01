@@ -1,3 +1,4 @@
+import { parseEvidenceRange, DEFAULT_EVIDENCE_PAGE_CHARS } from "../domain/evidence-range.ts";
 /**
  * Synthia Core API — command/query handlers (IF-001 §3 first slice)
  *
@@ -58,6 +59,7 @@ import type { RuntimeClient } from "./task-proxy.ts";
 import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
 import { ensureWorkspace, readAtLocationBytes } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
+import { bindJobConfiguration, readJobConfigurationMetadata } from "../services/project-configuration.ts";
 import type { CoreFeatureFlags } from "./feature-flags.ts";
 import { requireP4ProjectVisibility } from "./p4-project-access.ts";
 import {
@@ -594,7 +596,7 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
       });
     }
     let creatorRoleId: string | null = null;
-    if (projectType === "engineering" && requestedProfile === GJB_REF_V1.id) {
+    if (projectType === "free" || (projectType === "engineering" && requestedProfile === GJB_REF_V1.id)) {
       creatorRoleId = `role_${sha256Hex(`creator\0${id}\0${ctx.identity.actorType}\0${ctx.identity.actorId}`).slice(0, 40)}`;
       await tx.query(
         `INSERT INTO role_assignment
@@ -946,7 +948,7 @@ export async function getProject(ctx: RequestContext): Promise<HandlerResult> {
     `SELECT id, name, scope, data_classification, standard_version, target_part,
             toolchain_profile_ref, status, created_at, project_type,
             process_profile_id, process_profile_version, process_profile_name,
-            process_version_id
+            process_version_id, config_epoch, settings_revision
        FROM project WHERE id = $1`,
     [projectId],
   );
@@ -1941,6 +1943,7 @@ export function requireConnector(ctx: RequestContext): ConnectorPort {
 export function mapConnectorError(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
   if (err instanceof ConnectorError) {
+    if (err.code === "EVIDENCE_RANGE_INVALID") return validationError(err.message);
     if (err.code in CONNECTOR_NOT_FOUND_CODES) return notFoundError(`connector: ${err.code}`);
     // Scope rejections are configuration errors, not transient outages. Mapping
     // them to 503/retryable sent callers chasing connectivity instead of the
@@ -1951,6 +1954,12 @@ export function mapConnectorError(err: unknown): ApiError {
     return capabilityUnavailableError(`connector: ${err.code}`, { code: err.code });
   }
   return internalError(err instanceof Error ? err.message : "connector error");
+}
+
+/** Only explicit pre-execution refusals release a committed reservation. */
+export function connectorSubmissionFailureState(error: unknown): "rejected" | "unknown_effect" {
+  return error instanceof ConnectorError && ["PROJECT_NOT_ALLOWED", "CLASSIFICATION_NOT_ALLOWED", "PART_REQUIRED", "PART_NOT_ALLOWED", "FORMAL_BINDING_MISMATCH"].includes(error.code)
+    ? "rejected" : "unknown_effect";
 }
 
 /**
@@ -2010,12 +2019,9 @@ function buildAuthorizationContext(body: Record<string, unknown>): Record<string
 /**
  * POST /projects/:projectId/jobs — submit a Job through Core to the Connector.
  *
- * Creates a `tool_run` in state `submitted`, appends a `tool_run.submitted`
- * outbox event, and submits to the Connector — all inside one idempotent
- * transaction. A Connector drift/lease/capability rejection rolls the whole
- * thing back (no row, no event, idempotency slot released) and surfaces as 503.
- * Idempotent replay returns the original `jobId` without re-contacting the
- * Connector. (SYNTHIA-IF-002 §jobs.)
+ * Commits the configuration-bound `tool_run` and outbox before contacting
+ * Connector. A retry keeps its original inputs and job identity. Explicit
+ * pre-execution refusals become rejected; uncertain outcomes remain occupied.
  */
 export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
@@ -2033,12 +2039,15 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
   const timeoutMs = optionalPositiveNumber(body, "timeout_ms");
   const connector = requireConnector(ctx);
 
-  const { result } = await runIdempotent(ctx, "submit_job", projectId, async (tx) => {
+  const { result, replayed } = await runIdempotent(ctx, "submit_job", projectId, async (tx) => {
     await requireProject(tx, projectId);
+    const configuration = await bindJobConfiguration(tx, projectId, part, constraints, sources, top, ctx.request.headers.get("x-synthia-task-id"));
     const runClass = await adjudicateRunClass(tx, projectId, body);
     const jobId = `job-${randomUUID()}`;
-    const inputManifestHash = canonicalRequestHash(ctx.body);
-    const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part, constraints, stopBeforeBitstream, timeoutMs };
+    const inputManifestHash = canonicalRequestHash(configuration.epoch === null ? ctx.body : {
+      ...body, part: configuration.part, constraints: configuration.constraints, config_epoch: configuration.epoch,
+    });
+    const parameters = { operation, jobId, projectId, runClass, sources, top, testbench, part: configuration.part, constraints: configuration.constraints, stopBeforeBitstream, timeoutMs };
     const authorizationContext = buildAuthorizationContext(body);
     const projectFactsResult = await tx.query(
       "SELECT project_type, process_version_id, process_profile_id FROM project WHERE id = $1",
@@ -2069,8 +2078,8 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
     await tx.query(
       `INSERT INTO tool_run (id, project_id, operation, capability_version, run_class, state,
                               input_manifest_hash, authorization_context, parameters, connector_id, correlation_id,
-                              input_hash, toolchain_profile_hash, submitted_by_type, submitted_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14,$15)`,
+                              input_hash, toolchain_profile_hash, submitted_by_type, submitted_by,config_epoch,validation_chain_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17)`,
       [
         jobId, projectId, operation, "v1", runClass, "submitted", inputManifestHash,
         JSON.stringify(authorizationContext), JSON.stringify(parameters), connector.connectorId, ctx.correlationId,
@@ -2078,13 +2087,15 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
         exploratoryToolchainHash,
         modernExploratory ? ctx.identity.actorType : null,
         modernExploratory ? ctx.identity.actorId : null,
+        configuration.epoch,
+        configuration.chainHash,
       ],
     );
     await outboxEvent(tx, ctx, { type: "tool_run", id: jobId }, "tool_run.submitted", {
       jobId, projectId, operation, runClass, state: "submitted",
     });
 
-    return { jobId, runClass, state: "submitted", toolchainProfileHash: exploratoryToolchainHash };
+    return { jobId, runClass, state: "submitted", toolchainProfileHash: exploratoryToolchainHash, configuration, inputManifestHash };
   });
 
   // Connector dispatch happens AFTER the transaction commits (harness ledger
@@ -2097,6 +2108,11 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
   // `approval` carries the authorization context the remote client needs for
   // gate_check/formal runs; exploratory omits it.
   const dispatchAuthorizationContext = buildAuthorizationContext(body);
+  // Replays of pre-migration submissions keep the original stored inputs.
+  const stored = (await ctx.pool.query("SELECT state,connector_dispatch_confirmed,parameters,input_manifest_hash FROM tool_run WHERE id=$1 AND project_id=$2", [result.jobId, projectId])).rows[0];
+  if (!stored) throw notFoundError(`job not found: ${result.jobId}`);
+  if (replayed && (stored.connector_dispatch_confirmed || !["submitted", "unknown_effect"].includes(stored.state))) return { status: 201, data: result };
+  const dispatchParameters = stored.parameters;
   try {
     await connector.submitJob({
       jobId: result.jobId,
@@ -2105,19 +2121,20 @@ export async function submitJobHandler(ctx: RequestContext): Promise<HandlerResu
       runClass: result.runClass,
       idempotencyKey: ctx.idempotencyKey!,
       correlationId: ctx.correlationId,
-      inputHash: canonicalRequestHash(ctx.body),
+      inputHash: stored.input_manifest_hash,
       toolchainProfileHash: result.toolchainProfileHash ?? undefined,
       actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
-      parameters: { sources, top: top ?? undefined, testbench: testbench ?? undefined, part: part ?? undefined, constraints, stopBeforeBitstream, timeoutMs },
+      parameters: { sources: dispatchParameters.sources, top: dispatchParameters.top ?? undefined, testbench: dispatchParameters.testbench ?? undefined, part: dispatchParameters.part ?? undefined, constraints: dispatchParameters.constraints, stopBeforeBitstream: dispatchParameters.stopBeforeBitstream, timeoutMs: dispatchParameters.timeoutMs },
       approval: Object.keys(dispatchAuthorizationContext).length > 0 ? dispatchAuthorizationContext : undefined,
     });
+    await ctx.pool.query("UPDATE tool_run SET connector_dispatch_confirmed=true,state=CASE WHEN state='unknown_effect' THEN 'submitted'::tool_run_state ELSE state END,error_code=NULL WHERE id=$1 AND project_id=$2 AND state IN ('submitted','unknown_effect')", [result.jobId, projectId]);
   } catch (err) {
     const mapped = mapConnectorError(err);
     await ctx.pool.query(
       `UPDATE tool_run
-          SET state = 'failed', error_code = $1, end_time = now()
+          SET state = $4::tool_run_state, error_code = $1, end_time = CASE WHEN $4='rejected' THEN now() ELSE NULL END
         WHERE id = $2 AND project_id = $3 AND state = 'submitted'`,
-      [mapped.code, result.jobId, projectId],
+      [mapped.code, result.jobId, projectId, connectorSubmissionFailureState(err)],
     );
     throw mapped;
   }
@@ -2147,11 +2164,11 @@ export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResul
     if (!Number.isInteger(limit) || limit <= 0) throw validationError("limit must be a positive integer");
   }
 
-  const projectRow = await ctx.pool.query("SELECT 1 FROM project WHERE id = $1", [projectId]);
+  const projectRow = await ctx.pool.query("SELECT project_type,config_epoch FROM project WHERE id = $1", [projectId]);
   if (projectRow.rows.length === 0) throw notFoundError(`project not found: ${projectId}`);
 
   const { rows } = await ctx.pool.query(
-    `SELECT id, operation, run_class, state, error_code, start_time, end_time
+    `SELECT id, operation, run_class, state, error_code, start_time, end_time,config_epoch,validation_chain_hash,parameters->>'part' AS part
        FROM tool_run
       WHERE project_id = $1
       ORDER BY COALESCE(start_time, created_at) DESC, id
@@ -2189,6 +2206,11 @@ export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResul
       state: row.state,
       startTime: row.start_time,
       endTime: row.end_time,
+      configEpoch: row.config_epoch ?? null,
+      validationChainHash: row.validation_chain_hash ?? null,
+      part: row.part ?? null,
+      evidenceScope: projectRow.rows[0].project_type !== "free" ? "current"
+        : row.config_epoch === null ? "unattributed" : Number(row.config_epoch) === Number(projectRow.rows[0].config_epoch) ? "current" : "historical",
     };
     Object.assign(item, evidenceByJob.get(String(row.id)));
     if (row.error_code !== null && row.error_code !== undefined) item.errorCode = row.error_code;
@@ -2211,11 +2233,11 @@ export async function getJobStatusHandler(ctx: RequestContext): Promise<HandlerR
   const connector = requireConnector(ctx);
 
   const found = await ctx.pool.query(
-    "SELECT state, created_at FROM tool_run WHERE id = $1 AND project_id = $2",
+    "SELECT run.state,run.created_at,project.project_type FROM tool_run run JOIN project ON project.id=run.project_id WHERE run.id=$1 AND run.project_id=$2",
     [jobId, projectId],
   );
   if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
-  const row = found.rows[0] as { state: string; created_at: Date };
+  const row = found.rows[0] as { state: string; created_at: Date; project_type: string };
 
   let snapshot;
   try {
@@ -2232,15 +2254,16 @@ export async function getJobStatusHandler(ctx: RequestContext): Promise<HandlerR
       && !(row.state in TOOL_RUN_TERMINAL_STATES)
       && Date.now() - new Date(row.created_at).getTime() > 10 * 60 * 1000
     ) {
+      const lostState = row.project_type === "free" ? "lost" : "failed";
       await ctx.pool.query(
         `UPDATE tool_run
-            SET state = 'failed', error_code = 'WORKER_JOB_LOST', end_time = now()
+            SET state = $3::tool_run_state, error_code = 'WORKER_JOB_LOST', end_time = now()
           WHERE id = $1 AND project_id = $2 AND state NOT IN ('succeeded','failed','cancelled')`,
-        [jobId, projectId],
+        [jobId, projectId, lostState],
       );
       return {
         status: 200,
-        data: { jobId, state: "failed", errorCode: "WORKER_JOB_LOST", orphanReaped: true },
+        data: { jobId, state: lostState, errorCode: "WORKER_JOB_LOST", orphanReaped: true },
       };
     }
     throw mapConnectorError(err);
@@ -2311,7 +2334,7 @@ export async function getJobEvidenceHandler(ctx: RequestContext): Promise<Handle
     [JSON.stringify({ jobId: manifest.jobId, entries: manifest.entries }), jobId, projectId],
   );
 
-  return { status: 200, data: { jobId, entries: manifest.entries } };
+  return { status: 200, data: { jobId, entries: manifest.entries, ...await readJobConfigurationMetadata(ctx.pool, projectId, jobId) } };
 }
 
 /**
@@ -2332,6 +2355,12 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
   const name = ctx.url.searchParams.get("name");
   if (!name) throw validationError("query parameter 'name' is required");
 
+  let range;
+  if (ctx.url.searchParams.has("offset") || ctx.url.searchParams.has("limit")) {
+    try {
+      range = parseEvidenceRange({ offset: Number(ctx.url.searchParams.get("offset") ?? 0), limit: Number(ctx.url.searchParams.get("limit") ?? DEFAULT_EVIDENCE_PAGE_CHARS) });
+    } catch (error) { throw validationError((error as Error).message); }
+  }
   const found = await ctx.pool.query("SELECT state FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
   if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
   let state = String((found.rows[0] as Record<string, unknown>).state);
@@ -2359,13 +2388,13 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
   let content;
   try {
     const waveform = name.toLowerCase().endsWith(".vcd");
-    if (waveform) {
+    if (waveform && !range) {
       const manifest = await connector.fetchEvidence(projectId, jobId);
       const entry = manifest.entries.find((entry) => entry.name === name);
       if (!entry) throw notFoundError(`evidence entry not found: ${name}`);
       if (entry.sizeBytes > 8 * 1024 * 1024) throw validationError("波形超过 8 MiB 查看上限，请缩小信号范围或仿真窗口");
     }
-    content = await connector.fetchEvidenceContent(projectId, jobId, name, waveform ? { requireFull: true } : undefined);
+    content = await connector.fetchEvidenceContent(projectId, jobId, name, range ? { range } : waveform ? { requireFull: true } : undefined);
   } catch (err) {
     throw mapConnectorError(err);
   }
@@ -2374,10 +2403,13 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
     status: 200,
     data: {
       name: content.name,
+      ...(content.range ? { range: content.range } : {}),
+      ...(content.sizeBytes !== undefined ? { sizeBytes: content.sizeBytes } : {}),
       content: content.content,
       sha256: content.sha256,
       truncated: content.truncated,
       mediaType: content.mediaType,
+      ...await readJobConfigurationMetadata(ctx.pool, projectId, jobId),
     },
   };
 }

@@ -123,3 +123,36 @@ describe("buildLogDigest", () => {
     expect(digest.failureLines[0]!.line).toContain("FATAL: scenario failed");
   });
 });
+
+describe("H34 independent performance verdict", () => {
+  test("USB metrics are retained and bad goodput/drop counts fail even alongside PASS", () => {
+    const simulator = "LINE_RATE_MBPS 11.95\nGOODPUT_MBPS 11.49\nDROPPED_PKTS 1\nPASS\n";
+    const digest = buildLogDigest("simulate", { stdout: vivadoSimulateStdout(simulator), simulator });
+    expect(digest.performance?.metrics.map(m => m.name)).toEqual(["LINE_RATE_MBPS", "GOODPUT_MBPS", "DROPPED_PKTS"]);
+    expect(digest.performance?.total).toBe(3);
+    expect(digest.counts.failure).toBe(2);
+    expect(digest.performance?.failed).toBe(true);
+    expect(digest.failureLines.map(m => m.line)).toEqual(["GOODPUT_MBPS 11.49", "DROPPED_PKTS 1"]);
+  });
+  test("exact requirement boundaries pass and JPEG 45 cycles/pixel fails independently", () => {
+    const green = buildLogDigest("simulate", { simulator: "GOODPUT_MBPS 11.5\nDROPPED_PKTS 0\nCYCLES_PER_PIXEL 1" });
+    expect(green.counts).toEqual({ failure: 0, warning: 0, pass: 3 });
+    expect(green.performance?.failed).toBe(false);
+    const slow = buildLogDigest("simulate", { simulator: "CYCLES_PER_PIXEL 45\nPASS" });
+    expect(slow.counts.failure).toBe(1);
+    expect(slow.performance?.failed).toBe(true);
+  });
+  test("nonfinite/negative values fail, metrics stay bounded, and late failures remain counted", () => {
+    const digest = buildLogDigest("simulate", { simulator: `${"DROPPED_PKTS 0\n".repeat(70)}GOODPUT_MBPS NaN\nLINE_RATE_MBPS -1\nDROPPED_PKTS 0.5` });
+    expect(digest.counts.failure).toBe(3);
+    expect(digest.performance?.total).toBe(73);
+    expect(digest.performance?.metrics.length).toBe(64);
+    expect(digest.performance?.failed).toBe(true);
+    expect(digest.truncated).toBe(true);
+  });
+  test("explicit requirement values drive scenario verdicts", () => {
+    const digest = buildLogDigest("simulate", { simulator: "GOODPUT_MBPS 80\nCYCLES_PER_PIXEL 2" }, { minimumGoodputMbps: 100, maximumCyclesPerPixel: 2 });
+    expect(digest.counts.failure).toBe(1);
+    expect(digest.counts.pass).toBe(1);
+  });
+});

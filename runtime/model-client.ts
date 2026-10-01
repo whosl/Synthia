@@ -728,6 +728,7 @@ export class ModelClient implements LoopModel, ConversationalModel {
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
     opts: {
+      signal?: AbortSignal;
       onTextStart?: () => void;
       onDelta?: (text: string) => void;
       onReasoningStart?: () => void;
@@ -745,10 +746,11 @@ export class ModelClient implements LoopModel, ConversationalModel {
      * 非流式的二次错误只写 debug 日志，不覆盖首因。
      */
     const giveUp = async (err: Error): Promise<ChatTurn> => {
+      throwIfAborted(opts.signal);
       if (this.cfg.streamFallbackToBuffered === false) throw err;
       if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: giving up on SSE (${err.message}), falling back to buffered chat()\n`);
       try {
-        return await this.chat(messages, tools);
+        return await this.chat(messages, tools, opts.signal);
       } catch (fallbackErr) {
         if (this.cfg.debug) process.stderr.write(`[model-debug] chatStream: buffered fallback also failed (${String(fallbackErr)})\n`);
         throw err;
@@ -760,13 +762,15 @@ export class ModelClient implements LoopModel, ConversationalModel {
     let response: Response | null = null;
     let watchdog: StreamWatchdog | null = null;
     for (let attempt = 1; ; attempt++) {
+      throwIfAborted(opts.signal);
       watchdog?.stop();
       watchdog = startStreamWatchdog(idleMs);
       let res: Response;
       try {
-        res = await postStream({ url, headers, body, ...(watchdog.signal ? { signal: watchdog.signal } : {}) });
+        res = await postStream({ url, headers, body, ...(opts.signal || watchdog.signal ? { signal: opts.signal && watchdog.signal ? AbortSignal.any([opts.signal, watchdog.signal]) : opts.signal ?? watchdog.signal } : {}) });
       } catch (e) {
         watchdog.stop();
+        throwIfAborted(opts.signal);
         if (attempt > maxNetwork) return await giveUp(e instanceof Error ? e : new Error(String(e)));
         await sleep(backoffMs(attempt));
         continue;

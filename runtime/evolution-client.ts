@@ -500,7 +500,11 @@ function nullableSequence(value: unknown, path: string): number | null {
 
 function requireStringList(path: string, values: readonly string[]): readonly string[] {
   if (!Array.isArray(values)) throw contractError(`${path} must be an array`);
-  return values.map((value, index) => requireIdentifier(`${path}[${index}]`, value));
+  return values.map((value, index) => {
+    const text = requireText(`${path}[${index}]`, value);
+    if (text.length > 4096) throw contractError(`${path}[${index}] exceeds 4096 characters`);
+    return text;
+  });
 }
 
 function contractError(message: string): EvolutionClientError {

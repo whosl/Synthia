@@ -1,3 +1,5 @@
+import { evidenceTextPage } from "../src/domain/evidence-range.ts";
+import type { EvidenceContentOptions } from "../src/api/connector-port.ts";
 /**
  * Synthia Core — Run / Job API integration tests (real PostgreSQL + fake Connector)
  *
@@ -73,7 +75,7 @@ class FakeConnector implements ConnectorPort {
   contentOverride: ((jobId: string, name: string) => EvidenceContent | null) | null = null;
   /** Captures the last submit parameters (for assertion). */
   lastSubmit: SubmitJobParams | null = null;
-  lastContentOptions: { requireFull?: boolean } | undefined;
+  lastContentOptions: EvidenceContentOptions | undefined;
   submitCount = 0;
   /** When true, submitJob simulates the Worker's VIVADO_PARAMETERS_REQUIRED
    *  rejection: params.parameters must be a non-empty object. */
@@ -142,7 +144,7 @@ class FakeConnector implements ConnectorPort {
     };
   }
 
-  async fetchEvidenceContent(_projectId: string, jobId: string, name: string, options?: { requireFull?: boolean }): Promise<EvidenceContent> {
+  async fetchEvidenceContent(_projectId: string, jobId: string, name: string, options?: EvidenceContentOptions): Promise<EvidenceContent> {
     this.lastContentOptions = options;
     if (this.contentOverride) {
       const c = this.contentOverride(jobId, name);
@@ -496,7 +498,7 @@ describe.skipIf(!DATABASE_URL)("run/job API — real PostgreSQL + fake Connector
       expect(envelopeError(res.json).code).toBe("authorization");
     });
 
-    test("Connector drift on submit → 503 capability_unavailable (retryable), row rolled back; same-key retry then succeeds", async () => {
+    test("an uncertain submission retains its reservation; same-key retry repairs dispatch", async () => {
       const pid = await createProject();
       const key = `k_${randomUUID()}`;
       fake.submitError = new ConnectorError("CAPABILITY_DRIFT", "drift");
@@ -507,18 +509,21 @@ describe.skipIf(!DATABASE_URL)("run/job API — real PostgreSQL + fake Connector
       const err = envelopeError(res.json);
       expect(err.code).toBe("capability_unavailable");
       expect(err.retryable).toBe(true);
-      // No tool_run, no outbox event, idempotency slot released.
+      // Keep the row and original idempotency identity across external failure.
       const { rows } = await client.query("SELECT count(*)::int AS n FROM tool_run WHERE project_id = $1", [pid]);
-      expect(rows[0]!.n).toBe(0);
+      expect(rows[0]!.n).toBe(1);
       const ev = await client.query("SELECT count(*)::int AS n FROM outbox_events WHERE project_id = $1", [pid]);
-      expect(ev.rows[0]!.n).toBe(0);
+      expect(ev.rows[0]!.n).toBe(1);
+      const reserved = await client.query("SELECT id,state FROM tool_run WHERE project_id=$1", [pid]);
+      expect(reserved.rows[0]!.state).toBe("unknown_effect");
 
-      // Retry with the SAME key now succeeds — the rollback released the slot.
+      // Retry with the SAME key resends the frozen original job, not a new one.
       fake.submitError = null;
       const retry = await callApi(`/api/v1/projects/${pid}/jobs`, {
         method: "POST", token: ids.humanToken, headers: { "idempotency-key": key }, body: validBody(),
       });
       expect(retry.status).toBe(201);
+      expect(envelopeData(retry.json).jobId).toBe(reserved.rows[0]!.id);
     });
 
     test("parameters shape validated by fake (simulates Worker VIVADO_PARAMETERS_REQUIRED)", async () => {
@@ -683,6 +688,24 @@ describe.skipIf(!DATABASE_URL)("run/job API — real PostgreSQL + fake Connector
       expect(data.sha256).toBe("b".repeat(64));
       expect(data.truncated).toBe(false);
       expect(data.mediaType).toBe("text/plain");
+    });
+
+    test("H37 forwards validated pages, returns total size and retains project scoping", async () => {
+      const pid = await createProject();
+      const jobId = await submitJob(pid);
+      fake.setJob(jobId, { state: "succeeded" });
+      const text = "0!\n1!\n".repeat(200_000);
+      fake.contentOverride = () => ({ name: "waveform.vcd", ...evidenceTextPage(text, fake.lastContentOptions!.range!), sizeBytes: Buffer.byteLength(text), sha256: "a".repeat(64), mediaType: "text/plain", truncated: true });
+      const path = `/api/v1/projects/${pid}/jobs/${jobId}/evidence/content?name=waveform.vcd`;
+      const page = await callApi(`${path}&offset=300000&limit=65536`, { token: ids.humanToken });
+      expect(page.status).toBe(200);
+      expect(fake.lastContentOptions).toEqual({ range: { offset: 300000, limit: 65536 } });
+      expect(envelopeData(page.json)).toMatchObject({ content: text.slice(300000, 365536), sizeBytes: Buffer.byteLength(text), range: { totalChars: text.length, nextOffset: 365536 } });
+      for (const query of ["offset=-1", "limit=262145", "limit=0", "offset=nope"]) {
+        expect((await callApi(`${path}&${query}`, { token: ids.humanToken })).status).toBe(400);
+      }
+      const other = await createProject();
+      expect((await callApi(`/api/v1/projects/${other}/jobs/${jobId}/evidence/content?name=waveform.vcd&offset=0&limit=10`, { token: ids.humanToken })).status).toBe(404);
     });
 
     test("waveforms request full bytes and reject oversized or absent manifest entries", async () => {

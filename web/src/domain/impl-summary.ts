@@ -30,6 +30,7 @@ export const STAGE_LABELS: Record<ToolSummaryStage["operation"], { key: ImplCell
 const PIPELINE_KEYS: readonly ImplCell["key"][] = ["validate", "simulate", "synthesize", "implement", "bitstream"];
 
 function stageCell(stage: ToolSummaryStage): ImplCell {
+  if (stage.state === "stale") return { ...STAGE_LABELS[stage.operation], state: "never", detail: "输入或前置验证已更新，需要重跑" };
   const meta = STAGE_LABELS[stage.operation];
   const counts = `${stage.succeeded}✓/${stage.failed}✗`;
   const detail = stage.state === "never" ? "未运行" : counts;

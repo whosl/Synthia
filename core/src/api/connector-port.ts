@@ -1,3 +1,4 @@
+import type { EvidenceRange, EvidencePage } from "../domain/evidence-range.ts";
 /**
  * Synthia Core API — Connector port (IF-002 run/connector slice)
  *
@@ -94,6 +95,8 @@ export interface EvidenceManifest {
 
 /** Decoded content payload of a single evidence artifact for a terminal Job. */
 export interface EvidenceContent {
+  readonly range?: EvidencePage;
+  readonly sizeBytes?: number;
   readonly name: string;
   /** UTF-8 decoded content (may be truncated for large artifacts). */
   readonly content: string;
@@ -118,6 +121,7 @@ export interface ConnectorDiscovery {
 }
 
 export interface EvidenceContentOptions {
+  readonly range?: EvidenceRange;
   /** Request the complete artifact bytes instead of the UI preview window. */
   readonly requireFull?: boolean;
 }

@@ -1,3 +1,4 @@
+import type { EvidenceRange, EvidencePage } from "../domain/evidence-range.ts";
 /**
  * Synthia Core API — production Connector adapter (IF-002 run/connector slice)
  *
@@ -93,6 +94,8 @@ interface RemoteEvidenceManifest {
 /** remote.ts EvidenceContent shape — the decoded content of one artifact
  *  (POST /jobs/evidence/content response). Does not echo `name` back. */
 interface RemoteEvidenceContent {
+  range?: EvidencePage;
+  sizeBytes?: number;
   content: string;
   bytes?: Uint8Array;
   sha256: string;
@@ -135,7 +138,7 @@ interface RemoteClientLike {
   fetchEvidenceContent(
     id: string,
     name: string,
-    options?: { complete?: boolean },
+    options?: { complete?: boolean; range?: EvidenceRange },
   ): Promise<RemoteEvidenceContent>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
@@ -529,9 +532,12 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     return this.withClient(projectId, async (client) => {
       const c = await client.fetchEvidenceContent(jobId, name, {
         complete: options?.requireFull === true,
+        ...(options?.range ? { range: options.range } : {}),
       });
       return {
         name,
+        ...(c.range ? { range: c.range } : {}),
+        ...(c.sizeBytes !== undefined ? { sizeBytes: c.sizeBytes } : {}),
         content: c.content,
         ...(c.bytes ? { bytes: c.bytes } : {}),
         sha256: c.sha256,

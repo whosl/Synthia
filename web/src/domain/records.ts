@@ -21,6 +21,9 @@ export interface RecordEvidenceEntry {
 }
 
 export interface RecordJob {
+  readonly configEpoch?: number | null;
+  readonly evidenceScope?: "current" | "historical" | "unattributed";
+  readonly part?: string | null;
   readonly jobId: string;
   /** 白名单操作原文（validate_sources/simulate/…），供 `${jobId}:${name}` 之外的关联用。 */
   readonly operation: string;
@@ -81,6 +84,7 @@ export function mergeProjectRecordJobs(runs: readonly JobRunSummary[], current: 
       status: run.state, ok: run.state === "succeeded", inputSha256: run.inputSha256 ?? existing?.inputSha256 ?? "",
       ts: run.startTime ?? run.endTime ?? run.createdAt ?? existing?.ts ?? null,
       errorCode: run.errorCode ?? null, round: 0,
+      configEpoch: run.configEpoch, evidenceScope: run.evidenceScope, part: run.part,
       entries: run.evidenceEntries ?? existing?.entries ?? [],
     });
   }

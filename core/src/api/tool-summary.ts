@@ -16,6 +16,7 @@
 import type { HandlerResult, RequestContext } from "./handlers.ts";
 import { readResourceSummary, type ToolSummaryResources } from "./resource-summary.ts";
 import { notFoundError } from "./errors.ts";
+import { validationInputs } from "../services/validation-inputs.ts";
 
 export interface ToolSummaryStage {
   readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
@@ -38,6 +39,9 @@ export interface ToolSummaryTiming {
 }
 
 export interface ToolSummary {
+  readonly configEpoch?: number;
+  readonly validationChainHash?: string | null;
+  readonly validationState?: "passed" | "pending";
   readonly projectId: string;
   readonly generatedAt: string;
   readonly stages: readonly ToolSummaryStage[];
@@ -105,13 +109,20 @@ async function requireProjectReadable(ctx: RequestContext, projectId: string): P
 export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   await requireProjectReadable(ctx, projectId);
+  const project = (await ctx.pool.query("SELECT project_type,config_epoch FROM project WHERE id=$1", [projectId])).rows[0];
+  const epoch = project.project_type === "free" ? Number(project.config_epoch) : null;
+  const chain = epoch === null ? null : (await ctx.pool.query(
+    "SELECT validation_chain_hash FROM tool_run WHERE project_id=$1 AND config_epoch=$2 AND validation_chain_hash IS NOT NULL ORDER BY created_at DESC,id DESC LIMIT 1", [projectId, epoch],
+  )).rows[0]?.validation_chain_hash ?? null;
 
   const latest = await ctx.pool.query(
-    `SELECT DISTINCT ON (operation) operation, id AS job_id, state, created_at, end_time
+    `SELECT DISTINCT ON (operation) operation, id AS job_id, state, created_at, end_time,parameters,
+            EXTRACT(EPOCH FROM created_at)::text AS created_seconds,EXTRACT(EPOCH FROM COALESCE(end_time,created_at))::text AS end_seconds
        FROM tool_run
       WHERE project_id = $1
-      ORDER BY operation, created_at DESC`,
-    [projectId],
+        AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
+      ORDER BY operation, created_at DESC,id DESC`,
+    [projectId, epoch, chain],
   );
   const counts = await ctx.pool.query(
     `SELECT operation,
@@ -119,8 +130,9 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
             count(*) FILTER (WHERE state IN ('failed','timeout','lost','unknown_effect')) AS fail
        FROM tool_run
       WHERE project_id = $1
+        AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
       GROUP BY operation`,
-    [projectId],
+    [projectId, epoch, chain],
   );
   const countByOperation = new Map(counts.rows.map(row => [
     String(row.operation),
@@ -142,18 +154,44 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
     };
   });
 
+  // A later simulation/validation invalidates earlier downstream results even
+  // with identical source bytes. Require each stage to follow its dependency.
+  if (epoch !== null) {
+    for (let index = 1; index < 4; index++) {
+      const stage = stages[index]!;
+      const previous = stages[index - 1]!;
+      const row = latest.rows.find(candidate => candidate.operation === stage.operation);
+      const dependency = latest.rows.find(candidate => candidate.operation === previous.operation);
+      if (stage.state === "succeeded" && (previous.state !== "succeeded" || !dependency
+        || Number(row!.created_seconds) < Number(dependency.end_seconds))) {
+        stages[index] = { ...stage, state: "stale" };
+      }
+    }
+    const simulation = latest.rows.find(row => row.operation === "simulate");
+    if (simulation?.parameters?.sources) {
+      const simulationInputs = validationInputs(simulation.parameters.sources, simulation.parameters.top ?? null);
+      for (let index = 2; index < 4; index++) {
+        const row = latest.rows.find(candidate => candidate.operation === stages[index]!.operation);
+        const inputs = row?.parameters?.sources ? validationInputs(row.parameters.sources, row.parameters.top ?? null) : null;
+        if (inputs?.tests.length && inputs.testHash !== simulationInputs.testHash) stages[index] = { ...stages[index]!, state: "stale" };
+        if (index === 3 && stages[2]!.state === "stale") stages[index] = { ...stages[index]!, state: "stale" };
+      }
+    }
+  }
+
   const bit = await ctx.pool.query(
     `SELECT id AS job_id, end_time FROM tool_run
       WHERE project_id = $1 AND operation = 'implement' AND state = 'succeeded'
+        AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
         AND evidence::jsonb @> '[{"name":"synthia.bit"}]'::jsonb
       ORDER BY created_at DESC LIMIT 1`,
-    [projectId],
+    [projectId, epoch, chain],
   );
   const bitRow = bit.rows[0] as { job_id: string; end_time: Date | null } | undefined;
   const bitstream = {
-    generated: bitRow !== undefined,
-    jobId: bitRow?.job_id ?? null,
-    at: bitRow?.end_time ? bitRow.end_time.toISOString() : null,
+    generated: bitRow !== undefined && stages[3]!.state !== "stale",
+    jobId: stages[3]!.state === "stale" ? null : bitRow?.job_id ?? null,
+    at: stages[3]!.state !== "stale" && bitRow?.end_time ? bitRow.end_time.toISOString() : null,
   };
 
   let timing: ToolSummaryTiming | null = null;
@@ -161,12 +199,13 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
   const timingSource = await ctx.pool.query(
     `SELECT id AS job_id FROM tool_run
       WHERE project_id = $1 AND operation IN ('implement','report_sta') AND state = 'succeeded'
+        AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
         AND evidence::jsonb->'entries' @> '[{"name":"sta.rpt"}]'::jsonb
       ORDER BY created_at DESC LIMIT 1`,
-    [projectId],
+    [projectId, epoch, chain],
   );
   const sourceJobId = (timingSource.rows[0] as { job_id: string } | undefined)?.job_id;
-  if (sourceJobId !== undefined) {
+  if (sourceJobId !== undefined && stages[3]!.state !== "stale") {
     const cached = await ctx.pool.query(
       `SELECT wns, tns, whs, status, clocks, parsed_at
          FROM tool_timing_metrics WHERE job_id = $1 AND project_id = $2`,
@@ -208,10 +247,12 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
     }
   }
 
-  const resources = await readResourceSummary(ctx, projectId);
+  const resources = stages[2]!.state === "stale" ? { resources: null } : await readResourceSummary(ctx, projectId, epoch, chain);
   const summary: ToolSummary = {
     ...resources,
     projectId,
+    ...(epoch === null ? {} : { configEpoch: epoch, validationChainHash: chain,
+      validationState: stages.slice(0, 4).every((stage) => stage.state === "succeeded") ? "passed" as const : "pending" as const }),
     generatedAt: new Date().toISOString(),
     stages,
     bitstream,

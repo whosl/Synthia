@@ -182,3 +182,33 @@ describe("Anthropic context accounting", () => {
     expect(turn.usage).toEqual({ promptTokens: 1100, completionTokens: 50 });
   });
 });
+
+describe("H36 Anthropic transport cancellation", () => {
+  test("buffered abort reaches the provider and does not enter transport retry", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const model = new PiAnthropicRuntimeModel(CONFIG, { complete: async (_model, _context, options) => {
+      calls++;
+      expect(options?.signal).toBe(controller.signal);
+      controller.abort(new Error("watchdog aborted"));
+      throw new Error("fetch aborted");
+    } });
+    await expect(model.chat([{ role: "user", content: "test" }], [], controller.signal)).rejects.toThrow("watchdog aborted");
+    expect(calls).toBe(1);
+  });
+  test("stream cancellation reaches the provider and never falls back to buffered", async () => {
+    const controller = new AbortController();
+    let buffered = 0;
+    const model = new PiAnthropicRuntimeModel(CONFIG, {
+      complete: async () => { buffered++; return fakeAssistant(); },
+      stream: (_model, _context, options) => {
+        expect(options?.signal?.aborted).toBe(false);
+        controller.abort(new Error("watchdog aborted"));
+        expect(options?.signal?.aborted).toBe(true);
+        throw new Error("fetch aborted");
+      },
+    });
+    await expect(model.chatStream([{ role: "user", content: "test" }], [], { signal: controller.signal })).rejects.toThrow("watchdog aborted");
+    expect(buffered).toBe(0);
+  });
+});

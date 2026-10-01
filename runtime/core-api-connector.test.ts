@@ -57,6 +57,7 @@ function makeConnector(opts: { fetchImpl: typeof fetch; now?: () => number; slee
   return new CoreApiConnector({
     baseUrl: BASE, token: TOKEN, projectId: PROJECT,
     fetchImpl: opts.fetchImpl, pollIntervalMs: 0, retryDelayMs: 0,
+    ...(opts.boundTaskId ? { boundTaskId: opts.boundTaskId } : {}),
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.sleep ? { sleep: opts.sleep } : {}),
   });
@@ -156,6 +157,21 @@ describe("CoreApiConnector.submit happy path", () => {
     expect(body).not.toHaveProperty("gate_submission_id");
     expect(body).not.toHaveProperty("approved_gate_result_id");
     expect(body).not.toHaveProperty("baseline_id");
+  });
+
+  test("main jobs carry their task identity using ordinary Core routes and credential", async () => {
+    const { fetchImpl, calls } = mockFetch((url, init) => {
+      if (init.method === "POST") return { status: 201, body: { data: { jobId: "job-main", runClass: "exploratory", state: "submitted" } } };
+      if (url.endsWith("/evidence")) return { status: 200, body: { data: { jobId: "job-main", entries: [] } } };
+      return { status: 200, body: { data: { jobId: "job-main", state: "succeeded" } } };
+    });
+    await makeConnector({ fetchImpl, boundTaskId: "project-agent-main" }).submit(validateSubmission());
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/projects/${PROJECT}/jobs`);
+    for (const call of calls) {
+      expect(call.headers["Authorization"]).toBe(`Bearer ${TOKEN}`);
+      expect(call.headers["X-Synthia-Task-Id"]).toBe("project-agent-main");
+      expect(call.headers["X-Synthia-Workspace-Id"]).toBeUndefined();
+    }
   });
 
   test("task-bound connector keeps submit, polling, and evidence on task routes with binding headers", async () => {
@@ -580,5 +596,20 @@ describe("LoopExecutor over CoreApiConnector (via-core integration)", () => {
     const submitAudit = result.audit.find(a => a.action === "submit threw");
     expect(submitAudit?.errorCode).toBe("capability_unavailable");
     expect(submitAudit?.result).toBe("fail_closed");
+  });
+});
+
+
+describe("H37 Core evidence range client", () => {
+  test("sends numeric range query parameters and retains page metadata", async () => {
+    const { fetchImpl, calls } = mockFetch(() => ({ status: 200, body: { data: {
+      content: "page", sha256: "a".repeat(64), truncated: true, mediaType: "text/plain", sizeBytes: 1200000,
+      range: { offset: 300000, limit: 4, totalChars: 1200000, nextOffset: 300004 },
+    } } }));
+    const connector = new CoreApiConnector({ baseUrl: BASE, token: TOKEN, projectId: PROJECT, fetchImpl });
+    const page = await connector.fetchEvidenceContent("job-p28", "waveform.vcd", { offset: 300000, limit: 4 });
+    expect(calls[0]!.url).toContain("name=waveform.vcd&offset=300000&limit=4");
+    expect(page.range?.nextOffset).toBe(300004);
+    expect(page.sizeBytes).toBe(1200000);
   });
 });

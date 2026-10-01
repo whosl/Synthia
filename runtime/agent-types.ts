@@ -171,6 +171,7 @@ export interface StreamingConversationalModel {
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
     opts: {
+      signal?: AbortSignal;
       onTextStart?: () => void;
       onDelta?: (text: string) => void;
       onReasoningStart?: () => void;

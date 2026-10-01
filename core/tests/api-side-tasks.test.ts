@@ -37,7 +37,7 @@ class P3RuntimeFake implements RuntimeClient {
   readonly started: string[] = [];
   readonly listRequests: string[] = [];
   readonly getRequests: string[] = [];
-  readonly messages: { taskId: string; text: string; idempotencyKey?: string }[] = [];
+  readonly messages: { taskId: string; text: string; idempotencyKey?: string; configuration?: { part: string | null; epoch: number } }[] = [];
   readonly abortRequests: string[] = [];
   readonly abortIdempotencyKeys: Array<string | undefined> = [];
   readonly abortEffects: string[] = [];
@@ -143,11 +143,12 @@ class P3RuntimeFake implements RuntimeClient {
     };
   }
 
-  async sendMessage(taskId: string, text: string, idempotencyKey?: string): Promise<unknown> {
+  async sendMessage(taskId: string, text: string, idempotencyKey?: string, configuration?: { part: string | null; epoch: number }): Promise<unknown> {
     this.messages.push({
       taskId,
       text,
       ...(idempotencyKey ? { idempotencyKey } : {}),
+      ...(configuration ? { configuration } : {}),
     });
     if (this.messageError) throw this.messageError;
     return { accepted: true };
@@ -293,6 +294,41 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     if (!baseCommit) throw new Error("missing project HEAD");
     return { projectId, baseCommit };
   }
+
+  test("H20 creation freezes initial skipAll policy with caller/time audit; replay does not reconfigure", async () => {
+    const seeded = await seedEngineeringWorkspace();
+    const key = randomUUID();
+    const body = { task: "preconfigure permissions", permission_skip_all: true,
+      permission_policy_audit: { actor_id: "forged", actor_type: "service", set_at: "2000-01-01T00:00:00Z" } };
+    const result = await post(`/api/v1/projects/${seeded.projectId}/tasks`, body, key);
+    expect(result.status).toBe(201);
+    const request = runtime.created[0]!;
+    expect(request.permission_skip_all).toBe(true);
+    expect(request.permission_policy_audit).toMatchObject({ actor_type: "human", actor_id: harness.ids.humanUid });
+    expect(Date.parse((request.permission_policy_audit as { set_at: string }).set_at)).toBeGreaterThan(Date.parse("2026-01-01"));
+    const replay = await post(`/api/v1/projects/${seeded.projectId}/tasks`, body, key);
+    expect(replay.status).toBe(201);
+    expect(runtime.created.at(-1)?.permission_policy_audit).toEqual(request.permission_policy_audit);
+    const rows = await harness.client.query("SELECT payload FROM outbox_events WHERE project_id=$1 AND event_type='task.permission_policy.configured'", [seeded.projectId]);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].payload.permission_policy_audit).toEqual(request.permission_policy_audit);
+    const changed = await post(`/api/v1/projects/${seeded.projectId}/tasks`, { task: "other", permission_skip_all: false });
+    expect(changed.status).toBe(409);
+    expect(runtime.created).toHaveLength(2);
+  });
+
+  test("H20 rejects nonboolean and still enforces task creation authorization", async () => {
+    const seeded = await seedEngineeringWorkspace();
+    for (const permission_skip_all of [0, "true", null]) {
+      const invalid = await post(`/api/v1/projects/${seeded.projectId}/tasks`, { task: "bad", permission_skip_all });
+      expect(invalid.status).toBe(400);
+    }
+    const denied = await apiCall(harness.baseUrl, `/api/v1/projects/${seeded.projectId}/tasks`, {
+      method: "POST", token: harness.ids.readOnlyToken, headers: { "idempotency-key": randomUUID() }, body: { task: "bad", permission_skip_all: true },
+    });
+    expect(denied.status).toBe(403);
+    expect(runtime.created).toHaveLength(0);
+  });
 
   async function seedProject(): Promise<{
     projectId: string;
@@ -576,6 +612,27 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
         payload: { text: objective, source: "main_task_objective" },
       },
     ]);
+  });
+
+  test("free settings refresh the next Core-owned turn, reserve it before dispatch, and keep the original task descriptor", async () => {
+    const projectId = `p3-config-${randomUUID()}`;
+    const project = await post("/api/v1/projects", { id: projectId, name: "Configuration turn", project_type: "free", target_part: "part-a" });
+    expect(project.status).toBe(201);
+    const main = await post(`/api/v1/projects/${projectId}/tasks`, { task: "first turn" });
+    expect(main.status).toBe(201);
+    const taskId = String(data(main.json).task_id);
+    await harness.client.query("UPDATE agent_task SET status='awaiting_user' WHERE id=$1", [taskId]);
+    const changed = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/settings`, { method: "PATCH", token: harness.ids.humanToken,
+      headers: { "idempotency-key": randomUUID() }, body: { expected_revision: 1, target_part: "part-b", target_frequency_mhz: 125 } });
+    expect(changed.status).toBe(200);
+    const next = await post(`/api/v1/projects/${projectId}/tasks/${taskId}/message`, { text: "next turn" });
+    expect(next.status).toBe(200);
+    expect(runtime.messages.at(-1)).toMatchObject({ taskId, configuration: { part: "part-b", epoch: 2, target_frequency_mhz: 125 } });
+    const reserved = (await harness.client.query("SELECT status,config_epoch,runtime_snapshot FROM agent_task WHERE id=$1", [taskId])).rows[0];
+    expect(reserved).toMatchObject({ status: "queued", config_epoch: 2, runtime_snapshot: { agent_part: "part-a", turn_part: "part-b" } });
+    const busy = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/settings`, { method: "PATCH", token: harness.ids.humanToken,
+      headers: { "idempotency-key": randomUUID() }, body: { expected_revision: 2, target_part: "part-c" } });
+    expect(busy.status).toBe(409);
   });
 
   test("P3 main replay repairs a start failure without duplicating Core facts", async () => {
@@ -2181,14 +2238,15 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
     expect(lost.status).toBe(503);
     expect(connector.submissions).toHaveLength(1);
     expect(connector.accepted.size).toBe(1);
-    const rolledBack = await harness.client.query(
+    const reserved = await harness.client.query(
       `SELECT
          (SELECT COUNT(*)::int FROM tool_run WHERE project_id=$1) AS tool_runs,
          (SELECT COUNT(*)::int FROM idempotency_records
            WHERE project_id=$1 AND operation=$2 AND idempotency_key=$3) AS idempotency_rows`,
       [seeded.projectId, `submit_side_task_job:${side.task_id}`, key],
     );
-    expect(rolledBack.rows[0]).toEqual({ tool_runs: 0, idempotency_rows: 0 });
+    expect(reserved.rows[0]).toEqual({ tool_runs: 1, idempotency_rows: 1 });
+    expect((await harness.client.query("SELECT state FROM tool_run WHERE project_id=$1", [seeded.projectId])).rows[0].state).toBe("unknown_effect");
 
     const recovered = await apiCall(harness.baseUrl, path, {
       method: "POST",

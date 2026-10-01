@@ -138,6 +138,11 @@ describe("buildRecordJobs：evidence × audit(tool_call) 按 jobId 关联", () =
 describe("project history and waveform files", () => {
   const entry = { name: "waveform.vcd", sha256: "b".repeat(64), sizeBytes: 100, mediaType: "text/plain" };
   const run = (id: string, endTime: string) => ({ id, operation: "simulate", runClass: "exploratory", state: "succeeded", startTime: null, endTime, evidenceEntries: [entry] });
+  test("Core configuration attribution is retained when merging cached task evidence", () => {
+    const current = buildRecordJobs(makeDetail({ evidence: [evidenceEntry({ jobId: "same", entries: [entry] })] }));
+    const jobs = mergeProjectRecordJobs([{ ...run("same", "2026-09-24T00:00:00Z"), configEpoch: 1, part: "xc7k70tfbv676-1", evidenceScope: "historical" as const }], current);
+    expect(jobs[0]).toMatchObject({ configEpoch: 1, part: "xc7k70tfbv676-1", evidenceScope: "historical" });
+  });
   test("persisted runs are visible without any task detail and same-name waveforms stay distinct", () => {
     const jobs = mergeProjectRecordJobs([run("old", "2026-09-23T00:00:00Z"), run("new", "2026-09-24T00:00:00Z")], []);
     expect(jobs.map((job) => job.jobId)).toEqual(["new", "old"]);

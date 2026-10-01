@@ -689,6 +689,8 @@ export interface AbortAgentResult {
 
 /** GET /projects/:id 响应 data（getProject：Project 字段 + 流程实例列表）。 */
 export interface ProjectDetail extends Project {
+  readonly config_epoch?: number;
+  readonly settings_revision?: number;
   readonly scope: string;
   readonly standard_version: string;
   readonly toolchain_profile_ref: string | null;
@@ -1060,6 +1062,10 @@ export interface ProjectWorkVersionV1 {
 
 /** GET /projects/:id/jobs 列表项（tool_run 行镜像；startTime/endTime 可为 null）。 */
 export interface JobRunSummary {
+  readonly configEpoch?: number | null;
+  readonly part?: string | null;
+  readonly validationChainHash?: string | null;
+  readonly evidenceScope?: "current" | "historical" | "unattributed";
   readonly evidenceEntries?: JobEvidenceManifest["entries"] | null;
   readonly inputSha256?: string;
   readonly createdAt?: string;
@@ -1158,6 +1164,9 @@ export interface ToolSummaryResources {
 }
 
 export interface ToolSummary {
+  readonly configEpoch?: number;
+  readonly validationChainHash?: string | null;
+  readonly validationState?: "passed" | "pending";
   readonly projectId: string;
   readonly generatedAt: string;
   readonly stages: readonly ToolSummaryStage[];

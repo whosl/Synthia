@@ -15,15 +15,16 @@ type Result = { resources: ToolSummaryResources | null; resourcesError?: string 
 const caches = new WeakMap<ConnectorPort, Map<string, { expires: number; result: Promise<Result> }>>();
 
 /** Caller must authorize project access before invoking this read. */
-export async function readResourceSummary(ctx: RequestContext, projectId: string): Promise<Result> {
+export async function readResourceSummary(ctx: RequestContext, projectId: string, epoch: number | null = null, chain: string | null = null): Promise<Result> {
   const source = await ctx.pool.query(
     `SELECT id AS job_id, operation, COALESCE(end_time, created_at) AS at FROM tool_run
       WHERE project_id = $1 AND state = 'succeeded'
+        AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
         AND operation IN ('synthesize', 'implement', 'report_resources')
         AND (evidence::jsonb->'entries' @> '[{"name":"resources.rpt"}]'::jsonb
           OR evidence::jsonb @> '[{"name":"resources.rpt"}]'::jsonb)
       ORDER BY created_at DESC, id DESC LIMIT 1`,
-    [projectId],
+    [projectId, epoch, chain],
   );
   const row = source.rows[0] as { job_id: string; operation: ToolSummaryResources["sourceOperation"]; at: Date } | undefined;
   if (!row) return { resources: null };

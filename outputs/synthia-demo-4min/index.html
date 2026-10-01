@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthia · FPGA 开发效率汇报</title><style>
+:root{--ink:#20252a;--muted:#656c74;--line:#d9dde0;--accent:#235985;--paper:#fff;--section-inline:max(40px,calc((100vw - 1240px)/2))}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:90px}body{margin:0;background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;line-height:1.65}button,a{font:inherit}a{color:var(--accent)}button{cursor:pointer}button:focus-visible,a:focus-visible{outline:3px solid #467baa;outline-offset:4px}h1,h2,h3,p{margin:0}h1{font-size:clamp(32px,3.3vw,48px);line-height:1.45;font-weight:650;letter-spacing:-1px}h2{font-size:clamp(28px,2.4vw,36px);line-height:1.45;font-weight:650}h3{font-size:24px;font-weight:600}strong{font-weight:650}.site-nav{position:sticky;top:0;z-index:30;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:14px 28px;background:#fffffff5;border-bottom:1px solid var(--line)}.site-nav a{text-decoration:none;color:var(--muted);font-size:14px;white-space:nowrap}.site-nav .brand{font-weight:650;color:var(--ink);font-size:16px}.site-nav .links{display:flex;gap:24px;align-items:center}.site-nav a:hover{color:var(--accent)}
+.section{--section-inline:max(40px,calc((100vw - 1240px)/2));padding:54px var(--section-inline) 58px;border-bottom:1px solid var(--line);scroll-margin-top:64px}.section-label{font-size:15px;color:var(--muted);margin-bottom:12px}.lead{font-size:26px;line-height:1.75;margin-top:24px}.lead strong{color:var(--accent)}.intro-example{margin-top:32px;border-left:3px solid #aab7c1;padding-left:24px}.intro-example h3{font-size:22px}.intro-example p{font-size:22px;margin-top:10px}.sequence{font-size:22px;word-spacing:6px;line-height:1.9}.sequence span{color:#929ba3;margin:0 12px}.explain{color:var(--muted);font-size:17px;margin-top:12px}.pain-list{margin-top:30px}.pain-row{display:grid;grid-template-columns:235px 1fr;gap:38px;padding:24px 0;border-top:1px solid var(--line)}.pain-row h3{font-size:25px}.pain-row p{font-size:22px;line-height:1.85}.pain-row .number{color:var(--muted);font-weight:400;font-size:18px;margin-right:13px}.transition{margin-top:26px;font-size:22px}.transition strong{color:var(--accent)}.talk-points{padding-left:25px;margin:22px 0 0;font-size:23px;line-height:1.85}.talk-points li{padding-left:5px;margin:8px 0}.talk-points li::marker{color:#667b8d}.case-heading{margin-top:28px;font-size:22px;font-weight:600}.facts{width:100%;border-collapse:collapse;margin-top:16px;font-size:21px}.facts th,.facts td{text-align:left;border-bottom:1px solid var(--line);padding:12px 18px 12px 0;vertical-align:top}.facts th{font-weight:400;color:var(--muted);width:185px}.facts td strong{color:var(--accent)}.note{font-size:14px;color:var(--muted);line-height:1.8;margin-top:13px}.metrics-line{display:flex;gap:46px;flex-wrap:wrap;margin-top:26px;padding:21px 0;border-block:1px solid var(--line)}.metrics-line div{font-size:18px;color:var(--muted)}.metrics-line strong{color:var(--ink);font-size:31px;margin-right:8px}.next-step{font-size:22px;line-height:1.85;margin-top:24px}.next-step strong{color:var(--accent)}.end{padding:30px;text-align:center;color:var(--muted);font-size:15px}.end a{margin-left:18px}
+.live-preview{color:var(--ink);margin-top:28px;width:calc(100% + var(--section-inline) + var(--section-inline) - 48px);margin-inline:calc(24px - var(--section-inline));border:1px solid #c9cfd4;border-radius:5px;overflow:hidden;background:white}.browser-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#f2f4f5;border-bottom:1px solid var(--line);padding:10px 16px}.browser-label{font-size:16px;font-weight:600}.browser-label i{display:none}.preview-actions{display:flex;align-items:center;gap:8px}.preview-actions button,.preview-actions a{font-size:13px;line-height:1.5;color:var(--ink);background:#fff;border:1px solid #c9cfd4;border-radius:4px;padding:8px 12px;text-decoration:none;white-space:nowrap}.preview-actions button:hover,.preview-actions a:hover{background:#e6ebef}.frame-area{height:760px;position:relative;background:#f7f8f9}.frame-area iframe{position:relative;width:100%;height:100%;border:0;display:block;background:transparent;z-index:1}.loading-message{position:absolute;inset:0;display:grid;place-content:center;color:var(--muted);font-size:18px;padding:24px}.preview-hint{font-size:13px;color:var(--muted);background:#f6f7f8;line-height:1.7}.connection-hint{display:block;padding:10px 16px}.live-preview.expanded{position:fixed;inset:14px;z-index:100;display:flex;flex-direction:column;width:auto;margin:0;box-shadow:0 0 0 30px #20252acc}.live-preview.expanded .frame-area{height:auto;flex:1;min-height:0}body.preview-open{overflow:hidden}.preview-tabs{display:flex;gap:6px;align-items:center}.preview-tabs button{border:1px solid transparent;border-radius:4px;padding:10px 16px;background:transparent;color:var(--muted);font-size:15px;font-weight:600;white-space:nowrap}.preview-tabs button:hover{background:#e1e7ed}.preview-tabs button[aria-selected="true"]{background:#fff;color:var(--accent);border-color:#b9c8d4}
+@media(min-width:1700px){.frame-area{height:850px}}@media(max-width:1000px){.site-nav .links{gap:15px}.section{--section-inline:32px}.pain-row{grid-template-columns:205px 1fr;gap:22px}.frame-area{height:700px}}
+@media(max-width:700px){html{scroll-padding-top:110px}.site-nav{align-items:flex-start;flex-direction:column;gap:8px;padding:12px 20px}.site-nav .links{max-width:100%;overflow:auto;width:100%;gap:20px;padding-bottom:3px}.section{--section-inline:22px;padding-block:34px}.lead{font-size:21px}.intro-example{padding-left:16px;margin-top:24px}.intro-example p,.sequence{font-size:19px}.sequence span{margin:0 5px}.pain-row{grid-template-columns:1fr;gap:10px;padding:20px 0}.pain-row h3{font-size:22px}.pain-row p,.talk-points,.transition,.next-step{font-size:19px}.talk-points{padding-left:21px}.facts{font-size:17px}.facts th{width:100px}.facts td,.facts th{padding-block:10px}.metrics-line{gap:15px 24px}.metrics-line strong{font-size:26px}.metrics-line div{font-size:16px}.live-preview:not(.expanded){width:calc(100% + var(--section-inline) + var(--section-inline) - 24px);margin-inline:calc(12px - var(--section-inline))}.browser-bar{align-items:flex-start;flex-direction:column;padding:10px}.preview-actions{gap:6px}.preview-actions button,.preview-actions a{font-size:12px;padding:8px}.frame-area{height:650px}.live-preview.expanded{inset:6px}.note{font-size:13px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}@media print{.site-nav,.preview-actions{display:none}.section{padding:30px;break-inside:avoid}.live-preview{width:100%;margin-inline:0}.frame-area{height:600px}}
+</style></head><body>
+<nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">Synthia · FPGA 开发效率</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#can">项目开发 / CAN</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
+<main>
+<section id="intro" class="section" aria-labelledby="intro-title">
+<p class="section-label">攻关目标</p><h1 id="intro-title">提高工程师使用工业 EDA 软件<br>开发 FPGA 项目的效率</h1>
+<div class="intro-example"><h3>FPGA 项目：用代码描述电路</h3><p>以自助售货机为例：<strong>投币、出货、找零</strong></p><p class="sequence">编写代码 <span>→</span> EDA 综合与实现 <span>→</span> FPGA 电路 <span>→</span> 测试验证</p><p class="explain">这是简化流程。实际工程还涉及反复调试、高可靠设计和研制过程管理。</p></div>
+</section>
+<section id="problems" class="section" aria-labelledby="problems-title">
+<p class="section-label">调研发现</p><h2 id="problems-title">效率瓶颈主要在三个方面</h2>
+<div class="pain-list">
+<div class="pain-row"><h3><span class="number">1</span>项目开发慢</h3><p><strong>工具专业，上手周期长；发现问题后需要跨阶段调试。</strong><br>高可靠场景还涉及设计加固、故障评估，开发流程更复杂。</p></div>
+<div class="pain-row"><h3><span class="number">2</span>经验难复用</h3><p><strong>项目做完就存档，很多经验留在个人脑子里。</strong><br>即使共享出来，其他人也难以判断适用条件。</p></div>
+<div class="pain-row"><h3><span class="number">3</span>研制流程复杂</h3><p><strong>需求、设计、编码、硬件验证、测试验收，协同与管理成本高。</strong><br>引入智能体后，如何及时发现模型错误，避免带到最终验收？</p></div>
+</div>
+<p class="transition">借助<strong>天境平台</strong>的契机，我们围绕这三个问题开展了以下工作。</p>
+</section>
+<section id="can" class="section" aria-labelledby="can-title">
+<p class="section-label">针对第一个痛点：项目开发慢</p><h2 id="can-title">领域知识与经验 + 开发流程编排</h2>
+<ul class="talk-points"><li>提炼 FPGA 项目开发模式，形成智能体可用的<strong>专业知识和技能</strong>。</li><li>按开发流程编排工具调用，让智能体<strong>写代码、运行 EDA、分析结果、修改设计</strong>。</li><li>在选定基准项目中验证自动连续执行，减少人工值守。</li></ul>
+<p class="case-heading">CAN 对比：开源黄金设计与智能体独立开发</p>
+<table class="facts"><tbody>
+<tr><th scope="row">对比条件</th><td>同样的自然语言需求与硬件约束；同器件、同工具链。</td></tr>
+<tr><th scope="row">设计规模</th><td>黄金侧设计代码 + 测试代码，合计<strong>接近 1 万行</strong>。</td></tr>
+<tr><th scope="row">开发与验证</th><td>智能体活跃工作时间<strong>约 6 小时</strong>；<strong>13 / 13</strong> 仿真场景通过，完成综合与实现。</td></tr>
+<tr><th scope="row">时序与资源</th><td>时序裕量 <strong>+3.707 → +4.446 ns</strong>；LUT 报告值 <strong>1,051 → 917</strong>。</td></tr>
+</tbody></table>
+<p class="note">基准记录：活跃约 6 小时、总历时约 19 小时；资源报告统计阶段不同，需统一复核。验证止于实现，未生成比特流、未上板。来源：bench-lib T2 对比报告。</p>
+<div class="live-preview" data-path="/projects/p20">
+          <div class="browser-bar"><div class="preview-tabs" role="tablist" aria-label="CAN 项目对比">
+            <button type="button" id="can-blind-tab" role="tab" aria-selected="true" aria-controls="can-blind-panel" data-tab="can-blind-panel">CAN 盲测</button>
+            <button type="button" id="can-golden-tab" role="tab" aria-selected="false" aria-controls="can-golden-panel" tabindex="-1" data-tab="can-golden-panel">CAN 黄金基线</button>
+          </div><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p20" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
+          <div class="frame-area" id="can-blind-panel" role="tabpanel" aria-labelledby="can-blind-tab" data-path="/projects/p20"><p class="loading-message" role="status">正在加载 CAN 盲测 p20…</p><iframe title="CAN 盲测 p20 实时网页" name="can-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <div class="frame-area" id="can-golden-panel" role="tabpanel" aria-labelledby="can-golden-tab" data-path="/projects/p19" hidden><p class="loading-message" role="status">正在加载 CAN 黄金基线 p19…</p><iframe title="CAN 黄金基线 p19 实时网页" name="can-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
+        </div>
+</section>
+<section id="evolution" class="section" aria-labelledby="evolution-title">
+<p class="section-label">针对第二个痛点：经验难复用</p><h2 id="evolution-title">历史项目知识库 + 自进化技能</h2>
+<ul class="talk-points"><li><strong>历史项目可参考：</strong>把已有设计和开发过程纳入知识库。</li><li><strong>执行经验可提炼：</strong>从智能体的历史经历中总结处理方法，记录适用条件。</li><li><strong>复用之后再更新：</strong>根据使用结果持续完善技能和版本。</li></ul>
+<div class="metrics-line" aria-label="试运行数据快照"><div><strong>24 项</strong>活跃技能</div><div><strong>约 4.4 小时</strong>累计估算净省时</div><div><strong>12.6 倍</strong>观测耗时倍率</div></div>
+<p class="note">2026-09-29 统计快照。提效数据来自 1 项技能、3 次可比成功复用，相对源任务探索过程计算；是小样本活跃耗时估算，不代表全平台开发提速或人工工时。下方平台展示实时数据。</p>
+<div class="live-preview" data-path="/evolution"><div class="browser-bar"><span class="browser-label"><i></i>自进化 · 技能库与复用成效</span><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/evolution" target="_blank" rel="noopener">独立打开 ↗</a></div></div><div class="frame-area"><p class="loading-message" role="status">正在加载 自进化 · 技能库与复用成效…</p><iframe title="自进化 · 技能库与复用成效实时网页" name="evolution-preview" allow="fullscreen" loading="eager"></iframe></div><p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p></div>
+</section>
+<section id="governance" class="section" aria-labelledby="governance-title">
+<p class="section-label">针对第三个痛点：研制流程复杂</p><h2 id="governance-title">自由项目与工程项目分开管理</h2>
+<ul class="talk-points"><li><strong>自由项目：</strong>自由探索，试验设计方案。</li><li><strong>工程项目：</strong>对标 GJB 军用可编程器件相关研制规范，组织阶段流程和里程碑。</li><li><strong>过程管控：</strong>关键文件修改可追溯，智能体执行与证据可追溯，关键里程碑由人审核。</li></ul>
+<p class="next-step"><strong>后续目标：</strong>完善研制规范覆盖，加强验证与错误拦截，降低 AI 幻觉对项目验收的影响。</p>
+<p class="note">目前已建立流程管控基础，全面符合研制标准仍是后续目标。下方以 p4 项目展示。</p>
+<div class="live-preview" data-path="/projects/p4">
+          <div class="browser-bar"><span class="browser-label"><i></i>工程过程管控 · p4 项目</span><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p4" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
+          <div class="frame-area"><p class="loading-message" role="status">正在加载 p4 项目…</p><iframe title="工程过程管控 p4 实时网页" name="governance-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
+        </div>
+</section>
+</main><footer class="end">Synthia · FPGA 智能开发平台<a href="#intro">回到开头</a></footer><script>
+const hosted = location.protocol === "https:" || location.protocol === "http:";
+const platformBase = hosted ? new URL("../", location.href) : new URL("https://synthia.wenzhuolin.xyz/");
+for (const anchor of document.querySelectorAll("[data-platform-home]")) anchor.href = new URL("projects", platformBase).href;
+function collapsePreviews() {
+  document.querySelectorAll(".live-preview.expanded").forEach(panel => {panel.classList.remove("expanded");panel.querySelector("[data-expand]").textContent="展开预览";});
+  document.body.classList.remove("preview-open");
+}
+for (const panel of document.querySelectorAll(".live-preview")) {
+  const hint = panel.querySelector(".connection-hint");
+  const tabs = [...panel.querySelectorAll("[data-tab]")];
+  const states = [...panel.querySelectorAll(".frame-area")].map(area => {
+    const state = {
+      area,
+      frame: area.querySelector("iframe"),
+      message: area.querySelector(".loading-message"),
+      url: new URL((area.dataset.path || panel.dataset.path).slice(1), platformBase).href,
+      started: false,
+      slow: false,
+      timeout: null,
+    };
+    state.frame.addEventListener("load", () => {
+      if (!state.started) return;
+      state.message.hidden = true;
+      state.slow = false;
+      clearTimeout(state.timeout);
+      if (!state.area.hidden) hint.hidden = true;
+    });
+    return state;
+  });
+  let active = states.find(state => !state.area.hidden);
+  function load(state) {
+    clearTimeout(state.timeout);
+    state.message.hidden = false;
+    state.slow = false;
+    state.started = true;
+    hint.hidden = true;
+    state.frame.src = state.url;
+    state.timeout = setTimeout(() => {
+      state.slow = true;
+      if (state === active) hint.hidden = false;
+    }, 15000);
+  }
+  function select(state) {
+    active = state;
+    states.forEach(item => { item.area.hidden = item !== active; });
+    tabs.forEach(tab => {
+      const selected = tab.dataset.tab === active.area.id;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    });
+    panel.querySelector("[data-open]").href = active.url;
+    hint.hidden = !active.slow;
+    if (!active.started) load(active);
+  }
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => select(states.find(state => state.area.id === tab.dataset.tab)));
+    tab.addEventListener("keydown", event => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next].focus();
+      tabs[next].click();
+    });
+  });
+  panel.querySelector("[data-reload]").addEventListener("click", () => load(active));
+  panel.querySelector("[data-expand]").addEventListener("click", () => {
+    const expand = !panel.classList.contains("expanded");
+    collapsePreviews();
+    if (expand) {
+      panel.classList.add("expanded");
+      document.body.classList.add("preview-open");
+      panel.querySelector("[data-expand]").textContent = "收起预览";
+    }
+  });
+  select(active);
+  // Warm both CAN projects immediately; switching tabs preserves their loaded state.
+  states.filter(state => !state.started).forEach(load);
+}
+document.addEventListener("keydown",event=>{if(event.key==="Escape")collapsePreviews();});
+</script></body></html>

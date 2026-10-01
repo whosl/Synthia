@@ -1,3 +1,4 @@
+import { ModelWatchdogError, modelWatchdogMs, watchModelRequest } from "./model-watchdog.ts";
 /**
  * Synthia Runtime — Free Agent session (spec 001-agent-freedom, Slice A).
  *
@@ -248,6 +249,8 @@ export interface FreeAgentDeps {
   permissionTools?: readonly string[];
   /** 单轮 prompt() 的工具轮次上限；0（默认）= 不限制。 */
   maxToolRounds?: number;
+  /** Model-only persistence inactivity limit; 0 disables, default env/15 minutes. */
+  modelWatchdogMs?: number;
 }
 
 const REFERENCE_DATA_SYSTEM_POLICY = [
@@ -586,6 +589,8 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
   /** Durable turn id of the in-flight prompt; null outside a turn. */
   private currentTurnId: string | null = null;
   private abortFlag = false;
+  private modelRequestController?: AbortController;
+  private lastConversationPersistedAt = 0;
   private abortReason: string | undefined;
   private readonly pendingSteer: string[] = [];
 
@@ -616,6 +621,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.agentId = agentId;
     this.projectId = deps.projectId;
     this.deps = deps;
+    this.permissionSkipAll = deps.initialState?.permissionSkipAll ?? false;
 
     this.toolMap = new Map(deps.tools.map(t => [t.name, t]));
 
@@ -756,6 +762,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     if (this.pendingPermission) this.settlePermission(false, reason ? `aborted: ${reason}` : "aborted");
     this.abortFlag = true;
     this.abortReason = reason ?? "aborted by caller";
+    this.modelRequestController?.abort(new FreeAgentAbortedError(this.abortReason));
   }
 
   // ----- permission interaction (UI 卡片裁决) -----
@@ -979,7 +986,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     }
     this.contextSnapshot.compactionState = "running";
     try {
-      const turn = await this.deps.model.chat([{ role: "user", content: prompt }], []);
+      const turn = await this.callModelWithWatchdog(signal => this.deps.model.chat([{ role: "user", content: prompt }, ...this.watchdogNotes()], [], signal));
       const text = turn.kind === "text" ? turn.content.trim() : "";
       if (!text) { this.contextSnapshot.compactionState = "failed"; return; }
       this.compactionSummary = { text, coveredUpTo: split };
@@ -1037,28 +1044,33 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       let reasoningPartId: string | null = null;
       const useStream = !!streamingModel
         && !!(opts.onTextStart || opts.onDelta || opts.onReasoningStart || opts.onReasoningDelta);
-      const callModel = async (): Promise<ChatTurn> => {
+      const callModel = async (): Promise<ChatTurn> => this.callModelWithWatchdog(async signal => {
+        // Retry reprojects the persisted interruption note without rerunning compaction.
+        const requestMessages = [...modelMessages, ...this.watchdogNotes().filter(note => !modelMessages.some(message => message.role === note.role && message.content === note.content))];
         this.contextSnapshot.requestState = "pending";
         this.contextSnapshot.failure = null;
         return useStream && streamingModel
-        ? streamingModel.chatStream(modelMessages, this.deps.tools, {
+        ? streamingModel.chatStream(requestMessages, this.deps.tools, {
+            signal,
             onTextStart: () => {
+              if (signal.aborted) return;
               partId = `sp-${this.agentId}-${++this.streamPartCounter}`;
-              opts.onTextStart?.(partId);
+              if (!signal.aborted) opts.onTextStart?.(partId);
             },
             onDelta: (t) => {
-              if (partId) opts.onDelta?.(partId, t);
+              if (partId && !signal.aborted) opts.onDelta?.(partId, t);
             },
             onReasoningStart: () => {
+              if (signal.aborted) return;
               reasoningPartId = `rp-${this.agentId}-${++this.streamPartCounter}`;
-              opts.onReasoningStart?.(reasoningPartId);
+              if (!signal.aborted) opts.onReasoningStart?.(reasoningPartId);
             },
             onReasoning: (t) => {
-              if (reasoningPartId) opts.onReasoningDelta?.(reasoningPartId, t);
+              if (reasoningPartId && !signal.aborted) opts.onReasoningDelta?.(reasoningPartId, t);
             },
           })
-        : this.deps.model.chat(modelMessages, this.deps.tools);
-      };
+        : this.deps.model.chat(requestMessages, this.deps.tools, signal);
+      });
       let turn: ChatTurn;
       try {
         turn = await callModel();
@@ -1400,6 +1412,32 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     return this.artifactsById.get(revisionId);
   }
 
+  private watchdogNotes(): AgentMessage[] {
+    return this.messages.filter(message => message.role === "system" && message.content.startsWith("[model_watchdog]"));
+  }
+
+  private async callModelWithWatchdog(call: (signal: AbortSignal) => Promise<ChatTurn>): Promise<ChatTurn> {
+    for (let attempt = 0; ; attempt++) {
+      this.checkAbort();
+      const controller = new AbortController();
+      this.modelRequestController = controller;
+      try {
+        return await watchModelRequest(call, controller, this.deps.modelWatchdogMs ?? modelWatchdogMs(), () => this.lastConversationPersistedAt);
+      } catch (error) {
+        this.checkAbort();
+        if (!(error instanceof ModelWatchdogError) || attempt >= 1) throw error;
+        this.messages.push({
+          role: "system",
+          content: `[model_watchdog] 操作者策略已自动中止楔死的模型回合（${error.timeoutMs}ms 无会话落盘），请从中断点续。仅重试本次模型请求一次；已完成的工具与证据保留，不要重复提交作业。`,
+        });
+        process.stderr.write(`[free-agent] ${this.agentId}: model watchdog aborted pending request; retrying once\n`);
+        await this.persist();
+      } finally {
+        if (this.modelRequestController === controller) this.modelRequestController = undefined;
+      }
+    }
+  }
+
   // ----- abort -----
 
   private checkAbort(): void {
@@ -1433,6 +1471,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     this.agentState = {
       ...this.agentState,
       updatedAt: new Date().toISOString(),
+      permissionSkipAll: this.permissionSkipAll,
       contextPromptTokens: this.lastPromptTokens,
       contextUsageSnapshot: { ...this.contextSnapshot },
       compactionSummary: this.compactionSummary,
@@ -1475,6 +1514,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       const temporary = `${path}.tmp`;
       await writeFile(temporary, payload, "utf8");
       await rename(temporary, path);
+      this.lastConversationPersistedAt = Date.now();
     });
     this.conversationWrite = write.catch(() => {});
     return write;

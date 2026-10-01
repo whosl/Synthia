@@ -34,6 +34,7 @@ import {
   withTransaction,
   type TransactionClient,
 } from "../db/repository.ts";
+import { lockProjectConfiguration, readProjectConfiguration, type ProjectTurnConfiguration } from "../services/project-configuration.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
 import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
 import { headSha } from "../workspace/git.ts";
@@ -149,6 +150,8 @@ export interface RuntimeClient {
     /** Omitted for free-project sessions. */
     process_instance_id?: string;
     task: string;
+    permission_skip_all?: boolean;
+    permission_policy_audit?: { actor_type: string; actor_id: string; set_at: string };
     part?: string;
     /** "agent" = free-agent session only (do not start the pipeline loop). */
     mode?: "agent";
@@ -176,7 +179,7 @@ export interface RuntimeClient {
   /** GET /tasks/:agentId — fetch a single agent's detail. */
   getTask(agentId: string): Promise<RuntimeAgentDetail>;
   /** POST /tasks/:agentId/message — free-agent conversation (prompt/steer). */
-  sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown>;
+  sendMessage(agentId: string, text: string, idempotencyKey?: string, configuration?: ProjectTurnConfiguration): Promise<unknown>;
   /** POST /tasks/:agentId/abort — abort the free-agent session. */
   abortTask(agentId: string, idempotencyKey?: string): Promise<unknown>;
   resolveTaskPermission(
@@ -304,6 +307,8 @@ export class HttpRuntimeClient implements RuntimeClient {
     project_id: string;
     process_instance_id?: string;
     task: string;
+    permission_skip_all?: boolean;
+    permission_policy_audit?: { actor_type: string; actor_id: string; set_at: string };
     part?: string;
     mode?: "agent";
     project_type?: string;
@@ -337,7 +342,7 @@ export class HttpRuntimeClient implements RuntimeClient {
     return this.request<RuntimeAgentDetail>("GET", `/tasks/${encodeURIComponent(agentId)}`);
   }
 
-  async sendMessage(agentId: string, text: string, idempotencyKey?: string): Promise<unknown> {
+  async sendMessage(agentId: string, text: string, idempotencyKey?: string, configuration?: ProjectTurnConfiguration): Promise<unknown> {
     // The Runtime message endpoint returns `{accepted:true}` (or a 4xx) in
     // seconds — the multi-minute TURN runs in the background and is consumed
     // via stream/audit. The previous 10-minute timeout conflated the two and
@@ -348,7 +353,7 @@ export class HttpRuntimeClient implements RuntimeClient {
     return this.request(
       "POST",
       `/tasks/${encodeURIComponent(agentId)}/message`,
-      { text },
+      { text, ...(configuration ? { configuration } : {}) },
       {
         timeoutMs: 90_000,
         ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
@@ -975,7 +980,7 @@ async function findCoreOwnedTaskForWriteTx(
   taskId: string,
 ): Promise<CoreTaskRow | null> {
   const project = await tx.query(
-    "SELECT status FROM project WHERE id=$1 FOR SHARE",
+    "SELECT status FROM project WHERE id=$1 FOR UPDATE",
     [projectId],
   );
   const projectRow = project.rows[0] as { status?: unknown } | undefined;
@@ -1093,12 +1098,13 @@ async function markRegisteredMainReady(
   // Runtime may have already written a more advanced status event. Only fill
   // the original queued state; never move a callback-owned fact backwards.
   await ctx.pool.query(
-    `UPDATE agent_task
+    `WITH locked_project AS MATERIALIZED (SELECT id FROM project WHERE id=$2 FOR UPDATE)
+      UPDATE agent_task
         SET status=$3,
             current_stage=CASE WHEN $3='running' THEN COALESCE(current_stage,'intake') ELSE current_stage END,
             runtime_snapshot=runtime_snapshot || $4::jsonb,
             updated_at=now()
-      WHERE id=$1 AND project_id=$2 AND status='queued'`,
+      WHERE id=$1 AND project_id=$2 AND status='queued' AND project_id IN (SELECT id FROM locked_project)`,
     [
       taskId,
       projectId,
@@ -1120,13 +1126,16 @@ async function createCoreOwnedMainTask(
   task: string,
   part: string | null,
   explicitPi: string | null,
+  permissionSkipAll?: boolean,
 ): Promise<HandlerResult> {
   const runtime = requireRuntime(ctx);
   const taskId = projectAgentTaskId(projectId);
 
   const { result } = await runCoreIdempotent<CoreMainCreateRecord>(ctx, "create_core_task", projectId, async (tx) => {
+    await lockProjectConfiguration(tx, projectId);
     await requireConfiguredRuntimeActor(ctx, tx);
     const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
+    if (taskContext.projectType === "free" && part !== null && part !== taskContext.targetPart) throw conflictApiError("PROJECT_PART_MISMATCH");
     const existingProjectAgent = await tx.query(
       `SELECT id,objective,input_hash,authorization_scope,runtime_snapshot
          FROM agent_task
@@ -1143,9 +1152,11 @@ async function createCoreOwnedMainTask(
     } | undefined;
     if (existing) {
       const snapshot = asRuntimeSnapshot(existing.runtime_snapshot);
-      const persistedPart = typeof snapshot.agent_part === "string" && snapshot.agent_part.trim()
-        ? snapshot.agent_part.trim()
-        : taskContext.targetPart;
+      if (permissionSkipAll !== undefined && permissionSkipAll !== (snapshot.permission_skip_all ?? false)) {
+        throw conflictApiError("INITIAL_PERMISSION_POLICY_IMMUTABLE");
+      }
+      const persistedPart = Object.hasOwn(snapshot, "agent_part")
+        ? typeof snapshot.agent_part === "string" ? snapshot.agent_part : null : taskContext.targetPart;
       return {
         taskId: existing.id,
         inputHash: existing.input_hash,
@@ -1158,6 +1169,10 @@ async function createCoreOwnedMainTask(
           input_hash: existing.input_hash,
           project_id: projectId,
           task: existing.objective,
+          ...(typeof snapshot.permission_skip_all === "boolean" ? {
+            permission_skip_all: snapshot.permission_skip_all,
+            permission_policy_audit: snapshot.permission_policy_audit as { actor_type: string; actor_id: string; set_at: string },
+          } : {}),
           ...(persistedPart ? { part: persistedPart } : {}),
           ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
           mode: "agent" as const,
@@ -1185,9 +1200,14 @@ async function createCoreOwnedMainTask(
       baseCommit,
       baseManifestHash: manifestHash,
       authorizationScope: MAIN_AUTHORIZATION_SCOPE,
+      ...(permissionSkipAll !== undefined ? { permissionSkipAll } : {}),
     });
     const now = new Date().toISOString();
     const effectivePart = part ?? taskContext.targetPart;
+    const permissionPolicy = permissionSkipAll === undefined ? {} : {
+      permission_skip_all: permissionSkipAll,
+      permission_policy_audit: { actor_type: ctx.identity.actorType, actor_id: ctx.identity.actorId, set_at: now },
+    };
 
     await tx.query(
       `INSERT INTO agent_task
@@ -1204,7 +1224,7 @@ async function createCoreOwnedMainTask(
         task,
         JSON.stringify(MAIN_AUTHORIZATION_SCOPE),
         inputHash,
-        JSON.stringify({ agent_role: "project", agent_part: effectivePart }),
+        JSON.stringify({ agent_role: "project", agent_part: effectivePart, ...permissionPolicy }),
         ctx.identity.actorType,
         ctx.identity.actorId,
         now,
@@ -1231,7 +1251,9 @@ async function createCoreOwnedMainTask(
       projectId,
       kind: "main",
       inputHash,
+      ...permissionPolicy,
     });
+    if (permissionSkipAll !== undefined) await outboxEvent(tx, ctx, { type: "task", id: taskId }, "task.permission_policy.configured", permissionPolicy);
     return {
       taskId,
       inputHash,
@@ -1244,6 +1266,7 @@ async function createCoreOwnedMainTask(
         input_hash: inputHash,
         project_id: projectId,
         task,
+        ...permissionPolicy,
         ...(effectivePart ? { part: effectivePart } : {}),
         ...(taskContext.processInstanceId ? { process_instance_id: taskContext.processInstanceId } : {}),
         mode: "agent" as const,
@@ -1289,10 +1312,11 @@ async function createCoreOwnedMainTask(
   if (started.status === "failed" || started.status === "fail_closed" || started.status === "cancelled") {
     const terminal = started.status === "cancelled" ? "cancelled" : started.status;
     await ctx.pool.query(
-      `UPDATE agent_task
+      `WITH locked_project AS MATERIALIZED (SELECT id FROM project WHERE id=$2 FOR UPDATE)
+        UPDATE agent_task
           SET status=$3,finished_at=now(),updated_at=now(),
               runtime_snapshot=runtime_snapshot || $4::jsonb
-        WHERE id=$1 AND project_id=$2 AND status IN ('queued','running','awaiting_user')`,
+        WHERE id=$1 AND project_id=$2 AND status IN ('queued','running','awaiting_user') AND project_id IN (SELECT id FROM locked_project)`,
       [
         result.taskId,
         projectId,
@@ -1348,14 +1372,20 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
   // Validate the legacy hint but never let it override Core-owned project facts.
   nullableString(body, "mode");
   const explicitPi = nullableString(body, "process_instance_id");
+  const permissionSkipAll = body.permission_skip_all;
+  if (permissionSkipAll !== undefined && typeof permissionSkipAll !== "boolean") throw validationError("permission_skip_all must be a boolean");
 
   if (p3Enabled(ctx)) {
-    return createCoreOwnedMainTask(ctx, projectId, task, part, explicitPi);
+    return createCoreOwnedMainTask(ctx, projectId, task, part, explicitPi, permissionSkipAll as boolean | undefined);
   }
 
   const result = await runIdempotent<{ agentId: string }>(ctx, "create_task", projectId, async (tx) => {
     const taskContext = await resolveProcessInstance(tx, projectId, explicitPi);
 
+    const permissionPolicy = permissionSkipAll === undefined ? {} : {
+      permission_skip_all: permissionSkipAll as boolean,
+      permission_policy_audit: { actor_type: ctx.identity.actorType, actor_id: ctx.identity.actorId, set_at: new Date().toISOString() },
+    };
     let response: RuntimeCreateResponse;
     try {
       if (taskContext.projectType === "engineering") {
@@ -1371,6 +1401,7 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
       response = await runtime.createTask({
         project_id: projectId,
         task,
+        ...permissionPolicy,
         // An explicit task part is a deliberate one-off override. Otherwise
         // use the project's canonical target; when both are absent, omit the
         // field so Runtime cannot silently select a hardware default.
@@ -1395,10 +1426,12 @@ export async function createTaskHandler(ctx: RequestContext): Promise<HandlerRes
     await outboxEvent(tx, ctx, { type: "task", id: response.agent_id }, "task.forwarded", {
       agentId: response.agent_id,
       projectId,
+      ...permissionPolicy,
       ...(taskContext.processInstanceId ? { processInstanceId: taskContext.processInstanceId } : {}),
       projectType: taskContext.projectType,
       ...(taskContext.processProfileId ? { processProfileId: taskContext.processProfileId } : {}),
     });
+    if (permissionSkipAll !== undefined) await outboxEvent(tx, ctx, { type: "task", id: response.agent_id }, "task.permission_policy.configured", permissionPolicy);
     return { agentId: response.agent_id };
   });
 
@@ -1557,17 +1590,24 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
       readonly runtimeAgentId: string;
       readonly runtimeIdempotencyKey: string;
       readonly eventId: string;
+      readonly configuration?: ProjectTurnConfiguration;
     }>(
       ctx,
       `send_core_task_message:${task.id}`,
       projectId,
       async (tx) => {
+        const projectConfiguration = await lockProjectConfiguration(tx, projectId);
         const current = await findCoreOwnedTaskForWriteTx(ctx, tx, projectId, task.id);
         if (!current) throw notFoundError(`task not found: ${task.id}`);
         if (current.kind === "side" && !p3Enabled(ctx)) {
           throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
         }
         requireCoreTaskMessageable(current);
+        const turnConfiguration = projectConfiguration.project_type === "free" && current.agent_role === "project"
+          ? await readProjectConfiguration(tx, projectId) : null;
+        if (projectConfiguration.project_type === "free" && current.agent_role === "project" && current.status !== "running") {
+          await tx.query("UPDATE agent_task SET status='queued',config_epoch=$3,runtime_snapshot=runtime_snapshot || $4::jsonb WHERE id=$1 AND project_id=$2", [current.id, projectId, turnConfiguration!.epoch, JSON.stringify({ turn_part: turnConfiguration!.target_part, config_epoch: turnConfiguration!.epoch })]);
+        }
         const dispatchHash = canonicalRequestHash({
           schema: "task-message-dispatch.v1",
           projectId,
@@ -1584,7 +1624,7 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
           current.id,
           eventId,
           "user_message",
-          { text },
+          { text, ...(turnConfiguration ? { config_epoch: turnConfiguration.epoch } : {}) },
         );
         return {
           taskId: current.id,
@@ -1594,6 +1634,12 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
           // same client key without colliding in Runtime's per-agent store.
           runtimeIdempotencyKey: `core-message-${dispatchHash.slice(0, 48)}`,
           eventId,
+          ...(turnConfiguration ? { configuration: {
+            part: turnConfiguration.target_part,
+            epoch: turnConfiguration.epoch,
+            target_frequency_mhz: turnConfiguration.target_frequency_mhz,
+            constraints: turnConfiguration.constraints,
+          } } : {}),
         };
       },
       async (tx) => {
@@ -1602,7 +1648,7 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
         if (current.kind === "side" && !p3Enabled(ctx)) {
           throw capabilityUnavailableError("side tasks are disabled by SYNTHIA_FEATURE_SIDE_TASKS");
         }
-        requireCoreTaskMessageable(current);
+        if (current.status !== "queued") requireCoreTaskMessageable(current);
       },
     );
 
@@ -1615,6 +1661,7 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
         write.result.runtimeAgentId,
         text,
         write.result.runtimeIdempotencyKey,
+        write.result.configuration,
       );
       return { status: 200, data: reply };
     } catch (err) {
@@ -1629,6 +1676,10 @@ export async function sendTaskMessageHandler(ctx: RequestContext): Promise<Handl
     throw mapRuntimeError(err);
   }
   if (detail.project_id !== projectId) throw notFoundError(`task not found: ${agentId}`);
+
+  if (p3Enabled(ctx) && (await ctx.pool.query("SELECT project_type FROM project WHERE id=$1", [projectId])).rows[0]?.project_type === "free") {
+    throw conflictApiError("CORE_OWNED_TASK_REQUIRED", { message: "start the Project Agent to continue with configuration binding" });
+  }
 
   try {
     const reply = await runtime.sendMessage(agentId, text);

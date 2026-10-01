@@ -2,16 +2,18 @@ import { createServer, type Server } from "node:https";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { access, constants } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createConnection } from "node:net";
 import { WorkerRuntime, type WorkerExecution, type WorkerRuntimeOptions, type WorkerExecutionResult } from "./worker.ts";
-import { createVivadoProcessGuardian, VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest } from "./vivado.ts";
+import { createVivadoProcessGuardian, VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest, type CommandRunner } from "./vivado.ts";
 import type { JobRequest } from "./index.ts";
 import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot } from "./remote.ts";
 import { canonicalRequestHash } from "../core/src/hashing.ts";
+import { resolveJobPart, validatePartPolicy, type PartPolicy } from "./part-policy.ts";
 
 // The discovery wire contract is the three-key ConnectorCapability shape;
 // server-internal CapabilityDefinition fields must not leak onto the wire.
@@ -32,7 +34,7 @@ export interface WorkerConfig extends ConnectorEndpoint {
   workspace_root: string;
   evidence_root: string;
   vivado_binary: string;
-  vivado_part: string;
+  vivado_part: PartPolicy;
   vivado_install_identity: string;
   capability_map_version: string;
   part_catalog_hash: string;
@@ -94,7 +96,8 @@ export function workerRequestBindingMatches(
 }
 
 function validateWorkerConfig(config: WorkerConfig): WorkerConfig {
-  for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "evidence_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "vivado_part", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"] as const) required(config[name], name);
+  for (const name of ["connector_id", "endpoint_url", "protocol_version", "transport_mode", "auth_mode", "workspace_root", "evidence_root", "server_certificate_path", "server_private_key_path", "trusted_client_ca_path", "vivado_binary", "toolchain_profile_hash", "part_catalog_hash", "sdk_worker_build_hash"] as const) required(config[name], name);
+  validatePartPolicy(config.vivado_part);
   if (config.protocol_version !== REMOTE_SCHEMA_VERSION || config.transport_mode !== "direct_https" || config.auth_mode !== "mtls") throw new Error("CONFIG_INVALID:protocol");
   if (!Number.isInteger(config.listen_port) || config.listen_port < 1 || config.listen_port > 65535) throw new Error("CONFIG_INVALID:listen_port");
     return config;
@@ -225,17 +228,19 @@ export async function verifyWorkerReleaseManifest(path: string): Promise<string>
   return manifestHash;
 }
 
-function execution(
+export function createWorkerExecution(
   config: WorkerConfig,
   identity: {
     readonly activeConfigSha256: string;
     readonly workerProcessInstanceId: string;
   },
+  commandRunner?: CommandRunner,
 ): WorkerExecution {
-  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, part: config.vivado_part, profileHash: config.toolchain_profile_hash });
+  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, profileHash: config.toolchain_profile_hash, commandRunner });
   return {
     async discover(): Promise<DiscoverySnapshot> {
       const remoteAttestation = {
+        part_policy: config.vivado_part === "any" ? { mode: "any" as const } : { mode: "list" as const, parts: typeof config.vivado_part === "string" ? [config.vivado_part] : config.vivado_part },
         active_config_sha256: identity.activeConfigSha256,
         worker_process_instance_id: identity.workerProcessInstanceId,
       };
@@ -245,7 +250,14 @@ function execution(
     async execute(request: JobRequest, _workspace: string, signal?: AbortSignal): Promise<WorkerExecutionResult> {
       const candidate = (request as JobRequest & { parameters?: unknown }).parameters;
       if (!candidate || typeof candidate !== "object") return { outcome: "failure", error_code: "VIVADO_PARAMETERS_REQUIRED", output: JSON.stringify({ status: "rejected", errorCode: "VIVADO_PARAMETERS_REQUIRED" }), evidence: { jobId: request.jobId ?? "worker", entries: [] } };
-      if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: config.vivado_part })) {
+      let part: string | undefined;
+      try {
+        if (!["discover_toolchain", "query_parts"].includes(request.operation)) part = resolveJobPart(config.vivado_part, candidate as Record<string, unknown>);
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "PART_REQUIRED";
+        return { outcome: "failure", error_code: code, output: JSON.stringify({ status: "rejected", errorCode: code }), evidence: { jobId: request.jobId, entries: [] } };
+      }
+      if (!workerRequestBindingMatches(request, candidate, config.toolchain_profile_hash, { vivadoBinary: config.vivado_binary, part: part ?? "" })) {
         const jobId = request.jobId ?? "worker";
         return { outcome: "failure", error_code: "FORMAL_BINDING_MISMATCH", output: JSON.stringify({ status: "rejected", jobId, errorCode: "FORMAL_BINDING_MISMATCH" }), evidence: { jobId, entries: [] } };
       }
@@ -254,7 +266,7 @@ function execution(
         toolchain: {
           requiredLicense: (candidate as VivadoRequest).toolchain?.requiredLicense,
           vivadoBinary: config.vivado_binary,
-          part: config.vivado_part,
+          ...(part ? { part } : {}),
           profileHash: config.toolchain_profile_hash,
         },
       } as VivadoRequest;
@@ -301,7 +313,7 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
   const options: WorkerRuntimeOptions = {
     endpoint: config,
     workspaceRoot: config.workspace_root,
-    execution: execution(config, {
+    execution: createWorkerExecution(config, {
       activeConfigSha256: loaded.sha256,
       workerProcessInstanceId,
     }),
@@ -325,7 +337,9 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
   return { server, config };
 }
 
-if (import.meta.main) {
+// Node bundles use a CommonJS shim for import.meta.main. Check the actual
+// entry path too so importing a Worker bundle never starts the service.
+if (import.meta.main && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, configPath, outputPath] = process.argv.slice(2);
   const run = command === "--verify-release-manifest"
       ? verifyWorkerReleaseManifest(configPath ?? "")

@@ -1,3 +1,4 @@
+import type { EvidenceRange, EvidencePage } from "../core/src/domain/evidence-range.ts";
 import type { ContextUsageSnapshot } from "./context-usage.ts";
 /**
  * Synthia Runtime — shared types for the minimal task loop.
@@ -178,6 +179,8 @@ export interface VivadoResult {
 
 /** Decoded content of a single evidence artifact (from Core evidence/content endpoint). */
 export interface EvidenceContent {
+  readonly range?: EvidencePage;
+  readonly sizeBytes?: number;
   readonly content: string;
   readonly sha256: string;
   readonly truncated: boolean;
@@ -200,7 +203,7 @@ export interface LoopConnector {
   /** Submit a vivado operation and resolve to a terminal result + evidence. */
   submit(request: VivadoSubmission): Promise<VivadoResult>;
   /** Fetch the decoded content of a named evidence artifact for a terminal job. */
-  fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent>;
+  fetchEvidenceContent(jobId: string, name: string, range?: EvidenceRange): Promise<EvidenceContent>;
   /** Fetch the evidence manifest (entry list) for a terminal job. Optional so
    *  in-memory fakes can omit it; production adapters implement it. */
   fetchEvidenceManifest?(jobId: string): Promise<EvidenceManifest>;
@@ -687,6 +690,11 @@ export class NoGovernanceClient implements GovernanceClient {
 // Run-state persistence.
 // ---------------------------------------------------------------------------
 export interface AgentState {
+  readonly permissionSkipAll?: boolean;
+  readonly permissionPolicyAudit?: { readonly actor_type: string; readonly actor_id: string; readonly set_at: string };
+  /** Configuration bound to the latest Project Agent turn; descriptor stays frozen. */
+  readonly configEpoch?: number;
+  readonly turnConfiguration?: import("../core/src/services/project-configuration.ts").ProjectTurnConfiguration;
   readonly agentId: string;
   /** Core-issued task identity. For P3 tasks taskId === agentId. */
   readonly taskId?: string;

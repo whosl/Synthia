@@ -1,3 +1,4 @@
+import type { EvidenceRange } from "../core/src/domain/evidence-range.ts";
 /**
  * Synthia Runtime — Cloudflare remote connector adapter.
  *
@@ -110,14 +111,14 @@ export class RemoteVivadoConnector implements LoopConnector {
     }
   }
 
-  async fetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
+  async fetchEvidenceContent(jobId: string, name: string, range?: EvidenceRange): Promise<EvidenceContent> {
     await this.ensureReady();
     try {
-      return await this.doFetchEvidenceContent(jobId, name);
+      return await this.doFetchEvidenceContent(jobId, name, range);
     } catch (e) {
       if (isLeaseExpired(e)) {
         await this.reconnect("lease expired during fetchEvidenceContent");
-        return await this.doFetchEvidenceContent(jobId, name);
+        return await this.doFetchEvidenceContent(jobId, name, range);
       }
       throw e;
     }
@@ -166,9 +167,11 @@ export class RemoteVivadoConnector implements LoopConnector {
     };
   }
 
-  private async doFetchEvidenceContent(jobId: string, name: string): Promise<EvidenceContent> {
-    const c = await this.client.fetchEvidenceContent(jobId, name);
+  private async doFetchEvidenceContent(jobId: string, name: string, range?: EvidenceRange): Promise<EvidenceContent> {
+    const c = await this.client.fetchEvidenceContent(jobId, name, range ? { range } : undefined);
     return {
+      ...(c.range ? { range: c.range } : {}),
+      ...(c.sizeBytes !== undefined ? { sizeBytes: c.sizeBytes } : {}),
       content: c.content,
       sha256: c.sha256,
       truncated: c.truncated,

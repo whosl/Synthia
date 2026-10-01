@@ -25,3 +25,19 @@ describe("remote connector evidence content",()=>{
  test("rejects oversized complete content and manifest cardinality before allocation",async()=>{const oversized=new FakeHttp((_p,b)=>ok(b,{name:"synthia.bit",sha256:"a".repeat(64),sizeBytes:MAX_EVIDENCE_ENTRY_BYTES+1,mediaType:"application/octet-stream",content_base64:"",truncated:false}));await expect(client(oversized).fetchEvidenceContent("job-1","synthia.bit",{complete:true})).rejects.toMatchObject({code:"EVIDENCE_CORRUPT"});const many=new FakeHttp((_p,b)=>ok(b,{jobId:"job-1",entries:Array.from({length:MAX_EVIDENCE_ENTRIES+1},(_,index)=>({name:`e-${index}`,sha256:"a".repeat(64),sizeBytes:1,mediaType:"text/plain"}))}));await expect(client(many).evidence("job-1")).rejects.toMatchObject({code:"EVIDENCE_CORRUPT"});});
  test("rejects complete content whose decoded size disagrees with its manifest",async()=>{const bytes=new Uint8Array([1,2,3]);const h=new FakeHttp((_p,b)=>ok(b,{name:"synthia.bit",sha256:sha256Hex(bytes),sizeBytes:bytes.byteLength+1,mediaType:"application/octet-stream",content_base64:Buffer.from(bytes).toString("base64"),truncated:false}));await expect(client(h).fetchEvidenceContent("job-1","synthia.bit",{complete:true})).rejects.toMatchObject({code:"EVIDENCE_CORRUPT"});});
 });
+
+describe("H37 remote page integrity", () => {
+  test("validates page hash, offsets and next pointer without confusing file hash with page hash", async () => {
+    const page = "0!\n1!\n";
+    const body = { name: "waveform.vcd", sha256: sha256Hex("full-file"), sizeBytes: 1000, mediaType: "text/plain", content_base64: Buffer.from(page).toString("base64"), truncated: true, range: { offset: 100, limit: 6, totalChars: 1000, nextOffset: 106 }, content_sha256: sha256Hex(page) };
+    const h = new FakeHttp((_p, b) => ok(b, body));
+    const result = await client(h).fetchEvidenceContent("job-1", "waveform.vcd", { range: { offset: 100, limit: 6 } });
+    expect(result.content).toBe(page);
+    expect(result.range?.nextOffset).toBe(106);
+    expect(h.calls[0]!.body.payload).toMatchObject({ range: { offset: 100, limit: 6 } });
+    for (const patch of [{ content_sha256: "a".repeat(64) }, { range: { ...body.range, nextOffset: 999 } }, { range: undefined }]) {
+      const invalid = new FakeHttp((_p, b) => ok(b, { ...body, ...patch }));
+      await expect(client(invalid).fetchEvidenceContent("job-1", "waveform.vcd", { range: { offset: 100, limit: 6 } })).rejects.toMatchObject({ code: "EVIDENCE_CORRUPT" });
+    }
+  });
+});

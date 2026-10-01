@@ -1,3 +1,4 @@
+import { evidenceTextPage, parseEvidenceRange, type EvidenceRange } from "../core/src/domain/evidence-range.ts";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -121,7 +122,8 @@ export class WorkerRuntime {
       const out = await this.route(pathname, e); this.keys.set(key, { fingerprint, status: out.status, body: out.body }); return this.ok(out.body, out.status);
     }
     catch (cause) {
-      const code = cause instanceof Error ? cause.message : "WORKER_ERROR";
+      const message = cause instanceof Error ? cause.message : "WORKER_ERROR";
+      const code = typeof cause === "object" && cause !== null && "code" in cause && cause.code === "EVIDENCE_RANGE_INVALID" ? "EVIDENCE_RANGE_INVALID" : message;
       const status = code === "JOB_NOT_FOUND" || code === "EVIDENCE_NOT_AVAILABLE" || code === "NOT_FOUND"
         || code === "EVOLUTION_EVAL_EVIDENCE_NOT_AVAILABLE" ? 404
         : code === "EVIDENCE_CORRUPT" || code === "EVOLUTION_EVAL_EVIDENCE_CORRUPT" ? 422
@@ -132,7 +134,7 @@ export class WorkerRuntime {
                 || code === "EVOLUTION_EVAL_REMOTE_ATTESTATION_MISMATCH" ? 409
                 : code === "EVOLUTION_EVAL_SPOOL_FULL" || code === "EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE" ? 503
                   : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
-      return responseError(code, code, status);
+      return responseError(code, message, status);
     }
   }
 
@@ -166,7 +168,7 @@ export class WorkerRuntime {
       return { status: 200, body: this.envelope(e, copy(job)) };
     }
     if (path === "/jobs/evidence") { if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE"); this.assertEvidenceLimits(job.evidence); return { status: 200, body: this.envelope(e, copy(job.evidence)) }; }
-    if (path === "/jobs/evidence/content") { const name = p.name; if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE"); return this.evidenceContent(e, job, name, p.complete === true); }
+    if (path === "/jobs/evidence/content") { const name = p.name; if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE"); return this.evidenceContent(e, job, name, p.complete === true, p.range === undefined ? undefined : parseEvidenceRange(p.range)); }
     throw new Error("NOT_FOUND");
   }
   private submit(e: RemoteEnvelope<unknown>, request: JobRequest, approval?: Record<string, unknown>): { status: number; body: RemoteEnvelope<unknown> } { const capability = this.discovery?.capabilities.find(c => c.operation === request?.operation); if (!this.registration || this.registration.registration_state !== "ready" || this.registration.capability_drift === true) throw new Error("ENDPOINT_NOT_APPROVED"); if (!request || request.projectId !== e.project_id || !good(request.idempotencyKey) || !good(request.operation) || !good(request.input) || !good(request.correlationId)) throw new Error("INVALID_JOB_REQUEST"); if (!this.endpoint.allowed_capability_ids.includes(request.operation) || !capability || capability.version !== e.capability_version || !capability.runClasses.includes(request.runClass)) throw new Error("CAPABILITY_UNAVAILABLE"); if (request.runClass === "gate_check" && !good(approval?.gateSubmissionId)) throw new Error("GATE_SUBMISSION_REQUIRED"); if (request.runClass === "formal" && (approval?.inputApproved !== true || (!good(approval?.baselineId) && !good(approval?.approvedGateResultId)))) throw new Error("FORMAL_GATE_REQUIRED"); if (request.runClass === "formal" && request.input.startsWith("candidate:")) throw new Error("CANDIDATE_FORMAL_REJECTED"); const jobId = request.jobId ?? `job-${crypto.randomUUID()}`; if (!idRe.test(jobId)) throw new Error("INVALID_JOB_ID"); const fingerprint = sha256(JSON.stringify(request)); const old = this.jobs.get(jobId); if (old) { const binding = this.jobBindings.get(jobId); if (!binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND"); if (sha256(JSON.stringify(old.request)) !== fingerprint) throw new Error("IDEMPOTENCY_CONFLICT"); return { status: 200, body: this.envelope(e, copy(old)) }; } const job: Job = { id: jobId, request: { ...request, jobId }, state: "submitted", inputSha256: sha256(request.input) }; this.jobs.set(jobId, job); this.jobBindings.set(jobId, { projectId: e.project_id, classification: e.classification }); this.pending.push(jobId); void this.snapshotRegistry(); void this.pump(); return { status: 202, body: this.envelope(e, copy(job)) }; }
@@ -213,7 +215,7 @@ export class WorkerRuntime {
       this.activeControllers.delete(job.id);
     }
   }
-  private async evidenceContent(e: RemoteEnvelope<unknown>, job: Job, name: string, complete = false): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {
+  private async evidenceContent(e: RemoteEnvelope<unknown>, job: Job, name: string, complete = false, range?: EvidenceRange): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {
     if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE");
     this.assertEvidenceLimits(job.evidence);
     const entry = job.evidence.entries.find(x => x.name === name);
@@ -222,6 +224,13 @@ export class WorkerRuntime {
     let buf: Buffer;
     try { const details = await stat(filePath); if (details.size > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); if (!details.isFile() || details.size !== entry.sizeBytes) throw new Error("EVIDENCE_CORRUPT"); buf = await readFile(filePath) as Buffer; } catch (error) { if (error instanceof Error && error.message === "EVIDENCE_LIMIT_EXCEEDED") throw error; throw new Error("EVIDENCE_CORRUPT"); }
     if (sha256(buf) !== entry.sha256) throw new Error("EVIDENCE_CORRUPT");
+    if (range) {
+      const page = evidenceTextPage(buf.toString("utf8"), range);
+      const contentBytes = Buffer.from(page.content, "utf8");
+      return { status: 200, body: this.envelope(e, { name: entry.name, sha256: entry.sha256, sizeBytes: buf.byteLength,
+        mediaType: entry.mediaType, content_base64: contentBytes.toString("base64"), content_sha256: sha256(contentBytes),
+        truncated: page.range.nextOffset !== null || range.offset > 0, range: page.range }) };
+    }
     let contentBytes: Uint8Array = buf;
     let truncated = false;
     if (!complete && buf.byteLength > MAX_CONTENT_BYTES) {

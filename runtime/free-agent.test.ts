@@ -1947,3 +1947,26 @@ describe("free-agent: request context accounting", () => {
     expect(session.contextUsage()).toMatchObject({ promptTokens: 100, requestState: "unreported", failure: null });
   });
 });
+
+describe("H20 initial skipAll remains below hard governance checks", () => {
+  test("initial policy skips permission cards but never executes redline or gate-locked tools", async () => {
+    const { createAgentState } = await import("./agent-state.ts");
+    for (const locked of [false, true]) {
+      let executed = 0;
+      const tool = locked ? "safe_write" : "approve";
+      const model = new ScriptedModel([call("initial-policy-call", tool, {}), txt("done")]);
+      const agentId = `agent-initial-policy-${++idCounter}`;
+      const s = createFreeAgentSession(agentId, {
+        model, tools: [{ name: tool, description: "test", parameters: { type: "object", properties: {} }, execute: async () => { executed++; return { content: "done" }; } }],
+        projectId: "proj-test", part: "", classification: "internal", governance: new MockGovernanceClient(), connector: null,
+        systemPrompt: "test", agentsDir, permissionTools: [tool],
+        initialState: { ...createAgentState({ agentId, task: "test", part: "", projectId: "proj-test" }), permissionSkipAll: true },
+        ...(locked ? { initialGateLock: { gate: "G1" as const, submissionId: "submission-locked" } } : {}),
+      });
+      expect(s.permissionState().skipAll).toBe(true);
+      await s.prompt("run");
+      expect(executed).toBe(0);
+      expect(JSON.parse(toolResultFor(model, "initial-policy-call")!).error).toBe(locked ? "gate_locked" : "blocked");
+    }
+  });
+});

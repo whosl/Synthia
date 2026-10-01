@@ -404,3 +404,39 @@ describe("worker cancellation semantics", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
+
+describe("H37 bounded evidence ranges", () => {
+  test("Worker serves middle/end/EOF pages with full provenance and rejects corruption/overreach", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-worker-h37-"));
+    const text = "0!\n1!\n".repeat(200_000);
+    try {
+      const rt = runtime(root, async (request, workspace) => {
+        await mkdir(join(workspace, "output"), { recursive: true });
+        await writeFile(join(workspace, "output", "waveform.vcd"), text);
+        return { outcome: "success", evidence: { jobId: request.jobId!, entries: [{ name: "waveform.vcd", sha256: sha256(text), sizeBytes: Buffer.byteLength(text), mediaType: "text/plain" }] } };
+      });
+      await prime(rt);
+      await submitJob(rt, "job-range");
+      for (const offset of [0, 300_000, text.length - 10, text.length]) {
+        const res = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range: { offset, limit: 65_536 } });
+        expect(res.status).toBe(200);
+        const p = res.payload as ContentReply & { range: { totalChars: number; nextOffset: number | null }; content_sha256: string };
+        const decoded = Buffer.from(p.content_base64, "base64").toString("utf8");
+        expect(decoded).toBe(text.slice(offset, offset + 65_536));
+        expect(p.sha256).toBe(sha256(text));
+        expect(p.content_sha256).toBe(sha256(decoded));
+        expect(p.sizeBytes).toBe(Buffer.byteLength(text));
+        expect(p.range.totalChars).toBe(text.length);
+      }
+      const wrongProject = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range: { offset: 0, limit: 10 } }, "0", { projectId: "p2" });
+      expect(wrongProject.status).not.toBe(200);
+      for (const range of [{ offset: -1, limit: 10 }, { offset: 0, limit: 300_000 }, { offset: text.length + 1, limit: 1 }]) {
+        const invalid = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range });
+        expect(invalid.status).not.toBe(200);
+      }
+      await writeFile(join(root, "job-range", "output", "waveform.vcd"), "x".repeat(text.length));
+      const corrupt = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range: { offset: 0, limit: 10 } });
+      expect(corrupt.errorCode).toBe("EVIDENCE_CORRUPT");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});

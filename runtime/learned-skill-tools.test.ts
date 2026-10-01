@@ -7,6 +7,7 @@ import type {
   SkillApplicationResult,
   TaskEvolutionClient,
 } from "./evolution-client.ts";
+import { CoreTaskEvolutionClient } from "./evolution-client.ts";
 import { assembleLearnedSkillTools } from "./learned-skill-tools.ts";
 import { NoGovernanceClient } from "./types.ts";
 
@@ -179,4 +180,68 @@ describe("Learned Skill tools", () => {
     expect(captured).toMatchObject({ endEventSequence: 7, outcomeClaim: "appears fixed" });
     expect(JSON.parse(result.content).note).toContain("不是权威成功结论");
   });
+});
+
+
+describe("H35 p31 close argument regression", () => {
+  for (const applicationId of ["app_189a9157-c97f-44f9-ab23-a377dccea796", "app_ae7e49b8-7d00-44a4-89c6-5f0a2e9597a2"]) {
+    for (const shape of ["annotated", "empty", "omitted", "null-claim"]) {
+      test(`${applicationId}: ${shape} retains zero through tool and HTTP serialization`, async () => {
+        let captured: Record<string, unknown> | undefined;
+        const evolution = new CoreTaskEvolutionClient({
+          baseUrl: "http://core.test", token: "test-only", projectId: "project-1", taskId: "task-1",
+          fetchImpl: (async (url, init) => {
+            expect(String(url)).toContain(`/skill-applications/${applicationId}/close`);
+            captured = JSON.parse(String(init?.body));
+            return Response.json({ data: { schema: "skill-application.v1", application_id: applicationId, state: "closed_pending_episode", replayed: false } });
+          }) as typeof fetch,
+        });
+        const refs = shape === "annotated" ? {
+          evidence_refs: ["doc/compile/run_report.md v2 rev-e39d9f32 content sha256 3b665175…（收官）"],
+          tool_run_refs: ["job-acc013a2-0dfc-468e-860b-0ea3cd3e4fc2（R28 simulate，PASS=11 FAIL=0）"],
+        } : shape === "omitted" ? {} : { evidence_refs: [], tool_run_refs: [] };
+        const result = await tools().learned_skill_close!.execute({
+          application_id: applicationId, human_corrections: 0,
+          outcome_claim: shape === "null-claim" ? null : shape === "annotated" ? "p31 四步验收核证、引用长载荷。".repeat(100) : "p31 四步验收核证", ...refs,
+        }, context(evolution));
+        expect(result.isError).toBeUndefined();
+        expect(captured?.human_corrections).toBe(0);
+        expect(captured?.evidence_refs).toEqual(refs.evidence_refs ?? []);
+        expect(captured?.tool_run_refs).toEqual(refs.tool_run_refs ?? []);
+      });
+    }
+  }
+  test("apply accepts Chinese and annotated reason strings", async () => {
+    const result = await tools().learned_skill_apply!.execute({
+      version_id: "version-1", local_goal: "验收", role: "primary", reason_codes: ["四步链验收核证", "clock-only XDC 豁免指纹"],
+    }, context(fakeClient()));
+    expect(result.isError).toBeUndefined();
+  });
+  test("missing zero, invalid arrays and missing task boundary remain rejected with field diagnostics", async () => {
+    for (const patch of [{ human_corrections: undefined }, { human_corrections: false }, { evidence_refs: "[]" }, { tool_run_refs: [0] }]) {
+      const result = await tools().learned_skill_close!.execute({
+        application_id: "app-1", outcome_claim: null, human_corrections: 0, ...patch,
+      }, context(fakeClient()));
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content).reason).toContain(Object.keys(patch)[0]);
+    }
+    const result = await tools().learned_skill_close!.execute({ application_id: "app-1", outcome_claim: null, human_corrections: 0 }, { ...context(fakeClient()), toolEventSequence: undefined });
+    expect(JSON.parse(result.content).error).toBe("missing_runtime_binding");
+  });
+});
+
+
+test("H35 retains production skill_id resolution and omitted apply fields", async () => {
+  let applied: unknown;
+  const evolution = fakeClient({
+    search: async (query, limit) => {
+      expect(query).toBe("");
+      expect(limit).toBe(100);
+      return { learnedSkillsEnabled: true, items: [{ skillId: "skill-1", versionId: "version-1", name: "test", summary: "test", applicabilitySummary: "test", qualityState: "active_unproven", recommended: true }] };
+    },
+    createApplication: async input => { applied = input; return fakeClient().createApplication(input); },
+  });
+  const result = await tools().learned_skill_apply!.execute({ skill_id: "skill-1", local_goal: "p31 收官" }, context(evolution));
+  expect(result.isError).toBeUndefined();
+  expect(applied).toMatchObject({ versionId: "version-1", reasonCodes: [] });
 });

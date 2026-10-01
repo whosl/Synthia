@@ -721,3 +721,22 @@ describe("Vivado request fail-closed schema", () => {
     expect(() => validateVivadoRequest({ operation: "query_parts", jobId: "q-1", projectId: "project-1", runClass: "exploratory", pattern: "xc7*", family: "artix7" })).not.toThrow();
   });
 });
+
+describe("H34 forgotten TB throughput assertions", () => {
+  for (const metric of ["GOODPUT_MBPS 11.0", "DROPPED_PKTS 2", "CYCLES_PER_PIXEL 45"]) {
+    test(`${metric} fails the worker result even with PASS/$finish and exit 0`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "synthia-h34-"));
+      try {
+        const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "vivado", commandRunner: async () => ({
+          exitCode: 0, stdout: `SIMULATOR_OUTPUT_BEGIN\nLINE_RATE_MBPS 11.95\n${metric}\nPASS\n$finish called at time : 100 ns\nSIMULATOR_OUTPUT_END\nPHASE=simulate\nPHASE_EXIT_CODE=0\n`, stderr: "",
+        }) });
+        const result = await adapter.execute({ operation: "simulate", jobId: "job-h34", projectId: "p-test", runClass: "exploratory", top: "dut", testbench: "tb", sources: [{ path: "rtl/dut.v", content: "module dut; endmodule" }, { path: "tb/tb.v", content: "module tb; endmodule" }] });
+        expect(result.status).toBe("failed");
+        expect(result.errorCode).toBe("VIVADO_SIMULATION_FAILED");
+        expect(result.logDigest?.counts.failure).toBeGreaterThan(0);
+        const sealed = JSON.parse(await readFile(join(root, "job-h34", "output", "simulation-result.json"), "utf8"));
+        expect(sealed.status).toBe("failed");
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+  }
+});

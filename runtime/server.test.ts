@@ -2420,6 +2420,52 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     }
   });
 
+  test("a free Project Agent refreshes the next turn device while retaining conversation and its original descriptor", async () => {
+    const projectId = "p-free-configuration-refresh";
+    const taskId = `project-agent-${crypto.randomUUID()}`;
+    const project = projectInfo({ id: projectId, projectType: "free", targetPart: "xc7k70tfbv676-1", processVersionId: null, processProfileId: null, processProfileName: null, processProfileVersion: null });
+    const model = new RecordingConversationalModel();
+    const taskEvents: TaskConversationClient = {
+      projectId, taskId,
+      async appendEvent(input) { return { taskId, eventId: input.eventId, sequence: 1, replayed: false }; },
+    };
+    const server = new RuntimeServer(makeConfig(), async () => ({
+      model: new CounterScriptedModel(), connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+      governance: new ProjectInfoGovernance(project), taskEvents,
+    }), () => model);
+    await server.start();
+    try {
+      const create = await postTaskRaw(server, { project_id: projectId, task: "original device turn", part: project.targetPart,
+        task_id: taskId, task_kind: "main", execution_intent: "project_agent", authorization_scope: MAIN_TASK_AUTHORIZATION, mode: "agent", project_type: "free" });
+      expect(create.status).toBe(201);
+      createdAgentIds.push(taskId);
+      await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" });
+      await waitForStatus(server, taskId, ["awaiting_user"]);
+      const original = await loadAgentState(taskId);
+      const next = await fetch(`${server.url}/tasks/${taskId}/message`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "run the next device", configuration: { part: "xc7k160tffg676-2", epoch: 2 } }) });
+      expect(next.status).toBe(200);
+      await waitForStatus(server, taskId, ["awaiting_user"]);
+      expect(await loadAgentState(taskId)).toMatchObject({ part: "xc7k160tffg676-2", configEpoch: 2, taskDescriptorHash: original!.taskDescriptorHash });
+      expect(model.calls).toHaveLength(2);
+      expect(model.calls[1]!.messages).toContainEqual({ role: "user", content: "original device turn" });
+      expect(model.calls[1]!.messages[0]!.content).toContain("xc7k160tffg676-2");
+      expect(model.calls[1]!.messages[0]!.content).toContain("配置版本：2");
+      const frequency = await fetch(`${server.url}/tasks/${taskId}/message`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "new timing target", configuration: { part: "xc7k160tffg676-2", epoch: 3, target_frequency_mhz: 125,
+          constraints: [{ path: "constraints/clock.xdc", content: "create_clock -period 8 [get_ports clk]" }] } }) });
+      expect(frequency.status).toBe(200);
+      await waitForStatus(server, taskId, ["awaiting_user"]);
+      expect(model.calls).toHaveLength(3);
+      expect(model.calls[2]!.messages[0]!.content).toContain("125 MHz");
+      expect(model.calls[2]!.messages[0]!.content).toContain("create_clock -period 8");
+      const invalid = await fetch(`${server.url}/tasks/${taskId}/message`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "invalid", configuration: { part: "any", epoch: 3 } }) });
+      expect(invalid.status).toBe(400);
+      expect(model.calls).toHaveLength(3);
+    } finally { await server.stop(); await deleteAgent(taskId).catch(() => {}); }
+  });
+
   test("a Project Agent turn failure stays conversational and the same agent accepts the next turn", async () => {
     const projectId = "p-core-project-turn-recovery";
     const taskId = `project-agent-${crypto.randomUUID()}`;
@@ -3852,5 +3898,39 @@ describe("RuntimeServer — resume from execution failure", () => {
     } finally {
       await server.stop();
     }
+  });
+});
+
+describe("H20 initial permission policy", () => {
+  test("idle task exposes skipAll before activation, persists attribution, and restores on the first session", async () => {
+    const model = new RecordingConversationalModel();
+    const server = new RuntimeServer(makeConfig(), makeFactory(new CounterScriptedModel(), null, new NoGovernanceClient()), () => model);
+    await server.start();
+    try {
+      const audit = { actor_type: "human", actor_id: "user-test", set_at: new Date().toISOString() };
+      const id = await postTask(server, { project_id: "p-permission", task: "test", mode: "agent", permission_skip_all: true, permission_policy_audit: audit });
+      createdAgentIds.push(id);
+      const idle = await getTask(server, id);
+      expect(idle.status).toBe("idle");
+      expect(idle.permission).toMatchObject({ pending: null, skip_all: true });
+      expect(model.calls).toHaveLength(0);
+      expect((await loadAgentState(id))?.permissionPolicyAudit).toEqual(audit);
+      const session = await (server as unknown as { getOrCreateSession(id: string): Promise<FreeAgentSession | null> }).getOrCreateSession(id);
+      expect(session?.permissionState().skipAll).toBe(true);
+      await session!.prompt("hello");
+      expect((await loadAgentState(id))?.permissionSkipAll).toBe(true);
+      const restarted = new RuntimeServer(makeConfig(), makeFactory(new CounterScriptedModel(), null, new NoGovernanceClient()), () => model);
+      await restarted.start();
+      try { expect((await getTask(restarted, id)).permission).toMatchObject({ skip_all: true }); }
+      finally { await restarted.stop(); }
+    } finally { await server.stop(); }
+  });
+  test("nonboolean initial policy fails before allocating a task", async () => {
+    const server = new RuntimeServer(makeConfig(), makeFactory(new CounterScriptedModel(), null, new NoGovernanceClient()));
+    await server.start();
+    try {
+      const result = await postTaskRaw(server, { project_id: "p-permission", task: "test", mode: "agent", permission_skip_all: 0 });
+      expect(result.status).toBe(400);
+    } finally { await server.stop(); }
   });
 });

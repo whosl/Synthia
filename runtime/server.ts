@@ -1,4 +1,5 @@
 import { contextUsageDto, newContextUsage } from "./context-usage.ts";
+import { normalizeConstraints, type ProjectTurnConfiguration } from "../core/src/services/project-configuration.ts";
 /**
  * Synthia Runtime — HTTP task service.
  *
@@ -134,6 +135,7 @@ export interface AgentHandle {
   readonly taskKind?: RuntimeTaskKind;
   /** Project agents are durable conversations; runs and sides are bounded. */
   readonly agentRole: "project" | "run" | "side";
+  configEpoch?: number;
   readonly parentTaskId?: string;
   readonly workspaceId?: string;
   readonly authorization?: TaskAuthorizationScope;
@@ -150,7 +152,7 @@ export interface AgentHandle {
   readonly processProfileVersion?: string | null;
   readonly executionMode: "free" | "engineering";
   readonly task: string;
-  readonly part: string;
+  part: string;
   readonly createdAt: string;
   status: ServerStatus;
   currentStage: StageId;
@@ -428,6 +430,8 @@ function parseCoreIssuedTaskDescriptor(
     processProfileVersion: body.process_profile_version ?? null,
     part: body.part ?? null,
     inputHash: suppliedInputHash ?? null,
+    ...(body.permission_skip_all !== undefined ? { permissionSkipAll: body.permission_skip_all } : {}),
+    ...(body.permission_policy_audit !== undefined ? { permissionPolicyAudit: body.permission_policy_audit } : {}),
   }));
   return {
     taskId,
@@ -1241,6 +1245,14 @@ export class RuntimeServer {
     if (typeof task !== "string" || !task)
       return errorResponse(400, "bad_request", "task is required");
 
+    if (body.permission_skip_all !== undefined && typeof body.permission_skip_all !== "boolean") return errorResponse(400, "bad_request", "permission_skip_all must be a boolean");
+    if (body.permission_policy_audit !== undefined) {
+      const audit = body.permission_policy_audit as Record<string, unknown> | null;
+      if (!audit || typeof audit !== "object" || Array.isArray(audit)
+        || (audit.actor_type !== "human" && audit.actor_type !== "service" && audit.actor_type !== "user")
+        || typeof audit.actor_id !== "string" || !audit.actor_id.trim()
+        || typeof audit.set_at !== "string" || !Number.isFinite(Date.parse(audit.set_at))) return errorResponse(400, "bad_request", "permission_policy_audit is invalid");
+    }
     let descriptor: CoreIssuedTaskDescriptor | null;
     try {
       descriptor = parseCoreIssuedTaskDescriptor(body, projectId, task);
@@ -1412,6 +1424,8 @@ export class RuntimeServer {
       executionMode: runtime.executionMode,
       }),
       ...(deferCoreTaskStart ? { runtimeStarted: false } : {}),
+      ...(body.permission_skip_all !== undefined ? { permissionSkipAll: body.permission_skip_all as boolean } : {}),
+      ...(body.permission_policy_audit ? { permissionPolicyAudit: body.permission_policy_audit as NonNullable<AgentState["permissionPolicyAudit"]> } : {}),
     };
     await saveAgentState(agentState);
 
@@ -1455,6 +1469,7 @@ export class RuntimeServer {
       currentState: agentState,
     };
     this.registry.set(agentId, handle);
+    if (body.permission_skip_all !== undefined) this.recordConversationAudit(agentId, "free_agent_permission_initial", JSON.stringify({ skipAll: body.permission_skip_all, ...agentState.permissionPolicyAudit }));
 
     // mode="agent": free-agent conversation only — do NOT start the GJB
     // pipeline loop. The agent stays idle until /message drives it.
@@ -1572,7 +1587,10 @@ export class RuntimeServer {
 
   private permissionSnapshot(agentId: string): { pending: unknown; skip_all: boolean } | null {
     const session = this.sessions.get(agentId);
-    if (!session?.permissionState) return null;
+    if (!session?.permissionState) {
+      const handle = this.registry.get(agentId);
+      return handle ? { pending: null, skip_all: handle.currentState?.permissionSkipAll ?? false } : null;
+    }
     const state = session.permissionState();
     return { pending: state.pending, skip_all: state.skipAll };
   }
@@ -1664,6 +1682,20 @@ export class RuntimeServer {
     }
     const text = typeof body.text === "string" ? body.text.trim() : "";
     if (!text) return errorResponse(400, "bad_request", "text is required");
+    const configuration = body.configuration as ProjectTurnConfiguration | undefined;
+    if (configuration !== undefined && (!configuration || typeof configuration !== "object"
+      || !Number.isSafeInteger(configuration.epoch) || configuration.epoch < 1
+      || (configuration.part !== null && (typeof configuration.part !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(configuration.part) || configuration.part.toLowerCase() === "any")))) {
+      return errorResponse(400, "bad_request", "invalid turn configuration");
+    }
+    if (configuration) {
+      const frequency = configuration.target_frequency_mhz;
+      if (frequency !== undefined && frequency !== null && (typeof frequency !== "number" || !Number.isFinite(frequency) || frequency <= 0 || frequency > 10000)) return errorResponse(400, "bad_request", "invalid turn frequency");
+      if (configuration.constraints !== undefined) {
+        try { configuration.constraints = normalizeConstraints(configuration.constraints); }
+        catch { return errorResponse(400, "bad_request", "invalid turn constraints"); }
+      }
+    }
 
     const idempotencyKey = req.headers.get("idempotency-key");
     if (idempotencyKey !== null) {
@@ -1678,12 +1710,12 @@ export class RuntimeServer {
           "Idempotency-Key must contain 1-256 visible ASCII characters",
         );
       }
-      return this.handleIdempotentMessage(agentId, idempotencyKey, text);
+      return this.handleIdempotentMessage(agentId, idempotencyKey, text, configuration);
     }
 
     return this.withMessageDispatchLock(
       agentId,
-      () => this.performSendMessage(agentId, text),
+      () => this.performSendMessage(agentId, text, configuration),
     );
   }
 
@@ -1691,8 +1723,9 @@ export class RuntimeServer {
     agentId: string,
     idempotencyKey: string,
     text: string,
+    configuration?: ProjectTurnConfiguration,
   ): Promise<Response> {
-    const fingerprint = sha256Hex(JSON.stringify({ text }));
+    const fingerprint = sha256Hex(JSON.stringify({ text, ...(configuration ? { configuration } : {}) }));
     const pendingKey = `${agentId}\0${idempotencyKey}`;
     const pending = this.pendingTaskMessages.get(pendingKey);
     if (pending) {
@@ -1713,6 +1746,7 @@ export class RuntimeServer {
         idempotencyKey,
         fingerprint,
         text,
+        configuration,
       ),
     );
     this.pendingTaskMessages.set(pendingKey, { fingerprint, response });
@@ -1766,6 +1800,7 @@ export class RuntimeServer {
     idempotencyKey: string,
     fingerprint: string,
     text: string,
+    configuration?: ProjectTurnConfiguration,
   ): Promise<Response> {
     if (!(await this.agentExists(agentId))) {
       return errorResponse(404, "not_found", `agent ${agentId} not found`);
@@ -1821,7 +1856,7 @@ export class RuntimeServer {
       throw error;
     }
 
-    const response = await this.performSendMessage(agentId, text);
+    const response = await this.performSendMessage(agentId, text, configuration);
     if (!response.ok) {
       // performSendMessage only reports accepted/steered after dispatch. A
       // rejected request can safely release its intent, but failure to release
@@ -1905,7 +1940,7 @@ export class RuntimeServer {
     }
   }
 
-  private async performSendMessage(agentId: string, text: string): Promise<Response> {
+  private async performSendMessage(agentId: string, text: string, configuration?: ProjectTurnConfiguration): Promise<Response> {
 
     if (!(await this.agentExists(agentId))) {
       return errorResponse(404, "not_found", `agent ${agentId} not found`);
@@ -1924,6 +1959,24 @@ export class RuntimeServer {
     }
 
     const owner = this.registry.get(agentId);
+    if (configuration && owner?.projectType === "free" && owner.agentRole === "project") {
+      if (owner.configEpoch !== undefined && configuration.epoch < owner.configEpoch) return errorResponse(409, "configuration_stale", "turn configuration is older than the current binding");
+      const existingSession = this.sessions.get(agentId);
+      if (existingSession?.status() !== "running" && !this.activeMessageTurns.has(agentId)) {
+        const nextPart = configuration.part ?? "";
+        if (owner.part !== nextPart || owner.configEpoch !== configuration.epoch) {
+          owner.part = nextPart;
+          owner.configEpoch = configuration.epoch;
+          if (owner.currentState) {
+            owner.currentState = { ...owner.currentState, part: nextPart, configEpoch: configuration.epoch, turnConfiguration: configuration };
+            await saveAgentState(owner.currentState);
+          }
+          this.sessions.delete(agentId);
+        }
+      } else if (owner.part !== (configuration.part ?? "") || (owner.configEpoch !== undefined && owner.configEpoch !== configuration.epoch)) {
+        return errorResponse(409, "configuration_busy", "cannot change configuration during an active turn");
+      }
+    }
     if (owner?.busy || (owner?.executionMode === "engineering" && owner.agentRole === "run")) {
       return errorResponse(409, "pipeline_message_not_supported", "Engineering pipelines cannot accept conversational messages; abort or resume the pipeline through its control endpoint");
     }
@@ -2968,7 +3021,8 @@ export class RuntimeServer {
       processProfileId = runtime.processProfileId;
       processProfileName = runtime.processProfileName;
       processProfileVersion = runtime.processProfileVersion;
-      snapshotProjectInfo = coreInfo ?? undefined;
+      snapshotProjectInfo = coreInfo && projectType === "free" && agentRole === "project"
+        ? { ...coreInfo, targetPart: part ?? null } : coreInfo ?? undefined;
       initialGateLock = executionMode === "engineering" ? initialGateLock : undefined;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -3011,6 +3065,10 @@ export class RuntimeServer {
         },
       );
       systemPrompt = composeSystemPrompt(doc.text, context.systemContext);
+      if (handle?.configEpoch !== undefined) systemPrompt += `\n本回合验证配置版本：${handle.configEpoch}。验证 job 必须使用本回合绑定的器件与项目约束；历史报告不代表当前版本通过。`;
+      const turnConfiguration = handle?.currentState?.turnConfiguration;
+      if (turnConfiguration?.target_frequency_mhz !== undefined && turnConfiguration.target_frequency_mhz !== null) systemPrompt += `\n本回合目标频率：${turnConfiguration.target_frequency_mhz} MHz；应使用项目配置中对应的时钟约束。`;
+      if (turnConfiguration?.constraints?.length) systemPrompt += `\n本回合固定约束内容（由 Core 绑定）：${JSON.stringify(turnConfiguration.constraints)}`;
       if (taskKind === "side") {
         systemPrompt += [
           "",
@@ -3498,6 +3556,7 @@ export class RuntimeServer {
         const handle: AgentHandle = {
           agentId,
           agentRole,
+          ...(state.configEpoch !== undefined ? { configEpoch: state.configEpoch } : {}),
           ...(state.taskId ? { taskId: state.taskId } : {}),
           ...(state.taskKind ? { taskKind: state.taskKind } : {}),
           ...(state.parentTaskId ? { parentTaskId: state.parentTaskId } : {}),
@@ -3744,6 +3803,7 @@ export function createEnvDepsFactory(
         projectId,
         taskKind === "side" && taskId && workspaceId ? { taskId, workspaceId } : undefined,
         env,
+        taskKind === "side" ? undefined : taskId,
       );
     }
 

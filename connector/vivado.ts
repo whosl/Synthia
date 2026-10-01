@@ -1,3 +1,4 @@
+import { capOutput, createOutputCapture } from "./output-capture.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { access, constants } from "node:fs/promises";
 import { realpathSync, statSync } from "node:fs";
@@ -356,7 +357,7 @@ function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string):
     const projectPart = tclQuote(request.toolchain?.part ?? "xc7k70tfbv676-1");
     const topQ = tclQuote(request.top);
     const tbQ = tclQuote(request.testbench);
-    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl [file normalize ${tclQuote(join(outputDir, "waveform.tcl"))}] [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
+    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl [file normalize ${tclQuote(join(outputDir, "waveform.tcl"))}] [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot compile.log]}\nset phase elaborate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot elaborate.log]}; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot elaborate.log]}\nset phase simulate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }\nputs "PHASE=simulate"\nputs "PHASE_EXIT_CODE=0"\nputs "SIMULATOR_OUTPUT_BEGIN"\nputs $sim_output\nputs "SIMULATOR_OUTPUT_END"\nputs SIMULATION_OK`;
   }
@@ -423,12 +424,12 @@ async function writeExecutionEvidence(
   status: VivadoResultStatus,
   details: Readonly<Record<string, unknown>> = {},
 ): Promise<void> {
-  const stdout = result.stdout ?? "";
-  const stderr = result.stderr ?? "";
+  const stdout = capOutput(result.stdout ?? "");
+  const stderr = capOutput(result.stderr ?? "");
   await Promise.all([
     writeFile(join(outputDir, "stdout.log"), stdout, "utf8"),
     writeFile(join(outputDir, "stderr.log"), stderr, "utf8"),
-    writeFile(join(outputDir, "tool.log"), `${stdout}${stdout && stderr ? "\n" : ""}${stderr}`, "utf8"),
+    writeFile(join(outputDir, "tool.log"), capOutput(`${stdout}${stdout && stderr ? "\n" : ""}${stderr}`), "utf8"),
   ]);
   const resultName = RESULT_FILE_BY_OPERATION[request.operation];
   if (resultName) {
@@ -752,7 +753,8 @@ const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onP
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
-  let stdout = "", stderr = "", timedOut = false;
+  const stdoutCapture = createOutputCapture(), stderrCapture = createOutputCapture();
+  let timedOut = false;
   if (!child.pid) { reject(new Error("VIVADO_PROCESS_ID_UNAVAILABLE")); return promise; }
   const processStarted = processStartToken(child.pid).then(async (startToken) => {
     const identity = { pid: child.pid!, processGroupId: child.pid!, startToken };
@@ -766,12 +768,12 @@ const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onP
     terminateProcessTree(child.pid!);
     throw error;
   });
-  child.stdout.on("data", (d: Buffer) => stdout += d); child.stderr.on("data", (d: Buffer) => stderr += d);
+  child.stdout.on("data", (d: Buffer) => stdoutCapture.append(d)); child.stderr.on("data", (d: Buffer) => stderrCapture.append(d));
   const timer = setTimeout(() => { timedOut = true; if (child.pid) terminateProcessTree(child.pid); }, timeoutMs);
   const abort = () => { if (child.pid) terminateProcessTree(child.pid); };
   if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
   child.once("error", reject);
-  child.once("close", (exitCode, closeSignal) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); void processStarted.then(() => resolve({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout, stderr, timedOut, signal: closeSignal }), reject); });
+  child.once("close", (exitCode, closeSignal) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); void processStarted.then(() => resolve({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout: stdoutCapture.text(), stderr: stderrCapture.text(), timedOut, signal: closeSignal }), reject); });
   return promise;
 };
 
@@ -800,11 +802,11 @@ export async function createVivadoProcessGuardian(
     detached: process.platform !== "win32",
   });
   if (!child.pid) throw new Error("VIVADO_PROCESS_ID_UNAVAILABLE");
-  let stdout = "";
-  let stderr = "";
+  const stdoutCapture = createOutputCapture();
+  const stderrCapture = createOutputCapture();
   let spawnError: Error | undefined;
-  child.stdout.on("data", (data: Buffer) => stdout += data);
-  child.stderr.on("data", (data: Buffer) => stderr += data);
+  child.stdout.on("data", (data: Buffer) => stdoutCapture.append(data));
+  child.stderr.on("data", (data: Buffer) => stderrCapture.append(data));
   child.once("error", (error) => { spawnError = error; });
   let exited = false;
   const closed = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolveClose) => {
@@ -867,8 +869,8 @@ export async function createVivadoProcessGuardian(
       if (spawnError) throw spawnError;
       return {
         exitCode: ended.exitCode ?? (timedOut ? 124 : 1),
-        stdout,
-        stderr,
+        stdout: stdoutCapture.text(),
+        stderr: stderrCapture.text(),
         timedOut,
         signal: ended.signal,
       };
@@ -1082,7 +1084,12 @@ export class VivadoBatchAdapter {
     const toolchain = { ...base.toolchain, licenseStatus: licenseSuccess ? "available" as const : base.toolchain.licenseStatus };
     if (request.operation === "simulate") {
       const sim = parseSimulatePhases(result.stdout);
-      const verdict = judgeSimulation(sim.simulatorStdout, sim.phaseExitCode, result.exitCode);
+      const digest = sim.simulatorStdout !== undefined
+        ? buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr, simulator: sim.simulatorStdout })
+        : baseDigest;
+      const verdict = digest.performance?.failed
+        ? { status: "failed" as const, errorCode: "VIVADO_SIMULATION_FAILED" }
+        : judgeSimulation(sim.simulatorStdout, sim.phaseExitCode, result.exitCode);
       await writeExecutionEvidence(outputDir, request, result, verdict.status, {
         phase: sim.phase ?? null,
         phaseExitCode: sim.phaseExitCode ?? null,
@@ -1091,9 +1098,6 @@ export class VivadoBatchAdapter {
       // Re-emit the digest with the simulator stream included: TB assertions
       // are attributed to the simulator source and deduplicated against the
       // stdout simulator region.
-      const digest = sim.simulatorStdout !== undefined
-        ? buildLogDigest(request.operation, { stdout: result.stdout, stderr: result.stderr, simulator: sim.simulatorStdout })
-        : baseDigest;
       await writeFile(join(outputDir, LOG_DIGEST_FILE_NAME), JSON.stringify(digest, null, 2), "utf8");
       const ev = await evidence(workspace, request.jobId);
       return { ...base, status: verdict.status, exitCode: result.exitCode, phase: sim.phase, phaseExitCode: sim.phaseExitCode, simulatorStdout: sim.simulatorStdout, toolchain, timeoutMs: effectiveTimeout, stdout: result.stdout, stderr: result.stderr, output: { stdout: result.stdout, stderr: result.stderr }, evidence: ev, errorCode: verdict.errorCode, logDigest: digest };

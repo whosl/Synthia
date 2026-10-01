@@ -1,3 +1,5 @@
+import { parseEvidenceRange } from "../core/src/domain/evidence-range.ts";
+import type { EvidenceRange, EvidencePage } from "../core/src/domain/evidence-range.ts";
 import { createHash } from "node:crypto";
 import type {
   ConnectorCapability,
@@ -43,6 +45,7 @@ export interface ConnectorEndpoint {
   expected_sdk_worker_build_hash?: string;
 }
 export interface DiscoverySnapshot {
+  part_policy?: { mode: "any" } | { mode: "list"; parts: readonly string[] };
   connector_id: string;
   connector_protocol_version: string;
   capability_map_version: string;
@@ -300,6 +303,14 @@ function validateDiscovery(
     version: c.version,
     runClasses: [...c.runClasses],
   }));
+  if (d.part_policy !== undefined) {
+    const policy = d.part_policy;
+    if (!object(policy) || !["any", "list"].includes(String(policy.mode))
+      || (policy.mode === "list" && (!Array.isArray(policy.parts) || !policy.parts.length
+        || policy.parts.some((part) => typeof part !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(part) || part.toLowerCase() === "any")))) {
+      throw new RemoteConnectorError("COMPATIBILITY_REJECTED");
+    }
+  }
   const activeConfigValid = typeof d.active_config_sha256 === "string" && /^[0-9a-f]{64}$/.test(d.active_config_sha256);
   const processInstanceValid = typeof d.worker_process_instance_id === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(d.worker_process_instance_id);
@@ -339,6 +350,8 @@ function capabilitySupports(
   return !!cap && cap.version === version && cap.runClasses.includes(runClass);
 }
 export interface EvidenceContent {
+  readonly range?: EvidencePage;
+  readonly sizeBytes?: number;
   content: string;
   bytes: Uint8Array;
   sha256: string;
@@ -346,6 +359,8 @@ export interface EvidenceContent {
   mediaType: string;
 }
 interface EvidenceContentEnvelope {
+  range?: EvidencePage;
+  content_sha256?: string;
   name: string;
   sha256: string;
   sizeBytes: number;
@@ -675,10 +690,11 @@ export class RemoteConnectorClient {
   async fetchEvidenceContent(
     id: string,
     name: string,
-    options: { complete?: boolean } = {},
+    options: { complete?: boolean; range?: EvidenceRange } = {},
   ): Promise<EvidenceContent> {
     required(id, "jobId");
     required(name, "name");
+    if (options.range) parseEvidenceRange(options.range);
     const payload =
       options.complete === true
         ? { job_id: id, name, complete: true }
@@ -686,7 +702,7 @@ export class RemoteConnectorClient {
     const m = (
       await this.call<EvidenceContentEnvelope>(
         "/jobs/evidence/content",
-        payload,
+        { ...payload, ...(options.range ? { range: options.range } : {}) },
         "0",
         `evidence-content:${id}:${name}:${makeId("nonce")}`,
         this.corr(),
@@ -715,15 +731,27 @@ export class RemoteConnectorClient {
         "EVIDENCE_CORRUPT",
         "complete evidence request was truncated",
       );
-    if (m.truncated && bytes.byteLength > MAX_EVIDENCE_PREVIEW_BYTES)
+    if (!options.range && m.truncated && bytes.byteLength > MAX_EVIDENCE_PREVIEW_BYTES)
       throw new RemoteConnectorError("EVIDENCE_LIMIT_EXCEEDED");
     if (
-      !m.truncated &&
+      !options.range && !m.truncated &&
       (bytes.byteLength !== m.sizeBytes ||
         (await sha256OfBytes(bytes)) !== m.sha256)
     )
       throw new RemoteConnectorError("EVIDENCE_CORRUPT");
+    if (options.range) {
+      const page = m.range;
+      const decoded = new TextDecoder("utf-8").decode(bytes);
+      if (!page || page.offset !== options.range.offset || page.limit !== options.range.limit
+        || !Number.isSafeInteger(page.totalChars) || page.totalChars < page.offset
+        || decoded.length > Math.min(page.limit, page.totalChars - page.offset)
+        || (decoded.length === 0 && page.offset < page.totalChars)
+        || page.nextOffset !== (page.offset + decoded.length < page.totalChars ? page.offset + decoded.length : null)
+        || m.content_sha256 !== await sha256OfBytes(bytes)) throw new RemoteConnectorError("EVIDENCE_CORRUPT", "invalid evidence page");
+    }
     return {
+      ...(m.range ? { range: m.range } : {}),
+      sizeBytes: m.sizeBytes,
       content: new TextDecoder("utf-8").decode(bytes),
       bytes,
       sha256: m.sha256,

@@ -72,6 +72,8 @@ class FakeRuntimeClient implements RuntimeClient {
     project_id: string;
     process_instance_id?: string;
     task: string;
+    permission_skip_all?: boolean;
+    permission_policy_audit?: { actor_type: string; actor_id: string; set_at: string };
     part?: string;
     mode?: "agent";
     project_type?: string;
@@ -96,6 +98,8 @@ class FakeRuntimeClient implements RuntimeClient {
     project_id: string;
     process_instance_id?: string;
     task: string;
+    permission_skip_all?: boolean;
+    permission_policy_audit?: { actor_type: string; actor_id: string; set_at: string };
     part?: string;
     mode?: "agent";
     project_type?: string;
@@ -303,6 +307,22 @@ describe.skipIf(!DATABASE_URL)("task proxy API — real PostgreSQL + fake Runtim
   }
 
   // ─── POST happy path ────────────────────────────────────────────────────────
+
+  test("H20 legacy task create passes initial policy with an attributed durable audit", async () => {
+    const projectId = await createProject();
+    const body = { task: "initial permission", permission_skip_all: true };
+    const key = randomUUID();
+    const first = await callApi(`/api/v1/projects/${projectId}/tasks`, { method: "POST", token: ids.humanToken, headers: { "idempotency-key": key }, body });
+    expect(first.status).toBe(201);
+    expect(fake.lastCreate?.permission_skip_all).toBe(true);
+    expect(fake.lastCreate?.permission_policy_audit).toMatchObject({ actor_type: "human", actor_id: ids.humanUid });
+    const rows = await client.query("SELECT payload FROM outbox_events WHERE aggregate_id=$1 AND event_type='task.permission_policy.configured'", [envelopeData(first.json).agentId]);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].payload.permission_policy_audit).toEqual(fake.lastCreate?.permission_policy_audit);
+    const replay = await callApi(`/api/v1/projects/${projectId}/tasks`, { method: "POST", token: ids.humanToken, headers: { "idempotency-key": key }, body });
+    expect(replay.status).toBe(201);
+    expect(fake.createCount).toBe(1);
+  });
 
   test("POST /tasks: 201 {agentId}; lazily creates default process instance + outbox event", async () => {
     const projectId = await createProject();

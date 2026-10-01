@@ -18,6 +18,10 @@ function stage(operation: "validate_sources" | "simulate" | "synthesize" | "impl
 }
 
 describe("implCells", () => {
+  test("old downstream successes become pending after their input dependencies change", () => {
+    const cells = implCells(summary({ configEpoch: 2, validationState: "pending", stages: [stage("synthesize", "stale", 1)] }));
+    expect(cells.find(cell => cell.key === "synthesize")).toMatchObject({ state: "never", detail: "输入或前置验证已更新，需要重跑" });
+  });
   test("六行齐全：四阶段 + 码流 + STA；未开始时全部 never", () => {
     const cells = implCells(summary());
     expect(cells.map(c => c.key)).toEqual(["validate", "simulate", "synthesize", "implement", "bitstream", "sta"]);

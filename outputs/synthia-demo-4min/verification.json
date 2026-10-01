@@ -1,0 +1,22 @@
+{
+  "base": "https://synthia.wenzhuolin.xyz",
+  "checks": [
+    "entry bottom left",
+    "single scrolling page all sections visible",
+    "timer and slide controls removed",
+    "embedded session retained /projects/p20",
+    "no recursive entry in embed",
+    "embedded session retained /evolution",
+    "no recursive entry in embed",
+    "real evolution stats rendered",
+    "expand embedded app",
+    "collapse embedded app",
+    "reload preserves auth",
+    "mobile no horizontal page overflow",
+    "return to platform retains session",
+    "project workspace includes entry",
+    "entry hidden on login",
+    "no JavaScript errors"
+  ],
+  "errors": []
+}

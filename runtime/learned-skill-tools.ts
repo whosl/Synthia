@@ -117,18 +117,20 @@ function applyTool(): AgentTool {
   return {
     name: APPLY_TOOL,
     description:
-      "显式采用一个已查看的精确 Learned Skill 版本。第一次调用为局部目标创建 primary application；" +
-      "同一局部目标的其它 Skill 必须用 application_id 作为 supporting attach。每个局部目标只能有一个 primary。",
+      "显式采用一个 Learned Skill。第一次调用为局部目标创建 primary application；" +
+      "同一局部目标的其它 Skill 必须用 application_id 作为 supporting attach。每个局部目标只能有一个 primary。" +
+      "version_id 可省略——改传 skill_id 时自动解析当前 active 版本；role 默认 primary，reason_codes 默认 []。",
     parameters: {
       type: "object",
       properties: {
-        version_id: { type: "string" },
+        version_id: { type: "string", description: "search/view 返回的精确版本 id；与 skill_id 二选一。" },
+        skill_id: { type: "string", description: "技能 id；缺 version_id 时解析其 active 版本。" },
         local_goal: { type: "string" },
         reason_codes: { type: "array", items: { type: "string" }, maxItems: 20 },
         role: { type: "string", enum: ["primary", "supporting"] },
         application_id: { type: "string" },
       },
-      required: ["version_id", "local_goal", "reason_codes", "role"],
+      required: ["local_goal"],
       additionalProperties: false,
     },
     async execute(args, ctx) {
@@ -137,13 +139,31 @@ function applyTool(): AgentTool {
       const callId = identifier(ctx.toolCallId);
       if (!callId) return fail("missing_runtime_binding", "Runtime 没有注入 toolCallId，拒绝伪造 application");
       const row = plainObject(args);
-      const versionId = identifier(row?.version_id);
+      // 生产实测模型两次都倒在四字段硬校验上（version_id/local_goal/reason_codes/role），
+      // 除 local_goal 外全部给默认或替代路径——决定"用"这个动作不该被表格填写拦住。
       const localGoal = nonEmpty(row?.local_goal);
-      const reasonCodes = stringList(row?.reason_codes);
-      const role = row?.role;
+      if (!localGoal) return fail("invalid_arguments", "local_goal 必须是非空字符串");
+      const versionIdRaw = identifier(row?.version_id);
+      const skillIdRaw = identifier(row?.skill_id);
+      let versionId = versionIdRaw;
+      if (!versionId) {
+        if (!skillIdRaw) {
+          return fail("invalid_arguments", "version_id 与 skill_id 至少提供一个");
+        }
+        try {
+          const listing = await client.search("", 100);
+          const resolved = listing.items.find((item) => item.skillId === skillIdRaw);
+          if (!resolved) return fail("invalid_arguments", `skill_id 不是可用技能：${skillIdRaw}`);
+          versionId = resolved.versionId;
+        } catch (error) {
+          return caught(error);
+        }
+      }
+      const reasonCodes = row?.reason_codes === undefined ? [] : stringList(row?.reason_codes, 20);
+      const role = row?.role === undefined ? "primary" : row?.role;
       const applicationId = row?.application_id === undefined ? null : identifier(row.application_id);
-      if (!versionId || !localGoal || reasonCodes === null || (role !== "primary" && role !== "supporting")) {
-        return fail("invalid_arguments", "version_id/local_goal/reason_codes/role 不合法");
+      if (reasonCodes === null || (role !== "primary" && role !== "supporting")) {
+        return fail("invalid_arguments", "reason_codes 必须是字符串数组、role 只能是 primary/supporting");
       }
       if (role === "primary" && applicationId !== null) {
         return fail("invalid_application_shape", "primary 必须创建新 application，不能传 application_id");
@@ -210,7 +230,7 @@ function closeTool(): AgentTool {
         evidence_refs: { type: "array", items: { type: "string" }, maxItems: 100 },
         tool_run_refs: { type: "array", items: { type: "string" }, maxItems: 100 },
       },
-      required: ["application_id", "outcome_claim", "human_corrections", "evidence_refs", "tool_run_refs"],
+      required: ["application_id", "outcome_claim", "human_corrections"],
       additionalProperties: false,
     },
     async execute(args, ctx) {
@@ -220,8 +240,8 @@ function closeTool(): AgentTool {
       const applicationId = identifier(row?.application_id);
       const outcomeClaim = row?.outcome_claim === null ? null : nonEmpty(row?.outcome_claim);
       const corrections = integer(row?.human_corrections, 0, 1_000_000);
-      const evidenceRefs = refList(row?.evidence_refs);
-      const toolRunRefs = refList(row?.tool_run_refs);
+      const evidenceRefs = row?.evidence_refs === undefined ? [] : refList(row.evidence_refs);
+      const toolRunRefs = row?.tool_run_refs === undefined ? [] : refList(row.tool_run_refs);
       const sequence = ctx.toolEventSequence;
       if (
         !applicationId
@@ -230,7 +250,13 @@ function closeTool(): AgentTool {
         || evidenceRefs === null
         || toolRunRefs === null
       ) {
-        return fail("invalid_arguments", "application close 参数不合法");
+        return fail("invalid_arguments", `application close 参数不合法：${[
+          !applicationId ? "application_id 必须是有效 ID" : null,
+          row?.outcome_claim !== null && outcomeClaim === null ? "outcome_claim 必须是非空字符串或 null" : null,
+          corrections === null ? "human_corrections 必须是 0–1000000 的整数（0 有效）" : null,
+          evidenceRefs === null ? "evidence_refs 必须是非空字符串数组（最多 100 项）" : null,
+          toolRunRefs === null ? "tool_run_refs 必须是非空字符串数组（最多 100 项）" : null,
+        ].filter(value => value !== null).join("；")}`);
       }
       if (!Number.isInteger(sequence) || sequence! < 0) {
         return fail("missing_runtime_binding", "Core 未返回当前 tool_call event sequence，拒绝无边界封存");
@@ -313,17 +339,13 @@ function integer(value: unknown, min: number, max: number): number | null {
   return Number.isInteger(value) && (value as number) >= min && (value as number) <= max ? value as number : null;
 }
 
-function stringList(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length > 100) return null;
-  const parsed = value.map(identifier);
-  return parsed.every((item): item is string => item !== null) ? parsed : null;
+function stringList(value: unknown, maxItems = 100): readonly string[] | null {
+  if (!Array.isArray(value) || value.length > maxItems) return null;
+  const parsed = value.map(nonEmpty);
+  return parsed.every((item): item is string => item !== null && item.length <= 4096) ? parsed : null;
 }
 
-/** Evidence/tool-run refs cite workspace URIs and job paths, not bare ids. */
+/** References may include workspace paths, hashes, and human-readable annotations. */
 function refList(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length > 100) return null;
-  const parsed = value.map(nonEmpty);
-  return parsed.every((item): item is string => item !== null && !/\s/u.test(item))
-    ? parsed as readonly string[]
-    : null;
+  return stringList(value);
 }

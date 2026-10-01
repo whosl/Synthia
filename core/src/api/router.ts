@@ -35,6 +35,7 @@ import type {
   RequestContext,
 } from "./handlers.ts";
 import { getProjectToolSummaryHandler } from "./tool-summary.ts";
+import { getProjectSettings, updateProjectSettings } from "./project-settings.ts";
 import { WorkspaceError } from "../workspace/paths.ts";
 import {
   approveGateHandler,
@@ -498,6 +499,9 @@ function matchRoute(ctx: RequestContext): RouteMatch | null {
   if (segments.length >= 2) {
     const projectId = segments[1]!;
     const tail = segments[2];
+    if (segments.length === 3 && tail === "settings" && (method === "GET" || method === "PATCH")) {
+      return { handler: method === "GET" ? getProjectSettings : updateProjectSettings, params: { projectId }, requiredScope: method === "GET" ? "core:read" : "core:write" };
+    }
 
     // GET /projects/:projectId
     if (segments.length === 2 && method === "GET") return { handler: getProject, params: { projectId }, requiredScope: "core:read" };

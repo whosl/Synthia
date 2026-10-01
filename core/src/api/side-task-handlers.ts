@@ -11,6 +11,7 @@ import {
 } from "../db/repository.ts";
 import { canonicalRequestHash, sha256Hex } from "../hashing.ts";
 import { sealLearningEpisodeAtStatus } from "../services/learning-episode-seal.ts";
+import { bindJobConfiguration, lockProjectConfiguration } from "../services/project-configuration.ts";
 import type { SourceInput } from "./connector-port.ts";
 import { git, gitRaw, headSha } from "../workspace/git.ts";
 import { WorkspaceError, isRegisterablePath, validateWorkspacePath } from "../workspace/paths.ts";
@@ -43,6 +44,7 @@ import {
   getJobEvidenceHandler,
   getJobStatusHandler,
   mapConnectorError,
+  connectorSubmissionFailureState,
   outboxEvent,
   requireConnector,
   runIdempotent,
@@ -217,6 +219,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
   const workspaceId = `ws-${taskId.slice(5)}`;
 
   const write = await runIdempotent(ctx, `create_side_task:${parentTaskId}`, projectId, async (tx) => {
+    await lockProjectConfiguration(tx, projectId);
     await requireProjectAccess(ctx, tx, projectId);
     await requireConfiguredRuntimeActor(ctx, tx);
     const parentResult = await tx.query(
@@ -387,10 +390,11 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
   if (started.status === "failed" || started.status === "fail_closed" || started.status === "cancelled") {
     const terminal = started.status === "cancelled" ? "cancelled" : started.status;
     await ctx.pool.query(
-      `UPDATE agent_task
+      `WITH locked_project AS MATERIALIZED (SELECT id FROM project WHERE id=$2 FOR UPDATE)
+        UPDATE agent_task
           SET status=$3,adoption_state='discarded',finished_at=now(),updated_at=now(),
               runtime_snapshot=runtime_snapshot || $4::jsonb
-        WHERE id=$1 AND project_id=$2 AND status IN ('queued','running','awaiting_user')`,
+        WHERE id=$1 AND project_id=$2 AND status IN ('queued','running','awaiting_user') AND project_id IN (SELECT id FROM locked_project)`,
       [
         write.result.taskId,
         projectId,
@@ -403,7 +407,7 @@ export async function createSideTaskHandler(ctx: RequestContext): Promise<Handle
   // only a fallback for adapters/tests that do not issue the callback; it never
   // moves a more advanced Core fact backwards.
   await ctx.pool.query(
-    "UPDATE agent_task SET status='running',updated_at=now() WHERE id=$1 AND project_id=$2 AND status='queued'",
+    "WITH locked_project AS MATERIALIZED (SELECT id FROM project WHERE id=$2 FOR UPDATE) UPDATE agent_task SET status='running',updated_at=now() WHERE id=$1 AND project_id=$2 AND status='queued' AND project_id IN (SELECT id FROM locked_project)",
     [write.result.taskId, projectId],
   );
 
@@ -563,6 +567,7 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
   const dispatch = stableSideTaskJobDispatch(ctx, projectId, taskId);
 
   const write = await runIdempotent(ctx, `submit_side_task_job:${taskId}`, projectId, async (tx) => {
+    await lockProjectConfiguration(tx, projectId);
     const task = await requireActiveSideTask(tx, projectId, taskId);
     requireRuntimeBinding(ctx, task);
     const workspace = await lockWorkspace(tx, projectId, task);
@@ -580,10 +585,9 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       }
     }
 
-    // Connector submission is an external side effect. If it accepts the job
-    // and the response is lost, this database transaction rolls back. Derive
-    // every downstream identity from Core's idempotency scope so a retry sends
-    // an identical request and reattaches to the already-accepted job.
+    const configuration = await bindJobConfiguration(tx, projectId, part, constraints, sources, top, taskId);
+    // Commit the activity reservation before dispatch; an uncertain external
+    // outcome must remain visible and block configuration edits.
     const jobId = dispatch.jobId;
     const runClass = "exploratory" as const;
     const inputManifestHash = canonicalRequestHash({
@@ -594,10 +598,11 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       workspaceCommit: workspace.head_commit,
       operation,
       sources,
-      constraints,
+      constraints: configuration.constraints,
       top,
       testbench,
-      part,
+      part: configuration.part,
+      configEpoch: configuration.epoch,
       stopBeforeBitstream,
       timeoutMs,
       runClass,
@@ -611,18 +616,18 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       workspaceCommit: workspace.head_commit,
       runClass,
       sources,
-      constraints,
+      constraints: configuration.constraints,
       top,
       testbench,
-      part,
+      part: configuration.part,
       stopBeforeBitstream,
       timeoutMs,
     };
     await tx.query(
       `INSERT INTO tool_run
          (id,project_id,operation,capability_version,run_class,state,input_manifest_hash,
-          authorization_context,parameters,connector_id,correlation_id)
-       VALUES ($1,$2,$3,'v1','exploratory','submitted',$4,'{}'::jsonb,$5::jsonb,$6,$7)`,
+          authorization_context,parameters,connector_id,correlation_id,config_epoch,validation_chain_hash)
+       VALUES ($1,$2,$3,'v1','exploratory','submitted',$4,'{}'::jsonb,$5::jsonb,$6,$7,$8,$9)`,
       [
         jobId,
         projectId,
@@ -631,6 +636,8 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
         JSON.stringify(parameters),
         connector.connectorId,
         dispatch.correlationId,
+        configuration.epoch,
+        configuration.chainHash,
       ],
     );
     await outboxEvent(tx, ctx, { type: "tool_run", id: jobId }, "tool_run.submitted", {
@@ -642,37 +649,38 @@ export async function submitSideTaskJobHandler(ctx: RequestContext): Promise<Han
       runClass,
       state: "submitted",
     });
-    try {
-      await connector.submitJob({
-        jobId,
+    return { jobId, runClass, state: "submitted", task_id: taskId, workspace_id: task.workspace_id };
+  }, (tx) => authorizeRuntimeTaskWrite(ctx, tx, projectId, taskId, true));
+
+  const stored = (await ctx.pool.query("SELECT state,parameters,input_manifest_hash FROM tool_run WHERE id=$1 AND project_id=$2", [write.result.jobId, projectId])).rows[0];
+  if (!stored) throw notFoundError(`job not found: ${write.result.jobId}`);
+  if (write.replayed && !["submitted", "unknown_effect"].includes(stored.state)) return { status: 201, data: write.result };
+  const parameters = stored.parameters;
+  try {
+    const accepted = await connector.submitJob({
+        jobId: write.result.jobId,
         projectId,
         operation,
-        runClass,
+        runClass: "exploratory",
         idempotencyKey: dispatch.idempotencyKey,
         correlationId: dispatch.correlationId,
-        inputHash: inputManifestHash,
+        inputHash: stored.input_manifest_hash,
         actor: { actorType: ctx.identity.actorType, actorId: ctx.identity.actorId },
         parameters: {
-          sources,
-          constraints,
-          ...(top ? { top } : {}),
-          ...(testbench ? { testbench } : {}),
-          ...(part ? { part } : {}),
-          ...(stopBeforeBitstream !== undefined ? { stopBeforeBitstream } : {}),
-          ...(timeoutMs ? { timeoutMs } : {}),
+          sources: parameters.sources,
+          constraints: parameters.constraints,
+          ...(parameters.top ? { top: parameters.top } : {}),
+          ...(parameters.testbench ? { testbench: parameters.testbench } : {}),
+          ...(parameters.part ? { part: parameters.part } : {}),
+          ...(parameters.stopBeforeBitstream !== undefined ? { stopBeforeBitstream: parameters.stopBeforeBitstream } : {}),
+          ...(parameters.timeoutMs ? { timeoutMs: parameters.timeoutMs } : {}),
         },
       });
-    } catch (error) {
-      throw mapConnectorError(error);
-    }
-    return {
-      jobId,
-      runClass,
-      state: "submitted",
-      task_id: taskId,
-      workspace_id: task.workspace_id,
-    };
-  }, (tx) => authorizeRuntimeTaskWrite(ctx, tx, projectId, taskId, true));
+    await ctx.pool.query("UPDATE tool_run SET state=$3::tool_run_state WHERE id=$1 AND project_id=$2 AND state IN ('submitted','unknown_effect')", [write.result.jobId, projectId, accepted.state]);
+  } catch (error) {
+    await ctx.pool.query("UPDATE tool_run SET state=$4::tool_run_state,error_code=$3,end_time=CASE WHEN $4='rejected' THEN now() ELSE NULL END WHERE id=$1 AND project_id=$2 AND state IN ('submitted','unknown_effect')", [write.result.jobId, projectId, mapConnectorError(error).code, connectorSubmissionFailureState(error)]);
+    throw mapConnectorError(error);
+  }
   return { status: 201, data: write.result };
 }
 
@@ -1552,6 +1560,7 @@ async function lockSideTask(
   projectId: string,
   taskId: string,
 ): Promise<SideTaskRow> {
+  await lockProjectConfiguration(tx, projectId);
   const { rows } = await tx.query(
     "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2 AND kind='side' FOR UPDATE",
     [taskId, projectId],
@@ -1566,6 +1575,7 @@ async function lockAgentTask(
   projectId: string,
   taskId: string,
 ): Promise<AgentTaskRow> {
+  await lockProjectConfiguration(tx, projectId);
   const { rows } = await tx.query(
     "SELECT * FROM agent_task WHERE id=$1 AND project_id=$2 FOR UPDATE",
     [taskId, projectId],

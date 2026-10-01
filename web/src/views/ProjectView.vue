@@ -5,6 +5,14 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vu
 import { toast } from "vue-sonner";
 import { createRefreshQueue } from "../domain/refresh-queue.ts";
 import AppNavigation from "../components/layout/AppNavigation.vue";
+const ProjectSettingsDialog = defineAsyncComponent(() => import("../components/projects/ProjectSettingsDialog.vue"));
+const settingsOpen = ref(false);
+
+async function onSettingsSaved(): Promise<void> {
+  await initializeProject();
+  await refreshToolSummary();
+  await loadProjectRecords();
+}
 import { createFileTab, tabAfterClose, type WorkspaceFileTab } from "../domain/workspace-tabs.ts";
 import Button from "../components/ui/AppButton.vue";
 import EngineeringOverviewPanel from "../components/projects/EngineeringOverviewPanel.vue";
@@ -2672,6 +2680,8 @@ function onToggleChatOverlay(): void {
         @logout="onLogout"
       >
         <template #progress>
+          <ProjectToolbarButton v-if="project?.project_type === 'free'" :expanded="settingsOpen" @click="settingsOpen = !settingsOpen">项目设置</ProjectToolbarButton>
+          <span v-if="toolSummary?.configEpoch" class="text-xs text-fg-secondary">配置版本 {{ toolSummary.configEpoch }} · {{ toolSummary.validationState === 'passed' ? '已通过' : '待验证' }}</span>
           <StageStatusChip
             :type-label="projectTypeLabel"
             :profile-label="projectProfileLabel"
@@ -2707,6 +2717,7 @@ function onToggleChatOverlay(): void {
         </template>
       </TopBar>
     </header>
+    <ProjectSettingsDialog v-if="settingsOpen" :client="api" :project-id="projectId" @close="settingsOpen = false" @saved="onSettingsSaved" />
     <div v-if="loadErrorText" class="flex flex-none items-center justify-between gap-3 bg-danger/12 px-4 py-2 text-xs text-danger" role="alert"><span>{{ loadErrorText }}</span><Button size="sm" :disabled="loading" @click="project ? refresh() : initializeProject()">重试加载</Button></div>
     <div v-if="loading" class="grid flex-1 place-items-center text-fg-secondary" role="status">正在准备项目工作区…</div>
 

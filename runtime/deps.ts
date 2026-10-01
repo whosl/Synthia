@@ -99,6 +99,7 @@ export function buildCoreApiConnector(
   projectId: string,
   taskBinding?: CoreApiTaskJobBinding,
   env: Record<string, string | undefined> = process.env,
+  boundTaskId?: string,
 ): CoreApiConnector {
   const cfg = taskBinding === undefined
     ? resolveCoreApiConfig(env)
@@ -107,6 +108,7 @@ export function buildCoreApiConnector(
     baseUrl: cfg.baseUrl,
     token: cfg.token,
     projectId,
+    ...(boundTaskId ? { boundTaskId } : {}),
     ...(taskBinding ?? {}),
   });
 }

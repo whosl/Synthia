@@ -372,13 +372,15 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
     return /socket connection was closed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|fetch failed|network|Connection closed unexpectedly|aborted/i.test(text);
   }
 
-  private async withTransportRetry<T>(op: () => Promise<T>): Promise<T> {
+  private async withTransportRetry<T>(op: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const attempts = Math.max(1, this.config.networkRetries ?? 2) + 1;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
+        signal?.throwIfAborted();
         return await op();
       } catch (err) {
+        signal?.throwIfAborted();
         lastErr = err;
         if (attempt === attempts || !this.isTransientTransportError(err)) throw err;
         const backoffMs = 2_000 * attempt;
@@ -417,13 +419,13 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
     }
   }
 
-  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
+  async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[], signal?: AbortSignal): Promise<ChatTurn> {
     const context = agentMessagesToContext(messages, tools, this.piModel, this.now);
     const message = await this.withTransportRetry(() => this.requireSuccess(this.completeFn(
       this.piModel,
       context,
-      this.options(this.config.chatMaxTokens ?? 16_384),
-    )));
+      this.options(this.config.chatMaxTokens ?? 16_384, { signal }),
+    )), signal);
     return assistantToChatTurn(message);
   }
 
@@ -431,6 +433,7 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
     messages: readonly AgentMessage[],
     tools: readonly AgentTool[],
     opts: {
+      signal?: AbortSignal;
       onTextStart?: () => void;
       onDelta?: (text: string) => void;
       onReasoningStart?: () => void;
@@ -439,6 +442,8 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
   ): Promise<ChatTurn> {
     const context = agentMessagesToContext(messages, tools, this.piModel, this.now);
     const controller = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([controller.signal, opts.signal]) : controller.signal;
+    signal.throwIfAborted();
     const idleMs = this.config.streamIdleTimeoutMs ?? 120_000;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let emitted = false;
@@ -456,8 +461,8 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
       const eventStream = await this.withTransportRetry(() => Promise.resolve(this.streamFn(
         this.piModel,
         context,
-        this.options(this.config.chatMaxTokens ?? 16_384, { signal: controller.signal }),
-      )));
+        this.options(this.config.chatMaxTokens ?? 16_384, { signal }),
+      )), signal);
       for await (const event of eventStream) {
         bump();
         if (event.type === "text_start") { emitted = true; opts.onTextStart?.(); }
@@ -467,8 +472,9 @@ export class PiAnthropicRuntimeModel implements RuntimeModel {
       }
       return assistantToChatTurn(await this.requireSuccess(eventStream.result()));
     } catch (error) {
+      opts.signal?.throwIfAborted();
       if (!emitted && this.config.streamFallbackToBuffered !== false) {
-        return this.chat(messages, tools);
+        return this.chat(messages, tools, opts.signal);
       }
       throw error;
     } finally {
