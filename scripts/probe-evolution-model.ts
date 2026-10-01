@@ -1,5 +1,5 @@
 // Probe: what does GLM actually return for a distiller-shaped prompt?
-import { createRuntimeModelFromEnv } from "../runtime/pi-responses-model.ts";
+import { createRuntimeModelFromEnv } from "../runtime/runtime-model.ts";
 import { DISTILLER_SYSTEM_PROMPT } from "../runtime/evolution-workers.ts";
 
 const model = createRuntimeModelFromEnv();

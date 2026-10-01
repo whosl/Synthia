@@ -1,5 +1,7 @@
 /** Runtime-wide shared helpers. Each was previously duplicated across 3–5 files. */
 
+import type { VivadoResult } from "./types.ts";
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -34,7 +36,7 @@ export const TERMINAL_STATES: ReadonlySet<string> = new Set([
  * Map a Connector job state to a VivadoResult status.
  * Shared by remote-connector and core-api-connector (identical semantics).
  */
-export function jobStateToResultStatus(state: string): string {
+export function jobStateToResultStatus(state: string): VivadoResult["status"] {
   switch (state) {
     case "succeeded": return "succeeded";
     case "timeout": return "timeout";

@@ -9,7 +9,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createConnection } from "node:net";
 import { WorkerRuntime, type WorkerExecution, type WorkerRuntimeOptions, type WorkerExecutionResult } from "./worker.ts";
-import { createVivadoProcessGuardian, VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest, type CommandRunner } from "./vivado.ts";
+import { VivadoBatchAdapter, VIVADO_CAPABILITIES, type VivadoRequest, type CommandRunner } from "./vivado.ts";
 import type { JobRequest } from "./index.ts";
 import { REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type DiscoverySnapshot } from "./remote.ts";
 import { canonicalRequestHash } from "../core/src/hashing.ts";

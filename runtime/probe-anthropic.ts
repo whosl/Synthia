@@ -27,7 +27,7 @@ const addTool: AgentTool = {
     required: ["a", "b"],
   },
   async execute(args: Record<string, unknown>) {
-    return String(Number(args.a) + Number(args.b));
+    return { content: String(Number(args.a) + Number(args.b)) };
   },
 };
 

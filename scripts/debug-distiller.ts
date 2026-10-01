@@ -1,5 +1,5 @@
 // Inline distiller debug: claim one queued run and surface the exact failure.
-import { createRuntimeModelFromEnv } from "../runtime/pi-responses-model.ts";
+import { createRuntimeModelFromEnv } from "../runtime/runtime-model.ts";
 import { EvolutionModelAdapter } from "../runtime/evolution-model-adapter.ts";
 import { CoreDistillerEvolutionClient } from "../runtime/evolution-worker-client.ts";
 import { DistillerWorker } from "../runtime/evolution-workers.ts";

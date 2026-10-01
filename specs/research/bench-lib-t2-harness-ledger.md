@@ -86,6 +86,15 @@
 
 验证使用独立本地 PostgreSQL `:55439/synthia_harness_20261002`，不使用生产数据库。测试结果与窗口交付说明见 [platform-harness-batch-20261002.md](platform-harness-batch-20261002.md)。未来部署须按窗口协议更新：H35/H36 → Runtime；H34 → Worker；H37 → Core + Runtime + Worker；H20 → Core + Runtime。本批新增策略复用现有 JSON/state/outbox，无额外数据库迁移。
 
+## 四c、部署前 Core / Runtime / Worker 消融（platform-ops，未部署）
+
+以已包含 H35/H36/H37、H34、H20 的 `6fc0d73` 为基线，本地删除退休评测流程、旧 Responses 转换、无消费者的 SkillLoader 子类、Worker 第二套 guardian / 进程身份采集 / sealed workspace 分支。生产 TypeScript 净减少 **937 行**；canonical Worker bundle 从 **76,698** 降至 **69,408 字节**，SHA-256 `15c430a29177b3fb44c3820ba48cc8cf557121cee8a87fd193693e03d169514c`，两次本地构建字节一致。
+
+- H35/H36/H37/H34/H20 修复保留，仍为本地已修、待窗口部署；未改生产鉴权、会话状态或真实 application。
+- 对照移除 Core 授权、H36 watchdog、H34 独立吞吐判定，分别检出 1 / 1 / 3 项失败，因此保护保留；Unix/Windows 实际 guardian、5 MiB 捕获和证据完整性保留。
+- 双方 root 回归均 965 pass / 400 skip / 0 fail；34 组调用/结果完全一致。DB 回归与完整方法见 [platform-predeploy-ablation.md](platform-predeploy-ablation.md)，机器记录见 [platform-predeploy-ablation.json](platform-predeploy-ablation.json)。
+- 本轮仅在 worktree 开发、隔离测试和构建，未部署/重启 Core、Runtime、Worker。生效仍需三件套窗口，无新增数据库迁移；本地构建不替代 Windows Gate / 正式 release。
+
 ## 五、深核记录（2026-09-14 审核轮）
 
 对第二节可疑项逐一对源码/库实证：H25（Map 内存 + Core 无 reaper，grep 全仓无 job 回收）✅、H24（约束枚举 8 种）✅、H23（0014 唯一漂移）✅、H15（模式收窄为行首 FAIL）✅、H16（映射链完整）✅、H26（事务内网络调用，注释自认设计）✅；**两项被修正**：H17"来源不明"撤回（键归属操作者脚本）、H19 收窄（idle 态正常）；H22 收窄（SSE 面有活性，REST 面无）。取证方法沉淀：idempotency_records 的键模式是调用方指纹（`ui-run-*`=UI 按钮、`p17-*-1`=操作者脚本、会话提交另有键型）。

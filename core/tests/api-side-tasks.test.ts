@@ -1182,8 +1182,10 @@ describe.skipIf(!DATABASE_URL)("P3 side task API — PostgreSQL + isolated Git c
         `/api/v1/projects/${seeded.projectId}`,
         { token },
       );
-      expect(invalid.status).toBe(401);
-      expect(error(invalid.json).code).toBe("authorization");
+      // Capability credentials with companion scopes use the shared
+      // fail-closed scope contract, also covered by self-evolution-contract.
+      expect(invalid.status).toBe(403);
+      expect(error(invalid.json).code).toBe("EVOLUTION_SCOPE_FORBIDDEN");
     }
 
     const after = await harness.client.query(

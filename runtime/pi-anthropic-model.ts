@@ -40,7 +40,7 @@ import type {
   UpstreamArtifacts,
   XdcGeneration,
 } from "./types.ts";
-import type { RuntimeModel } from "./pi-responses-model.ts";
+import type { RuntimeModel } from "./runtime-model.ts";
 
 type PiAnthropicModel = Model<"anthropic-messages">;
 type PiAnthropicComplete = (

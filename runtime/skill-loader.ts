@@ -151,20 +151,3 @@ function methodCore(md: string): string {
 function evidenceBlock(s: LoadedSkill): string {
   return `EVIDENCE REQUIREMENTS:\n- ${s.evidence.join("\n- ")}`;
 }
-
-/** In-memory loader for tests: skips disk reads by injecting loaded skills. */
-export class InMemorySkillLoader extends SkillLoader {
-  private readonly injected: Partial<Record<LoopSkillId, LoadedSkill>>;
-  constructor(injected: Partial<Record<LoopSkillId, LoadedSkill>>) {
-    super("__inmemory__");
-    this.injected = injected;
-  }
-  async loadSkill(id: LoopSkillId): Promise<LoadedSkill> {
-    const s = this.injected[id];
-    if (!s) throw new Error(`in-memory skill loader: ${id} not provided`);
-    return s;
-  }
-  async loadPack(): Promise<SkillPack> {
-    throw new Error("in-memory skill loader has no pack");
-  }
-}

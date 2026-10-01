@@ -1,10 +1,10 @@
 import { capOutput, createOutputCapture } from "./output-capture.ts";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { access, constants } from "node:fs/promises";
 import { realpathSync, statSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ConnectorCapability, EvidenceManifest } from "./index.ts";
 import { buildLogDigest, LOG_DIGEST_FILE_NAME, type LogDigest } from "./log-digest.ts";
 
@@ -23,24 +23,6 @@ export interface ConstraintInput { readonly path: string; readonly content: stri
 export interface ImplementRequest extends VivadoRequestBase { readonly operation: "implement"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string; readonly constraints?: readonly ConstraintInput[]; readonly stopBeforeBitstream?: boolean; readonly generateTrialBitstream?: boolean }
 export interface ReportRequest extends VivadoRequestBase { readonly operation: "report_drc" | "report_sta" | "report_resources"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string }
 export type VivadoRequest = DiscoverToolchainRequest | QueryPartsRequest | ValidateSourcesRequest | SimulateRequest | SynthesizeRequest | ImplementRequest | ReportRequest;
-interface EvolutionEvalVivadoBase {
-  readonly schema: "evolution-eval-vivado-request.v1";
-  readonly evalJobId: string;
-  readonly jobId: string;
-  readonly projectId: string;
-  readonly runClass: "evolution_eval";
-  readonly dispatchRequestHash: string;
-  readonly workspaceManifestHash: string;
-  readonly sealedInputProjectionHash: string;
-  readonly toolchainProfileHash: string;
-  readonly deadlineAt: string;
-  readonly timeoutMs: number;
-}
-export type EvolutionEvalVivadoRequest =
-  | (EvolutionEvalVivadoBase & { readonly operation: "validate_sources"; readonly sources: readonly SourceInput[]; readonly top: string | null })
-  | (EvolutionEvalVivadoBase & { readonly operation: "simulate"; readonly sources: readonly SourceInput[]; readonly top: string; readonly testbench: string })
-  | (EvolutionEvalVivadoBase & { readonly operation: "synthesize"; readonly sources: readonly SourceInput[]; readonly top: string; readonly part: string })
-  | (EvolutionEvalVivadoBase & { readonly operation: "implement"; readonly sources: readonly SourceInput[]; readonly constraints: readonly ConstraintInput[]; readonly top: string; readonly part: string; readonly generateTrialBitstream: boolean });
 export interface CapabilityDefinition<I extends VivadoRequest = VivadoRequest> extends ConnectorCapability { readonly operation: I["operation"]; readonly inputKind: string; readonly outputKind: string; readonly execution: "vivado_batch" }
 export const VIVADO_CAPABILITIES: readonly CapabilityDefinition[] = [
   ["discover_toolchain", "node", "toolchain_snapshot"], ["query_parts", "part_query", "part_list"], ["validate_sources", "source_manifest", "source_validation"], ["simulate", "simulation_request", "simulation_result"], ["synthesize", "synthesis_request", "synthesis_result"], ["implement", "implementation_request", "bitstream_artifact"], ["report_drc", "design_request", "drc_report"], ["report_sta", "design_request", "sta_report"], ["report_resources", "design_request", "resource_report"],
@@ -61,14 +43,7 @@ export interface EvidenceReference { readonly name: string; readonly uri: string
 export interface ToolchainMetadata { readonly binary: string; readonly vivadoVersion?: string; readonly licenseStatus: "available" | "unavailable" | "unknown"; readonly part?: string; readonly profileHash?: string }
 export interface VivadoExecutionResult { readonly status: VivadoResultStatus; readonly jobId: string; readonly operation: VivadoOperation; readonly command: readonly string[]; readonly inputSha256: string; readonly workspace: string; readonly toolchain: ToolchainMetadata; readonly exitCode?: number; readonly phase?: string; readonly phaseExitCode?: number; readonly simulatorStdout?: string; readonly stdout?: string; readonly stderr?: string; readonly output?: unknown; readonly errorCode?: string; readonly error?: Record<string, unknown>; readonly evidence: EvidenceManifest; readonly unsupportedReason?: "BINARY_UNAVAILABLE" | "LICENSE_UNAVAILABLE" | "PART_UNAVAILABLE"; readonly timeoutMs?: number; readonly timedOut?: boolean; readonly signal?: string | null; readonly logDigest?: LogDigest }
 export interface CommandResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly signal?: string | null }
-export interface VivadoProcessIdentity { readonly pid: number; readonly processGroupId: number; readonly startToken: string }
-export type ProcessStartObserver = (identity: VivadoProcessIdentity) => boolean | void | Promise<boolean | void>;
-export type CommandRunner = (command: string, args: readonly string[], cwd: string, timeoutMs: number, signal?: AbortSignal, onProcessStarted?: ProcessStartObserver) => Promise<CommandResult>;
-export interface VivadoProcessGuardian {
-  readonly identity: VivadoProcessIdentity;
-  readonly run: CommandRunner;
-  close(): Promise<void>;
-}
+export type CommandRunner = (command: string, args: readonly string[], cwd: string, timeoutMs: number, signal?: AbortSignal) => Promise<CommandResult>;
 export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner }
 export const VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -289,49 +264,6 @@ export function validateVivadoRequest(request: VivadoRequest): void {
   if ("part" in request && request.toolchain?.part !== undefined && request.part !== request.toolchain.part) reject("TOOLCHAIN_PART_MISMATCH");
 }
 
-export function validateEvolutionEvalVivadoRequest(input: unknown): EvolutionEvalVivadoRequest {
-  if (!isPlainObject(input)) reject("INVALID_REQUEST");
-  const request = input as Record<string, unknown>;
-  const operation = request.operation;
-  if (!(operation === "validate_sources" || operation === "simulate" || operation === "synthesize" || operation === "implement")) reject("CAPABILITY_UNAVAILABLE");
-  const keysByOperation: Readonly<Record<typeof operation & string, readonly string[]>> = {
-    validate_sources: ["deadlineAt", "dispatchRequestHash", "evalJobId", "jobId", "operation", "projectId", "runClass", "schema", "sealedInputProjectionHash", "sources", "timeoutMs", "toolchainProfileHash", "top", "workspaceManifestHash"],
-    simulate: ["deadlineAt", "dispatchRequestHash", "evalJobId", "jobId", "operation", "projectId", "runClass", "schema", "sealedInputProjectionHash", "sources", "testbench", "timeoutMs", "toolchainProfileHash", "top", "workspaceManifestHash"],
-    synthesize: ["deadlineAt", "dispatchRequestHash", "evalJobId", "jobId", "operation", "part", "projectId", "runClass", "schema", "sealedInputProjectionHash", "sources", "timeoutMs", "toolchainProfileHash", "top", "workspaceManifestHash"],
-    implement: ["constraints", "deadlineAt", "dispatchRequestHash", "evalJobId", "generateTrialBitstream", "jobId", "operation", "part", "projectId", "runClass", "schema", "sealedInputProjectionHash", "sources", "timeoutMs", "toolchainProfileHash", "top", "workspaceManifestHash"],
-  };
-  const actual = Reflect.ownKeys(request);
-  const expected = keysByOperation[operation];
-  if (actual.some((key) => typeof key !== "string") || actual.length !== expected.length
-    || [...actual as string[]].sort().some((key, index) => key !== [...expected].sort()[index])) reject("INVALID_REQUEST");
-  if (request.schema !== "evolution-eval-vivado-request.v1" || request.runClass !== "evolution_eval") reject("INVALID_RUN_CLASS");
-  if (!Array.isArray(request.sources) || request.sources.length < 1 || request.sources.length > 512) reject("INVALID_SOURCES");
-  for (const source of request.sources) {
-    if (!isPlainObject(source) || Reflect.ownKeys(source).length !== 3
-      || !["content", "mediaType", "path"].every((key) => Object.prototype.hasOwnProperty.call(source, key))) reject("INVALID_SOURCE");
-  }
-  if (operation === "implement") {
-    if (!Array.isArray(request.constraints) || request.constraints.length > 128) reject("INVALID_CONSTRAINTS");
-    for (const constraint of request.constraints) {
-      if (!isPlainObject(constraint) || Reflect.ownKeys(constraint).length !== 3
-        || !["content", "mediaType", "path"].every((key) => Object.prototype.hasOwnProperty.call(constraint, key))) reject("INVALID_CONSTRAINT");
-    }
-  }
-  for (const key of ["dispatchRequestHash", "workspaceManifestHash", "sealedInputProjectionHash", "toolchainProfileHash"] as const) {
-    if (typeof request[key] !== "string" || !/^[0-9a-f]{64}$/.test(request[key])) reject("INVALID_INPUT_HASH");
-  }
-  if (typeof request.deadlineAt !== "string" || !request.deadlineAt.endsWith("Z") || !Number.isFinite(Date.parse(request.deadlineAt))) reject("INVALID_TIMEOUT");
-  const generic = operation === "validate_sources"
-    ? { operation, jobId: request.jobId, projectId: request.projectId, runClass: request.runClass, sources: request.sources, ...(request.top === null ? {} : { top: request.top }), inputHash: request.workspaceManifestHash, toolchainHash: request.toolchainProfileHash, timeoutMs: request.timeoutMs }
-    : operation === "simulate"
-      ? { operation, jobId: request.jobId, projectId: request.projectId, runClass: request.runClass, sources: request.sources, top: request.top, testbench: request.testbench, inputHash: request.workspaceManifestHash, toolchainHash: request.toolchainProfileHash, timeoutMs: request.timeoutMs }
-      : operation === "synthesize"
-        ? { operation, jobId: request.jobId, projectId: request.projectId, runClass: request.runClass, sources: request.sources, top: request.top, part: request.part, inputHash: request.workspaceManifestHash, toolchainHash: request.toolchainProfileHash, timeoutMs: request.timeoutMs }
-        : { operation, jobId: request.jobId, projectId: request.projectId, runClass: request.runClass, sources: request.sources, constraints: request.constraints, top: request.top, part: request.part, generateTrialBitstream: request.generateTrialBitstream, inputHash: request.workspaceManifestHash, toolchainHash: request.toolchainProfileHash, timeoutMs: request.timeoutMs };
-  validateVivadoRequest(generic as VivadoRequest);
-  if (typeof request.evalJobId !== "string" || !idRe.test(request.evalJobId)) reject("INVALID_ID");
-  return structuredClone(input) as EvolutionEvalVivadoRequest;
-}
 function tclQuote(value: string): string { return `{${value.replace(/[{}]/g, c => `\\${c}`)}}`; }
 function readSourceLine(source: SourceInput, inputDir: string): string {
   const target = tclQuote(join(inputDir, source.path));
@@ -398,7 +330,7 @@ function evidenceInputManifest(request: VivadoRequest): Record<string, unknown> 
     top: "top" in request ? request.top : null,
     testbench: request.operation === "simulate" ? request.testbench : null,
     part: request.operation === "synthesize" || request.operation === "implement"
-      ? ("part" in request ? request.part : request.toolchain?.part ?? null)
+      ? request.part
       : null,
     stopBeforeBitstream: request.operation === "implement" ? request.stopBeforeBitstream === true : null,
     sources: "sources" in request
@@ -476,72 +408,6 @@ function terminateProcessTree(pid: number): void {
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
   }, 1_000).unref();
-}
-const WINDOWS_PROCESS_IDENTITY_SOURCE = String.raw`
-$ProgressPreference = 'SilentlyContinue'
-$ErrorActionPreference = 'Stop'
-$identityPid = [int]$env:SYNTHIA_PROCESS_IDENTITY_PID
-$process = Get-Process -Id $identityPid
-$operatingSystem = Get-CimInstance Win32_OperatingSystem
-$cimProcess = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $identityPid)
-if ($null -eq $cimProcess -or [string]::IsNullOrWhiteSpace([string]$cimProcess.CommandLine)) { exit 19 }
-$facts = $operatingSystem.LastBootUpTime.ToUniversalTime().Ticks.ToString() + ':' +
-  $process.StartTime.ToUniversalTime().Ticks.ToString() + ':' + [string]$cimProcess.CommandLine
-$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($facts))
-[Console]::Out.Write('SYNTHIA_PROCESS_IDENTITY:' + $env:SYNTHIA_PROCESS_IDENTITY_NONCE + ':' + $encoded)
-`;
-
-export function readWindowsProcessIdentityFacts(pid: number): string | null {
-  if (!Number.isSafeInteger(pid) || pid < 1) return null;
-  const nonce = randomBytes(16).toString("hex");
-  const result = spawnSync("powershell.exe", [
-    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-EncodedCommand", Buffer.from(WINDOWS_PROCESS_IDENTITY_SOURCE, "utf16le").toString("base64"),
-  ], {
-    encoding: "utf8",
-    windowsHide: true,
-    env: {
-      ...process.env,
-      SYNTHIA_PROCESS_IDENTITY_PID: String(pid),
-      SYNTHIA_PROCESS_IDENTITY_NONCE: nonce,
-    },
-  });
-  if (result.error || result.status !== 0 || result.stderr.trim() !== "") return null;
-  const prefix = `SYNTHIA_PROCESS_IDENTITY:${nonce}:`;
-  if (!result.stdout.startsWith(prefix)) return null;
-  const encoded = result.stdout.slice(prefix.length);
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
-  const bytes = Buffer.from(encoded, "base64");
-  if (bytes.toString("base64") !== encoded) return null;
-  let facts: string;
-  try { facts = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return null; }
-  return /^\d+:\d+:.+$/s.test(facts) ? facts : null;
-}
-
-async function processStartToken(pid: number): Promise<string> {
-  let source = "";
-  if (process.platform === "linux") {
-    const statLine = await readFile(`/proc/${pid}/stat`, "utf8");
-    const tail = statLine.slice(statLine.lastIndexOf(")") + 2).trim().split(/\s+/);
-    const bootId = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
-    if (!tail[19] || !bootId) throw new Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");
-    source = `${bootId}:${pid}:${tail[19]}`;
-  } else if (process.platform === "win32") {
-    const facts = readWindowsProcessIdentityFacts(pid);
-    if (!facts) throw new Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");
-    source = `${pid}:${facts}`;
-  } else {
-    const bootResult = spawnSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8" });
-    const factsResult = spawnSync("ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)], { encoding: "utf8" });
-    const boot = bootResult.stdout.trim();
-    const facts = factsResult.stdout.trim();
-    if (bootResult.error || bootResult.status !== 0 || factsResult.error || factsResult.status !== 0 || !boot || !facts) {
-      throw new Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");
-    }
-    source = `${boot}:${pid}:${facts}`;
-  }
-  if (!source.trim()) throw new Error("VIVADO_PROCESS_IDENTITY_UNAVAILABLE");
-  return hash(source);
 }
 const PROCESS_GUARDIAN_SOURCE = String.raw`
 const { spawn } = require("node:child_process");
@@ -740,14 +606,15 @@ function windowsGuardianRequest(command: string, args: readonly string[], cwd: s
   };
 }
 
-const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onProcessStarted) => {
-  const { promise, resolve, reject } = Promise.withResolvers<CommandResult>();
-  const nonce = randomBytes(16).toString("hex");
-  const windowsGuardian = `${WINDOWS_JOB_GUARDIAN_SOURCE}\n# ${nonce}`;
+const defaultRunner: CommandRunner = async (command, args, cwd, timeoutMs, signal) => {
+  if (signal?.aborted) throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
+  const request = JSON.stringify(process.platform === "win32"
+    ? windowsGuardianRequest(command, args, cwd)
+    : { command, args: [...args], cwd });
   const guardianCommand = process.platform === "win32" ? "powershell.exe" : process.execPath;
   const guardianArgs = process.platform === "win32"
-    ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(windowsGuardian, "utf16le").toString("base64")]
-    : ["-e", PROCESS_GUARDIAN_SOURCE, nonce];
+    ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(WINDOWS_JOB_GUARDIAN_SOURCE, "utf16le").toString("base64")]
+    : ["-e", PROCESS_GUARDIAN_SOURCE];
   const child = spawn(guardianCommand, guardianArgs, {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
@@ -755,133 +622,26 @@ const defaultRunner: CommandRunner = (command, args, cwd, timeoutMs, signal, onP
   });
   const stdoutCapture = createOutputCapture(), stderrCapture = createOutputCapture();
   let timedOut = false;
-  if (!child.pid) { reject(new Error("VIVADO_PROCESS_ID_UNAVAILABLE")); return promise; }
-  const processStarted = processStartToken(child.pid).then(async (startToken) => {
-    const identity = { pid: child.pid!, processGroupId: child.pid!, startToken };
-    if (await onProcessStarted?.(identity) === false) throw new Error("VIVADO_PROCESS_IDENTITY_NOT_DURABLE");
-    if (signal?.aborted) throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
-    child.stdin.end(JSON.stringify(process.platform === "win32"
-      ? windowsGuardianRequest(command, args, cwd)
-      : { command, args: [...args], cwd }));
-    return identity;
-  }).catch((error) => {
-    terminateProcessTree(child.pid!);
-    throw error;
-  });
-  child.stdout.on("data", (d: Buffer) => stdoutCapture.append(d)); child.stderr.on("data", (d: Buffer) => stderrCapture.append(d));
-  const timer = setTimeout(() => { timedOut = true; if (child.pid) terminateProcessTree(child.pid); }, timeoutMs);
-  const abort = () => { if (child.pid) terminateProcessTree(child.pid); };
-  if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
-  child.once("error", reject);
-  child.once("close", (exitCode, closeSignal) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); void processStarted.then(() => resolve({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout: stdoutCapture.text(), stderr: stderrCapture.text(), timedOut, signal: closeSignal }), reject); });
-  return promise;
-};
-
-/**
- * Starts an inert, durably-owned process supervisor before any fallible eval
- * preparation. The command cannot execute until `run` is called, and closing
- * the supervisor kills its Unix process group or Windows kill-on-close Job.
- */
-export async function createVivadoProcessGuardian(
-  cwd: string,
-  signal?: AbortSignal,
-  onProcessStarted?: ProcessStartObserver,
-  identityReader: (pid: number) => Promise<string> = processStartToken,
-  beforeLaunch?: () => boolean | void | Promise<boolean | void>,
-  terminateTree: (pid: number) => void = terminateProcessTree,
-): Promise<VivadoProcessGuardian> {
-  const nonce = randomBytes(16).toString("hex");
-  const windowsGuardian = `${WINDOWS_JOB_GUARDIAN_SOURCE}\n# ${nonce}`;
-  const guardianCommand = process.platform === "win32" ? "powershell.exe" : process.execPath;
-  const guardianArgs = process.platform === "win32"
-    ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(windowsGuardian, "utf16le").toString("base64")]
-    : ["-e", PROCESS_GUARDIAN_SOURCE, nonce];
-  const child = spawn(guardianCommand, guardianArgs, {
-    cwd,
-    stdio: ["pipe", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-  });
-  if (!child.pid) throw new Error("VIVADO_PROCESS_ID_UNAVAILABLE");
-  const stdoutCapture = createOutputCapture();
-  const stderrCapture = createOutputCapture();
-  let spawnError: Error | undefined;
+  let launchError: Error | undefined;
   child.stdout.on("data", (data: Buffer) => stdoutCapture.append(data));
   child.stderr.on("data", (data: Buffer) => stderrCapture.append(data));
-  child.once("error", (error) => { spawnError = error; });
-  let exited = false;
-  const closed = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolveClose) => {
+  const abort = () => { if (child.pid) terminateProcessTree(child.pid); };
+  const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
+  return new Promise<CommandResult>((resolveResult, rejectResult) => {
+    child.once("error", (error) => { launchError = error; });
+    child.stdin.once("error", (error) => { launchError = error; abort(); });
     child.once("close", (exitCode, closeSignal) => {
-      exited = true;
-      resolveClose({ exitCode, signal: closeSignal });
-    });
-  });
-  const abort = () => { if (!exited) terminateTree(child.pid!); };
-  if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
-  let identity: VivadoProcessIdentity;
-  let permitted = false;
-  try {
-    identity = { pid: child.pid, processGroupId: child.pid, startToken: await identityReader(child.pid) };
-    permitted = await onProcessStarted?.(identity) !== false;
-  } catch (error) {
-    if (!exited) terminateTree(child.pid);
-    await closed;
-    signal?.removeEventListener("abort", abort);
-    throw error;
-  }
-  if (!permitted || signal?.aborted) {
-    if (!exited) terminateTree(child.pid);
-    await closed;
-    signal?.removeEventListener("abort", abort);
-    throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
-  }
-  let launched = false;
-  return {
-    identity: identity!,
-    run: async (command, args, runCwd, timeoutMs, runSignal) => {
-      if (launched || runCwd !== cwd || !permitted || signal?.aborted || runSignal?.aborted) {
-        throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
-      }
-      launched = true;
-      const serializedRequest = JSON.stringify(process.platform === "win32"
-        ? windowsGuardianRequest(command, args, runCwd)
-        : { command, args: [...args], cwd: runCwd });
-      let launchReady = false;
-      try { launchReady = await beforeLaunch?.() !== false; }
-      catch {
-        if (!exited) terminateTree(child.pid!);
-        await closed;
-        throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
-      }
-      if (!launchReady || signal?.aborted || runSignal?.aborted) {
-        if (!exited) terminateTree(child.pid!);
-        await closed;
-        throw new Error("VIVADO_PROCESS_LAUNCH_CANCELLED");
-      }
-      const runAbort = () => { if (!exited) terminateTree(child.pid!); };
-      runSignal?.addEventListener("abort", runAbort, { once: true });
-      let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; if (!exited) terminateTree(child.pid!); }, timeoutMs);
-      child.stdin.end(serializedRequest);
-      const ended = await closed;
       clearTimeout(timer);
-      runSignal?.removeEventListener("abort", runAbort);
       signal?.removeEventListener("abort", abort);
-      if (spawnError) throw spawnError;
-      return {
-        exitCode: ended.exitCode ?? (timedOut ? 124 : 1),
-        stdout: stdoutCapture.text(),
-        stderr: stderrCapture.text(),
-        timedOut,
-        signal: ended.signal,
-      };
-    },
-    async close() {
-      if (!exited) terminateTree(child.pid!);
-      await closed;
-      signal?.removeEventListener("abort", abort);
-    },
-  };
-}
+      if (launchError) rejectResult(launchError);
+      else resolveResult({ exitCode: exitCode ?? (timedOut ? 124 : 1), stdout: stdoutCapture.text(), stderr: stderrCapture.text(), timedOut, signal: closeSignal });
+    });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else child.stdin.end(request);
+  });
+};
+
 function parseSimulatePhases(text: string): { phase?: string; phaseExitCode?: number; simulatorStdout?: string } {
   const phaseMatch = text.match(/^PHASE=(\S+)/m);
   const exitMatch = text.match(/^PHASE_EXIT_CODE=(\d+)/m);
@@ -971,45 +731,9 @@ async function failedImplementationEvidence(workspace: string, jobId: string): P
 export class VivadoBatchAdapter {
   private readonly run: CommandRunner; private readonly root: string; private readonly defaultBinary: string; private readonly configuredPart: string | undefined; private readonly configuredProfileHash: string | undefined; private readonly injected: boolean;
   constructor(options: VivadoAdapterOptions) { this.root = resolve(options.workspaceRoot); this.defaultBinary = options.binary ?? "vivado"; this.configuredPart = options.part; this.configuredProfileHash = options.profileHash; this.injected = options.commandRunner !== undefined; this.run = options.commandRunner ?? defaultRunner; }
-  capabilities(): readonly CapabilityDefinition[] { return VIVADO_CAPABILITIES; }
   async execute(request: VivadoRequest, signal?: AbortSignal): Promise<VivadoExecutionResult> {
     validateVivadoRequest(request);
     if (request.runClass === "evolution_eval") reject("EVOLUTION_EVAL_DEDICATED_ROUTE_REQUIRED");
-    return this.executeRequest(request, signal);
-  }
-  async executeEvolutionEval(
-    input: unknown,
-    signal?: AbortSignal,
-    onProcessStarted?: ProcessStartObserver,
-    sealedWorkspace?: string,
-    processRunner?: CommandRunner,
-  ): Promise<VivadoExecutionResult> {
-    const request = validateEvolutionEvalVivadoRequest(input);
-    const common = {
-      jobId: request.jobId,
-      projectId: request.projectId,
-      runClass: request.runClass,
-      inputHash: request.workspaceManifestHash,
-      toolchainHash: request.toolchainProfileHash,
-      timeoutMs: request.timeoutMs,
-    };
-    const generic: VivadoRequest = request.operation === "validate_sources"
-      ? { ...common, operation: request.operation, sources: request.sources, ...(request.top === null ? {} : { top: request.top }) }
-      : request.operation === "simulate"
-        ? { ...common, operation: request.operation, sources: request.sources, top: request.top, testbench: request.testbench }
-        : request.operation === "synthesize"
-          ? { ...common, operation: request.operation, sources: request.sources, top: request.top, part: request.part }
-          : { ...common, operation: request.operation, sources: request.sources, constraints: request.constraints, top: request.top, part: request.part, generateTrialBitstream: request.generateTrialBitstream };
-    return this.executeRequest(generic, signal, onProcessStarted, sealedWorkspace, processRunner);
-  }
-  private async executeRequest(
-    request: VivadoRequest,
-    signal?: AbortSignal,
-    onProcessStarted?: ProcessStartObserver,
-    sealedWorkspace?: string,
-    processRunner?: CommandRunner,
-  ): Promise<VivadoExecutionResult> {
-    validateVivadoRequest(request);
     if (request.toolchain?.vivadoBinary !== undefined && request.toolchain.vivadoBinary !== this.defaultBinary) reject("TOOLCHAIN_BINARY_MISMATCH");
     if (this.configuredPart !== undefined && (("part" in request && request.part !== this.configuredPart) || (request.toolchain?.part !== undefined && request.toolchain.part !== this.configuredPart))) reject("TOOLCHAIN_PART_MISMATCH");
     if (this.configuredProfileHash !== undefined && ((request.toolchainHash !== undefined && request.toolchainHash !== this.configuredProfileHash) || (request.toolchain?.profileHash !== undefined && request.toolchain.profileHash !== this.configuredProfileHash))) reject("TOOLCHAIN_PROFILE_MISMATCH");
@@ -1020,9 +744,7 @@ export class VivadoBatchAdapter {
       ...(this.configuredProfileHash !== undefined ? { profileHash: this.configuredProfileHash } : {}),
     };
     const effectiveRequest = { ...request, toolchain: effectiveToolchain } as VivadoRequest;
-    const workspace = sealedWorkspace === undefined ? join(this.root, request.jobId) : resolve(sealedWorkspace);
-    if (sealedWorkspace !== undefined && request.runClass !== "evolution_eval") reject("SEALED_WORKSPACE_FORBIDDEN");
-    if (sealedWorkspace !== undefined && workspace !== this.root && !workspace.startsWith(`${this.root}${sep}`)) reject("UNSAFE_WORKSPACE");
+    const workspace = join(this.root, request.jobId);
     const inputDir = join(workspace, "input"); const outputDir = join(workspace, "output"); await mkdir(inputDir, { recursive: true }); await mkdir(outputDir, { recursive: true });
     if (request.operation === "implement" && (request.stopBeforeBitstream === true || request.generateTrialBitstream === false)) {
       try { await unlink(join(outputDir, "synthia.bit")); } catch {}
@@ -1030,16 +752,8 @@ export class VivadoBatchAdapter {
     const stageInput = async (item: SourceInput | ConstraintInput): Promise<void> => {
       safePath(item.path);
       const target = join(inputDir, item.path);
-      if (sealedWorkspace === undefined) {
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, item.content);
-      } else {
-        let existing: Uint8Array;
-        try { existing = await readFile(target); } catch { reject("SEALED_INPUT_MISSING"); }
-        const expected = typeof item.content === "string" ? Buffer.from(item.content) : Buffer.from(item.content);
-        if (!Buffer.from(existing).equals(expected)) reject("SEALED_INPUT_DRIFT");
-      }
-      if (request.runClass === "evolution_eval") await chmod(target, 0o400);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, item.content);
     };
     if ("sources" in request) for (const source of request.sources) await stageInput(source);
     if ("constraints" in request && request.constraints) for (const constraint of request.constraints) await stageInput(constraint);
@@ -1055,14 +769,7 @@ export class VivadoBatchAdapter {
     const effectiveTimeout = request.timeoutMs ?? VIVADO_DEFAULT_TIMEOUT_MS;
     let result: CommandResult;
     try {
-      result = await (processRunner ?? this.run)(
-        binary,
-        command.slice(1),
-        workspace,
-        effectiveTimeout,
-        signal,
-        processRunner ? undefined : onProcessStarted,
-      );
+      result = await this.run(binary, command.slice(1), workspace, effectiveTimeout, signal);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
       const ev = request.operation === "implement" ? await failedImplementationEvidence(workspace, request.jobId) : await evidence(workspace, request.jobId);

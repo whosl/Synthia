@@ -41,7 +41,7 @@ function clearInheritedProxyEnvironment(): void {
 }
 
 import { SkillLoader } from "./skill-loader.ts";
-import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
+import { createRuntimeModelFromEnv } from "./runtime-model.ts";
 import { LoopExecutor, FakeVivadoConnector, successBehavior, VIVADO_CAPABILITY_VERSION } from "./loop.ts";
 import { resolveCoreApiConfig } from "./core-api-connector.ts";
 import { CoreGovernanceClient } from "./governance-client.ts";

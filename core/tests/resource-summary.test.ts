@@ -13,6 +13,7 @@ function context(options: { authorized?: boolean; source?: boolean; fail?: boole
     pool: { async query(sql: string, params: unknown[]) {
       queries.push({ sql, params });
       if (sql.includes("SELECT id FROM project")) return { rows: [{ id: "p1" }] };
+      if (sql.includes("SELECT project_type,config_epoch FROM project")) return { rows: [{ project_type: "engineering", config_epoch: 0 }] };
       if (sql.includes("role_assignment")) return { rows: options.authorized === false ? [] : [{ allowed: 1 }] };
       if (sql.includes("COALESCE(end_time, created_at)")) return { rows: options.source === false ? [] : [{ job_id: `job-${params[0]}`, operation: "implement", at: new Date("2026-09-27T00:00:00Z") }] };
       return { rows: [] };
@@ -41,7 +42,7 @@ describe("project resource summary", () => {
     const result = await getProjectToolSummaryHandler(c.ctx);
     expect(result.data).toMatchObject({ resources: { sourceJobId: "job-p1", device: "xc7-test", sourceOperation: "implement", metrics: [{ key: "lut", used: 50, available: 100, percent: 50 }] } });
     const query = c.queries.find((q) => q.sql.includes("COALESCE(end_time, created_at)"))!;
-    expect(query.params).toEqual(["p1"]);
+    expect(query.params).toEqual(["p1", null, null]);
     expect(query.sql).toContain("state = 'succeeded'");
     expect(query.sql).toContain("ORDER BY created_at DESC, id DESC LIMIT 1");
   });

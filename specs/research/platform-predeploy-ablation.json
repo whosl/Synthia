@@ -1,0 +1,190 @@
+{
+  "baseline_commit": "6fc0d73a1f5a8068aa566a00295a63c5f64fa956",
+  "scope": "platform-ops local development only; no deployment, service restart, production DB writes, or p31/p32 state edits",
+  "production_source_count_rule": "rg --files core/src runtime connector --glob *.ts --glob !*.test.ts --glob !*.d.ts; includes blank lines; excludes tests, generated bundle and research probe",
+  "footprints": {
+    "baseline": {
+      "core": {
+        "files": 52,
+        "lines": 27739,
+        "bytes": 1127145
+      },
+      "runtime": {
+        "files": 45,
+        "lines": 25553,
+        "bytes": 1059169
+      },
+      "worker": {
+        "files": 9,
+        "lines": 2973,
+        "bytes": 175806
+      },
+      "worker_bundle": {
+        "bytes": 76698,
+        "sha256": "7fb50dc112500cc6c2c6b93248961f594eb6d37a0d4a87676efe8ac522e1c9ed"
+      }
+    },
+    "candidate": {
+      "core": {
+        "files": 50,
+        "lines": 27460,
+        "bytes": 1118581
+      },
+      "runtime": {
+        "files": 45,
+        "lines": 25189,
+        "bytes": 1048433
+      },
+      "worker": {
+        "files": 9,
+        "lines": 2679,
+        "bytes": 158239
+      },
+      "worker_bundle": {
+        "bytes": 69408,
+        "sha256": "15c430a29177b3fb44c3820ba48cc8cf557121cee8a87fd193693e03d169514c"
+      }
+    },
+    "reduction": {
+      "core": {
+        "files": 2,
+        "lines": 279,
+        "bytes": 8564
+      },
+      "runtime": {
+        "files": 0,
+        "lines": 364,
+        "bytes": 10736
+      },
+      "worker": {
+        "files": 0,
+        "lines": 294,
+        "bytes": 17567
+      }
+    }
+  },
+  "tests": {
+    "baseline-unit": {
+      "exit": 0,
+      "pass": 965,
+      "skip": 400,
+      "fail": 0
+    },
+    "candidate-unit": {
+      "exit": 0,
+      "pass": 965,
+      "skip": 400,
+      "fail": 0
+    },
+    "baseline-process": {
+      "exit": 0,
+      "pass": 5,
+      "skip": 0,
+      "fail": 0
+    },
+    "candidate-core-check": {
+      "exit": 0,
+      "pass": 0,
+      "skip": 0,
+      "fail": 0
+    },
+    "candidate-runtime-types": {
+      "exit": 0,
+      "pass": 0,
+      "skip": 0,
+      "fail": 0
+    },
+    "baseline-db": {
+      "exit": 0,
+      "pass": 87,
+      "skip": 0,
+      "fail": 0
+    },
+    "candidate-db": {
+      "exit": 0,
+      "pass": 87,
+      "skip": 0,
+      "fail": 0
+    }
+  },
+  "negative_controls": [
+    {
+      "check": "control-core-auth",
+      "exit": 1,
+      "pass": 0,
+      "skip": 0,
+      "fail": 1,
+      "expected": "failure; safeguard retained"
+    },
+    {
+      "check": "control-runtime-watchdog",
+      "exit": 1,
+      "pass": 0,
+      "skip": 0,
+      "fail": 1,
+      "expected": "failure; safeguard retained"
+    },
+    {
+      "check": "control-worker-throughput",
+      "exit": 1,
+      "pass": 0,
+      "skip": 0,
+      "fail": 3,
+      "expected": "failure; safeguard retained"
+    }
+  ],
+  "behavioral_traces": {
+    "core": {
+      "identical": true,
+      "sha256": "bd32a4d74dcd8b3a52179d73ec48273c626de8138fc984a649400cee5d4b2c00",
+      "cases": 7
+    },
+    "runtime": {
+      "identical": true,
+      "sha256": "4ea34c9c78946fc16a98092bfc31c861aa4c15105eafb98bc4903cfe3061baa5",
+      "cases": 9
+    },
+    "worker": {
+      "identical": true,
+      "sha256": "4d3586dc9859d26d49ef6424978308e92cae13cb47d063cbebf17f7425e258ad",
+      "cases": 18
+    }
+  },
+  "protected_source_sha256": {
+    "connector/log-digest.ts": "66e9a4f82309a525e0d0be99bb1ea273fdc846080f039315134b5077a83c0dac",
+    "connector/output-capture.ts": "0a78d310cd9ae398c92c9c34c9f09e13ab084455db9f146d20739e45e519059f",
+    "runtime/free-agent.ts": "09976eac914389f19bc066cd3588201a51136d1c6e7a87f5fce6d3cf096eaa71",
+    "runtime/model-watchdog.ts": "d252877981139eb77729f5cf82b2baac5ba1cf11ee3a9077735cf57d932b4248",
+    "runtime/evolution-client.ts": "5f3da1bb29278e075f3f10b794846df796b18126206e13de1338dc79e490f129",
+    "runtime/learned-skill-tools.ts": "7c214712bc0bc9ba46a4a6c9a95ccc198bd703e39841b33b6f84b166b8b85512",
+    "core/src/domain/evidence-range.ts": "128567e97fde93798b2cae94f9d39576a852fc3d54027a46b807eea490f5ff7e",
+    "core/src/api/side-task-handlers.ts": "509dca94397f77b99948ecaafa48942a752a7352afa4df116d5b136c03fffdb0",
+    "core/src/api/auth.ts": "23eeed9626ca95f8a1efb81a89a47598611d6d64187068833b9f77faeff7f740",
+    "connector/vivado.ts:WINDOWS_JOB_GUARDIAN_SOURCE": "dc68c9954d0fcadbf07eba3a965d7908c86e63ff431be5efb491a029b5a7c14a"
+  },
+  "test_fixture_alignment": [
+    "resource-summary: add project type/config epoch result and epoch/chain SQL parameters",
+    "task capability auth: require 403 / EVOLUTION_SCOPE_FORBIDDEN; auth code unchanged; authorization and no-side-effect assertions retained"
+  ],
+  "baseline_type_errors_resolved": [
+    "unreachable part fallback in Worker manifest",
+    "shared jobStateToResultStatus return type used by two adapters",
+    "manual Anthropic probe tool result shape"
+  ],
+  "bundle_build": {
+    "command": "bun build connector/server.ts --target=node --format=esm --minify --outfile <output>",
+    "bun": "1.4.1",
+    "two_builds_identical": true,
+    "node_syntax_check": true,
+    "node_import_without_server_start": true,
+    "sha256": "15c430a29177b3fb44c3820ba48cc8cf557121cee8a87fd193693e03d169514c",
+    "bytes": 69408,
+    "formal_release_or_windows_gate_completed": false
+  },
+  "db_test_timeout_ms": 30000,
+  "limits": [
+    "400 root tests skipped without DATABASE_URL; separate selected Core API DB regression executed",
+    "Unix fake executable process-tree tests; no Windows host or real Vivado benchmark",
+    "no production latency, throughput or webpage performance measurements"
+  ]
+}

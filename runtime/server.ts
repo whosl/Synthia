@@ -75,7 +75,7 @@ import {
   buildCoreTaskEvolutionClient,
   buildCoreTaskWorkspaceClient,
 } from "./deps.ts";
-import { createRuntimeModelFromEnv } from "./pi-responses-model.ts";
+import { createRuntimeModelFromEnv } from "./runtime-model.ts";
 import { SkillLoader } from "./skill-loader.ts";
 import type { SkillPrompts } from "./skill-loader.ts";
 

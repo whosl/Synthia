@@ -17,15 +17,7 @@ import type { EvidenceRange, EvidencePage } from "../domain/evidence-range.ts";
  * never loads this module, keeping the Core test graph Connector-free.
  */
 
-import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
-import {
-  closeSync,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-} from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   ConnectorError,
   type ConnectorDiscovery,
@@ -36,11 +28,6 @@ import {
   type EvidenceManifest,
   type SubmitJobParams,
 } from "./connector-port.ts";
-
-/** 历史常量：Cloudflare 隧道时代保留，direct_https 配置不使用。 */
-const PRODUCTION_ENDPOINT_URL = "https://connect.wenzhuolin.xyz";
-const SHA256 = /^[0-9a-f]{64}$/;
-const MAX_TLS_MATERIAL_BYTES = 1024 * 1024;
 
 // ─── structural shapes of the Connector client we depend on ───────────────────
 // Locally declared (not imported) so this module does not pull Connector types
@@ -120,10 +107,6 @@ interface RemoteDiscovery {
   live_mapping_health?: "healthy" | "unavailable";
 }
 
-
-
-
-
 interface RemoteRegistration {
   registration_state: string;
 }
@@ -151,84 +134,9 @@ interface RemoteFactoryOptions {
   classification: string;
   projectId: string;
   env?: Record<string, string | undefined>;
-  secretNames?: { clientId?: string; clientSecret?: string };
-  devMode?: boolean;
 }
 
 type RemoteFactory = (options: RemoteFactoryOptions) => RemoteClientLike;
-
-interface DirectMtlsRemoteFactoryOptions extends RemoteFactoryOptions {
-  readonly ca: string;
-  readonly cert: string;
-  readonly key: string;
-}
-
-type DirectMtlsRemoteFactory =
-  (options: DirectMtlsRemoteFactoryOptions) => RemoteClientLike;
-
-export interface M4fDirectMtlsMaterial {
-  readonly ca: string;
-  readonly cert: string;
-  readonly key: string;
-  readonly caSha256: string;
-  readonly certSha256: string;
-  readonly keySha256: string;
-}
-
-function requiredM4fEnvironment(
-  env: Record<string, string | undefined>,
-  name: string,
-): string {
-  const value = env[name];
-  if (!value) throw new Error(`${name} is required for direct M4-F mTLS`);
-  return value;
-}
-
-function readBoundM4fPem(
-  path: string,
-  expectedSha256: string,
-  kind: "ca" | "cert" | "key",
-): string {
-  if (!isAbsolute(path) || path.length > 1024 || /[\r\n\0]/.test(path)
-    || !SHA256.test(expectedSha256)) {
-    throw new Error(`direct M4-F ${kind} binding is invalid`);
-  }
-  let fd: number | null = null;
-  try {
-    const pathBefore = lstatSync(path);
-    fd = openSync(path, "r");
-    const before = fstatSync(fd);
-    const bytes = readFileSync(fd);
-    const after = fstatSync(fd);
-    const pathAfter = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !before.isFile() || before.nlink !== 1
-      || before.uid !== process.getuid?.() || (before.mode & 0o777) !== 0o600
-      || before.dev !== after.dev || before.ino !== after.ino
-      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs
-      || after.dev !== pathAfter.dev || after.ino !== pathAfter.ino
-      || bytes.length < 1 || bytes.length > MAX_TLS_MATERIAL_BYTES
-      || createHash("sha256").update(bytes).digest("hex") !== expectedSha256) {
-      throw new Error(`direct M4-F ${kind} binding is untrusted`);
-    }
-    const pem = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const marker = kind === "key"
-      ? /-----BEGIN (?:EC |RSA )?PRIVATE KEY-----/
-      : /-----BEGIN CERTIFICATE-----/;
-    if (!marker.test(pem) || /\0/.test(pem)) {
-      throw new Error(`direct M4-F ${kind} PEM is invalid`);
-    }
-    return pem;
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith("direct M4-F")) throw error;
-    throw new Error(`direct M4-F ${kind} binding is unavailable`);
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
-}
-
-
-
 
 // ─── error translation ───────────────────────────────────────────────────────
 
@@ -346,7 +254,6 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     endpointConfig: Record<string, unknown>,
     allowlist: readonly string[],
     env: Record<string, string | undefined>,
-
   ) {
     this.factory = factory;
     this.endpointConfig = endpointConfig;
@@ -357,9 +264,6 @@ export class RemoteConnectorAdapter implements ConnectorPort {
   get connectorId(): string {
     return String(this.endpointConfig.connector_id ?? "remote-connector");
   }
-
-  /** Startup proof that the live remote still equals the frozen B identity. */
-
 
   private buildClient(projectId: string): RemoteClientLike {
     try {
@@ -432,13 +336,6 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     }
     return client;
   }
-
-  /**
-   * Evolution-eval uses an actor- and project-isolated client pool. Keeping it
-   * separate from generic Job clients prevents either authority from reusing
-   * the other's envelope identity, and avoids a mutable last-project context.
-   */
-
 
   /**
    * Run `action` against a ready client. If the action throws LEASE_EXPIRED,
@@ -546,8 +443,6 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       };
     });
   }
-
-
 }
 // ─── env-driven bootstrap ────────────────────────────────────────────────────
 
@@ -556,21 +451,17 @@ export interface ConnectorEnvOptions {
   configPath?: string;
   /** Env source. Default: `process.env`. */
   env?: Record<string, string | undefined>;
-  /** Override the endpoint_url (always the production tunnel in real deployments). */
-  endpointUrl?: string;
 }
 
 /**
  * Build a production {@link ConnectorPort} from environment, or return undefined
- * when the ordinary Cloudflare Connector is not configured. The isolated M4-F
- * 18443 mode is deliberately stricter: an incomplete authorization or TLS
- * binding throws so a dispatcher host cannot silently fall back to 8443.
+ * when the direct mTLS Connector is not configured. TLS material is loaded
+ * and validated by the Connector HTTP transport, using the configured origin.
  */
 export async function createConnectorFromEnv(
   opts: ConnectorEnvOptions = {},
 ): Promise<RemoteConnectorAdapter | undefined> {
   const env = opts.env ?? process.env;
-  const endpointUrl = opts.endpointUrl ?? PRODUCTION_ENDPOINT_URL;
   const configPath = opts.configPath ?? env.SYNTHIA_CONNECTOR_CONFIG ?? "connector/worker-66.config.json";
 
   let raw: string;

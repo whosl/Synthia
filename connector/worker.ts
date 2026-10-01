@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { sha256 } from "../core/src/hashing.ts";
 import { MAX_EVIDENCE_ENTRIES, MAX_EVIDENCE_ENTRY_BYTES, MAX_EVIDENCE_TOTAL_BYTES, REMOTE_SCHEMA_VERSION, type ConnectorEndpoint, type ConnectorRegistration, type DataClassification, type DiscoverySnapshot, type RemoteEnvelope } from "./remote.ts";
 import type { ConnectorCapability, EvidenceManifest, Job, JobRequest } from "./index.ts";
-import { readWindowsProcessIdentityFacts } from "./vivado.ts";
 
 export interface WorkerExecutionResult {
   outcome?: "success" | "failure" | "timeout" | "lost" | "unknown_effect";
