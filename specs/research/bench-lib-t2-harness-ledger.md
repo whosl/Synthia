@@ -69,6 +69,10 @@
 | H36 | GAP | **上下文高压下模型调用楔死无自动处置**（p28 `task-65477236b84486aa1cf3d3273acdb4a2`，R25 40/29/20+ 分钟无会话落盘，需操作者 abort）：H31 水位观测不足以恢复。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：仅挂起模型请求（chat/chatStream、摘要模型调用）计时；默认 15 分钟，可设 `SYNTHIA_MODEL_WATCHDOG_MINUTES`，0 禁用。超时 abort 请求、持久化系统中断注记、重试一次；二次超时失败。会话落盘刷新空闲计时，工具期不计时；用户取消不重试，旧流增量丢弃。见四b、四d |
 | H37 | GAP | **证据文本 262144 字符单读上限无分页**（p28 约 1.19MB waveform.vcd 被 fail-closed 拒读）：agent 被迫改读 worker-result.json，完整波形证据不可达。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：synthia_job_evidence 增加 offset/limit（UTF-16 字符，默认 65536、最多 262144），贯通 Core/Connector/Worker；manifest 总字节数及每项大小/hash；页面 totalChars/nextOffset/next_read，保留整文件 hash 并校验页 hash。分页无需套用 UI 整 VCD 的 8MiB 上限，但仍守 Worker 64MiB 单文件/128MiB 总证据限制。项目/任务隔离、二进制拒读、Unicode 边界与损坏拒读保持。见四b、四d |
 
+## 四c、H36 看门狗首次实弹记录（2026-10-02）
+
+p32 盲测会话（task-6bd05f30）10:01 起模型调用挂起 → **10:16:45 看门狗自动中止并重试一次** → 重试再挂 → 10:31:45 二次中止后回合干净收口（awaiting_user，无部分状态）。全程零人工干预——此前同类场景需操作者手动 abort+复位（p28 R25 期间 ×3）。修复批次 2026-10-02 07:55 部署后首个实弹，H36 判 fixed（实弹验证）。
+
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
 一次静默窗完成：迁移 0014+0036（含迁移器自注册惯例补齐）→ Core/Runtime/worker 三点部署 → 11 项验证炮组全过（403 映射/僵尸收割/自动开工/.vh/逃逸拒绝/FAIL 模式/updated_at/约束解除）。部署中附带发现：testbench 参数约定为模块名非文件名（H18 探针踩坑记录）；外来未提交修改按标签贮藏（stash@07cfd5c7）。H19 收窄未全证；H25 的 worker 落盘队列与 H27 查看器为移交项。
