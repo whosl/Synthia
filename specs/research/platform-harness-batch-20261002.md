@@ -1,5 +1,7 @@
 # 平台 harness 修复交付（2026-10-02）
 
+> 后续状态：2026-10-02 07:55 CST 已按用户指令部署 `42cf5fa`；下文保留此前开发/测试阶段记录。部署验证与备份见 [platform-ablation-deployment.md](platform-ablation-deployment.md)。
+
 实现位于 platform-ops worktree，尚未部署。生产 `/data3/dev/synthia-golden`、Core :5130、Runtime :8791、Worker 66机 :8443 未重启；p31/p32 会话及真实 application 状态未写入。
 
 | 项目 | 修法 | 窗口内更新服务 |

@@ -1,5 +1,7 @@
 # Core / Runtime / Worker 部署前消融实验
 
+> 后续状态：2026-10-02 07:55 CST 已按用户指令部署 `42cf5fa`；下文保留此前开发/测试阶段记录。部署验证与备份见 [platform-ablation-deployment.md](platform-ablation-deployment.md)。
+
 本轮以 `6fc0d73` 为源码基线，在 platform-ops worktree 保留已合入的 H35/H36/H37、H34、H20 修复，删除已退出调用链的实现并精简 Worker 实际执行路径。净减少 **937 行生产 TypeScript / 36,867 字节源码**，Worker canonical bundle 减少 **7,290 字节（9.5%）**。生产部署、服务进程、p31/p32 会话及真实 application 均未改动。
 
 机器可读记录见 [platform-predeploy-ablation.json](platform-predeploy-ablation.json)，可复跑的请求/结果对照见 [platform-predeploy-ablation-probe.ts](platform-predeploy-ablation-probe.ts)。

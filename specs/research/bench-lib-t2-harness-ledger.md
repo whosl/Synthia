@@ -21,7 +21,7 @@
 | H16 | BUG | **PROJECT_NOT_ALLOWED → 503+retryable:true**（源码实证：worker 本报 403，Core `mapConnectorError` 把所有非 404 类 ConnectorError 统一重包 `capabilityUnavailableError`）——配置错被伪装成可重试的暂态故障，误导排障方向 | fixed（403 实测：authorization/PROJECT_NOT_ALLOWED/retryable:false） |
 | H18 | GAP | **createTask 的 task 文本不触发执行**：说明书还是指令语义不明，5 个会话全靠追加 message 才开工 | fixed（创建即开工实测：25 秒完成回合，零追加消息） |
 | H19 | BUG | **abort 端点**：深核实测——idle 会话 200 且优雅降级（`{"aborted":false,"reason":"no active free-agent session"}`）；400 仅见于 running 态会话，根因待安全窗口复现（不能在 p22 盲测上试） | narrowed（idle 200 实测；running 400 未复现——草稿会话机制已具备） |
-| H20 | GAP | **permission skipAll 双缺口**：①持久化已修（修复批次）；②**预配置仍不可能**——idle 会话 404，须"激活→再设"两步舞；且修复部署本身会清掉修复前未持久化的存量开关（2026-09-15 10:30 部署实证：三会话 vivado_run 全部 permission_denied，静默卡 2-3 小时） | **本地已修，待部署窗口（2026-10-02）**：POST tasks 支持 `permission_skip_all`，Core 记录调用者/时间并传递到 Runtime 持久化注册状态；idle 可读、首轮即生效、恢复保留；红线/门禁硬拦不变。见四b |
+| H20 | GAP | **permission skipAll 双缺口**：①持久化已修（修复批次）；②**预配置仍不可能**——idle 会话 404，须"激活→再设"两步舞；且修复部署本身会清掉修复前未持久化的存量开关（2026-09-15 10:30 部署实证：三会话 vivado_run 全部 permission_denied，静默卡 2-3 小时） | **已部署（2026-10-02 07:55 CST，42cf5fa）**：POST tasks 支持 `permission_skip_all`，Core 记录调用者/时间并传递到 Runtime 持久化注册状态；idle 可读、首轮即生效、恢复保留；红线/门禁硬拦不变。见四b、四d |
 | H21 | GAP | **.vh 拒收**：T1 已知（AES 内联绕过），T2 p22 复发（job-56528a73）——规则未显性化给 agent，每轮重新踩 | fixed（.vh validate 实测通过） |
 | H22 | GAP | **回合级活性：REST 面缺失但 SSE 面存在**（深核修正）——SSE 流有 delta 事件（模型增量）+ `: hb` 传输心跳，看流可区分活回合/挂死；但 task-status REST 面（status/updatedAt）无此信号，轮询式监控不可区分（双向误判实证：误判挂死×1、真楔死×1）。监控改用 SSE 即可缓解，平台侧可选补 REST 活性字段 | fixed（/tasks updated_at 实测返回） |
 | H23 | BUG | **迁移漂移**：0014_tool_timing_metrics.sql 在仓库、未应用生产库（schema_migrations 尾部 {0011,0012,0013,0020,0021}） | fixed（0014+0036 已应用并注册；迁移器自注册惯例补齐） |
@@ -63,11 +63,11 @@
 
 | H33 | BUG | **simulate run.tcl 顺序缺陷**（p28 盲测会话定罪，2026-09-29）：worker 的 simulate 脚本模板在 `update_compile_order` **之前**执行 `set_property top`→Vivado 无法验证 TB 顶层（filemgmt 20-742）→自动回退 sources_1 顶层→TB 文件被剪枝出编译顺序→零功能仿真信号（4 连 INCONCLUSIVE）。会话侧三对策（显式参数/省略/TB 路径迁移）全部证伪后按纪律停止报告。**FIXED（本 commit）**：update_compile_order 前后各跑一次（先发现模块再钉顶层再重排） |
 
-| H34 | ARCH | **关键性能 DRQ 无验证场景 → 盲测「全绿」但关键项未达且未呈报**（p28 复核实证，2026-09-30）：需求书 JPEG-DRQ-PERF-002（稳态 ≥1 像素/拍，关键级）在 TST-002 必测场景中无对应测量场景——四步+23 场景全过而实际吞吐 ≈1 像素/45 拍（TB 头注自证「已知观察项，非判定项」），终局报告零提及。净效应：**验收结论「四步全绿=收官」掩盖关键需求未达**；对比报告的「17× DSP 面积优势」实为 45× 吞吐换面积（黄金 3 并行正是买吞吐的钱）。归因三层：①需求书把关键 DRQ 写成不可验证（根因）②平台四步无吞吐轴、claim-check 不核需求覆盖 ③模型半诚实（TB 留注释、报告未上升）。**教训**：每个关键级 DRQ 必须有机器可判定场景；终局报告必须附 DRQ→证据覆盖矩阵（TST-003）。前向修复：TST 模板加 (k) 稳态吞吐场景（pix_ready 占空比断言 + CYCLES_PER_PIXEL 进 digest） | **模板已落地；平台层本地已修，待部署窗口（2026-10-02）**：digest 独立识别四项性能指标并计入 counts/pass/fail；USB GOODPUT ≥11.5Mbps / DROPPED=0、JPEG CYCLES_PER_PIXEL ≤1；性能失败优先于 TB PASS/$finish/exit=0。canonical bundle 与源码同步，见四b |
+| H34 | ARCH | **关键性能 DRQ 无验证场景 → 盲测「全绿」但关键项未达且未呈报**（p28 复核实证，2026-09-30）：需求书 JPEG-DRQ-PERF-002（稳态 ≥1 像素/拍，关键级）在 TST-002 必测场景中无对应测量场景——四步+23 场景全过而实际吞吐 ≈1 像素/45 拍（TB 头注自证「已知观察项，非判定项」），终局报告零提及。净效应：**验收结论「四步全绿=收官」掩盖关键需求未达**；对比报告的「17× DSP 面积优势」实为 45× 吞吐换面积（黄金 3 并行正是买吞吐的钱）。归因三层：①需求书把关键 DRQ 写成不可验证（根因）②平台四步无吞吐轴、claim-check 不核需求覆盖 ③模型半诚实（TB 留注释、报告未上升）。**教训**：每个关键级 DRQ 必须有机器可判定场景；终局报告必须附 DRQ→证据覆盖矩阵（TST-003）。前向修复：TST 模板加 (k) 稳态吞吐场景（pix_ready 占空比断言 + CYCLES_PER_PIXEL 进 digest） | **模板已落地；平台层已部署（2026-10-02 07:55 CST，42cf5fa）**：digest 独立识别四项性能指标并计入 counts/pass/fail；USB GOODPUT ≥11.5Mbps / DROPPED=0、JPEG CYCLES_PER_PIXEL ≤1；性能失败优先于 TB PASS/$finish/exit=0。canonical bundle 与源码同步，见四b、四d |
 
-| H35 | BUG | **Learned Skill 参数泛化拒绝**（p31 `task-d142e3f722e8d8845a122e399a2c639f`）：末段 8 次 close 拒绝、apply 带中文/空格 reason_codes 拒绝而省略成功。只读会话实证 `human_corrections: 0` 与数组均已完整落盘，**未发现 falsy-zero 丢参或数组序列化损坏**。根因：工具 stringList 把原因文本按 ID 校验；close refList 禁空格；evolution-client 再把引用按 ID 校验；省略数组无默认值，均被泛化报 invalid_arguments。 | **本地已修，待部署窗口（2026-10-02）**：原因/引用采用有界非空文本数组；省略引用默认 []，0 明确保留，错误指明字段；沿用生产 skill_id 自动解析和默认 role/reason_codes。两个真实 app ID × 4 参数形态通过工具→mock HTTP 回归；未关闭真实 application。见四b |
-| H36 | GAP | **上下文高压下模型调用楔死无自动处置**（p28 `task-65477236b84486aa1cf3d3273acdb4a2`，R25 40/29/20+ 分钟无会话落盘，需操作者 abort）：H31 水位观测不足以恢复。 | **本地已修，待部署窗口（2026-10-02）**：仅挂起模型请求（chat/chatStream、摘要模型调用）计时；默认 15 分钟，可设 `SYNTHIA_MODEL_WATCHDOG_MINUTES`，0 禁用。超时 abort 请求、持久化系统中断注记、重试一次；二次超时失败。会话落盘刷新空闲计时，工具期不计时；用户取消不重试，旧流增量丢弃。见四b |
-| H37 | GAP | **证据文本 262144 字符单读上限无分页**（p28 约 1.19MB waveform.vcd 被 fail-closed 拒读）：agent 被迫改读 worker-result.json，完整波形证据不可达。 | **本地已修，待部署窗口（2026-10-02）**：synthia_job_evidence 增加 offset/limit（UTF-16 字符，默认 65536、最多 262144），贯通 Core/Connector/Worker；manifest 总字节数及每项大小/hash；页面 totalChars/nextOffset/next_read，保留整文件 hash 并校验页 hash。分页无需套用 UI 整 VCD 的 8MiB 上限，但仍守 Worker 64MiB 单文件/128MiB 总证据限制。项目/任务隔离、二进制拒读、Unicode 边界与损坏拒读保持。见四b |
+| H35 | BUG | **Learned Skill 参数泛化拒绝**（p31 `task-d142e3f722e8d8845a122e399a2c639f`）：末段 8 次 close 拒绝、apply 带中文/空格 reason_codes 拒绝而省略成功。只读会话实证 `human_corrections: 0` 与数组均已完整落盘，**未发现 falsy-zero 丢参或数组序列化损坏**。根因：工具 stringList 把原因文本按 ID 校验；close refList 禁空格；evolution-client 再把引用按 ID 校验；省略数组无默认值，均被泛化报 invalid_arguments。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：原因/引用采用有界非空文本数组；省略引用默认 []，0 明确保留，错误指明字段；沿用生产 skill_id 自动解析和默认 role/reason_codes。两个真实 app ID × 4 参数形态通过工具→mock HTTP 回归；未关闭真实 application。见四b、四d |
+| H36 | GAP | **上下文高压下模型调用楔死无自动处置**（p28 `task-65477236b84486aa1cf3d3273acdb4a2`，R25 40/29/20+ 分钟无会话落盘，需操作者 abort）：H31 水位观测不足以恢复。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：仅挂起模型请求（chat/chatStream、摘要模型调用）计时；默认 15 分钟，可设 `SYNTHIA_MODEL_WATCHDOG_MINUTES`，0 禁用。超时 abort 请求、持久化系统中断注记、重试一次；二次超时失败。会话落盘刷新空闲计时，工具期不计时；用户取消不重试，旧流增量丢弃。见四b、四d |
+| H37 | GAP | **证据文本 262144 字符单读上限无分页**（p28 约 1.19MB waveform.vcd 被 fail-closed 拒读）：agent 被迫改读 worker-result.json，完整波形证据不可达。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：synthia_job_evidence 增加 offset/limit（UTF-16 字符，默认 65536、最多 262144），贯通 Core/Connector/Worker；manifest 总字节数及每项大小/hash；页面 totalChars/nextOffset/next_read，保留整文件 hash 并校验页 hash。分页无需套用 UI 整 VCD 的 8MiB 上限，但仍守 Worker 64MiB 单文件/128MiB 总证据限制。项目/任务隔离、二进制拒读、Unicode 边界与损坏拒读保持。见四b、四d |
 
 ## 四a、修复批次（2026-09-15 部署，fix/harness-batch-on-ablation @ a64eb79）
 
@@ -94,6 +94,14 @@
 - 对照移除 Core 授权、H36 watchdog、H34 独立吞吐判定，分别检出 1 / 1 / 3 项失败，因此保护保留；Unix/Windows 实际 guardian、5 MiB 捕获和证据完整性保留。
 - 双方 root 回归均 965 pass / 400 skip / 0 fail；34 组调用/结果完全一致。DB 回归与完整方法见 [platform-predeploy-ablation.md](platform-predeploy-ablation.md)，机器记录见 [platform-predeploy-ablation.json](platform-predeploy-ablation.json)。
 - 本轮仅在 worktree 开发、隔离测试和构建，未部署/重启 Core、Runtime、Worker。生效仍需三件套窗口，无新增数据库迁移；本地构建不替代 Windows Gate / 正式 release。
+
+## 四d、平台消融版本正式部署（2026-10-02 07:55 CST）
+
+按用户最新部署指令，将 `42cf5fa` 更新到 `/data3/dev/synthia-golden`，重启 Core、Runtime、66 机 Worker 与 evolution workers；H35/H36/H37/H34/H20 已生效。原前端资产与 Web 进程保持，manifest 更新后端版本。三处 Worker build hash 已对齐，mTLS discovery 为 ready、9 项能力、无漂移。
+
+- Windows 隔离执行预检 **6/6** 通过；正式站点/Core/Runtime/证据分页 **18/18** 接口检查通过。H37 连续读取真实 4,194,529 字节 waveform.vcd 的两页成功。
+- **23** 个 Runtime 会话状态与 **216** 个 Worker 历史作业索引保留；p31/p32 仍为 awaiting_user，真实 application 状态与部署前一致（两个均已为 pending_evaluation）。没有代替 T3 agent 启动新任务。
+- 备份、准确版本、hash 与验证范围见 [platform-ablation-deployment.md](platform-ablation-deployment.md)。四b/四c 的“未部署”记录保留为此前阶段历史；当前状态以本节为准。
 
 ## 五、深核记录（2026-09-14 审核轮）
 
