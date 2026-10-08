@@ -116,7 +116,7 @@ describe("H38 deterministic output-limit continuation", () => {
   test("whitespace truncation uses only the existing empty-reply guard", async () => {
     const f = await fixture([text(" \n", "max_tokens"), text("", "max_tokens")]);
     try {
-      expect(await f.session.prompt("开始")).toBe("");
+      expect(await f.session.prompt("开始")).toContain("模型连续返回空正文");
       expect(f.calls).toHaveLength(2);
       const disk = await loadFreeAgentConversation(f.session.agentId, f.dir);
       expect(disk!.messages.some(m => m.content?.includes("[model_output_limit]"))).toBe(false);

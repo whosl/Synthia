@@ -724,10 +724,22 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
 
     // Update the persisted task to the latest prompt for resume clarity.
     this.agentState = { ...this.agentState, task: text };
-    await this.persist();
+    const turnMessagesStart = this.messages.length;
 
     try {
-      const reply = await this.runLoop(opts);
+      await this.persist();
+      let reply = await this.runLoop(opts);
+      // A return from a future/blocked branch must not silently settle a turn
+      // whose only durable additions were user messages or empty placeholders.
+      const recordedOutput = this.messages.slice(turnMessagesStart).some(message =>
+        message.role === "system" || message.role === "tool"
+        || (message.role === "assistant" && (!!message.content?.trim() || !!message.toolCalls?.length)),
+      );
+      if (!recordedOutput) {
+        reply = reply.trim() || "[系统] 本回合未产生模型回复或工具结果，已停止；请查看会话记录后继续。";
+        this.messages.push({ role: "system", content: `[free_agent_turn_end] disposition=turn_no_output\n${reply}` });
+        process.stderr.write(`[free-agent] ${this.agentId}: turn ended without recorded output; persisted system note\n`);
+      }
       // Preserve the awaiting-approval lock: a locked session stays locked
       // across prompt boundaries (only core_check_gate approved unlocks it).
       this._status = this.isGateLocked() ? "awaiting_approval" : "idle";
@@ -742,6 +754,9 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         this._status = "failed";
         if (e instanceof Error) this.abortReason = e.message;
       }
+      const reason = clipText(e instanceof Error ? e.message : String(e), 4_000);
+      this.messages.push({ role: "system", content: `[free_agent_turn_error] status=${this._status}\n${reason}` });
+      process.stderr.write(`[free-agent] ${this.agentId}: turn ${this._status}; ${clipText(reason, 500)}\n`);
       await this.persist();
       throw e;
     }
@@ -1028,8 +1043,11 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       // Layer 3: beforeModelCall data-domain pre-check.
       const stop = this.beforeModelCallHook(modelMessages);
       if (stop?.stop) {
-        // Halt the loop — surface the reason as the reply.
-        return `[系统] 模型调用被数据域预检阻止: ${stop.reason}`;
+        const reply = `[系统] 模型调用被数据域预检阻止: ${stop.reason}`;
+        this.messages.push({ role: "system", content: `[model_precheck_stop]\n${reply}` });
+        process.stderr.write(`[free-agent] ${this.agentId}: model data-domain pre-check stopped request; ${clipText(stop.reason, 500)}\n`);
+        await this.persist();
+        return reply;
       }
 
       // Call the model with the full conversation + tool catalog. When the
@@ -1114,14 +1132,23 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
       // content:"" with stop at the cap). Treating that as a finished reply
       // silently idles the agent mid-task with no error, no retry, and no
       // trace — so nudge once and let the round re-run.
-      if (turn.kind === "text" && turn.content.trim().length === 0 && emptyReplyRetries < MAX_EMPTY_REPLY_RETRIES) {
-        emptyReplyRetries++;
-        this.messages.push({
-          role: "user",
-          content: "（系统提示）你的上一轮回复内容为空（输出预算疑似被思考耗尽）。请继续执行当前任务：给出下一步工具调用，或输出实质性的阶段产出/最终汇总文本。",
-        });
+      if (turn.kind === "text" && turn.content.trim().length === 0) {
+        if (emptyReplyRetries < MAX_EMPTY_REPLY_RETRIES) {
+          emptyReplyRetries++;
+          this.messages.push({
+            role: "user",
+            content: "（系统提示）你的上一轮回复内容为空（输出预算疑似被思考耗尽）。请继续执行当前任务：给出下一步工具调用，或输出实质性的阶段产出/最终汇总文本。",
+          });
+          process.stderr.write(`[free-agent] ${this.agentId}: empty model reply stop_reason=${turn.stopReason ?? "unknown"}; retry=${emptyReplyRetries}/${MAX_EMPTY_REPLY_RETRIES}\n`);
+          await this.persist();
+          continue;
+        }
+        const reply = "[系统] 模型连续返回空正文，自动续跑提示次数已耗尽；已保留任务现场，请检查上下文或输出预算后继续。";
+        this.messages.push({ role: "system", content: `[empty_reply_exhausted] stop_reason=${turn.stopReason ?? "unknown"} retry=${emptyReplyRetries}/${MAX_EMPTY_REPLY_RETRIES}\n${reply}` });
+        process.stderr.write(`[free-agent] ${this.agentId}: empty model reply stop_reason=${turn.stopReason ?? "unknown"}; retry=${emptyReplyRetries}/${MAX_EMPTY_REPLY_RETRIES} exhausted\n`);
         await this.persist();
-        continue;
+        if (this.consumeSteer()) { await this.persist(); continue; }
+        return reply;
       }
 
       // H38: only a provider-reported output limit authorizes continuation.

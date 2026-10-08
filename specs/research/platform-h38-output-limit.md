@@ -1,5 +1,7 @@
 # H38 模型输出超限处置（2026-10-08，platform-ops，本地完成，未部署）
 
+> 后续：首批 `aa72598` 已部署；2026-10-08 新发现的回合静默终结已完成本地补修，详见 [platform-h38-turn-termination.md](platform-h38-turn-termination.md)。以下保留首批交付记录。
+
 本批包含模型结束信号透传、free-agent 确定性续跑、智谱端点思考参数调研和 FPGA 大文件生成纪律。未重启任何生产服务，未发送 p32 会话消息，未修改生产部署目录或 Worker bundle。
 
 ## 1. 三种观测形态与处置矩阵

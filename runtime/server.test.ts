@@ -49,6 +49,7 @@ import {
 } from "./task-workspace-client.ts";
 import type { GateId, GateSubmissionState } from "../core/src/domain/enums.ts";
 import { sha256Hex } from "../core/src/hashing.ts";
+import { loadFreeAgentConversation } from "./free-agent.ts";
 import { GJB_REF_V1_PROFILE } from "../core/src/services/process-profile.ts";
 
 // ---------------------------------------------------------------------------
@@ -421,11 +422,12 @@ class RecordingConversationalModel implements ConversationalModel {
 }
 
 class FailOnceConversationalModel implements ConversationalModel {
+  constructor(private readonly failureMessage = "temporary model outage") {}
   readonly calls: Array<{ messages: readonly AgentMessage[]; tools: readonly AgentTool[] }> = [];
 
   async chat(messages: readonly AgentMessage[], tools: readonly AgentTool[]): Promise<ChatTurn> {
     this.calls.push({ messages: [...messages], tools: [...tools] });
-    if (this.calls.length === 1) throw new Error("temporary model outage");
+    if (this.calls.length === 1) throw new Error(this.failureMessage);
     return { kind: "text", content: "recovered on the same project agent" };
   }
 }
@@ -2466,7 +2468,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     } finally { await server.stop(); await deleteAgent(taskId).catch(() => {}); }
   });
 
-  test("a Project Agent turn failure stays conversational and the same agent accepts the next turn", async () => {
+  for (const reason of ["temporary model outage", "context_budget_exceeded: input exceeds request budget"]) test(`a Project Agent failure stays visible and conversational (${reason})`, async () => {
     const projectId = "p-core-project-turn-recovery";
     const taskId = `project-agent-${crypto.randomUUID()}`;
     const events: Array<{ type: string; payload: Readonly<Record<string, unknown>> }> = [];
@@ -2491,7 +2493,7 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
       processProfileVersion: "GJB_REF_V1",
       targetPart: "xc7k70tfbv676-1",
     }), "pi-project-turn-recovery");
-    const model = new FailOnceConversationalModel();
+    const model = new FailOnceConversationalModel(reason);
     const server = new RuntimeServer(
       makeConfig(),
       async () => ({
@@ -2523,14 +2525,14 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         .toBe("awaiting_user");
       expect(events).toContainEqual({
         type: "assistant_message",
-        payload: { turn_id: expect.any(String), text: "[error] temporary model outage" },
+        payload: { turn_id: expect.any(String), text: `[error] ${reason}` },
       });
       expect(events).toContainEqual({
         type: "status",
         payload: {
           turn_id: expect.any(String),
           status: "awaiting_user",
-          reason: "temporary model outage",
+          reason,
         },
       });
       expect(await loadAgentState(taskId)).toMatchObject({
@@ -2538,6 +2540,10 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
         agentRole: "project",
         runtimeStarted: true,
         status: "awaiting_user",
+        contextUsageSnapshot: { requestState: "failed", failure: reason.startsWith("context_budget_exceeded") ? "context_limit" : "request_failed" },
+      });
+      expect((await loadFreeAgentConversation(taskId))!.messages.at(-1)).toMatchObject({
+        role: "system", content: expect.stringContaining(reason),
       });
 
       const followUp = await fetch(`${server.url}/tasks/${taskId}/message`, {

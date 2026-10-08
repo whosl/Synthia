@@ -2172,11 +2172,15 @@ export class RuntimeServer {
               delete handle.endedReason;
               delete handle.terminalCause;
               if (handle.currentState) {
+                // prompt() already persisted its failed request observations.
+                // Recover the conversational status from that fresh state,
+                // not the pre-turn handle (which would erase context_limit).
+                const failedState = await loadAgentState(agentId);
                 const {
                   endedReason: _endedReason,
                   terminalCause: _terminalCause,
                   ...recoverableState
-                } = handle.currentState;
+                } = failedState;
                 const awaiting: AgentState = {
                   ...recoverableState,
                   status: "awaiting_user",

@@ -68,7 +68,7 @@
 | H35 | BUG | **Learned Skill 参数泛化拒绝**（p31 `task-d142e3f722e8d8845a122e399a2c639f`）：末段 8 次 close 拒绝、apply 带中文/空格 reason_codes 拒绝而省略成功。只读会话实证 `human_corrections: 0` 与数组均已完整落盘，**未发现 falsy-zero 丢参或数组序列化损坏**。根因：工具 stringList 把原因文本按 ID 校验；close refList 禁空格；evolution-client 再把引用按 ID 校验；省略数组无默认值，均被泛化报 invalid_arguments。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：原因/引用采用有界非空文本数组；省略引用默认 []，0 明确保留，错误指明字段；沿用生产 skill_id 自动解析和默认 role/reason_codes。两个真实 app ID × 4 参数形态通过工具→mock HTTP 回归；未关闭真实 application。见四b、四d |
 | H36 | GAP | **上下文高压下模型调用楔死无自动处置**（p28 `task-65477236b84486aa1cf3d3273acdb4a2`，R25 40/29/20+ 分钟无会话落盘，需操作者 abort）：H31 水位观测不足以恢复。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：仅挂起模型请求（chat/chatStream、摘要模型调用）计时；默认 15 分钟，可设 `SYNTHIA_MODEL_WATCHDOG_MINUTES`，0 禁用。超时 abort 请求、持久化系统中断注记、重试一次；二次超时失败。会话落盘刷新空闲计时，工具期不计时；用户取消不重试，旧流增量丢弃。见四b、四d |
 | H37 | GAP | **证据文本 262144 字符单读上限无分页**（p28 约 1.19MB waveform.vcd 被 fail-closed 拒读）：agent 被迫改读 worker-result.json，完整波形证据不可达。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：synthia_job_evidence 增加 offset/limit（UTF-16 字符，默认 65536、最多 262144），贯通 Core/Connector/Worker；manifest 总字节数及每项大小/hash；页面 totalChars/nextOffset/next_read，保留整文件 hash 并校验页 hash。分页无需套用 UI 整 VCD 的 8MiB 上限，但仍守 Worker 64MiB 单文件/128MiB 总证据限制。项目/任务隔离、二进制拒读、Unicode 边界与损坏拒读保持。见四b、四d |
-| H38 | BUG/GAP | **模型输出超限三形态**（p28/p32，2026-10-03/10-08）：空回复、模型请求楔死、预告式收口（有正文/冒号结尾但零工具→awaiting_user）；另有 tb_top.v 生成截断/乱码残骸。旧 conversation 无结束原因，不能由叙述反推截断。 | **本地已修，待部署窗口（2026-10-08）**：结束信号透传到 ChatTurn/assistant audit；非空 text + max_tokens 自动续跑 ≤2 次、stderr/conversation 留痕；空回复沿 nudge 独立 ≤1 次；楔死沿 H36。P2 独立 7 请求未验证有效思考控制，不接入无效 env；P3 两技能 >8KiB 骨架工作副本/分段 ≤8KiB/完整登记后读回。残余正常 end_turn 语义性收口待 P1 上线统计后决定 Cline 式门控。见四e |
+| H38 | BUG/GAP | **模型输出超限三形态**（p28/p32，2026-10-03/10-08）：空回复、模型请求楔死、预告式收口（有正文/冒号结尾但零工具→awaiting_user）；另有 tb_top.v 生成截断/乱码残骸。旧 conversation 无结束原因，不能由叙述反推截断。 | **首批 aa72598 已部署；终结留痕补修本地完成，待窗口（2026-10-08）**：结束信号透传到 ChatTurn/assistant audit；非空 text + max_tokens 自动续跑 ≤2 次、stderr/conversation 留痕；空回复沿 nudge 独立 ≤1 次；楔死沿 H36。P2 独立 7 请求未验证有效思考控制，不接入无效 env；P3 两技能 >8KiB 骨架工作副本/分段 ≤8KiB/完整登记后读回。残余正常 end_turn 语义性收口待 P1 上线统计后决定 Cline 式门控。预算拒绝→Project Agent 恢复的本地静默链已复现并补齐错误注记/新状态恢复；空正文耗尽改为可见系统提示。见四e、四f |
 
 ## 四c、H36 看门狗首次实弹记录（2026-10-02）
 
@@ -123,6 +123,14 @@ p32 盲测会话（task-6bd05f30）10:01 起模型调用挂起 → **10:16:45 �
 P2：官方 GLM-4.6 thinking 开关说明不构成 Anthropic 兼容端点的 budget 契约；reasoning_effort 官方仅 GLM-5.2+。平台配置独立小请求共 7 个（203 输入/1281 输出 tokens），disabled 仍返回思考、budget=1 仍有 603 字符思考，故意无效参数也返回 200，未验证有效思考预算/关闭能力；不新增 SYNTHIA_MODEL_THINKING_*。不读基准 tokens 文件、不发 p32 消息。详细边界、探针表与证据见 [platform-h38-output-limit.md](platform-h38-output-limit.md)、[platform-h38-thinking-probe.json](platform-h38-thinking-probe.json)。
 
 验证：受影响测试 **210 pass / 0 fail**；根回归 **979 pass / 400 skip / 0 fail**（未设 DATABASE_URL）；Core check / Runtime TypeScript / diff 检查通过。仅需后续窗口更新代码/模板并重启 Runtime；本轮未部署、未重启任何服务，Worker bundle 不变。
+
+## 四f、H38 部署后静默终结补修（2026-10-08，worktree，未部署）
+
+634 消息/约 4.45MB 的独立旧版复现：摘要提示词超预算→机械投影仍估算 213396 tokens（输入预算 134464）→prepareRequest 抛错、模型调用 0 次→prompt catch 未记 conversation→Project Agent catch 恢复 awaiting_user 且旧 handle.currentState 覆盖失败上下文，形成无看门狗/无本地错误/endedReason=None 的表现。当前 defaultBeforeModelCall 固定放行；其潜在 stop-return 漏记录同时修复。源码 blame 表明预算/恢复缺口在 H38 前存在；未重放正在接受操作者手术的生产会话。
+
+补修：所有错误在 prompt catch 中先写 system/stderr 再持久化并抛出；预检 stop 记录原因；空正文（含 max_tokens）沿一次 nudge，耗尽写非空系统提示；成功收尾增加本轮有效记录不变量。Project Agent 错误恢复读最新落盘状态，保留 context_limit 等失败诊断。预算护栏与完整历史保留。
+
+新六项回归旧版 **0/6 通过**、修复后通过；受影响 **188 pass / 0 fail**，根回归 **986 pass / 400 skip / 0 fail**（无 DATABASE_URL），Core check / Runtime TypeScript 通过。只需后续 Runtime 窗口，本轮未部署/重启，未写 p32 文件。链路、终结出口矩阵和日志见 [platform-h38-turn-termination.md](platform-h38-turn-termination.md)。
 
 ## 五、深核记录（2026-09-14 审核轮）
 

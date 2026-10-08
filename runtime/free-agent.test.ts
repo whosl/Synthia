@@ -171,14 +171,14 @@ describe("free-agent: idle chat (zero tool calls)", () => {
     // finished text turn. Without the guard the session just idles mid-task.
     const model = new ScriptedModel([
       txt(""),   // exhausted budget
-      txt(""),   // still empty after nudge (guard budget exhausted → falls through)
+      txt(""),   // still empty after nudge → visible exhaustion note
       txt("任务完成汇总"),
     ]);
     const { session } = makeSession({ model });
 
     const reply = await session.prompt("开始任务");
-    // First prompt(): empty → nudge → empty again → guard exhausted → empty final.
-    expect(reply).toBe("");
+    // First prompt(): empty → nudge → empty again → visible system fallback.
+    expect(reply).toContain("模型连续返回空正文");
     expect(model.calls).toHaveLength(2);
     // The corrective nudge is visible in the model's second call context.
     const secondCallMessages = model.calls[1]!.messages;
