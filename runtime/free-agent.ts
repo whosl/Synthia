@@ -490,6 +490,7 @@ function truncateForStream(s: string): string {
 const MAX_CLAIM_RETRIES = 2;
 /** Empty text turns per prompt() that get one corrective nudge + retry. */
 const MAX_EMPTY_REPLY_RETRIES = 1;
+const MAX_OUTPUT_LIMIT_RETRIES = 2;
 
 /**
  * 完成性声明模式（中英文）。宁漏勿滥：只拦高置信的「仿真已通过」类表述，
@@ -1016,6 +1017,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
     // 防呆 2：本 prompt() 内完成声明被拦截的次数（重试上限 MAX_CLAIM_RETRIES）。
     let claimRetries = 0;
     let emptyReplyRetries = 0;
+    let outputLimitRetries = 0;
     const maxRounds = this.deps.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     for (let round = 0; maxRounds === 0 || round < maxRounds; round++) {
       this.checkAbort();
@@ -1118,7 +1120,30 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
           role: "user",
           content: "（系统提示）你的上一轮回复内容为空（输出预算疑似被思考耗尽）。请继续执行当前任务：给出下一步工具调用，或输出实质性的阶段产出/最终汇总文本。",
         });
+        await this.persist();
         continue;
+      }
+
+      // H38: only a provider-reported output limit authorizes continuation.
+      // Empty replies retain their own nudge budget; tools run through the
+      // existing governance path. Never infer truncation from narration.
+      if (turn.kind === "text" && turn.content.trim().length > 0 && turn.stopReason === "max_tokens") {
+        if (outputLimitRetries < MAX_OUTPUT_LIMIT_RETRIES) {
+          outputLimitRetries++;
+          this.messages.push({ role: "assistant", content: turn.content, stopReason: turn.stopReason });
+          this.messages.push({
+            role: "user",
+            content: `[model_output_limit] stop_reason=max_tokens retry=${outputLimitRetries}/${MAX_OUTPUT_LIMIT_RETRIES} disposition=retry\n（系统提示）你的上轮输出被输出上限截断，请从中断处继续完成任务。已完成的工具与证据保留，不要重复提交作业；大文件按不超过 8 KiB 的增量分节生成。`,
+          });
+          process.stderr.write(`[free-agent] ${this.agentId}: model output limit stop_reason=max_tokens; retry=${outputLimitRetries}/${MAX_OUTPUT_LIMIT_RETRIES}\n`);
+          await this.persist();
+          continue;
+        }
+        this.messages.push({
+          role: "system",
+          content: `[model_output_limit] stop_reason=max_tokens retry=${outputLimitRetries}/${MAX_OUTPUT_LIMIT_RETRIES} disposition=exhausted\n输出上限自动续跑次数已耗尽，保留部分输出并等待操作者继续。`,
+        });
+        process.stderr.write(`[free-agent] ${this.agentId}: model output limit stop_reason=max_tokens; retry=${outputLimitRetries}/${MAX_OUTPUT_LIMIT_RETRIES} exhausted\n`);
       }
 
       if (turn.kind === "text") {
@@ -1184,7 +1209,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         }
 
         // Model converged to a plain-text reply — turn complete.
-        this.messages.push({ role: "assistant", content: turn.content });
+        this.messages.push({ role: "assistant", content: turn.content, ...(turn.stopReason ? { stopReason: turn.stopReason } : {}) });
         await this.persist();
         if (this.pendingSteer.length > 0) continue;
         return turn.content;
@@ -1195,6 +1220,7 @@ class FreeAgentSessionImpl implements FreeAgentSession, FreeAgentController {
         role: "assistant",
         content: turn.content,
         toolCalls: turn.calls,
+        ...(turn.stopReason ? { stopReason: turn.stopReason } : {}),
       });
       await this.persist();
 

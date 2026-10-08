@@ -126,7 +126,7 @@ export interface AgentToolCall {
 /** 对话消息（OpenAI 风格）。 */
 export type AgentMessage =
   | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string | null; toolCalls?: readonly AgentToolCall[] }
+  | { role: "assistant"; content: string | null; toolCalls?: readonly AgentToolCall[]; stopReason?: string }
   | { role: "tool"; toolCallId: string; name: string; content: string; isError?: boolean };
 
 /** 三层强制钩子。返回 undefined 表示放行。 */
@@ -147,10 +147,12 @@ export interface TurnUsage {
   readonly completionTokens?: number;
 }
 
-/** 模型一次对话回合：要么纯文本（闲聊/答复/收尾），要么一组工具调用。 */
+/** 模型一次对话回合：要么纯文本，要么一组工具调用。
+ * stopReason 保留结束信号；适配层将输出截断统一为 max_tokens。
+ * 缺失表示未知，不推断为截断。 */
 export type ChatTurn =
-  | { kind: "text"; content: string; usage?: TurnUsage }
-  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null; usage?: TurnUsage };
+  | { kind: "text"; content: string; usage?: TurnUsage; stopReason?: string }
+  | { kind: "tool_calls"; calls: readonly AgentToolCall[]; content: string | null; usage?: TurnUsage; stopReason?: string };
 
 /** 对话式模型原语（多轮 tool-calling）。Slice A 在 model-client.ts 上实现 chat()。 */
 export interface ConversationalModel {

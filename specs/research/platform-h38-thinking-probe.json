@@ -1,0 +1,202 @@
+{
+  "checked_at": "2026-10-08T11:32:54.194251+08:00",
+  "endpoint": "https://open.bigmodel.cn/api/anthropic",
+  "model": "glm-4.6",
+  "config_source": "synthia-runtime systemd platform model configuration (credentials never copied to repository)",
+  "configured_model_at_probe": "glm-5.3-flash",
+  "transport": "independent POST /api/anthropic/v1/messages; no Runtime task API, no conversation or benchmark usage mutation",
+  "prompt": "Calculate 7483 * 6279. Reply with the integer only.",
+  "max_tokens_per_request": 512,
+  "requests": 7,
+  "input_tokens_total": 203,
+  "output_tokens_total": 1281,
+  "results": [
+    {
+      "variant": "disabled",
+      "status": 200,
+      "seconds": 3.68,
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 117,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 160,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    {
+      "variant": "budget_1",
+      "status": 200,
+      "seconds": 8.04,
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 362,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 603,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 1
+        }
+      }
+    },
+    {
+      "variant": "budget_128",
+      "status": 200,
+      "seconds": 5.34,
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 240,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 436,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 128
+        }
+      }
+    },
+    {
+      "variant": "effort_low",
+      "status": 200,
+      "seconds": 5.88,
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 222,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 445,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "variant": "default",
+      "status": 200,
+      "seconds": 5.16,
+      "response_model": "glm-4.6",
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 177,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 348,
+      "text_chars": 8,
+      "request_extra": {}
+    },
+    {
+      "variant": "disabled_confirm",
+      "status": 200,
+      "seconds": 2.3,
+      "response_model": "glm-4.6",
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 80,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 106,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    {
+      "variant": "invalid_thinking_control",
+      "status": 200,
+      "seconds": 2.2,
+      "response_model": "glm-4.6",
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 29,
+        "output_tokens": 83,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      },
+      "block_types": [
+        "thinking",
+        "text"
+      ],
+      "thinking_chars": 113,
+      "text_chars": 8,
+      "request_extra": {
+        "thinking": {
+          "type": "not_a_valid_mode",
+          "budget_tokens": -1
+        },
+        "reasoning_effort": "not_a_valid_effort"
+      }
+    }
+  ],
+  "interpretation": "This endpoint did not honor thinking=disabled or a hard budget of 1. Acceptance of invalid controls suggests ignored fields; HTTP 200 does not verify support. No thinking configuration added."
+}

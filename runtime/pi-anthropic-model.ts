@@ -249,9 +249,13 @@ function assistantToChatTurn(message: AssistantMessage): ChatTurn {
   const usage = (message.usage.input > 0 || message.usage.cacheRead > 0 || message.usage.cacheWrite > 0 || message.usage.output > 0)
     ? { promptTokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite, completionTokens: message.usage.output }
     : undefined;
+  // pi-ai normalizes Anthropic max_tokens to length. Preserve that signal
+  // for the agent loop instead of treating truncated text as a finished turn.
+  const stopReason = message.stopReason === "length" ? "max_tokens"
+    : message.stopReason === "toolUse" ? "tool_use" : "end_turn";
   return calls.length > 0
-    ? { kind: "tool_calls", calls, content: text || null, ...(usage ? { usage } : {}) }
-    : { kind: "text", content: text, ...(usage ? { usage } : {}) };
+    ? { kind: "tool_calls", calls, content: text || null, stopReason, ...(usage ? { usage } : {}) }
+    : { kind: "text", content: text, stopReason, ...(usage ? { usage } : {}) };
 }
 
 function assistantToChatCompletion(message: AssistantMessage): ChatCompletionResponse {
@@ -269,7 +273,7 @@ function assistantToChatCompletion(message: AssistantMessage): ChatCompletionRes
   const json = {
     choices: [{
       message: wireMessage,
-      finish_reason: turn.kind === "tool_calls" ? "tool_calls" : "stop",
+      finish_reason: turn.stopReason === "max_tokens" ? "length" : turn.kind === "tool_calls" ? "tool_calls" : "stop",
     }],
     usage: {
       prompt_tokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite,

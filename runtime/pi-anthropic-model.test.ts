@@ -4,7 +4,7 @@ import {
   type PiAnthropicDeps,
 } from "./pi-anthropic-model.ts";
 import type { ModelClientConfig } from "./model-client.ts";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { createAssistantMessageEventStream, type AssistantMessage } from "@mariozechner/pi-ai";
 
 const CONFIG: ModelClientConfig = {
   baseUrl: "https://open.bigmodel.cn/api/anthropic",
@@ -38,6 +38,7 @@ describe("PiAnthropicRuntimeModel", () => {
     const model = new PiAnthropicRuntimeModel(CONFIG, deps);
     const turn = await model.chat([{ role: "user", content: "hello" }], []);
     expect(turn.kind).toBe("text");
+    expect(turn.stopReason).toBe("end_turn");
     if (turn.kind === "text") expect(turn.content).toContain("module top");
   });
 
@@ -59,10 +60,41 @@ describe("PiAnthropicRuntimeModel", () => {
       [],
     );
     expect(turn.kind).toBe("tool_calls");
+    expect(turn.stopReason).toBe("tool_use");
     if (turn.kind === "tool_calls") {
       expect(turn.calls).toHaveLength(1);
       expect(turn.calls[0]!.name).toBe("emit_rtl");
     }
+  });
+
+  test("H38 buffered pi length is exposed as max_tokens, including empty text", async () => {
+    for (const content of ["继续读取：", ""]) {
+      const model = new PiAnthropicRuntimeModel(CONFIG, {
+        complete: async () => fakeAssistant({ stopReason: "length", content: [{ type: "text", text: content }] }),
+      });
+      const turn = await model.chat([{ role: "user", content: "test" }], []);
+      expect(turn).toMatchObject({ kind: "text", content, stopReason: "max_tokens" });
+    }
+  });
+
+  test("H38 streaming completion retains length and deltas; default thinking options stay unset", async () => {
+    const partial = fakeAssistant({ stopReason: "length", content: [{ type: "text", text: "先读：" }] });
+    const deltas: string[] = [];
+    const model = new PiAnthropicRuntimeModel(CONFIG, {
+      stream: (_model, _context, options) => {
+        expect(options).not.toHaveProperty("thinkingEnabled");
+        expect(options).not.toHaveProperty("thinkingBudgetTokens");
+        expect(options).not.toHaveProperty("effort");
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "text_start", contentIndex: 0, partial });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: "先读：", partial });
+        stream.push({ type: "done", reason: "length", message: partial });
+        return stream;
+      },
+    });
+    const turn = await model.chatStream([{ role: "user", content: "test" }], [], { onDelta: delta => deltas.push(delta) });
+    expect(turn).toMatchObject({ kind: "text", content: "先读：", stopReason: "max_tokens" });
+    expect(deltas).toEqual(["先读："]);
   });
 
   test("chat throws on error stop reason", async () => {

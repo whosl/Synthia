@@ -211,6 +211,16 @@ describe("ModelClient.chatStream", () => {
     });
   }
 
+  test("H38 normalizes the terminal SSE length signal to max_tokens", async () => {
+    const sse = [
+      `data: {"choices":[{"delta":{"content":"先读："}}]}\n\n`,
+      `data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n`,
+      `data: [DONE]\n\n`,
+    ].join("");
+    const turn = await new ModelClient({ ...cfg, postStream: poster(sse) }).chatStream([{ role: "user", content: "test" }], []);
+    expect(turn).toMatchObject({ kind: "text", content: "先读：", stopReason: "max_tokens" });
+  });
+
   test("streams text turn with onDelta callbacks", async () => {
     const sse = [
       `data: {"choices":[{"delta":{"content":"hello "}}]}\n\n`,

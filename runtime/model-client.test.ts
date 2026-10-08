@@ -40,6 +40,17 @@ function makeClient(protocol: ActionProtocol, poster: ChatPoster, opts: { maxPar
 }
 
 describe("ModelClient.chat cancellation", () => {
+  test("H38 normalizes buffered length without guessing absent stop reasons", async () => {
+    for (const finishReason of ["length", "stop", undefined]) {
+      const poster: ChatPoster = async () => ({
+        status: 200, text: "{}",
+        json: { choices: [{ message: { content: "先读：" }, finish_reason: finishReason }] },
+      });
+      const turn = await makeClient("tools", poster).chat([{ role: "user", content: "test" }], []);
+      expect(turn.stopReason).toBe(finishReason === "length" ? "max_tokens" : finishReason === "stop" ? "end_turn" : undefined);
+    }
+  });
+
   test("propagates AbortSignal to the buffered HTTP poster", async () => {
     let observed: AbortSignal | undefined;
     const poster: ChatPoster = async ({ signal }) => {

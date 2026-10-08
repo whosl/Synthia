@@ -45,8 +45,8 @@ export interface ModelClientConfig {
   /** Max output tokens for the free-agent conversational path (chat/chatStream).
    *  Default 16384 — separate from {@link toolMaxTokens} because a chat turn may
    *  carry a whole source file, while the pipeline phases emit one bounded action.
-   *  Counts **visible** tokens only: measured on the grok-4.6 gateway, reasoning
-   *  tokens are billed on top and are not charged against this cap. */
+   *  Provider-dependent: the grok-4.6 gateway caps visible tokens only;
+   *  GLM's Anthropic endpoint shares this cap between thinking and text. */
   readonly chatMaxTokens?: number;
   /** When true, log raw response summaries to stderr (no secrets). */
   readonly debug?: boolean;
@@ -512,10 +512,12 @@ function toWireMessage(m: AgentMessage): Record<string, unknown> {
 function parseChatTurn(json: unknown): ChatTurn {
   interface WireToolCall { id?: string; function?: { name?: string; arguments?: unknown } }
   interface WireMessage { content?: string | null; tool_calls?: WireToolCall[] }
-  const root = json as { choices?: Array<{ message?: WireMessage }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | undefined;
+  const root = json as { choices?: Array<{ message?: WireMessage; finish_reason?: string | null }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | undefined;
   const choices = root?.choices;
   const msg = choices?.[0]?.message;
   const content = msg?.content ?? null;
+  const stopReason = normalizedStopReason(choices?.[0]?.finish_reason);
+  const stop = stopReason ? { stopReason } : {};
   const wireCalls = msg?.tool_calls;
   const wireUsage = root?.usage;
   const usage = wireUsage && (typeof wireUsage.prompt_tokens === "number" || typeof wireUsage.completion_tokens === "number")
@@ -538,11 +540,18 @@ function parseChatTurn(json: unknown): ChatTurn {
         args,
       };
     });
-    return { kind: "tool_calls", calls, content, ...(usage ? { usage } : {}) };
+    return { kind: "tool_calls", calls, content, ...stop, ...(usage ? { usage } : {}) };
   }
   // No tool calls → treat as a text turn. Fall back to empty string if both
   // content and tool_calls are absent (malformed but non-throwing).
-  return { kind: "text", content: typeof content === "string" ? content : "", ...(usage ? { usage } : {}) };
+  return { kind: "text", content: typeof content === "string" ? content : "", ...stop, ...(usage ? { usage } : {}) };
+}
+
+function normalizedStopReason(reason: string | null | undefined): string | undefined {
+  if (reason === "length") return "max_tokens";
+  if (reason === "stop") return "end_turn";
+  if (reason === "tool_calls") return "tool_use";
+  return reason ?? undefined;
 }
 
 /**
@@ -808,6 +817,8 @@ export class ModelClient implements LoopModel, ConversationalModel {
       }
 
       const result = await consumeChatSSE(sseBody, { ...opts, onActivity: watchdog.bump });
+      const stopReason = normalizedStopReason(result.finishReason);
+      const stop = stopReason ? { stopReason } : {};
       if (this.cfg.debug) {
         process.stderr.write(
           `[model-debug] chatStream: finish=${result.finishReason ?? "?"} ` +
@@ -824,9 +835,9 @@ export class ModelClient implements LoopModel, ConversationalModel {
           }
           return { toolCallId: c.id, name: c.name, args };
         });
-        return { kind: "tool_calls", calls, content: result.text || null, ...(result.usage ? { usage: result.usage } : {}) };
+        return { kind: "tool_calls", calls, content: result.text || null, ...stop, ...(result.usage ? { usage: result.usage } : {}) };
       }
-      return { kind: "text", content: result.text, ...(result.usage ? { usage: result.usage } : {}) };
+      return { kind: "text", content: result.text, ...stop, ...(result.usage ? { usage: result.usage } : {}) };
     } finally {
       watchdog.stop();
     }

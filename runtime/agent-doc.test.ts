@@ -155,6 +155,21 @@ describe("read_skill_doc：按需读技能包", () => {
     expect(body.truncated).toBeUndefined();
   });
 
+  test("H38 RTL/TB generation guidance reaches agent_doc_read without weakening candidate gates", async () => {
+    for (const id of ["fpga-rtl-build", "fpga-tb-write"]) {
+      const { isError, body } = await call({ path: `skills/${id}/SKILL.md` });
+      expect(isError).toBe(false);
+      expect(body.truncated).toBeUndefined();
+      const content = body.content as string;
+      expect(content).toContain("8192 个 UTF-8 字节");
+      expect(content).toContain("先在工作副本落盘骨架一版");
+      expect(content).toContain("单次生成的新增/替换内容 ≤8 KiB");
+      expect(content).toContain("每次登记后读回核验");
+      expect(content).toContain("不登记候选、不宣称完整、不提交门禁");
+      expect(content).toContain("不改变");
+    }
+  });
+
   test("模板也读得到——文件结构与命名就定在这里", async () => {
     const { isError, body } = await call({ path: "skills/fpga-tb-write/templates/tb_top.v" });
     expect(isError).toBe(false);

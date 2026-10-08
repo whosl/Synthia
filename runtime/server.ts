@@ -27,10 +27,10 @@ import { normalizeConstraints, type ProjectTurnConfiguration } from "../core/src
  *                                   GJB_REF_V1 requires explicit lowercase SHA-256)
  *   SYNTHIA_RUNS_DIR           override .runs/ directory (tests)
  *   SYNTHIA_MODEL_URL / KEY / NAME  (real model, non-offline mode)
- *   SYNTHIA_MODEL_API               chat-completions | responses (default chat-completions)
+ *   SYNTHIA_MODEL_API               chat-completions | anthropic-messages (default chat-completions)
  *   SYNTHIA_MODEL_REASONING_EFFORT  (optional; sent as reasoning_effort. 当前保 xhigh，
  *                                    见 specs/agent-stream-benchmark.md §4.2)
- *   SYNTHIA_MODEL_CHAT_MAX_TOKENS   (free-agent 对话轮的可见 token 上限, default 16384)
+ *   SYNTHIA_MODEL_CHAT_MAX_TOKENS   (free-agent 输出上限, default 16384；GLM Anthropic 思考与正文共享)
  *   SYNTHIA_MODEL_TOOL_MAX_TOKENS   (流水线工具阶段, default 4096)
  *   SYNTHIA_MODEL_STREAM_FALLBACK   0|false 关掉「流式失败降级为非流式」(default on)
  *   SYNTHIA_FEATURE_HISTORICAL_MATERIALS 1|true 显式开启历史资料上下文 (default off)
