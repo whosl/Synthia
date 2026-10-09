@@ -621,7 +621,7 @@ function parseEvaluation(
     : identifier(row.application_id, `${label}.application_id`);
   const bundle = expected.get(applicationId);
   if (!bundle) malformed(`${label}.application_id was not claimed`);
-  const outcome = oneOf(
+  let outcome = oneOf(
     row.outcome,
     ["success", "applicability_failure", "execution_failure", "inconclusive"] as const,
     `${label}.outcome`,
@@ -641,8 +641,14 @@ function parseEvaluation(
     }
     return ref;
   });
-  if (outcome !== "inconclusive" && evidenceRefs.length === 0) {
-    malformed(`${label} attributable outcome requires evidence`);
+  // The citation invariant stands, but a single violation no longer kills
+  // the whole run's co-claimed applications (live loop 2026-10-09: four
+  // regression-window applications closed with no refs made every run die
+  // here). Degrade to inconclusive with an audit note instead — the honest
+  // verdict for an attributable claim with nothing citable.
+  const downgradedForNoEvidence = outcome !== "inconclusive" && evidenceRefs.length === 0;
+  if (downgradedForNoEvidence) {
+    outcome = "inconclusive";
   }
   const supersedesId = row.supersedes_id === null
     ? null
@@ -658,7 +664,9 @@ function parseEvaluation(
     evidence_snapshot_hash: hash(bundle.evidence_snapshot_hash, `${label}.evidence_snapshot_hash`),
     outcome,
     confidence,
-    reason: boundedText(row.reason, `${label}.reason`, 8_192),
+    reason: downgradedForNoEvidence
+      ? `${boundedText(row.reason, `${label}.reason`, 7_800)} [auto-downgraded: attributable outcome cited no evidence]`
+      : boundedText(row.reason, `${label}.reason`, 8_192),
     evidence_refs: evidenceRefs,
     eval_job_refs: [],
     supersedes_id: supersedesId,

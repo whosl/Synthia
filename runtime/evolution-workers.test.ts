@@ -677,6 +677,30 @@ describe("CuratorWorker", () => {
     }
   });
 
+  test("attributable outcome with no citable refs degrades to inconclusive, not run death", async () => {
+    // Live loop 2026-10-09: four regression-window applications (closed with
+    // empty refs, null claims) made the model claim success with evidence_refs
+    // [] and the guard killed every co-claimed run.
+    const client = new FakeCuratorClient();
+    client.claims.push(curatorClaim(1));
+    const model = new FakeModel();
+    model.responses.push({
+      evaluations: [{
+        application_id: "app-1",
+        outcome: "success",
+        confidence: 0.8,
+        reason: "Looks done",
+        evidence_refs: [],
+        supersedes_id: null,
+      }],
+      remediations: [{ skill_id: "skill-1", action: "no_op" }],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    expect(client.completes[0]!.evaluations[0]).toMatchObject({ outcome: "inconclusive" });
+    expect(client.completes[0]!.evaluations[0]!.reason).toContain("auto-downgraded");
+  });
+
   test("an omitted remediation skill_id is assigned by elimination", async () => {
     // Live failure 2026-10-09 14:46: "remediations[0].skill_id is required"
     // killed a recovered scheduled run. Two skills claimed, one remediation
