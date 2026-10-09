@@ -13,7 +13,7 @@
  * Usage:
  *   bun run scripts/regeneralize-skills.ts [--slug <slug> ...]   # default: all skills
  */
-import { createRuntimeModelFromEnv } from "../runtime/pi-responses-model.ts";
+import { createRuntimeModelFromEnv } from "../runtime/runtime-model.ts";
 import { EvolutionModelAdapter } from "../runtime/evolution-model-adapter.ts";
 import { EVOLUTION_MODEL_OUTPUT_MAX_BYTES } from "../runtime/evolution-workers.ts";
 
