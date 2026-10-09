@@ -706,6 +706,67 @@ describe("CuratorWorker", () => {
     expect(sorted.map((r) => r.skill_id)).toEqual(["skill-1", "skill-2"]);
   });
 
+  test("elimination uses the remaining claimed skill and its CAS facts for a patch", async () => {
+    const client = new FakeCuratorClient();
+    client.claims.push(curatorClaim(3));
+    const model = new FakeModel();
+    const patch = { applicability: { summary: "Timing failures" } };
+    model.responses.push({
+      evaluations: [1, 2, 3].map((index) => ({
+        application_id: `app-${index}`,
+        outcome: "inconclusive",
+        confidence: 0.4,
+        reason: "thin evidence",
+        evidence_refs: [],
+        supersedes_id: null,
+      })),
+      remediations: [
+        { action: "patch", patch, expected_active_version_id: "model-invented-cas" },
+        { skill_id: "skill-3", action: "no_op" },
+        { skill_id: "skill-1", action: "no_op" },
+      ],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    expect(client.completes[0]!.remediations[0]).toEqual({
+      skill_id: "skill-2",
+      expected_active_version_id: "version-2",
+      expected_control_revision: 5,
+      action: "patch",
+      patch,
+    });
+  });
+
+  test("elimination rejects ambiguous, incorrect, duplicate, and incomplete assignments", async () => {
+    const cases = [
+      { count: 2, remediations: [{ action: "no_op" }, { action: "no_op" }] },
+      { count: 2, remediations: [{ skill_id: "unknown-skill", action: "no_op" }, { action: "no_op" }] },
+      { count: 3, remediations: [{ skill_id: "skill-1", action: "no_op" }, { skill_id: "skill-1", action: "no_op" }, { action: "no_op" }] },
+      { count: 2, remediations: [{ skill_id: "skill-1", action: "no_op" }] },
+      { count: 2, remediations: [{ skill_id: "skill-1", action: "no_op" }, { skill_id: null, action: "no_op" }] },
+    ];
+    for (const input of cases) {
+      const client = new FakeCuratorClient();
+      client.claims.push(curatorClaim(input.count));
+      const model = new FakeModel();
+      model.responses.push({
+        evaluations: Array.from({ length: input.count }, (_, index) => ({
+          application_id: `app-${index + 1}`,
+          outcome: "inconclusive",
+          confidence: 0.4,
+          reason: "thin evidence",
+          evidence_refs: [],
+          supersedes_id: null,
+        })),
+        remediations: input.remediations,
+      });
+      const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+      expect(result).toMatchObject({ state: "failed", errorCode: "MALFORMED_MODEL_OUTPUT", retryable: false });
+      expect(client.completes).toHaveLength(0);
+      expect(client.failures).toHaveLength(1);
+    }
+  });
+
   test("a stale primary version passes through instead of killing the run's evaluations", async () => {
     // The distiller minted a newer version after the agent applied: the
     // claim's skill summary and its application bundle disagree. The model
