@@ -94,6 +94,19 @@ describe("self-evolution domain", () => {
     });
   });
 
+  test("an even sample preserves a half-millisecond duration median", () => {
+    const metrics = computeSkillMetrics([210_982, 210_983].map((durationMs) => ({
+      role: "primary" as const,
+      applicationState: "evaluated" as const,
+      outcome: "success" as const,
+      durationMs,
+      humanCorrections: 0,
+    })));
+    expect(metrics.median_duration_ms).toBe(210_982.5);
+    expect(metrics.primary_applied).toBe(2);
+    expect(metrics.success_rate).toBe(1);
+  });
+
   test("computes efficiency against the origin-episode baseline from success durations only", () => {
     const observations = [
       { role: "primary", applicationState: "evaluated", outcome: "success", durationMs: 600, humanCorrections: 0 },

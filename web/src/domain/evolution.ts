@@ -92,6 +92,13 @@ function number(value: unknown, label: string): number {
   return value;
 }
 
+function nullableNonNegativeNumber(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  const result = number(value, label);
+  if (result < 0) throw new EvolutionContractError(`${label} must be non-negative`);
+  return result;
+}
+
 function isoTime(value: unknown, label: string): string {
   const result = string(value, label);
   if (Number.isNaN(Date.parse(result))) throw new EvolutionContractError(`${label} must be ISO-8601`);
@@ -143,7 +150,8 @@ function parseMetrics(value: unknown, label: string): SkillMetricsV1 {
     applicability_failure: integer(row.applicability_failure, `${label}.applicability_failure`),
     execution_failure: integer(row.execution_failure, `${label}.execution_failure`),
     success_rate: successRate,
-    median_duration_ms: nullableInteger(row.median_duration_ms, `${label}.median_duration_ms`),
+    // Even-sized samples can have a fractional median of integer milliseconds.
+    median_duration_ms: nullableNonNegativeNumber(row.median_duration_ms, `${label}.median_duration_ms`),
     human_corrections: nullableInteger(row.human_corrections, `${label}.human_corrections`),
     first_solved_problem_families: nullableInteger(
       row.first_solved_problem_families,

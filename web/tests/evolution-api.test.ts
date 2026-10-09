@@ -90,6 +90,20 @@ describe("self-evolution v1 API consumer", () => {
     expect(captured).toBe("/api/v1/learned-skills?status=active_unproven&cursor=next+token&limit=25");
   });
 
+  test("a fractional median in the seventh skill does not reject the complete API list", async () => {
+    const items = Array.from({ length: 7 }, (_, index) => ({
+      ...skill,
+      skill_id: `skill-${index + 1}`,
+      metrics: { ...skill.metrics, median_duration_ms: index === 6 ? 210_982.5 : null },
+    }));
+    const client = createClient({
+      fetchImpl: (async () => envelope({ schema: "learned-skill-list.v1", items, next_cursor: null })) as typeof fetch,
+    });
+    const result = await listLearnedSkills(client);
+    expect(result.items).toHaveLength(7);
+    expect(result.items[6]!.metrics.median_duration_ms).toBe(210_982.5);
+  });
+
   test("settings sends frozen CAS body plus Idempotency-Key", async () => {
     let captured: RequestInit | undefined;
     const client = createClient({

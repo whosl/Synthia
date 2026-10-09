@@ -43,6 +43,7 @@ export interface SkillMetricsV1 {
   readonly applicability_failure: number;
   readonly execution_failure: number;
   readonly success_rate: number | null;
+  /** An even sample of integer durations can produce a fractional millisecond median. */
   readonly median_duration_ms: number | null;
   readonly human_corrections: number | null;
   readonly first_solved_problem_families: number | null;

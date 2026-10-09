@@ -10,7 +10,9 @@ import {
   currentEvaluationIds,
   freezeWriteAttempt,
   parseEvolutionOverview,
+  parseLearnedSkillDetail,
   parseLearnedSkillSummary,
+  parseLearnedSkillVersion,
   parseSkillApplicationDetail,
   successRateText,
 } from "../src/domain/evolution.ts";
@@ -185,6 +187,58 @@ describe("self-evolution v1 domain contract", () => {
       execution_failure: 0,
       success_rate: 0,
     }))).toThrow("unknown measurement");
+  });
+
+  test("fractional duration medians survive summary and per-version detail parsing", () => {
+    const metrics = { ...unknownMetrics(), median_duration_ms: 210_982.5 };
+    const summary = learnedSkill(metrics);
+    expect(parseLearnedSkillSummary(summary).metrics.median_duration_ms).toBe(210_982.5);
+    const detail = parseLearnedSkillDetail({
+      ...(summary as object),
+      versions: [{
+        version_id: "version-1",
+        version_no: 1,
+        parent_version_id: null,
+        created_at: "2026-10-09T00:00:00.000Z",
+        quality_state: "active_observed",
+        content_manifest_hash: HASH,
+      }],
+      source_summary: { distillation_run_id: "distill-1", source_count: 1, visible_source_count: 1 },
+    });
+    expect(detail.metrics.median_duration_ms).toBe(210_982.5);
+    const version = parseLearnedSkillVersion({
+      schema: "learned-skill-version.v1",
+      skill: summary,
+      version: {
+        version_id: "version-1",
+        version_no: 1,
+        parent_version_id: null,
+        description: "Skill description",
+        quality_state: "active_observed",
+        applicability: {},
+        outcome_contract: {},
+        metrics,
+        content_manifest_hash: HASH,
+        created_at: "2026-10-09T00:00:00.000Z",
+        files: [],
+        scan: { scanner_version: "scanner-v1", decision: "pass", findings: [] },
+      },
+    });
+    expect(version.version.metrics!.median_duration_ms).toBe(210_982.5);
+    for (const value of [0, null]) {
+      expect(parseLearnedSkillSummary(learnedSkill({ ...metrics, median_duration_ms: value })).metrics.median_duration_ms)
+        .toBe(value);
+    }
+  });
+
+  test("duration medians reject invalid values while metric counts still require integers", () => {
+    for (const value of [-0.5, NaN, Infinity, -Infinity, "210982.5", undefined]) {
+      expect(() => parseLearnedSkillSummary(learnedSkill({
+        ...unknownMetrics(), median_duration_ms: value as number,
+      }))).toThrow(EvolutionContractError);
+    }
+    expect(() => parseLearnedSkillSummary(learnedSkill({ ...unknownMetrics(), primary_applied: 1.5 })))
+      .toThrow("primary_applied must be a non-negative integer");
   });
 
   test("rollout-off exposes only one-way emergency disable actions", () => {
