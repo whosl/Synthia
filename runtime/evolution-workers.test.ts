@@ -677,6 +677,35 @@ describe("CuratorWorker", () => {
     }
   });
 
+  test("an omitted remediation skill_id is assigned by elimination", async () => {
+    // Live failure 2026-10-09 14:46: "remediations[0].skill_id is required"
+    // killed a recovered scheduled run. Two skills claimed, one remediation
+    // names its skill, the other omits it — the assignment is unambiguous.
+    const client = new FakeCuratorClient();
+    const claim = curatorClaim(2);
+    client.claims.push(claim);
+    const model = new FakeModel();
+    const evaluations = [0, 1].map((i) => ({
+      application_id: `app-${i + 1}`,
+      outcome: "inconclusive",
+      confidence: 0.4,
+      reason: "thin evidence",
+      evidence_refs: [],
+      supersedes_id: null,
+    }));
+    model.responses.push({
+      evaluations,
+      remediations: [
+        { skill_id: "skill-2", action: "no_op" },
+        { action: "no_op" },
+      ],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    const sorted = [...client.completes[0]!.remediations].sort((a, b) => a.skill_id.localeCompare(b.skill_id));
+    expect(sorted.map((r) => r.skill_id)).toEqual(["skill-1", "skill-2"]);
+  });
+
   test("a stale primary version passes through instead of killing the run's evaluations", async () => {
     // The distiller minted a newer version after the agent applied: the
     // claim's skill summary and its application bundle disagree. The model

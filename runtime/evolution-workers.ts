@@ -557,7 +557,29 @@ export function parseCuratorOutput(
   for (const bundle of run.applications) {
     expectedSkills.set(bundle.primary_version.skill.skill_id, bundle);
   }
-  const remediations = array(row.remediations, "remediations", expectedSkills.size)
+  const remediationRows = array(row.remediations, "remediations", expectedSkills.size);
+  // Elimination pass: the model must name a skill per remediation but
+  // transcribes ids unreliably and sometimes omits them outright. When
+  // exactly one entry omits skill_id and exactly one expected skill is not
+  // named by any other entry, the assignment is unambiguous — fill it in
+  // before parsing (live failure: "remediations[0].skill_id is required"
+  // killed a recovered scheduled run with 7 pending applications).
+  {
+    const asRecords = remediationRows.map((value): Record<string, unknown> | null =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null);
+    const named = new Set(asRecords
+      .filter((item): item is Record<string, unknown> => item !== null)
+      .map((item) => item.skill_id)
+      .filter((id): id is string => typeof id === "string"));
+    const unclaimed = [...expectedSkills.keys()].filter((id) => !named.has(id));
+    const unnamed = asRecords.filter((item) => item !== null && item.skill_id === undefined);
+    if (unnamed.length === 1 && unclaimed.length === 1) {
+      (unnamed[0] as Record<string, unknown>).skill_id = unclaimed[0]!;
+    }
+  }
+  const remediations = remediationRows
     .map((value, index) => parseRemediation(value, index, expectedSkills));
   if (remediations.length !== expectedSkills.size) {
     malformed("curator must return one remediation per primary skill");
