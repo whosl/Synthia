@@ -261,6 +261,23 @@ describe.skipIf(!DATABASE_URL)("Self-Evolution v1 — real PostgreSQL API", () =
     return data(response.json);
   }
 
+  test("project creation assigns the evaluator role from birth", async () => {
+    const created = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      method: "POST",
+      token: harness.ids.humanToken,
+      headers: { "idempotency-key": "evaluator-role-birth" },
+      body: { id: "project_evaluator_role_birth", name: "evaluator-role-birth" },
+    });
+    expect(created.status).toBe(201);
+    const projectId = String(data(created.json).id);
+    const role = await harness.client.query(
+      "SELECT role FROM role_assignment WHERE project_id=$1 AND actor_type='service' AND actor_id='synthia-evolution-curator'",
+      [projectId],
+    );
+    expect(role.rows).toHaveLength(1);
+    expect(role.rows[0]!.role).toBe("quality");
+  });
+
   test("lease reclaim rejects old tokens and terminal completion replays through pause and rollout-off", async () => {
     const { projectId, taskId } = await seedTask("lease");
     await appendTaskEvent(projectId, taskId, "event-terminal-lease", "status", { status: "failed" });

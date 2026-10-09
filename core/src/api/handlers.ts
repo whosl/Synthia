@@ -519,6 +519,9 @@ export async function createProject(ctx: RequestContext): Promise<HandlerResult>
         profile?.name ?? null,
       ],
     );
+    if (insertResult.rows.length > 0) {
+      await assignEvaluatorRole(tx, id);
+    }
     if (insertResult.rows.length === 0) {
       // Row already exists; reject if the new payload differs from the stored one.
       const existing = await tx.query(
@@ -758,6 +761,9 @@ export async function copyProjectAsEngineering(ctx: RequestContext): Promise<Han
       ],
     );
 
+    if (insertResult.rows.length > 0) {
+      await assignEvaluatorRole(tx, id);
+    }
     if (insertResult.rows.length === 0) {
       const existingResult = await tx.query(
         `SELECT id, name, scope, data_classification, standard_version, target_part,
@@ -1068,6 +1074,23 @@ export async function createProcessInstance(ctx: RequestContext): Promise<Handle
   });
 
   return { status: 201, data: result };
+}
+
+/**
+ * Every project carries the self-evolution evaluator role from birth: the
+ * curator service identity must be able to view project facts or every
+ * evidence projection reaches it redacted and all its verdicts peg at
+ * low-confidence inconclusive (the blindfold bug, twice). The role is inert
+ * when self-evolution is off — nothing outside the evolution handlers
+ * consults it.
+ */
+async function assignEvaluatorRole(tx: TransactionClient, projectId: string): Promise<void> {
+  await tx.query(
+    `INSERT INTO role_assignment (id, project_id, actor_type, actor_id, role, permissions)
+     VALUES ($1, $2, 'service', 'synthia-evolution-curator', 'quality', '{}'::jsonb)
+     ON CONFLICT (id) DO NOTHING`,
+    [`role-evaluator-${projectId}`, projectId],
+  );
 }
 
 export async function assignRole(ctx: RequestContext): Promise<HandlerResult> {
