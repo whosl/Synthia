@@ -4,7 +4,7 @@
 
 - 应用代码：`65c43b6a6c2a0ef6523c1aa8da39b94692e79de9`；运行目录 `/data3/dev/synthia-golden`，从 `57c51f0` 前进到该提交，保留未跟踪的运行目录和 Web 发布软链接。
 - 公网站点 `https://synthia.wenzhuolin.xyz` 首页、`release.json` 和入口 JS/CSS 均返回 200。公网入口资产逐字节匹配新发布目录；公网 p11 `tool-summary` 通过鉴权返回修复后的历史指标。
-- Web 独立发布目录 `/data3/dev/synthia-web-releases/history-evidence-65c43b6-20261009-115059`，构建与应用同为 `65c43b6`，原发布目录保留，可切回。
+- Web 最终发布目录 `/data3/dev/synthia-web-releases/history-evidence-65c43b6-golden-20261009-124233`，构建与应用同为 `65c43b6`；按下文恢复正式功能开关。各次原发布目录保留，可切回。
 - Core PID `1958 → 1251697`，Web PID `1964 → 1251788`。Runtime PID 保持 `1159570`，未重启；运行的 Runtime 代码版本仍为部署前的 `57c51f0`。
 - 66 机沿用现有 Node `D:\softwares\Nodejs\node.exe` 和计划任务 `synthia-worker`，未替换原启动器、mTLS/PFX 或器件策略。Worker PID `57052 → 41924`；部署前确认零在途作业、无 Vivado/xsim/xvlog/xelab 进程、无 Runtime running 回合。
 - Canonical Worker bundle 与 Windows 实际运行 bundle 为 70,789 字节，SHA-256 `4bef8d340de434f787f2ed801fea76ec7b8efc42023624e25c5533b7f9e3dcd8`。Worker 配置与 Core Connector 配置中的 build hash 同步。Windows Node 语法检查通过。
@@ -32,3 +32,15 @@ Linux 私有备份 `/home/wenzhuolin/.synthia/backups/history-evidence-20261009-
 Windows 备份 `D:\synthia-worker\deployments\history-evidence-20261009-115059`：原 bundle、配置、启动器、watchdog、原 registry、新 bundle 和切换记录。原 Web 发布 `/data3/dev/synthia-web-releases/platform-ablation-42cf5fa` 保留。
 
 本次无数据库迁移；历史时序首次读取只使用既有缓存机制写入 `tool_timing_metrics`，未修改原作业证据或会话。
+
+## 前端功能开关补正
+
+2026-10-09 12:42，用户反馈自进化入口消失。排查确认首次发布误用了 `bun run build`；普通构建默认关闭 `VITE_FEATURE_SELF_EVOLUTION` 等前端开关，导航组件因此被编译为隐藏。Core 自进化 rollout 与数据始终正常，本次没有修改权限或删除自进化页面。
+
+已使用仓库已有正式构建命令 `(cd web && bun run build:golden)` 重新构建、发布并只重启 Web，PID `1251788 → 1602228`。Core PID `1251697`、Runtime PID `1159570` 和 Worker 均未重启。
+
+最终 Web 目录为 `/data3/dev/synthia-web-releases/history-evidence-65c43b6-golden-20261009-124233`。自进化、历史材料、探索任务、正式交付四个原 golden 前端开关恢复为启用；后端权限与 rollout 判断保持原逻辑。新版 `release.json` 记录 `build_command=bun run build:golden` 和明确的 `frontend_feature_flags`。
+
+公网 `release.json` 返回上述正式构建信息，入口 JS `/assets/index-BGQUFJWQ.js` 逐字节匹配 golden 构建。构建产物包含自进化导航项；Core 自进化 overview、Learned Skill 列表、p11 历史摘要接口均返回 200。相关 Web 5 文件测试 38 通过、0 失败；golden 构建通过。
+
+后续正式前端发布必须执行 `build:golden`，并核对实际发布的功能开关与自进化入口，不使用普通 `build` 的产物替代正式发布。补正记录保存在原备份目录的 `selfevo-frontend-correction.json`。
