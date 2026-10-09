@@ -190,6 +190,61 @@ describe.skipIf(!DATABASE_URL)("PB-003 project model — real PostgreSQL", () =>
     ]);
   });
 
+  test("free creation and engineering copy assign one curator role across request replays", async () => {
+    const sourceId = `evaluator_source_${randomUUID()}`;
+    const sourceBody = { id: sourceId, name: "Evaluator source", project_type: "free" };
+    const createKey = `evaluator_create_${randomUUID()}`;
+    expect((await create(sourceBody, createKey)).status).toBe(201);
+    expect((await create(sourceBody, createKey)).status).toBe(201);
+    expect((await create(sourceBody)).status).toBe(201);
+
+    const targetId = `evaluator_target_${randomUUID()}`;
+    const targetBody = { id: targetId, name: "Evaluator target" };
+    const copyKey = `evaluator_copy_${randomUUID()}`;
+    expect((await copyAsEngineering(sourceId, targetBody, copyKey)).status).toBe(201);
+    expect((await copyAsEngineering(sourceId, targetBody, copyKey)).status).toBe(201);
+    expect((await copyAsEngineering(sourceId, targetBody)).status).toBe(201);
+
+    for (const projectId of [sourceId, targetId]) {
+      const result = await harness.client.query(
+        `SELECT id,actor_type,actor_id,role,permissions FROM role_assignment
+          WHERE project_id=$1 AND actor_type='service' AND actor_id='synthia-evolution-curator'`,
+        [projectId],
+      );
+      expect(result.rows).toEqual([{
+        id: `role-evaluator-${projectId}`,
+        actor_type: "service",
+        actor_id: "synthia-evolution-curator",
+        role: "quality",
+        permissions: {},
+      }]);
+      const owners = await harness.client.query("SELECT id FROM role_assignment WHERE project_id=$1 AND role='owner'", [projectId]);
+      expect(owners.rows).toHaveLength(1);
+    }
+  });
+
+  test("rejected project creation leaves no project or curator assignment", async () => {
+    const deniedId = `evaluator_denied_${randomUUID()}`;
+    const denied = await apiCall(harness.baseUrl, "/api/v1/projects", {
+      method: "POST",
+      body: { id: deniedId, name: "Denied", project_type: "free" },
+      token: harness.ids.readOnlyToken,
+      headers: { "idempotency-key": `denied_${randomUUID()}` },
+    });
+    expect(denied.status).toBe(403);
+    const invalidId = `evaluator_invalid_${randomUUID()}`;
+    const invalid = await create({ id: invalidId, name: "Invalid", project_type: "engineering", process_profile_id: "unknown-profile" });
+    expect(invalid.status).toBe(400);
+    for (const projectId of [deniedId, invalidId]) {
+      const result = await harness.client.query(
+        `SELECT (SELECT count(*)::int FROM project WHERE id=$1) AS projects,
+                (SELECT count(*)::int FROM role_assignment WHERE project_id=$1) AS roles`,
+        [projectId],
+      );
+      expect(result.rows[0]).toEqual({ projects: 0, roles: 0 });
+    }
+  });
+
   test("modern process instances inherit the frozen GJB profile and reject flow-v1", async () => {
     const projectId = `eng_${randomUUID()}`;
     const created = await create({
