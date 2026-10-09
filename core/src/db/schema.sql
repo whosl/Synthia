@@ -3563,6 +3563,9 @@ BEGIN
   IF OLD.state = 'pending_evaluation' AND NEW.state = 'evaluated' THEN
     RETURN NEW;
   END IF;
+  IF OLD.state = 'evaluated' AND NEW.state = 'pending_evaluation' THEN
+    RETURN NEW;
+  END IF;
   RAISE EXCEPTION 'illegal skill application transition: % -> %', OLD.state, NEW.state USING ERRCODE = '55000';
 END;
 $$;

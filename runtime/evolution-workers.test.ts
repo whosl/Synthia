@@ -650,6 +650,33 @@ describe("CuratorWorker", () => {
     });
   });
 
+  test("curator tolerates extra output fields and applies the same payload rules to patch and scope_change", async () => {
+    for (const action of ["patch", "scope_change"] as const) {
+      for (const payload of [null, [], { description: "Narrow the applicability" }]) {
+        const client = new FakeCuratorClient();
+        client.claims.push(curatorClaim(1));
+        const model = new FakeModel();
+        model.responses.push({
+          commentary: "advisory field",
+          evaluations: [{
+            application_id: "app-1",
+            outcome: "success",
+            confidence: 0.9,
+            reason: "Evidence proves the local goal",
+            evidence_refs: ["evidence-1"],
+            supersedes_id: null,
+            commentary: "ignored",
+          }],
+          remediations: [{ skill_id: "skill-1", action, patch: payload }],
+        });
+        const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+        expect(result.state).toBe("completed");
+        expect(client.completes[0]!.evaluations).toHaveLength(1);
+        expect(client.completes[0]!.remediations[0]!.action).toBe(payload === null || Array.isArray(payload) ? "no_op" : action);
+      }
+    }
+  });
+
   test("a stale primary version passes through instead of killing the run's evaluations", async () => {
     // The distiller minted a newer version after the agent applied: the
     // claim's skill summary and its application bundle disagree. The model

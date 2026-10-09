@@ -234,6 +234,7 @@ function curatorClaim(): CuratorClaimV1 {
           summary: "Vivado synthesis evidence",
           content: null,
         }],
+        evidence_content: [],
       }],
     },
   };
@@ -387,6 +388,39 @@ describe("CoreDistillerEvolutionClient", () => {
 });
 
 describe("CoreCuratorEvolutionClient", () => {
+  test("claim preserves tool excerpts and accepts older Core without excerpts", async () => {
+    const claim = curatorClaim();
+    const bundle = claim.run!.applications[0]!;
+    const excerpts = [{
+      sequence: 7,
+      kind: "tool_result",
+      tool: "synthia_job_evidence",
+      args_excerpt: "{\"job_id\":\"job-1\"}",
+      result_excerpt: "WNS 0.591",
+    }];
+    const withExcerpts = { ...claim, run: { ...claim.run!, applications: [{ ...bundle, evidence_content: excerpts }] } };
+    const client = curator((async () => ok(withExcerpts)) as typeof fetch);
+    const parsed = await client.claimManual({ worker_id: "curator-1", lease_seconds: 30 });
+    expect(parsed.run?.applications[0]?.evidence_content).toEqual(excerpts);
+
+    const legacyBundle = { ...bundle } as Record<string, unknown>;
+    delete legacyBundle.evidence_content;
+    const legacy = curator((async () => ok({ ...claim, run: { ...claim.run!, applications: [legacyBundle] } })) as typeof fetch);
+    const parsedLegacy = await legacy.claimManual({ worker_id: "curator-1", lease_seconds: 30 });
+    expect(parsedLegacy.run?.applications[0]?.evidence_content).toEqual([]);
+  });
+
+  test("claim rejects malformed tool excerpts instead of forwarding untrusted shapes", async () => {
+    const claim = curatorClaim();
+    for (const malformed of [null, [{ sequence: -1, kind: "tool_result", tool: null, args_excerpt: null, result_excerpt: null }]]) {
+      const client = curator((async () => ok({
+        ...claim,
+        run: { ...claim.run!, applications: [{ ...claim.run!.applications[0]!, evidence_content: malformed }] },
+      })) as typeof fetch);
+      await expect(client.claimManual({ worker_id: "curator-1", lease_seconds: 30 })).rejects.toBeInstanceOf(EvolutionWorkerClientError);
+    }
+  });
+
   test("manual and scheduled claims use distinct routes with the Curator singleton token", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const client = curator((async (input, init) => {
