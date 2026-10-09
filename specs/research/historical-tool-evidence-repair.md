@@ -1,6 +1,6 @@
 # 历史运行指标与报告读取修复
 
-2026-10-09，在 platform-ops worktree 开发与验证。状态：未部署；未重启生产 Core、Runtime、Worker 或 Web，未修改生产数据库与 p31/p32 会话。
+2026-10-09，在 platform-ops worktree 开发与验证。用户随后授权重新部署，代码 `65c43b6` 已于当日 11:54 切换到正式站点，11:56 完成生产验收；详见 [部署回执](historical-tool-evidence-deployment.md)。开发阶段未重启生产服务，部署阶段只重启 Core、Web、Worker，Runtime 和 p31/p32 会话保持原状态。
 
 ## 复现与根因
 
@@ -37,4 +37,4 @@ Core 保存的清单包含 51 份 `sta.rpt` 与 96 份 `resources.rpt`。Worker 
 
 需要更新 Worker canonical bundle、Core 代码和 Web 构建；Runtime 无改动，无需重启。窗口内先更新 Worker，再更新 Core 与 Web，并同步现有 Worker/Core 部署配置中的 bundle build hash。保留旧 registry、workspace 和 Core 数据，按原部署协议备份、校验及切换。
 
-部署后应检查 p11/p13/p28 的历史 summary、报告清单与原文，核对冻结 SHA-256、原器件/作业归属，以及当前验证未被历史报告提升；本开发回执不代表生产已经恢复展示。
+部署后已检查 p11/p13/p28 的历史 summary、报告清单与原文，冻结 SHA-256、原器件/作业归属均一致；当前验证未被历史报告提升。生产恢复结果与备份路径以部署回执为准。
