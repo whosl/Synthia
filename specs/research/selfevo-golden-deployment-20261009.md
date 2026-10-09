@@ -51,6 +51,7 @@
 
 - 公网 `https://synthia.wenzhuolin.xyz` 首页和 `release.json` 返回 200；release 中应用/Core/Runtime/Web/自进化后台提交均为最终版本。
 - 公网入口 `/assets/index-DpvVSG4q.js` 与新发布目录逐字节相同，SHA-256 为 `6d78e0aeb34096b9b93cc144f988098a3f6b48032fc802f824c69312d5f066ea`。自进化导航所在 `/assets/index-DAdZkgiI.js` 也逐字节匹配。导航资源与入口分别校验，未把入口脚本中缺少中文明文误判为入口消失。
+- 最终公网资源复测中，部分 HTTP/2 连接在收到部分内容后超时；使用 DNS 返回的另一地址 `172.67.194.110`、HTTP/1.1 和压缩完整读取两份资源，各约 0.65 秒并匹配上述 hash。本机原文件一直正常；该观测不用于声称部署改善了页面加载速度，也不据此确定网络超时根因。
 - Core 自进化 overview、35 个 Learned Skill、详情与 p31/p32 任务接口均返回 200；技能列表及详情 `metrics_scope=all_versions`。p31 的只读中文检索“波形 读回 恒零”返回 10 个候选。
 - p11/p13/p28 的累计作业分别为 11/17/90，历史 WNS 分别为 4.249/1.348/0.591 ns；LUT/FF/BRAM/DSP 与此前部署一致。六份 `sta.rpt`/`resources.rpt` 原文读取均为 200，UTF-8 SHA-256 匹配冻结清单。
 - 23 个 Runtime 会话仍为 `awaiting_user`，包括 p31/p32；68 个状态/会话文件部署前后 SHA-256 完全相同，Core 任务 ID/状态/更新时间也完全相同。
