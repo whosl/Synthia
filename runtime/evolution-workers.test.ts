@@ -701,6 +701,49 @@ describe("CuratorWorker", () => {
     expect(client.completes[0]!.evaluations[0]!.reason).toContain("auto-downgraded");
   });
 
+  test("missing citations downgrade only their evaluations and preserve co-claimed evidence", async () => {
+    const client = new FakeCuratorClient();
+    const claim = curatorClaim(4);
+    for (const bundle of claim.run!.applications.slice(0, 3)) bundle.evidence = [];
+    client.claims.push(claim);
+    const model = new FakeModel();
+    const outcomes = ["success", "applicability_failure", "execution_failure", "success"];
+    model.responses.push({
+      evaluations: outcomes.map((outcome, index) => ({
+        application_id: `app-${index + 1}`,
+        outcome,
+        confidence: 0.9,
+        reason: `Claim ${index + 1}`,
+        evidence_refs: index === 3 ? ["evidence-4"] : [],
+        supersedes_id: null,
+      })),
+      remediations: outcomes.map((_, index) => ({ skill_id: `skill-${index + 1}`, action: "no_op" })),
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result.state).toBe("completed");
+    expect(client.completes[0]!.evaluations.map((item) => item.outcome))
+      .toEqual(["inconclusive", "inconclusive", "inconclusive", "success"]);
+    for (const evaluation of client.completes[0]!.evaluations.slice(0, 3)) {
+      expect(evaluation.reason).toContain("[auto-downgraded: attributable outcome cited no evidence]");
+      expect(evaluation.evidence_refs).toEqual([]);
+    }
+    expect(client.completes[0]!.evaluations[3]!.reason).toBe("Claim 4");
+    expect(client.completes[0]!.evaluations[3]!.evidence_refs).toEqual(["evidence-4"]);
+  });
+
+  test("downgrade does not forgive evidence references outside the claim", async () => {
+    const client = new FakeCuratorClient();
+    client.claims.push(curatorClaim(1));
+    const model = new FakeModel();
+    model.responses.push({
+      evaluations: [{ application_id: "app-1", outcome: "success", confidence: 0.9, reason: "Claim", evidence_refs: ["unclaimed-evidence"], supersedes_id: null }],
+      remediations: [{ skill_id: "skill-1", action: "no_op" }],
+    });
+    const result = await new CuratorWorker(client, model, { workerId: "curator-1" }).runOnce();
+    expect(result).toMatchObject({ state: "failed", errorCode: "MALFORMED_MODEL_OUTPUT" });
+    expect(client.completes).toHaveLength(0);
+  });
+
   test("an omitted remediation skill_id is assigned by elimination", async () => {
     // Live failure 2026-10-09 14:46: "remediations[0].skill_id is required"
     // killed a recovered scheduled run. Two skills claimed, one remediation
