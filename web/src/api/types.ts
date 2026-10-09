@@ -1153,6 +1153,7 @@ export interface ToolSummaryResources {
   readonly sourceOperation: "synthesize" | "implement" | "report_resources";
   readonly sourceAt: string;
   readonly reportName: string;
+  readonly configEpoch?: number | null;
   readonly metrics: readonly {
     readonly key: "lut" | "ff" | "bram" | "dsp" | "io" | "clock";
     readonly label: string;
@@ -1175,4 +1176,14 @@ export interface ToolSummary {
   readonly timingError?: string;
   readonly resources?: ToolSummaryResources | null;
   readonly resourcesError?: string;
+  readonly history?: {
+    readonly runCount: number;
+    readonly succeeded: number;
+    readonly failed: number;
+    readonly timing?: ToolSummaryTiming | null;
+    readonly timingSource?: { readonly configEpoch: number | null; readonly at: string };
+    readonly timingError?: string;
+    readonly resources?: ToolSummaryResources | null;
+    readonly resourcesError?: string;
+  };
 }

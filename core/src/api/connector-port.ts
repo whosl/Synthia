@@ -122,6 +122,8 @@ export interface ConnectorDiscovery {
 
 export interface EvidenceContentOptions {
   readonly range?: EvidenceRange;
+  /** Internal only: an entry read from Core's owned, terminal job manifest. */
+  readonly archivedEntry?: EvidenceEntry;
   /** Request the complete artifact bytes instead of the UI preview window. */
   readonly requireFull?: boolean;
 }

@@ -1,12 +1,14 @@
 import type { RequestContext } from "./handlers.ts";
 import type { ConnectorPort } from "./connector-port.ts";
 import { parseResourceUtilization, type ResourceUtilization } from "../services/resource-utilization.ts";
+import { fetchJobEvidenceContent } from "./job-evidence.ts";
 
 export interface ToolSummaryResources extends ResourceUtilization {
   readonly sourceJobId: string;
   readonly sourceOperation: "synthesize" | "implement" | "report_resources";
   readonly sourceAt: string;
   readonly reportName: string;
+  readonly configEpoch?: number | null;
 }
 
 type Result = { resources: ToolSummaryResources | null; resourcesError?: string };
@@ -17,7 +19,7 @@ const caches = new WeakMap<ConnectorPort, Map<string, { expires: number; result:
 /** Caller must authorize project access before invoking this read. */
 export async function readResourceSummary(ctx: RequestContext, projectId: string, epoch: number | null = null, chain: string | null = null): Promise<Result> {
   const source = await ctx.pool.query(
-    `SELECT id AS job_id, operation, COALESCE(end_time, created_at) AS at FROM tool_run
+    `SELECT id AS job_id, operation, config_epoch, COALESCE(end_time, created_at) AS at FROM tool_run
       WHERE project_id = $1 AND state = 'succeeded'
         AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
         AND operation IN ('synthesize', 'implement', 'report_resources')
@@ -26,7 +28,7 @@ export async function readResourceSummary(ctx: RequestContext, projectId: string
       ORDER BY created_at DESC, id DESC LIMIT 1`,
     [projectId, epoch, chain],
   );
-  const row = source.rows[0] as { job_id: string; operation: ToolSummaryResources["sourceOperation"]; at: Date } | undefined;
+  const row = source.rows[0] as { job_id: string; operation: ToolSummaryResources["sourceOperation"]; config_epoch: number | null; at: Date } | undefined;
   if (!row) return { resources: null };
   const connector = ctx.connector;
   if (!connector) return { resources: null, resourcesError: "unavailable" };
@@ -41,13 +43,13 @@ export async function readResourceSummary(ctx: RequestContext, projectId: string
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const evidence = await Promise.race([
-        connector.fetchEvidenceContent(projectId, row.job_id, "resources.rpt", { requireFull: true }),
+        fetchJobEvidenceContent(ctx, projectId, row.job_id, "resources.rpt", { requireFull: true }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("resource report timeout")), 5_000); }),
       ]);
       if (evidence.truncated) return { resources: null, resourcesError: "truncated_report" };
       const parsed = parseResourceUtilization(evidence.content);
       if (!parsed.metrics.length) return { resources: null, resourcesError: "unrecognized_report" };
-      return { resources: { ...parsed, sourceJobId: row.job_id, sourceOperation: row.operation, sourceAt: row.at.toISOString(), reportName: "resources.rpt" } };
+      return { resources: { ...parsed, sourceJobId: row.job_id, sourceOperation: row.operation, sourceAt: row.at.toISOString(), reportName: "resources.rpt", configEpoch: row.config_epoch ?? null } };
     } catch {
       return { resources: null, resourcesError: "unavailable" };
     } finally {

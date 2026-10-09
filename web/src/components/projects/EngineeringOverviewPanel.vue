@@ -5,7 +5,7 @@ import ResourceUtilizationPanel from "./ResourceUtilizationPanel.vue";
 import Button from "../ui/AppButton.vue";
 import type { EngineeringOverviewProps } from "../../domain/engineering-overview.ts";
 import { formatNs, TIMING_STATUS_LABELS } from "../../domain/impl-summary.ts";
-import { overviewStages, OVERVIEW_STATE_LABELS } from "../../domain/engineering-overview.ts";
+import { overviewMetrics, overviewStages, OVERVIEW_STATE_LABELS } from "../../domain/engineering-overview.ts";
 import { formatTime } from "../../util/format-time.ts";
 
 const props = defineProps<EngineeringOverviewProps & { embedded?: boolean }>();
@@ -21,13 +21,17 @@ const selected = computed(() => stages.value.find((stage) => stage.key === selec
 const running = computed(() => stages.value.some((stage) => stage.state === "running"));
 const passed = computed(() => stages.value.filter((stage) => stage.state === "passed").length);
 const attention = computed(() => stages.value.filter((stage) => stage.state === "failed").length);
-const executions = computed(() => props.summary?.stages.reduce((total, stage) => total + stage.succeeded + stage.failed, 0) ?? null);
+const metrics = computed(() => overviewMetrics(props.summary));
+const executions = computed(() => metrics.value.runCount);
+const hasHistory = computed(() => (props.summary?.history?.runCount ?? 0) > 0);
+const stateLabel = (state: keyof typeof OVERVIEW_STATE_LABELS) => state === "idle" && hasHistory.value && props.summary?.configEpoch !== undefined ? "当前配置尚未运行" : OVERVIEW_STATE_LABELS[state];
 const title = computed(() => {
   if (!props.summary) return "等待工程数据";
   if (running.value) return "设计正在验证中";
   if (attention.value) return "发现问题，继续迭代";
   if (passed.value === 4) return "四项验证均已通过";
   if (passed.value) return "设计一步步成为现实";
+  if (hasHistory.value && props.summary.configEpoch !== undefined) return "历史记录已保留，当前配置待验证";
   return "从一个目标，开始设计";
 });
 const canViewRecord = computed(() => selected.value.jobId !== null && props.recordJobIds.includes(selected.value.jobId));
@@ -84,42 +88,46 @@ function showRecord(): void {
                 <button v-for="(stage, index) in stages" :key="stage.key" type="button"
                   :class="['circuit-node', stage.state, { selected: selectedKey === stage.key }]"
                   :style="{ left: `${positions[index]!.x}%`, top: `${positions[index]!.y}%` }"
-                  :aria-pressed="selectedKey === stage.key" :aria-label="`${stage.label}：${OVERVIEW_STATE_LABELS[stage.state]}`"
+                  :aria-pressed="selectedKey === stage.key" :aria-label="`${stage.label}：${stateLabel(stage.state)}`"
                   @click="selectedKey = stage.key">
                   <span class="node-icon"><component :is="icons[index]" :size="21" :stroke-width="1.5" /></span>
-                  <span class="node-copy"><small>{{ stage.short }}</small><strong>{{ stage.label }}</strong><span class="node-status"><Check v-if="stage.state === 'passed'" :size="12" />{{ OVERVIEW_STATE_LABELS[stage.state] }}</span></span>
+                  <span class="node-copy"><small>{{ stage.short }}</small><strong>{{ stage.label }}</strong><span class="node-status"><Check v-if="stage.state === 'passed'" :size="12" />{{ stateLabel(stage.state) }}</span></span>
                 </button>
               </div>
               <div class="circuit-footer"><span><Cpu :size="14" />{{ targetPart ?? "尚未配置目标器件" }}</span><span class="bitstream-state" :class="{ generated: summary?.bitstream.generated }"><span class="status-dot" />{{ !summary ? "码流状态未知" : summary.bitstream.generated ? "已有码流产出" : "尚未产出码流" }}</span></div>
             </section>
 
             <aside class="overview-results" aria-label="工程成果">
-              <div class="timing-card" :class="summary?.timing?.status ?? 'unknown'">
+              <div class="timing-card" :class="metrics.timing?.status ?? 'unknown'">
                 <div class="metric-label"><Activity :size="16" />时序余量 <span>WNS</span></div>
-                <div class="timing-value">{{ formatNs(summary?.timing?.wns ?? null) }}<small>ns</small></div>
-                <strong>{{ summary?.timing ? TIMING_STATUS_LABELS[summary.timing.status] : "等待时序报告" }}</strong>
-                <p>{{ summary?.timing?.status === 'met' ? "该报告中的时序检查已达标。" : summary?.timing?.status === 'failed' ? "该报告存在时序违例，需继续优化。" : "以工具报告确认设计的时序表现。" }}</p>
+                <div class="timing-value">{{ formatNs(metrics.timing?.wns ?? null) }}<small>ns</small></div>
+                <strong>{{ metrics.timing ? TIMING_STATUS_LABELS[metrics.timing.status] : "等待时序报告" }}</strong>
+                <p v-if="metrics.timingHistorical">历史时序报告 · {{ metrics.timingAt ? formatTime(metrics.timingAt) : '' }}<br />对应当时的设计，当前配置仍需验证。</p>
+                <p v-else-if="metrics.timingError">时序报告暂时无法读取，可查看项目运行记录。</p>
+                <p v-else>{{ metrics.timing?.status === 'met' ? "该报告中的时序检查已达标。" : metrics.timing?.status === 'failed' ? "该报告存在时序违例，需继续优化。" : "以工具报告确认设计的时序表现。" }}</p>
+                <Button v-if="metrics.timing && recordJobIds.includes(metrics.timing.sourceJobId)" size="sm" variant="ghost" @click="emit('records', metrics.timing.sourceJobId)">查看时序记录<ArrowUpRight :size="14" /></Button>
               </div>
               <div class="result-metrics">
                 <div><FileCode2 :size="17" /><strong>{{ fileCount ?? "—" }}</strong><span>工作区文件</span></div>
-                <div><ShieldCheck :size="17" /><strong>{{ executions ?? "—" }}</strong><span>成功 / 失败运行总数</span></div>
+                <div><ShieldCheck :size="17" /><strong>{{ executions ?? "—" }}</strong><span>累计运行记录</span></div>
               </div>
               <div class="validation-count"><span>四项检查最近结果</span><strong>{{ summary ? passed : "—" }}<small> / 4 已通过</small></strong><div class="validation-segments" aria-hidden="true"><i v-for="stage in stages" :key="stage.key" :class="stage.state" /></div></div>
             </aside>
           </div>
 
           <ResourceUtilizationPanel
-            :resources="summary?.resources ?? null"
-            :error="summary?.resourcesError"
+            :resources="metrics.resources"
+            :error="metrics.resourcesError"
+            :historical="metrics.resourcesHistorical"
             :record-job-ids="recordJobIds"
             @records="emit('records', $event)"
           />
 
           <div class="overview-bottom">
             <section class="selected-result" aria-label="所选验证结果">
-              <div class="section-label"><Maximize2 :size="14" />验证详情<span :class="['detail-state', selected.state]">{{ OVERVIEW_STATE_LABELS[selected.state] }}</span></div>
+              <div class="section-label"><Maximize2 :size="14" />验证详情<span :class="['detail-state', selected.state]">{{ stateLabel(selected.state) }}</span></div>
               <h3>{{ selected.label }}</h3><p>{{ selected.description }}</p>
-              <div v-if="summary" class="result-history"><span>累计通过 <b>{{ selected.succeeded }}</b></span><span>累计失败 <b>{{ selected.failed }}</b></span><span v-if="selected.at">最近运行 {{ formatTime(selected.at) }}</span></div>
+              <div v-if="summary" class="result-history"><span>{{ summary.configEpoch !== undefined ? '当前配置通过' : '累计通过' }} <b>{{ selected.succeeded }}</b></span><span>{{ summary.configEpoch !== undefined ? '当前配置失败' : '累计失败' }} <b>{{ selected.failed }}</b></span><span v-if="selected.at">最近运行 {{ formatTime(selected.at) }}</span></div>
               <p v-else class="empty-result">暂未取得验证记录，恢复连接后自动更新。</p>
               <Button v-if="canViewRecord" size="sm" variant="ghost" @click="showRecord">查看原始记录<ArrowUpRight :size="14" /></Button>
             </section>
@@ -132,7 +140,7 @@ function showRecord(): void {
               <template v-else><h3>探索 · 验证 · 迭代</h3><p>按目标自主开展设计与验证。需要正式交付时，可复制为工程项目，进入阶段确认流程。</p><div class="explore-tags"><span>自然语言协作</span><span>工具验证</span><span>版本留痕</span></div></template>
             </section>
           </div>
-          <footer class="overview-footnote"><span>各项显示最近一次记录，可能对应不同设计版本；码流产出不代表正式交付。</span><span>{{ summary ? `数据更新 ${formatTime(summary.generatedAt)}` : "等待数据" }}</span></footer>
+          <footer class="overview-footnote"><span>{{ summary?.configEpoch !== undefined ? '当前验证按本配置计算；历史报告对应当时的设计，码流产出不代表正式交付。' : '各项显示最近一次记录，可能对应不同设计版本；码流产出不代表正式交付。' }}</span><span>{{ summary ? `数据更新 ${formatTime(summary.generatedAt)}` : "等待数据" }}</span></footer>
         </div>
       </div>
   </div>

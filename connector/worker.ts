@@ -132,7 +132,7 @@ export class WorkerRuntime {
               : code === "IDEMPOTENCY_CONFLICT" || code.includes("BINDING_CONFLICT")
                 || code === "EVOLUTION_EVAL_REMOTE_ATTESTATION_MISMATCH" ? 409
                 : code === "EVOLUTION_EVAL_SPOOL_FULL" || code === "EVOLUTION_EVAL_CAPABILITY_UNAVAILABLE" ? 503
-                  : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" ? 403 : 400;
+                  : code === "PROJECT_NOT_ALLOWED" || code === "CLASSIFICATION_NOT_ALLOWED" || code === "ARCHIVED_EVIDENCE_FORBIDDEN" ? 403 : 400;
       return responseError(code, message, status);
     }
   }
@@ -147,7 +147,11 @@ export class WorkerRuntime {
       if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) { this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration; throw new Error("LEASE_EXPIRED"); }
       return this.submit(e, p.request as JobRequest, p.approval as Record<string, unknown> | undefined);
     }
-    const jobId = p.job_id; if (!good(jobId)) throw new Error("INVALID_JOB_ID"); const job = this.jobs.get(jobId); const binding = this.jobBindings.get(jobId); if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND");
+    const jobId = p.job_id; if (!good(jobId)) throw new Error("INVALID_JOB_ID"); const job = this.jobs.get(jobId); const binding = this.jobBindings.get(jobId);
+    if (path === "/jobs/evidence/content" && !job && !binding && p.archived_entry !== undefined) {
+      return this.archivedEvidenceContent(e, jobId, p);
+    }
+    if (!job || !binding || binding.projectId !== e.project_id || binding.classification !== e.classification) throw new Error("JOB_NOT_FOUND");
     if (path === "/jobs/status") return { status: 200, body: this.envelope(e, copy(job)) };
     if (path === "/jobs/cancel") {
       if (!terminal.has(job.state)) {
@@ -214,7 +218,28 @@ export class WorkerRuntime {
       this.activeControllers.delete(job.id);
     }
   }
-  private async evidenceContent(e: RemoteEnvelope<unknown>, job: Job, name: string, complete = false, range?: EvidenceRange): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {
+  /** Read-only recovery: Core supplies its frozen digest, never a filesystem URI. */
+  private async archivedEvidenceContent(e: RemoteEnvelope<unknown>, jobId: string, p: Record<string, unknown>): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {
+    if (e.actor.actor_type !== "service" || e.actor.actor_id !== "synthia-core") throw new Error("ARCHIVED_EVIDENCE_FORBIDDEN");
+    if (!idRe.test(jobId)) throw new Error("INVALID_JOB_ID");
+    const name = p.name;
+    if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE");
+    const entry = p.archived_entry as EvidenceManifest["entries"][number];
+    if (!exactObjectKeys(entry, ["name", "sha256", "sizeBytes", "mediaType"])
+      || entry.name !== name || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)
+      || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0
+      || typeof entry.mediaType !== "string" || !entry.mediaType.trim()) throw new Error("EVIDENCE_CORRUPT");
+    this.assertEvidenceLimits({ jobId, entries: [entry] });
+    try {
+      for (const [path, directory] of [[join(this.root, jobId), true], [join(this.root, jobId, "output"), true], [join(this.root, jobId, "output", name), false]] as const) {
+        const details = await lstat(path);
+        if (details.isSymbolicLink() || (directory ? !details.isDirectory() : !details.isFile())) throw new Error("EVIDENCE_CORRUPT");
+      }
+    } catch { throw new Error("EVIDENCE_CORRUPT"); }
+    return this.evidenceContent(e, { id: jobId, evidence: { jobId, entries: [entry] } }, name,
+      p.complete === true, p.range === undefined ? undefined : parseEvidenceRange(p.range));
+  }
+  private async evidenceContent(e: RemoteEnvelope<unknown>, job: Pick<Job, "id" | "evidence">, name: string, complete = false, range?: EvidenceRange): Promise<{ status: number; body: RemoteEnvelope<unknown> }> {
     if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE");
     this.assertEvidenceLimits(job.evidence);
     const entry = job.evidence.entries.find(x => x.name === name);

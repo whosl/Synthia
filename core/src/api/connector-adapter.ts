@@ -121,7 +121,7 @@ interface RemoteClientLike {
   fetchEvidenceContent(
     id: string,
     name: string,
-    options?: { complete?: boolean; range?: EvidenceRange },
+    options?: { complete?: boolean; range?: EvidenceRange; archivedEntry?: RemoteEvidenceEntry },
   ): Promise<RemoteEvidenceContent>;
   readonly state: string;
   readonly hasCapabilityDrift: boolean;
@@ -430,6 +430,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
       const c = await client.fetchEvidenceContent(jobId, name, {
         complete: options?.requireFull === true,
         ...(options?.range ? { range: options.range } : {}),
+        ...(options?.archivedEntry ? { archivedEntry: options.archivedEntry } : {}),
       });
       return {
         name,

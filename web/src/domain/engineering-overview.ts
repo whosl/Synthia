@@ -53,3 +53,17 @@ export function overviewStages(summary: ToolSummary | null) {
     };
   });
 }
+
+/** Historical metrics describe their own report; stages remain current-only. */
+export function overviewMetrics(summary: ToolSummary | null) {
+  return {
+    timing: summary?.timing ?? summary?.history?.timing ?? null,
+    timingHistorical: !summary?.timing && !!summary?.history?.timing,
+    timingAt: !summary?.timing ? summary?.history?.timingSource?.at : undefined,
+    timingError: summary?.history?.timingError ?? summary?.timingError,
+    resources: summary?.resources ?? summary?.history?.resources ?? null,
+    resourcesHistorical: !summary?.resources && !!summary?.history?.resources,
+    resourcesError: summary?.history?.resourcesError ?? summary?.resourcesError,
+    runCount: summary?.history?.runCount ?? summary?.stages.reduce((total, stage) => total + stage.succeeded + stage.failed, 0) ?? null,
+  };
+}

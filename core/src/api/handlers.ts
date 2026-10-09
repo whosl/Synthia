@@ -60,6 +60,7 @@ import { parseGitLocation, validateProjectId } from "../workspace/paths.ts";
 import { ensureWorkspace, readAtLocationBytes } from "../workspace/store.ts";
 import { freezeBaselineContent } from "../workspace/archive.ts";
 import { bindJobConfiguration, readJobConfigurationMetadata } from "../services/project-configuration.ts";
+import { fetchJobEvidenceContent, readFrozenJobEvidence } from "./job-evidence.ts";
 import type { CoreFeatureFlags } from "./feature-flags.ts";
 import { requireP4ProjectVisibility } from "./p4-project-access.ts";
 import {
@@ -2187,7 +2188,8 @@ export async function listJobsHandler(ctx: RequestContext): Promise<HandlerResul
                   'sizeBytes', e.size_bytes, 'mediaType', e.media_type) ORDER BY e.name)
                 FROM tool_run_evidence_entry e
                 WHERE e.project_id = t.project_id AND e.manifest_id = m.id
-              ), '[]'::jsonb) ELSE t.evidence->'entries' END AS entries
+              ), '[]'::jsonb) WHEN jsonb_typeof(t.evidence)='array' THEN t.evidence
+                ELSE t.evidence->'entries' END AS entries
        FROM tool_run t
        LEFT JOIN tool_run_evidence_manifest m ON m.project_id = t.project_id AND m.tool_run_id = t.id
        WHERE t.project_id = $1 AND t.id = ANY($2::text[])`,
@@ -2289,20 +2291,19 @@ export async function getJobStatusHandler(ctx: RequestContext): Promise<HandlerR
  * manifest for a terminal Job.
  *
  * Non-terminal: Core first refreshes status once; if still non-terminal → 404.
- * Terminal: the Connector manifest is fetched, frozen onto `tool_run.evidence`
- * (migration 0004), and returned. Connector "no evidence" → 404 not_found.
+ * Terminal: prefer Core's frozen manifest; fetch and freeze from the Connector
+ * only when no manifest has been persisted. Worker eviction does not erase history.
  */
 export async function getJobEvidenceHandler(ctx: RequestContext): Promise<HandlerResult> {
   const projectId = ctx.params.projectId!;
   const jobId = ctx.params.jobId!;
-  const connector = requireConnector(ctx);
-
   const found = await ctx.pool.query("SELECT state FROM tool_run WHERE id = $1 AND project_id = $2", [jobId, projectId]);
   if (found.rows.length === 0) throw notFoundError(`job not found: ${jobId}`);
   let state = String((found.rows[0] as Record<string, unknown>).state);
 
   // Non-terminal: refresh status once before deciding evidence availability.
   if (!(state in TOOL_RUN_TERMINAL_STATES)) {
+    const connector = requireConnector(ctx);
     let snapshot;
     try {
       snapshot = await connector.queryStatus(projectId, jobId);
@@ -2321,6 +2322,9 @@ export async function getJobEvidenceHandler(ctx: RequestContext): Promise<Handle
     if (!terminal) throw notFoundError("evidence not available: job not terminal");
   }
 
+  const frozen = await readFrozenJobEvidence(ctx, projectId, jobId);
+  if (frozen) return { status: 200, data: { jobId, entries: frozen.entries, ...await readJobConfigurationMetadata(ctx.pool, projectId, jobId) } };
+  const connector = requireConnector(ctx);
   let manifest;
   try {
     manifest = await connector.fetchEvidence(projectId, jobId);
@@ -2389,12 +2393,12 @@ export async function getJobEvidenceContentHandler(ctx: RequestContext): Promise
   try {
     const waveform = name.toLowerCase().endsWith(".vcd");
     if (waveform && !range) {
-      const manifest = await connector.fetchEvidence(projectId, jobId);
+      const manifest = await readFrozenJobEvidence(ctx, projectId, jobId) ?? await connector.fetchEvidence(projectId, jobId);
       const entry = manifest.entries.find((entry) => entry.name === name);
       if (!entry) throw notFoundError(`evidence entry not found: ${name}`);
       if (entry.sizeBytes > 8 * 1024 * 1024) throw validationError("波形超过 8 MiB 查看上限，请缩小信号范围或仿真窗口");
     }
-    content = await connector.fetchEvidenceContent(projectId, jobId, name, range ? { range } : waveform ? { requireFull: true } : undefined);
+    content = await fetchJobEvidenceContent(ctx, projectId, jobId, name, range ? { range } : waveform ? { requireFull: true } : undefined);
   } catch (err) {
     throw mapConnectorError(err);
   }

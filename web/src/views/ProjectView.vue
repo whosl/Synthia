@@ -1859,7 +1859,7 @@ const projectProfileLabel = computed(() =>
 const toolSummary = ref<ToolSummary | null>(null);
 
 const staReportLoader = computed(() => {
-  const timing = toolSummary.value?.timing;
+  const timing = toolSummary.value?.timing ?? toolSummary.value?.history?.timing;
   return timing ? () => loadStaReportText(timing.sourceJobId) : undefined;
 });
 

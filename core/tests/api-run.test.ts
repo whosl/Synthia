@@ -768,6 +768,7 @@ class MockRemoteClient {
   heartbeatError: Error | null = null;
   lastRequest: Record<string, unknown> | null = null;
   lastApproval: unknown = undefined;
+  lastEvidenceOptions: unknown = undefined;
 
   async register() { this.state = "ready"; return { registration_state: "ready" }; }
   async heartbeat() {
@@ -786,7 +787,10 @@ class MockRemoteClient {
   }
   async status(id: string) { return { id, state: "queued" as ToolRunState }; }
   async evidence(id: string) { return { jobId: id, entries: [{ name: "r.txt", sha256: "a".repeat(64), sizeBytes: 1, mediaType: "text/plain" }] }; }
-  async fetchEvidenceContent(id: string, name: string) { return { content: `body:${name}`, sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" }; }
+  async fetchEvidenceContent(id: string, name: string, options?: unknown) {
+    this.lastEvidenceOptions = options;
+    return { content: `body:${name}`, sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" };
+  }
 }
 
 /** Build a MockRemoteError with a `code` property (mimics RemoteConnectorError). */
@@ -819,6 +823,17 @@ describe("RemoteConnectorAdapter — lease reconnect + parameters mapping", () =
     actor: { actorType: "service", actorId: "core" },
     parameters: { sources: [{ path: "top.v", content: "module top; endmodule" }], top: "top", part: "xc7k70t", constraints: [] },
     ...overrides,
+  });
+
+  test("archived evidence forwards Core's frozen entry and preserves full/range requests", async () => {
+    const mock = new MockRemoteClient();
+    const adapter = makeAdapter(mock);
+    const archivedEntry = { name: "resources.rpt", sha256: "a".repeat(64), sizeBytes: 15, mediaType: "text/plain" };
+    const range = { offset: 4, limit: 12 };
+    await adapter.fetchEvidenceContent("p1", "job-old", archivedEntry.name, { archivedEntry, range });
+    expect(mock.lastEvidenceOptions).toEqual({ complete: false, archivedEntry, range });
+    await adapter.fetchEvidenceContent("p1", "job-old", archivedEntry.name, { archivedEntry, requireFull: true });
+    expect(mock.lastEvidenceOptions).toEqual({ complete: true, archivedEntry });
   });
 
   test("submitJob sends the canonical input hash and repeats the execution binding in parameters", async () => {

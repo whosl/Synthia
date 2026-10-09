@@ -4,7 +4,7 @@ import { Client } from "pg";
 import type { ApiHarness } from "./support/api-harness.ts";
 import { apiCall, setupApiHarness, teardownApiHarness, truncateDomainTables } from "./support/api-harness.ts";
 import { bindJobConfiguration, lockProjectConfiguration, readJobConfigurationMetadata } from "../src/services/project-configuration.ts";
-import type { ConnectorPort, SubmitJobParams } from "../src/api/connector-port.ts";
+import { ConnectorError, type ConnectorPort, type EvidenceContentOptions, type SubmitJobParams } from "../src/api/connector-port.ts";
 import { sha256Hex } from "../src/hashing.ts";
 import type { RuntimeClient, RuntimeAgentSummary } from "../src/api/task-proxy.ts";
 
@@ -14,6 +14,9 @@ describe.skipIf(!databaseUrl)("free project configuration epochs", () => {
   let harness: ApiHarness;
   let projectId: string;
   const submissions: SubmitJobParams[] = [];
+  const reports = new Map<string, string>();
+  const evicted = new Set<string>();
+  const evidenceReads: { jobId: string; name: string; options?: EvidenceContentOptions }[] = [];
   let legacyAgents: RuntimeAgentSummary[] = [];
   const runtime = { async listTasks() { return { agents: legacyAgents }; } } as RuntimeClient;
   const connector: ConnectorPort = {
@@ -21,7 +24,12 @@ describe.skipIf(!databaseUrl)("free project configuration epochs", () => {
     async submitJob(input) { submissions.push(input); return { jobId: input.jobId, state: "queued" }; },
     async queryStatus(_projectId, jobId) { return { jobId, state: "succeeded" }; },
     async fetchEvidence(_projectId, jobId) { return { jobId, entries: [] }; },
-    async fetchEvidenceContent(_projectId, _jobId, name) { return { name, content: "report", sha256: "a".repeat(64), truncated: false, mediaType: "text/plain" }; },
+    async fetchEvidenceContent(_projectId, jobId, name, options) {
+      evidenceReads.push({ jobId, name, options });
+      if (evicted.has(jobId) && !options?.archivedEntry) throw new ConnectorError("JOB_NOT_FOUND");
+      const content = reports.get(`${jobId}:${name}`) ?? "report";
+      return { name, content, sha256: sha256Hex(content), sizeBytes: Buffer.byteLength(content), truncated: false, mediaType: "text/plain" };
+    },
   };
   const data = (response: { json: unknown }) => (response.json as { data: Record<string, any> }).data;
 
@@ -30,6 +38,7 @@ describe.skipIf(!databaseUrl)("free project configuration epochs", () => {
   beforeEach(async () => {
     await truncateDomainTables(harness.client);
     submissions.length = 0;
+    reports.clear(); evicted.clear(); evidenceReads.length = 0;
     legacyAgents = [];
     projectId = `config-${randomUUID()}`;
     const response = await apiCall(harness.baseUrl, "/api/v1/projects", {
@@ -163,6 +172,43 @@ describe.skipIf(!databaseUrl)("free project configuration epochs", () => {
     expect(next.stages.every((stage: { state: string }) => stage.state === "never")).toBe(true);
     const history = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/jobs`, { token: harness.ids.humanToken });
     expect((data(history) as unknown as { evidenceScope: string }[]).every((entry) => entry.evidenceScope === "historical")).toBe(true);
+  });
+
+  test("legacy reports remain visible and readable after worker eviction and config changes, without passing current checks", async () => {
+    const sta = "Clock : clk\nWNS(ns) TNS(ns) TNS-fail TNS-end WHS THS\n0.591 0 0 10 0.042 0\nAll user specified timing constraints are met.";
+    const resource = "Device : old-part\n| Site Type | Used | Available | Util% |\n| Slice LUTs | 12896 | 20000 | 64.48 |";
+    const older = await job("succeeded", null, "old-chain", "implement");
+    const latest = await job("succeeded", null, "old-chain", "implement");
+    const failed = await job("failed", null, "old-chain", "implement");
+    const entries = [{ name: "sta.rpt", sha256: sha256Hex(sta), sizeBytes: Buffer.byteLength(sta), mediaType: "text/plain" },
+      { name: "resources.rpt", sha256: sha256Hex(resource), sizeBytes: Buffer.byteLength(resource), mediaType: "text/plain" }];
+    // Cover both persisted manifest shapes and a newer failed report.
+    await harness.client.query("UPDATE tool_run SET evidence=$1::jsonb WHERE id=$2", [JSON.stringify({ entries }), older]);
+    await harness.client.query("UPDATE tool_run SET evidence=$1::jsonb WHERE id=ANY($2::text[])", [JSON.stringify(entries), [latest, failed]]);
+    await harness.client.query("INSERT INTO tool_timing_metrics(job_id,project_id,wns,tns,status,clocks) VALUES($1,$2,0.658,0,'met','[]')", [older, projectId]);
+    reports.set(`${latest}:sta.rpt`, sta); reports.set(`${latest}:resources.rpt`, resource); evicted.add(latest);
+    const summary = () => apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/tool-summary`, { token: harness.ids.humanToken });
+    for (const epoch of [1, 2]) {
+      if (epoch === 2) expect((await edit({ expected_revision: 1, target_part: "part-b" })).status).toBe(200);
+      const result = data(await summary());
+      expect(result.configEpoch).toBe(epoch);
+      expect(result.validationState).toBe("pending");
+      expect(result.stages.every((stage: { state: string; succeeded: number }) => stage.state === "never" && stage.succeeded === 0)).toBeTrue();
+      expect(result.timing).toBeNull(); expect(result.resources).toBeNull();
+      expect(result.bitstream.generated).toBeFalse();
+      expect(result.history).toMatchObject({ runCount: 3, succeeded: 2, failed: 1,
+        timing: { wns: 0.591, whs: 0.042, sourceJobId: latest }, timingSource: { configEpoch: null },
+        resources: { device: "old-part", sourceJobId: latest, configEpoch: null, metrics: [{ used: 12896 }] } });
+    }
+    expect(evidenceReads.some((read) => read.options?.archivedEntry?.name === "resources.rpt")).toBeTrue();
+    expect(evidenceReads.some((read) => read.options?.archivedEntry?.name === "sta.rpt")).toBeTrue();
+    const manifest = data(await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/jobs/${latest}/evidence`, { token: harness.ids.humanToken }));
+    expect(manifest.entries).toEqual(entries); expect(manifest.evidenceScope).toBe("unattributed");
+    const listed = data(await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/jobs?include_evidence=1`, { token: harness.ids.humanToken })) as unknown as { id: string; evidenceEntries: unknown }[];
+    expect(listed.find((run) => run.id === latest)?.evidenceEntries).toEqual(entries);
+    const read = await apiCall(harness.baseUrl, `/api/v1/projects/${projectId}/jobs/${latest}/evidence/content?name=resources.rpt`, { token: harness.ids.humanToken });
+    expect(read.status).toBe(200); expect(data(read).content).toBe(resource);
+    expect((await harness.client.query("SELECT config_epoch,validation_chain_hash FROM tool_run WHERE id=$1", [latest])).rows[0]).toEqual({ config_epoch: null, validation_chain_hash: "old-chain" });
   });
 
   test("a newer simulation requires downstream stages to be rerun before passing", async () => {

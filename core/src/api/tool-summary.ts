@@ -11,12 +11,13 @@
  * timing 降级为 null（携带 timingError），端点本身不失败 —— 进度信息
  * 不应因 evidence 通道故障而不可见。
  *
- * 工程项目与自由项目一视同仁：数据源是 tool_run，与项目类型无关。
+ * 自由项目当前验证严格限定配置与验证链；历史指标独立展示，不能恢复通过状态。
  */
 import type { HandlerResult, RequestContext } from "./handlers.ts";
 import { readResourceSummary, type ToolSummaryResources } from "./resource-summary.ts";
 import { notFoundError } from "./errors.ts";
 import { validationInputs } from "../services/validation-inputs.ts";
+import { fetchJobEvidenceContent } from "./job-evidence.ts";
 
 export interface ToolSummaryStage {
   readonly operation: "validate_sources" | "simulate" | "synthesize" | "implement" | "report_sta";
@@ -50,6 +51,17 @@ export interface ToolSummary {
   readonly timingError?: string;
   readonly resources?: ToolSummaryResources | null;
   readonly resourcesError?: string;
+  /** Lifetime records are visible without satisfying the current configuration. */
+  readonly history?: {
+    readonly runCount: number;
+    readonly succeeded: number;
+    readonly failed: number;
+    readonly timing?: ToolSummaryTiming | null;
+    readonly timingSource?: { readonly configEpoch: number | null; readonly at: string };
+    readonly timingError?: string;
+    readonly resources?: ToolSummaryResources | null;
+    readonly resourcesError?: string;
+  };
 }
 
 /**
@@ -94,6 +106,36 @@ export function parseStaSummary(text: string): { wns: number | null; tns: number
 }
 
 const OPERATIONS: readonly ToolSummaryStage["operation"][] = ["validate_sources", "simulate", "synthesize", "implement", "report_sta"];
+
+async function readTimingSummary(ctx: RequestContext, projectId: string, sourceJobId: string): Promise<{ timing: ToolSummaryTiming | null; timingError?: string }> {
+  const cached = await ctx.pool.query(
+    "SELECT wns, tns, whs, status, clocks, parsed_at FROM tool_timing_metrics WHERE job_id = $1 AND project_id = $2",
+    [sourceJobId, projectId],
+  );
+  const row = cached.rows[0];
+  if (row) return { timing: {
+    wns: row.wns === null ? null : Number(row.wns),
+    tns: row.tns === null ? null : Number(row.tns),
+    whs: row.whs === null ? null : Number(row.whs),
+    status: row.status as ToolSummaryTiming["status"],
+    clocks: Array.isArray(row.clocks) ? row.clocks.map(String) : [],
+    sourceJobId, parsedAt: row.parsed_at.toISOString(),
+  } };
+  if (!ctx.connector) return { timing: null, timingError: "connector not configured" };
+  try {
+    const evidence = await fetchJobEvidenceContent(ctx, projectId, sourceJobId, "sta.rpt", { requireFull: true });
+    if (evidence.truncated) throw new Error("truncated timing report");
+    const parsed = parseStaSummary(evidence.content);
+    await ctx.pool.query(
+      `INSERT INTO tool_timing_metrics (job_id, project_id, wns, tns, whs, status, clocks, parsed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT (job_id) DO NOTHING`,
+      [sourceJobId, projectId, parsed.wns, parsed.tns, parsed.whs, parsed.status, JSON.stringify(parsed.clocks)],
+    );
+    return { timing: { ...parsed, sourceJobId, parsedAt: new Date().toISOString() } };
+  } catch (error) {
+    return { timing: null, timingError: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 async function requireProjectReadable(ctx: RequestContext, projectId: string): Promise<void> {
   const project = await ctx.pool.query("SELECT id FROM project WHERE id=$1", [projectId]);
@@ -183,7 +225,8 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
     `SELECT id AS job_id, end_time FROM tool_run
       WHERE project_id = $1 AND operation = 'implement' AND state = 'succeeded'
         AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
-        AND evidence::jsonb @> '[{"name":"synthia.bit"}]'::jsonb
+        AND (evidence::jsonb @> '[{"name":"synthia.bit"}]'::jsonb
+          OR evidence::jsonb->'entries' @> '[{"name":"synthia.bit"}]'::jsonb)
       ORDER BY created_at DESC LIMIT 1`,
     [projectId, epoch, chain],
   );
@@ -200,56 +243,43 @@ export async function getProjectToolSummaryHandler(ctx: RequestContext): Promise
     `SELECT id AS job_id FROM tool_run
       WHERE project_id = $1 AND operation IN ('implement','report_sta') AND state = 'succeeded'
         AND ($2::int IS NULL OR (config_epoch=$2 AND validation_chain_hash=$3))
-        AND evidence::jsonb->'entries' @> '[{"name":"sta.rpt"}]'::jsonb
-      ORDER BY created_at DESC LIMIT 1`,
+        AND (evidence::jsonb->'entries' @> '[{"name":"sta.rpt"}]'::jsonb
+          OR evidence::jsonb @> '[{"name":"sta.rpt"}]'::jsonb)
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
     [projectId, epoch, chain],
   );
   const sourceJobId = (timingSource.rows[0] as { job_id: string } | undefined)?.job_id;
   if (sourceJobId !== undefined && stages[3]!.state !== "stale") {
-    const cached = await ctx.pool.query(
-      `SELECT wns, tns, whs, status, clocks, parsed_at
-         FROM tool_timing_metrics WHERE job_id = $1 AND project_id = $2`,
-      [sourceJobId, projectId],
-    );
-    const cachedRow = cached.rows[0] as
-      | { wns: string | null; tns: string | null; whs: string | null; status: string; clocks: unknown; parsed_at: Date }
-      | undefined;
-    if (cachedRow) {
-      timing = {
-        wns: cachedRow.wns === null ? null : Number(cachedRow.wns),
-        tns: cachedRow.tns === null ? null : Number(cachedRow.tns),
-        whs: cachedRow.whs === null ? null : Number(cachedRow.whs),
-        status: cachedRow.status as ToolSummaryTiming["status"],
-        clocks: Array.isArray(cachedRow.clocks) ? cachedRow.clocks.map(String) : [],
-        sourceJobId,
-        parsedAt: cachedRow.parsed_at.toISOString(),
-      };
-    } else if (!ctx.connector) {
-      timingError = "connector not configured";
-    } else {
-      try {
-        const evidence = await ctx.connector.fetchEvidenceContent(projectId, sourceJobId, "sta.rpt");
-        const parsed = parseStaSummary(evidence.content);
-        timing = {
-          wns: parsed.wns, tns: parsed.tns, whs: parsed.whs, status: parsed.status,
-          clocks: parsed.clocks, sourceJobId,
-          parsedAt: new Date().toISOString(),
-        };
-        await ctx.pool.query(
-          `INSERT INTO tool_timing_metrics (job_id, project_id, wns, tns, whs, status, clocks, parsed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,now())
-           ON CONFLICT (job_id) DO NOTHING`,
-          [sourceJobId, projectId, parsed.wns, parsed.tns, parsed.whs, parsed.status, JSON.stringify(parsed.clocks)],
-        );
-      } catch (err) {
-        timingError = err instanceof Error ? err.message : String(err);
-      }
-    }
+    ({ timing, timingError } = await readTimingSummary(ctx, projectId, sourceJobId));
   }
 
   const resources = stages[2]!.state === "stale" ? { resources: null } : await readResourceSummary(ctx, projectId, epoch, chain);
+  const lifetime = (await ctx.pool.query(
+    `SELECT count(*) AS total, count(*) FILTER (WHERE state='succeeded') AS ok,
+            count(*) FILTER (WHERE state IN ('failed','timeout','lost','unknown_effect')) AS fail
+       FROM tool_run WHERE project_id=$1`, [projectId],
+  )).rows[0];
+  let history: NonNullable<ToolSummary["history"]> = {
+    runCount: Number(lifetime?.total ?? 0), succeeded: Number(lifetime?.ok ?? 0), failed: Number(lifetime?.fail ?? 0),
+  };
+  // Only fetch fallback reports when the current configuration has no metric.
+  // Do not rebind legacy NULL epochs or promote old reports into stage results.
+  if (epoch !== null && !timing) {
+    const historical = (await ctx.pool.query(
+      `SELECT id AS job_id, config_epoch, COALESCE(end_time,created_at) AS at FROM tool_run
+        WHERE project_id=$1 AND state='succeeded' AND operation IN ('implement','report_sta')
+          AND (evidence::jsonb->'entries' @> '[{"name":"sta.rpt"}]'::jsonb
+            OR evidence::jsonb @> '[{"name":"sta.rpt"}]'::jsonb)
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [projectId],
+    )).rows[0];
+    if (historical) history = { ...history, ...await readTimingSummary(ctx, projectId, historical.job_id),
+      timingSource: { configEpoch: historical.config_epoch, at: historical.at.toISOString() },
+    };
+  }
+  if (epoch !== null && !resources.resources) history = { ...history, ...await readResourceSummary(ctx, projectId) };
   const summary: ToolSummary = {
     ...resources,
+    history,
     projectId,
     ...(epoch === null ? {} : { configEpoch: epoch, validationChainHash: chain,
       validationState: stages.slice(0, 4).every((stage) => stage.state === "succeeded") ? "passed" as const : "pending" as const }),

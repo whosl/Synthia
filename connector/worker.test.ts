@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sha256 } from "../core/src/hashing.ts";
@@ -15,8 +15,8 @@ interface WorkerReply { readonly status: number; readonly payload: unknown; read
 interface ContentReply { readonly name: string; readonly sha256: string; readonly sizeBytes: number; readonly mediaType: string; readonly content_base64: string; readonly truncated: boolean }
 
 let seq = 0;
-async function post(rt: WorkerRuntime, path: string, payload: unknown, cap = "0", scope: { projectId?: string; classification?: DataClassification } = {}): Promise<WorkerReply> {
-  const envelope = { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: `c-${++seq}`, idempotency_key: `k-${path}-${seq}`, actor: { actor_type: "service", actor_id: "core" }, project_id: scope.projectId ?? "p1", classification: scope.classification ?? "internal", capability_version: cap, payload };
+async function post(rt: WorkerRuntime, path: string, payload: unknown, cap = "0", scope: { projectId?: string; classification?: DataClassification; actorId?: string } = {}): Promise<WorkerReply> {
+  const envelope = { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: `c-${++seq}`, idempotency_key: `k-${path}-${seq}`, actor: { actor_type: "service", actor_id: scope.actorId ?? "core" }, project_id: scope.projectId ?? "p1", classification: scope.classification ?? "internal", capability_version: cap, payload };
   const res = await rt.handle(new Request(`https://worker.test${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope) }));
   const json = await res.json() as Record<string, unknown>;
   return { status: res.status, payload: "payload" in json ? (json as { payload: unknown }).payload : undefined, errorCode: typeof json.error_code === "string" ? json.error_code : undefined };
@@ -437,6 +437,66 @@ describe("H37 bounded evidence ranges", () => {
       await writeFile(join(root, "job-range", "output", "waveform.vcd"), "x".repeat(text.length));
       const corrupt = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range: { offset: 0, limit: 10 } });
       expect(corrupt.errorCode).toBe("EVIDENCE_CORRUPT");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("worker reads Core-attested archived artifacts without restoring jobs", () => {
+  test("reads a disk-only report and page after repeated restarts without execution or registry writes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-archive-"));
+    try {
+      const report = "historical utilization report\n";
+      const entry = { name: "resources.rpt", sha256: sha256(report), sizeBytes: Buffer.byteLength(report), mediaType: "text/plain" };
+      await mkdir(join(root, "job-evicted", "output"), { recursive: true });
+      await writeFile(join(root, "job-evicted", "output", entry.name), report);
+      for (let restart = 0; restart < 2; restart++) {
+        const rt = runtime(root, async () => { throw new Error("archive read must not execute"); });
+        const path = "/jobs/evidence/content";
+        const payload = { job_id: "job-evicted", name: entry.name, archived_entry: entry };
+        expect((await post(rt, path, { job_id: payload.job_id, name: entry.name })).errorCode).toBe("JOB_NOT_FOUND");
+        expect((await post(rt, path, payload)).status).toBe(403);
+        const result = await post(rt, path, { ...payload, complete: true }, "0", { actorId: "synthia-core" });
+        expect(result.status).toBe(200);
+        expect(Buffer.from((result.payload as ContentReply).content_base64, "base64").toString()).toBe(report);
+        const page = await post(rt, path, { ...payload, range: { offset: 3, limit: 8 } }, "0", { actorId: "synthia-core" });
+        expect(page.status).toBe(200);
+        expect(Buffer.from((page.payload as ContentReply).content_base64, "base64").toString()).toBe(report.slice(3, 11));
+        expect((await post(rt, "/jobs/status", { job_id: payload.job_id })).status).toBe(404);
+        await expect(readFile(join(root, "jobs-registry.json"))).rejects.toThrow();
+        for (const bad of [{ ...entry, sha256: "0".repeat(64) }, { ...entry, sizeBytes: entry.sizeBytes + 1 }, { ...entry, uri: "/etc/passwd" }]) {
+          expect((await post(rt, path, { ...payload, archived_entry: bad }, "0", { actorId: "synthia-core" })).errorCode).toBe("EVIDENCE_CORRUPT");
+        }
+        expect((await post(rt, path, { ...payload, job_id: "../job-evicted" }, "0", { actorId: "synthia-core" })).status).toBe(400);
+        expect((await post(rt, path, { ...payload, name: "../resources.rpt" }, "0", { actorId: "synthia-core" })).status).toBe(404);
+        expect((await post(rt, path, payload, "0", { actorId: "synthia-core", projectId: "p2" })).status).toBe(403);
+        expect((await post(rt, path, payload, "0", { actorId: "synthia-core", classification: "restricted" })).status).toBe(403);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("rejects symbolic links instead of following paths outside the job output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-archive-link-"));
+    try {
+      const content = "private report";
+      const entry = { name: "sta.rpt", sha256: sha256(content), sizeBytes: content.length, mediaType: "text/plain" };
+      await writeFile(join(root, "private.txt"), content);
+      await mkdir(join(root, "job-link", "output"), { recursive: true });
+      await symlink(join(root, "private.txt"), join(root, "job-link", "output", entry.name));
+      const rt = runtime(root, async () => ({ outcome: "success" }));
+      expect((await post(rt, "/jobs/evidence/content", { job_id: "job-link", name: entry.name, archived_entry: entry }, "0", { actorId: "synthia-core" })).errorCode).toBe("EVIDENCE_CORRUPT");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("archive metadata cannot override a known job's project or classification binding", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-archive-bound-"));
+    try {
+      const rt = runtime(root, async () => ({ outcome: "success", output: "{}" }), { ...endpoint, project_scope: ["p1", "p2"], data_classification_scope: ["internal", "confidential"] });
+      await prime(rt);
+      await submitJob(rt, "job-bound-archive");
+      const payload = { job_id: "job-bound-archive", name: "worker-result.json", archived_entry: { name: "worker-result.json", sha256: sha256("{}"), sizeBytes: 2, mediaType: "application/json" } };
+      for (const scope of [{ projectId: "p2" }, { classification: "confidential" as const }]) {
+        expect((await post(rt, "/jobs/evidence/content", payload, "0", { ...scope, actorId: "synthia-core" })).errorCode).toBe("JOB_NOT_FOUND");
+      }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

@@ -41,3 +41,11 @@ describe("H37 remote page integrity", () => {
     }
   });
 });
+
+test("remote archived evidence carries only the Core entry and preserves complete/range semantics", async () => {
+  const content = "old report";
+  const entry = { name: "resources.rpt", sha256: sha256Hex(content), sizeBytes: content.length, mediaType: "text/plain" };
+  const h = new FakeHttp((_p, b) => ok(b, { ...entry, content_base64: Buffer.from(content).toString("base64"), truncated: false }));
+  expect((await client(h).fetchEvidenceContent("job-evicted", entry.name, { complete: true, archivedEntry: entry })).content).toBe(content);
+  expect(h.calls[0]!.body.payload).toEqual({ job_id: "job-evicted", name: entry.name, complete: true, archived_entry: entry });
+});

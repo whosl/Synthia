@@ -690,7 +690,7 @@ export class RemoteConnectorClient {
   async fetchEvidenceContent(
     id: string,
     name: string,
-    options: { complete?: boolean; range?: EvidenceRange } = {},
+    options: { complete?: boolean; range?: EvidenceRange; archivedEntry?: EvidenceManifest["entries"][number] } = {},
   ): Promise<EvidenceContent> {
     required(id, "jobId");
     required(name, "name");
@@ -702,7 +702,8 @@ export class RemoteConnectorClient {
     const m = (
       await this.call<EvidenceContentEnvelope>(
         "/jobs/evidence/content",
-        { ...payload, ...(options.range ? { range: options.range } : {}) },
+        { ...payload, ...(options.range ? { range: options.range } : {}),
+          ...(options.archivedEntry ? { archived_entry: options.archivedEntry } : {}) },
         "0",
         `evidence-content:${id}:${name}:${makeId("nonce")}`,
         this.corr(),

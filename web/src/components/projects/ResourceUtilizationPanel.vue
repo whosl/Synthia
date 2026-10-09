@@ -8,6 +8,7 @@ import { formatTime } from "../../util/format-time.ts";
 const props = defineProps<{
   resources: ToolSummaryResources | null;
   error?: string;
+  historical?: boolean;
   recordJobIds: readonly string[];
 }>();
 const emit = defineEmits<{ records: [jobId: string] }>();
@@ -20,7 +21,7 @@ const count = (value: number | null) => value === null ? "—" : value.toLocaleS
   <section class="resources-panel" aria-label="器件资源占用">
     <header class="resources-header">
       <div><span class="resources-eyebrow"><Cpu :size="15" /> DEVICE UTILIZATION</span><h2>器件资源占用</h2></div>
-      <div class="resource-source"><span class="resource-phase">{{ phase }}</span><code v-if="resources?.device">{{ resources.device }}</code></div>
+      <div class="resource-source"><span class="resource-phase">{{ historical ? '历史报告 · ' : '' }}{{ phase }}</span><code v-if="resources?.device">{{ resources.device }}</code></div>
     </header>
     <div v-if="resources" class="resource-grid">
       <article v-for="row in rows" :key="row.key" class="resource-card" :data-tone="row.tone" :aria-label="`${row.label} 资源占用`">
@@ -32,7 +33,7 @@ const count = (value: number | null) => value === null ? "—" : value.toLocaleS
     </div>
     <p v-else class="resource-empty">{{ error ? "资源报告暂时无法读取，请稍后刷新。" : "综合或布局布线生成资源报告后，这里会显示用量与器件占比。" }}</p>
     <footer v-if="resources" class="resource-footer">
-      <span>已用 / 可用 · 占比按报告中的器件容量计算<br />{{ formatTime(resources.sourceAt) }} · {{ resources.reportName }} · 此次运行的设计结果</span>
+      <span>已用 / 可用 · 占比按报告中的器件容量计算<br />{{ formatTime(resources.sourceAt) }} · {{ resources.reportName }} · {{ historical ? '当时的设计结果，当前配置仍需验证' : '此次运行的设计结果' }}</span>
       <button v-if="recordJobIds.includes(resources.sourceJobId)" type="button" @click="emit('records', resources.sourceJobId)">查看运行记录<ArrowUpRight :size="14" /></button>
     </footer>
   </section>

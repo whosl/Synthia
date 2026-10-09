@@ -22,6 +22,7 @@ import { currentProcessGate, processProgress, PROCESS_GATE_STATUS_TEXT } from ".
 import { implCells, implChipText, implDeepestCell, timingStatusTone, formatNs, TIMING_STATUS_LABELS, type ImplCell } from "../../domain/impl-summary.ts";
 import type { ImplRunAction } from "../../domain/impl-run.ts";
 import { useChipPopover } from "../../composables/use-chip-popover.ts";
+import { overviewMetrics } from "../../domain/engineering-overview.ts";
 
 const RUN_ACTIONS: readonly ImplRunAction[] = [
   { key: "validate", operation: "validate_sources", label: "运行校验" },
@@ -90,7 +91,8 @@ const facePulsing = computed(() => deepest.value?.state === "running");
 // ─── 物理实现明细（原 ImplProgressChip 弹层内容） ──────────────────────
 const cells = computed(() => (props.summary ? implCells(props.summary) : []));
 const cellByKey = computed(() => new Map(cells.value.map(cell => [cell.key, cell])));
-const tone = computed(() => timingStatusTone(props.summary?.timing?.status ?? "unknown"));
+const metrics = computed(() => overviewMetrics(props.summary));
+const tone = computed(() => timingStatusTone(metrics.value.timing?.status ?? "unknown"));
 const pending = computed(() => new Set(props.pendingKeys ?? []));
 
 function isPending(key: ImplCell["key"]): boolean {
@@ -214,16 +216,17 @@ function select(stageId: string): void {
         >{{ runError }}</p>
 
         <div
-          v-if="summary.timing"
+          v-if="metrics.timing"
           class="group/timing mt-2.5 flex flex-wrap items-baseline gap-3 border-t border-dashed border-line pt-2.5"
           :data-tone="tone"
         >
-          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.wns) }}</b> WNS</span>
-          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.tns) }}</b> TNS</span>
-          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(summary.timing.whs) }}</b> WHS</span>
-          <span class="text-[11px] text-fg-secondary">{{ TIMING_STATUS_LABELS[summary.timing.status] }}<template v-if="summary.timing.clocks.length > 0"> · {{ summary.timing.clocks.join("、") }}</template></span>
+          <span v-if="metrics.timingHistorical" class="text-[11px] text-fg-muted">历史时序报告 · 当前配置待验证</span>
+          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(metrics.timing.wns) }}</b> WNS</span>
+          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(metrics.timing.tns) }}</b> TNS</span>
+          <span class="text-[10px] text-fg-muted"><b class="mr-[3px] text-sm text-fg tabular-nums group-data-[tone=bad]/timing:text-danger group-data-[tone=ok]/timing:text-ok">{{ formatNs(metrics.timing.whs) }}</b> WHS</span>
+          <span class="text-[11px] text-fg-secondary">{{ TIMING_STATUS_LABELS[metrics.timing.status] }}<template v-if="metrics.timing.clocks.length > 0"> · {{ metrics.timing.clocks.join("、") }}</template></span>
         </div>
-        <p v-else-if="summary.timingError" class="m-0 mt-2.5 border-t border-dashed border-line pt-2.5 text-[11px] text-fg-muted">时序摘要不可得（{{ summary.timingError }}）——进度不受影响</p>
+        <p v-else-if="metrics.timingError" class="m-0 mt-2.5 border-t border-dashed border-line pt-2.5 text-[11px] text-fg-muted">时序摘要不可得（{{ metrics.timingError }}）——进度不受影响</p>
         <p v-else class="m-0 mt-2.5 border-t border-dashed border-line pt-2.5 text-[11px] text-fg-muted">尚无成功布局布线的时序数据</p>
 
         <button
