@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthia · FPGA 开发效率汇报</title><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>天境 x 鸿途FPGA开发智能体 · 开发效率汇报</title><style>
 :root{--ink:#20252a;--muted:#656c74;--line:#d9dde0;--accent:#235985;--paper:#fff;--section-inline:max(40px,calc((100vw - 1240px)/2))}
 *{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:90px}body{margin:0;background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;line-height:1.65}button,a{font:inherit}a{color:var(--accent)}button{cursor:pointer}button:focus-visible,a:focus-visible{outline:3px solid #467baa;outline-offset:4px}h1,h2,h3,p{margin:0}h1{font-size:clamp(32px,3.3vw,48px);line-height:1.45;font-weight:650;letter-spacing:-1px}h2{font-size:clamp(28px,2.4vw,36px);line-height:1.45;font-weight:650}h3{font-size:24px;font-weight:600}strong{font-weight:650}.site-nav{position:sticky;top:0;z-index:30;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:14px 28px;background:#fffffff5;border-bottom:1px solid var(--line)}.site-nav a{text-decoration:none;color:var(--muted);font-size:14px;white-space:nowrap}.site-nav .brand{font-weight:650;color:var(--ink);font-size:16px}.site-nav .links{display:flex;gap:24px;align-items:center}.site-nav a:hover{color:var(--accent)}
 .section{--section-inline:max(40px,calc((100vw - 1240px)/2));padding:54px var(--section-inline) 58px;border-bottom:1px solid var(--line);scroll-margin-top:64px}.section-label{font-size:15px;color:var(--muted);margin-bottom:12px}.lead{font-size:26px;line-height:1.75;margin-top:24px}.lead strong{color:var(--accent)}.intro-example{margin-top:32px;border-left:3px solid #aab7c1;padding-left:24px}.intro-example h3{font-size:22px}.intro-example p{font-size:22px;margin-top:10px}.sequence{font-size:22px;word-spacing:6px;line-height:1.9}.sequence span{color:#929ba3;margin:0 12px}.explain{color:var(--muted);font-size:17px;margin-top:12px}.pain-list{margin-top:30px}.pain-row{display:grid;grid-template-columns:235px 1fr;gap:38px;padding:24px 0;border-top:1px solid var(--line)}.pain-row h3{font-size:25px}.pain-row p{font-size:22px;line-height:1.85}.pain-row .number{color:var(--muted);font-weight:400;font-size:18px;margin-right:13px}.transition{margin-top:26px;font-size:22px}.transition strong{color:var(--accent)}.talk-points{padding-left:25px;margin:22px 0 0;font-size:23px;line-height:1.85}.talk-points li{padding-left:5px;margin:8px 0}.talk-points li::marker{color:#667b8d}.case-heading{margin-top:28px;font-size:22px;font-weight:600}.facts{width:100%;border-collapse:collapse;margin-top:16px;font-size:21px}.facts th,.facts td{text-align:left;border-bottom:1px solid var(--line);padding:12px 18px 12px 0;vertical-align:top}.facts th{font-weight:400;color:var(--muted);width:185px}.facts td strong{color:var(--accent)}.note{font-size:14px;color:var(--muted);line-height:1.8;margin-top:13px}.metrics-line{display:flex;gap:46px;flex-wrap:wrap;margin-top:26px;padding:21px 0;border-block:1px solid var(--line)}.metrics-line div{font-size:18px;color:var(--muted)}.metrics-line strong{color:var(--ink);font-size:31px;margin-right:8px}.next-step{font-size:22px;line-height:1.85;margin-top:24px}.next-step strong{color:var(--accent)}.end{padding:30px;text-align:center;color:var(--muted);font-size:15px}.end a{margin-left:18px}
@@ -8,7 +8,7 @@
 @media(max-width:700px){html{scroll-padding-top:110px}.site-nav{align-items:flex-start;flex-direction:column;gap:8px;padding:12px 20px}.site-nav .links{max-width:100%;overflow:auto;width:100%;gap:20px;padding-bottom:3px}.section{--section-inline:22px;padding-block:34px}.lead{font-size:21px}.intro-example{padding-left:16px;margin-top:24px}.intro-example p,.sequence{font-size:19px}.sequence span{margin:0 5px}.pain-row{grid-template-columns:1fr;gap:10px;padding:20px 0}.pain-row h3{font-size:22px}.pain-row p,.talk-points,.transition,.next-step{font-size:19px}.talk-points{padding-left:21px}.facts{font-size:17px}.facts th{width:100px}.facts td,.facts th{padding-block:10px}.metrics-line{gap:15px 24px}.metrics-line strong{font-size:26px}.metrics-line div{font-size:16px}.live-preview:not(.expanded){width:calc(100% + var(--section-inline) + var(--section-inline) - 24px);margin-inline:calc(12px - var(--section-inline))}.browser-bar{align-items:flex-start;flex-direction:column;padding:10px}.preview-actions{gap:6px}.preview-actions button,.preview-actions a{font-size:12px;padding:8px}.frame-area{height:650px}.live-preview.expanded{inset:6px}.note{font-size:13px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}@media print{.site-nav,.preview-actions{display:none}.section{padding:30px;break-inside:avoid}.live-preview{width:100%;margin-inline:0}.frame-area{height:600px}}
 </style></head><body>
-<nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">Synthia · FPGA 开发效率</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#can">项目开发 / CAN</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
+<nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">天境 x 鸿途FPGA开发智能体</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#can">项目开发 / CAN</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
 <main>
 <section id="intro" class="section" aria-labelledby="intro-title">
 <p class="section-label">攻关目标</p><h1 id="intro-title">提高工程师使用工业 EDA 软件<br>开发 FPGA 项目的效率</h1>
@@ -47,8 +47,8 @@
 <section id="evolution" class="section" aria-labelledby="evolution-title">
 <p class="section-label">针对第二个痛点：经验难复用</p><h2 id="evolution-title">历史项目知识库 + 自进化技能</h2>
 <ul class="talk-points"><li><strong>历史项目可参考：</strong>把已有设计和开发过程纳入知识库。</li><li><strong>执行经验可提炼：</strong>从智能体的历史经历中总结处理方法，记录适用条件。</li><li><strong>复用之后再更新：</strong>根据使用结果持续完善技能和版本。</li></ul>
-<div class="metrics-line" aria-label="试运行数据快照"><div><strong>24 项</strong>活跃技能</div><div><strong>约 4.4 小时</strong>累计估算净省时</div><div><strong>12.6 倍</strong>观测耗时倍率</div></div>
-<p class="note">2026-09-29 统计快照。提效数据来自 1 项技能、3 次可比成功复用，相对源任务探索过程计算；是小样本活跃耗时估算，不代表全平台开发提速或人工工时。下方平台展示实时数据。</p>
+<div class="metrics-line" aria-label="自进化数据"><div><strong id="skill-count">41 项</strong>活跃技能</div><div><strong id="saved-hours">约 86.7 小时</strong>累计估算净省时</div><div><strong id="speedup">20.4 倍</strong>观测耗时倍率</div></div>
+<p class="note"><span id="evolution-snapshot">2026-10-15 核验快照。提效数据来自 7 项技能、15 次可比成功复用，另有 9 次待评估。</span> 相对源任务探索过程计算；是样本内活跃耗时估算，不代表全平台开发提速或人工工时。<span id="evolution-live-status">正在核对实时统计…</span></p>
 <div class="live-preview" data-path="/evolution"><div class="browser-bar"><span class="browser-label"><i></i>自进化 · 技能库与复用成效</span><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/evolution" target="_blank" rel="noopener">独立打开 ↗</a></div></div><div class="frame-area"><p class="loading-message" role="status">正在加载 自进化 · 技能库与复用成效…</p><iframe title="自进化 · 技能库与复用成效实时网页" name="evolution-preview" allow="fullscreen" loading="eager"></iframe></div><p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p></div>
 </section>
 <section id="governance" class="section" aria-labelledby="governance-title">
@@ -62,10 +62,52 @@
           <p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
         </div>
 </section>
-</main><footer class="end">Synthia · FPGA 智能开发平台<a href="#intro">回到开头</a></footer><script>
+</main><footer class="end">天境 x 鸿途FPGA开发智能体<a href="#intro">回到开头</a></footer><script>
 const hosted = location.protocol === "https:" || location.protocol === "http:";
 const platformBase = hosted ? new URL("../", location.href) : new URL("https://synthia.wenzhuolin.xyz/");
 for (const anchor of document.querySelectorAll("[data-platform-home]")) anchor.href = new URL("projects", platformBase).href;
+
+// Refresh once on entry so a live talk stays stable; retain the dated snapshot on failure.
+async function refreshEvolutionSnapshot() {
+  const status = document.getElementById("evolution-live-status");
+  try {
+    const token = hosted ? sessionStorage.getItem("synthia.token") : null;
+    if (!token) {
+      status.textContent = "当前显示核验快照；登录平台后重新打开可读取最新统计。";
+      return;
+    }
+    const response = await fetch(new URL("api/v1/evolution/overview", platformBase), {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error("Statistics unavailable");
+    const { data } = await response.json();
+    const counts = data?.skill_counts;
+    const efficiency = data?.efficiency;
+    const finite = value => typeof value === "number" && Number.isFinite(value);
+    if (!counts || !efficiency ||
+      ![counts.active_unproven, counts.active_observed, efficiency.net_saved_ms,
+        efficiency.compared_skills, efficiency.compared_applications, data.pending_applications].every(finite) ||
+      (efficiency.speedup != null && !finite(efficiency.speedup))) {
+      throw new Error("Invalid statistics");
+    }
+    document.getElementById("skill-count").textContent = `${counts.active_unproven + counts.active_observed} 项`;
+    document.getElementById("saved-hours").textContent = `约 ${(efficiency.net_saved_ms / 3600000).toFixed(1)} 小时`;
+    document.getElementById("speedup").textContent = efficiency.speedup == null ? "暂无可比数据" : `${efficiency.speedup.toFixed(1)} 倍`;
+    const checkedAt = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).format(new Date());
+    document.getElementById("evolution-snapshot").textContent =
+      `${checkedAt}（北京时间）读取。提效数据来自 ${efficiency.compared_skills} 项技能、${efficiency.compared_applications} 次可比成功复用，另有 ${data.pending_applications} 次待评估。`;
+    status.textContent = "已读取最新统计；重新打开页面可再次更新。";
+  } catch {
+    status.textContent = "实时统计暂不可用，当前显示 2026-10-15 核验快照。";
+  }
+}
+void refreshEvolutionSnapshot();
+
 function collapsePreviews() {
   document.querySelectorAll(".live-preview.expanded").forEach(panel => {panel.classList.remove("expanded");panel.querySelector("[data-expand]").textContent="展开预览";});
   document.body.classList.remove("preview-open");
