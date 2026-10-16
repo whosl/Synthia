@@ -7,8 +7,9 @@
 @media(min-width:1700px){.frame-area{height:850px}}@media(max-width:1000px){.site-nav .links{gap:15px}.section{--section-inline:32px}.pain-row{grid-template-columns:205px 1fr;gap:22px}.frame-area{height:700px}}
 @media(max-width:700px){html{scroll-padding-top:110px}.site-nav{align-items:flex-start;flex-direction:column;gap:8px;padding:12px 20px}.site-nav .links{max-width:100%;overflow:auto;width:100%;gap:20px;padding-bottom:3px}.section{--section-inline:22px;padding-block:34px}.lead{font-size:21px}.intro-example{padding-left:16px;margin-top:24px}.intro-example p,.sequence{font-size:19px}.sequence span{margin:0 5px}.pain-row{grid-template-columns:1fr;gap:10px;padding:20px 0}.pain-row h3{font-size:22px}.pain-row p,.talk-points,.transition,.next-step{font-size:19px}.talk-points{padding-left:21px}.facts{font-size:17px}.facts th{width:100px}.facts td,.facts th{padding-block:10px}.metrics-line{gap:15px 24px}.metrics-line strong{font-size:26px}.metrics-line div{font-size:16px}.live-preview:not(.expanded){width:calc(100% + var(--section-inline) + var(--section-inline) - 24px);margin-inline:calc(12px - var(--section-inline))}.browser-bar{align-items:flex-start;flex-direction:column;padding:10px}.preview-actions{gap:6px}.preview-actions button,.preview-actions a{font-size:12px;padding:8px}.frame-area{height:650px}.live-preview.expanded{inset:6px}.note{font-size:13px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}@media print{.site-nav,.preview-actions{display:none}.section{padding:30px;break-inside:avoid}.live-preview{width:100%;margin-inline:0}.frame-area{height:600px}}
+.comparison-scroll{overflow-x:auto}.facts.comparison{table-layout:fixed;font-size:20px}.facts.comparison th,.facts.comparison td{padding:13px 18px;border-bottom:1px solid var(--line)}.facts.comparison thead{background:#edf2f5}.facts.comparison thead th{font-weight:650;color:var(--ink);font-size:23px}.facts.comparison th:first-child{width:23%}.facts.comparison td{width:38.5%}.facts.comparison td:nth-child(3){background:#f3f8fa}.facts.comparison small{display:block;font-size:14px;line-height:1.7;color:var(--muted);margin-top:4px;font-weight:400}@media(max-width:700px){.facts.comparison{min-width:660px;font-size:17px}.facts.comparison thead th{font-size:19px}.facts.comparison th,.facts.comparison td{padding:10px 12px}}
 </style></head><body>
-<nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">天境 x 鸿途FPGA开发智能体</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#can">项目开发 / CAN</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
+<nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">天境 x 鸿途FPGA开发智能体</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#jpeg">项目开发 / JPEG</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
 <main>
 <section id="intro" class="section" aria-labelledby="intro-title">
 <p class="section-label">攻关目标</p><h1 id="intro-title">提高工程师使用工业 EDA 软件<br>开发 FPGA 项目的效率</h1>
@@ -23,24 +24,32 @@
 </div>
 <p class="transition">借助<strong>天境平台</strong>的契机，我们围绕这三个问题开展了以下工作。</p>
 </section>
-<section id="can" class="section" aria-labelledby="can-title">
-<p class="section-label">针对第一个痛点：项目开发慢</p><h2 id="can-title">领域知识与经验 + 开发流程编排</h2>
+<section id="jpeg" class="section" aria-labelledby="jpeg-title">
+<p class="section-label">针对第一个痛点：项目开发慢</p><h2 id="jpeg-title">领域知识与经验 + 开发流程编排</h2>
 <ul class="talk-points"><li>提炼 FPGA 项目开发模式，形成智能体可用的<strong>专业知识和技能</strong>。</li><li>按开发流程编排工具调用，让智能体<strong>写代码、运行 EDA、分析结果、修改设计</strong>。</li><li>在选定基准项目中验证自动连续执行，减少人工值守。</li></ul>
-<p class="case-heading">CAN 对比：开源黄金设计与智能体独立开发</p>
-<table class="facts"><tbody>
-<tr><th scope="row">对比条件</th><td>同样的自然语言需求与硬件约束；同器件、同工具链。</td></tr>
-<tr><th scope="row">设计规模</th><td>黄金侧设计代码 + 测试代码，合计<strong>接近 1 万行</strong>。</td></tr>
-<tr><th scope="row">开发与验证</th><td>智能体活跃工作时间<strong>约 6 小时</strong>；<strong>13 / 13</strong> 仿真场景通过，完成综合与实现。</td></tr>
-<tr><th scope="row">时序与资源</th><td>时序裕量 <strong>+3.707 → +4.446 ns</strong>；LUT 报告值 <strong>1,051 → 917</strong>。</td></tr>
-</tbody></table>
-<p class="note">基准记录：活跃约 6 小时、总历时约 19 小时；资源报告统计阶段不同，需统一复核。验证止于实现，未生成比特流、未上板。来源：bench-lib T2 对比报告。</p>
-<div class="live-preview" data-path="/projects/p20">
-          <div class="browser-bar"><div class="preview-tabs" role="tablist" aria-label="CAN 项目对比">
-            <button type="button" id="can-blind-tab" role="tab" aria-selected="true" aria-controls="can-blind-panel" data-tab="can-blind-panel">CAN 盲测</button>
-            <button type="button" id="can-golden-tab" role="tab" aria-selected="false" aria-controls="can-golden-panel" tabindex="-1" data-tab="can-golden-panel">CAN 黄金基线</button>
-          </div><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p20" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
-          <div class="frame-area" id="can-blind-panel" role="tabpanel" aria-labelledby="can-blind-tab" data-path="/projects/p20"><p class="loading-message" role="status">正在加载 CAN 盲测 p20…</p><iframe title="CAN 盲测 p20 实时网页" name="can-preview" allow="fullscreen" loading="eager"></iframe></div>
-          <div class="frame-area" id="can-golden-panel" role="tabpanel" aria-labelledby="can-golden-tab" data-path="/projects/p19" hidden><p class="loading-message" role="status">正在加载 CAN 黄金基线 p19…</p><iframe title="CAN 黄金基线 p19 实时网页" name="can-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
+<p class="case-heading">JPEG 编码器：人工开发与智能体协同</p>
+<div class="comparison-scroll"><table class="facts comparison" aria-label="JPEG 人工开发与智能体协同对比"><thead><tr><th scope="col">比较项</th><th scope="col">人工开发<small>开源黄金参考 · p29</small></th><th scope="col">智能体协同<small>JPEG 智能体协同 · p28</small></th></tr></thead><tbody>
+<tr><th scope="row">RTL 代码规模</th><td><strong>约 1.36 万行 RTL</strong><small>19 个文件 · 13,590 行</small></td><td><strong>3,071 行 RTL</strong><small>9 个文件 · 终轮仿真源集</small></td></tr>
+<tr><th scope="row">开发投入</th><td><strong>数十至近百人天</strong><small>从零设计、编码、验证及调试<br>团队估算，非原作者实测</small></td><td><strong>累计活跃约 29.8 小时</strong><small>按事件间隔估算 · 总历时约 109 小时</small></td></tr>
+<tr><th scope="row">人工协作</th><td>工程师完成设计与验证</td><td><strong>38 条工程师微调</strong><small>操作者指令：含指导、授权、验收和恢复</small></td></tr>
+<tr><th scope="row">目标器件</th><td>Kintex-7 160T</td><td>Kintex-7 70T</td></tr>
+<tr><th scope="row">时序裕量 WNS</th><td><strong>+0.354 ns</strong></td><td><strong>+0.591 ns</strong></td></tr>
+<tr><th scope="row">LUT 用量 / 占比</th><td>21,755 / 21.45%</td><td><strong>12,896 / 31.45%</strong></td></tr>
+<tr><th scope="row">FF 用量 / 占比</th><td>33,099 / 16.32%</td><td><strong>7,232 / 8.82%</strong></td></tr>
+<tr><th scope="row">BRAM 用量 / 占比</th><td>12.5 / 3.85%</td><td><strong>1.5 / 1.11%</strong></td></tr>
+<tr><th scope="row">DSP 用量 / 占比</th><td>396 / 66.00%</td><td><strong>64 / 26.67%</strong></td></tr>
+<tr><th scope="row">I/O 用量 / 占比</th><td>40 / 10.00%</td><td>38 / 12.67%</td></tr>
+<tr><th scope="row">BUFG 用量 / 占比</th><td>1 / 3.13%</td><td>1 / 3.13%</td></tr>
+</tbody></table></div>
+<p class="note">代码按物理行统计（含注释和空行），不含测试代码；黄金侧不含平台封装。38 条不含最初 6 条需求输入，包含 9 条平台恢复或继续执行指令，不等于 38 次 RTL 修改。活跃时间按相邻事件间隔最多 10 分钟累计，不等于人工工时或全程无人值守。</p>
+<p class="note">时序与资源取自 100 MHz 目标下的历史布局布线报告；两侧器件不同，资源占比按各自容量计算，BRAM 按 36 Kb tile 计。p28 终轮仿真含后续 Huffman 修订，代码统计与上述实现报告不是完全相同的源集；未生成比特流、未上板。预览中的历史结果对应当时设计，当前配置仍待验证。</p>
+<div class="live-preview" data-path="/projects/p28?overview=1">
+          <div class="browser-bar"><div class="preview-tabs" role="tablist" aria-label="JPEG 项目对比">
+            <button type="button" id="jpeg-blind-tab" role="tab" aria-selected="true" aria-controls="jpeg-blind-panel" data-tab="jpeg-blind-panel">JPEG 智能体协同</button>
+            <button type="button" id="jpeg-golden-tab" role="tab" aria-selected="false" aria-controls="jpeg-golden-panel" tabindex="-1" data-tab="jpeg-golden-panel">JPEG 人工黄金参考</button>
+          </div><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p28?overview=1" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
+          <div class="frame-area" id="jpeg-blind-panel" role="tabpanel" aria-labelledby="jpeg-blind-tab" data-path="/projects/p28?overview=1"><p class="loading-message" role="status">正在加载 JPEG 智能体协同 p28…</p><iframe title="JPEG 智能体协同 p28 实时网页" name="jpeg-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <div class="frame-area" id="jpeg-golden-panel" role="tabpanel" aria-labelledby="jpeg-golden-tab" data-path="/projects/p29?overview=1" hidden><p class="loading-message" role="status">正在加载 JPEG 人工黄金参考 p29…</p><iframe title="JPEG 人工黄金参考 p29 实时网页" name="jpeg-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
           <p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
         </div>
 </section>
@@ -184,7 +193,7 @@ for (const panel of document.querySelectorAll(".live-preview")) {
     }
   });
   select(active);
-  // Warm both CAN projects immediately; switching tabs preserves their loaded state.
+  // Warm both JPEG projects immediately; switching tabs preserves their loaded state.
   states.filter(state => !state.started).forEach(load);
 }
 document.addEventListener("keydown",event=>{if(event.key==="Escape")collapsePreviews();});
