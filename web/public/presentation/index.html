@@ -8,6 +8,7 @@
 @media(max-width:700px){html{scroll-padding-top:110px}.site-nav{align-items:flex-start;flex-direction:column;gap:8px;padding:12px 20px}.site-nav .links{max-width:100%;overflow:auto;width:100%;gap:20px;padding-bottom:3px}.section{--section-inline:22px;padding-block:34px}.lead{font-size:21px}.intro-example{padding-left:16px;margin-top:24px}.intro-example p,.sequence{font-size:19px}.sequence span{margin:0 5px}.pain-row{grid-template-columns:1fr;gap:10px;padding:20px 0}.pain-row h3{font-size:22px}.pain-row p,.talk-points,.transition,.next-step{font-size:19px}.talk-points{padding-left:21px}.facts{font-size:17px}.facts th{width:100px}.facts td,.facts th{padding-block:10px}.metrics-line{gap:15px 24px}.metrics-line strong{font-size:26px}.metrics-line div{font-size:16px}.live-preview:not(.expanded){width:calc(100% + var(--section-inline) + var(--section-inline) - 24px);margin-inline:calc(12px - var(--section-inline))}.browser-bar{align-items:flex-start;flex-direction:column;padding:10px}.preview-actions{gap:6px}.preview-actions button,.preview-actions a{font-size:12px;padding:8px}.frame-area{height:650px}.live-preview.expanded{inset:6px}.note{font-size:13px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}@media print{.site-nav,.preview-actions{display:none}.section{padding:30px;break-inside:avoid}.live-preview{width:100%;margin-inline:0}.frame-area{height:600px}}
 .comparison-scroll{overflow-x:auto}.facts.comparison{table-layout:fixed;font-size:20px}.facts.comparison th,.facts.comparison td{padding:13px 18px;border-bottom:1px solid var(--line)}.facts.comparison thead{background:#edf2f5}.facts.comparison thead th{font-weight:650;color:var(--ink);font-size:23px}.facts.comparison th:first-child{width:23%}.facts.comparison td{width:38.5%}.facts.comparison td:nth-child(3){background:#f3f8fa}.facts.comparison small{display:block;font-size:14px;line-height:1.7;color:var(--muted);margin-top:4px;font-weight:400}@media(max-width:700px){.facts.comparison{min-width:660px;font-size:17px}.facts.comparison thead th{font-size:19px}.facts.comparison th,.facts.comparison td{padding:10px 12px}}
+.preview-panels{display:grid;min-width:0;min-height:0}.preview-panels>.frame-area{grid-area:1 / 1;min-width:0}.preview-panels>.frame-area[hidden]{display:block!important;visibility:hidden;pointer-events:none}.live-preview.expanded .preview-panels{flex:1;grid-template-rows:minmax(0,1fr)}.live-preview.expanded .preview-panels>.frame-area{height:100%}
 </style></head><body>
 <nav class="site-nav" aria-label="汇报导航"><a class="brand" href="#intro">天境 x 鸿途FPGA开发智能体</a><div class="links"><a href="#intro">攻关目标</a><a href="#problems">三个痛点</a><a href="#jpeg">项目开发 / JPEG</a><a href="#evolution">经验复用</a><a href="#governance">研制流程</a><a data-platform-home href="https://synthia.wenzhuolin.xyz/projects">返回平台</a></div></nav>
 <main>
@@ -48,8 +49,10 @@
             <button type="button" id="jpeg-blind-tab" role="tab" aria-selected="true" aria-controls="jpeg-blind-panel" data-tab="jpeg-blind-panel">JPEG 智能体协同</button>
             <button type="button" id="jpeg-golden-tab" role="tab" aria-selected="false" aria-controls="jpeg-golden-panel" tabindex="-1" data-tab="jpeg-golden-panel">JPEG 人工黄金参考</button>
           </div><div class="preview-actions"><button type="button" data-reload>重新载入</button><button type="button" data-expand>展开预览</button><a data-open href="https://synthia.wenzhuolin.xyz/projects/p28?overview=1" target="_blank" rel="noopener">独立打开 ↗</a></div></div>
+          <div class="preview-panels">
           <div class="frame-area" id="jpeg-blind-panel" role="tabpanel" aria-labelledby="jpeg-blind-tab" data-path="/projects/p28?overview=1"><p class="loading-message" role="status">正在加载 JPEG 智能体协同 p28…</p><iframe title="JPEG 智能体协同 p28 实时网页" name="jpeg-preview" allow="fullscreen" loading="eager"></iframe></div>
-          <div class="frame-area" id="jpeg-golden-panel" role="tabpanel" aria-labelledby="jpeg-golden-tab" data-path="/projects/p29?overview=1" hidden><p class="loading-message" role="status">正在加载 JPEG 人工黄金参考 p29…</p><iframe title="JPEG 人工黄金参考 p29 实时网页" name="jpeg-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
+          <div class="frame-area" id="jpeg-golden-panel" role="tabpanel" aria-labelledby="jpeg-golden-tab" data-path="/projects/p29?overview=1" hidden inert><p class="loading-message" role="status">正在加载 JPEG 人工黄金参考 p29…</p><iframe title="JPEG 人工黄金参考 p29 实时网页" name="jpeg-golden-preview" allow="fullscreen" loading="eager"></iframe></div>
+          </div>
           <p class="preview-hint"><span class="connection-hint" hidden>加载较慢时，可重新载入或独立打开。</span></p>
         </div>
 </section>
@@ -158,7 +161,10 @@ for (const panel of document.querySelectorAll(".live-preview")) {
   }
   function select(state) {
     active = state;
-    states.forEach(item => { item.area.hidden = item !== active; });
+    states.forEach(item => {
+      item.area.hidden = item !== active;
+      item.area.inert = item !== active;
+    });
     tabs.forEach(tab => {
       const selected = tab.dataset.tab === active.area.id;
       tab.setAttribute("aria-selected", String(selected));
