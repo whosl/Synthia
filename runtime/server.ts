@@ -1,3 +1,4 @@
+import { errorDiagnostic } from "./error-diagnostic.ts";
 import { contextUsageDto, newContextUsage } from "./context-usage.ts";
 import { normalizeConstraints, type ProjectTurnConfiguration } from "../core/src/services/project-configuration.ts";
 /**
@@ -2136,6 +2137,7 @@ export class RuntimeServer {
       })
       .catch(async (e: unknown) => {
         const reason = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[runtime-server] turn failed for ${agentId}: ${errorDiagnostic(e)}\n`);
         this.recordConversationAudit(agentId, "free_agent_reply_error", reason);
         opts.finalize();
         this.syncHandleFromSession(agentId, session);
@@ -2204,9 +2206,10 @@ export class RuntimeServer {
             }
           } catch (error) {
             status = "fail_closed";
+            process.stderr.write(`[runtime-server] turn recovery failed for ${agentId}: ${errorDiagnostic(error)}\n`);
             await this.failClosedCoreTask(
               agentId,
-              `project-agent turn recovery failed after ${reason}: ${error instanceof Error ? error.message : String(error)}`,
+              `project-agent turn recovery failed after ${reason}: ${errorDiagnostic(error)}`,
             );
           }
         } else if (mustFailClosed) {
@@ -3665,7 +3668,7 @@ export class RuntimeServer {
             } catch (error) {
               await this.failClosedCoreTask(
                 agentId,
-                `project-agent restart recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+                `project-agent restart recovery failed: ${errorDiagnostic(error)}`,
               );
             }
           } else if (state.taskId && (handle.taskEvents ?? handle.taskWorkspace)) {
@@ -3714,7 +3717,7 @@ export class RuntimeServer {
         );
       } catch (e) {
         process.stderr.write(
-          `[runtime-server] recovery: failed to load ${agentId}: ${e}\n`,
+          `[runtime-server] recovery: failed to load ${agentId}: ${errorDiagnostic(e)}\n`,
         );
       }
     }

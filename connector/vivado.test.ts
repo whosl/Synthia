@@ -334,7 +334,7 @@ describe("Vivado simulate contract", () => {
       expect(tcl).toContain("launch_simulation -mode behavioral");
       expect(tcl).toContain(`set_property xsim.simulate.custom_tcl [file normalize {${join(result.workspace, "output", "waveform.tcl")}}] [get_filesets sim_1]`);
       const wave = await readFile(join(result.workspace, "output", "waveform.tcl"), "utf8");
-      expect(wave).toContain("limit_vcd 4194304");
+      expect(wave).toContain("limit_vcd 16777216");
       expect(wave.indexOf("open_vcd")).toBeLessThan(wave.indexOf("run all"));
       expect(wave).toContain("log_vcd [get_objects -r /*]");
       expect(wave).toContain("return -options $run_options $run_error");
@@ -739,4 +739,73 @@ describe("H34 forgotten TB throughput assertions", () => {
       } finally { await rm(root, { recursive: true, force: true }); }
     });
   }
+});
+
+describe("H42 configurable bounded VCD", () => {
+  test("default 16 MiB; explicit/env limit; invalid or >64 MiB fail before execution", async () => {
+    const { vcdCaptureBytes, WAVEFORM_CAPTURE_BYTES } = await import("./vivado.ts");
+    expect(WAVEFORM_CAPTURE_BYTES).toBe(16 * 1024 * 1024);
+    expect(vcdCaptureBytes("32")).toBe(32 * 1024 * 1024);
+    for (const bad of ["", "x", 0, -1, 1.5, 65, Infinity, null]) expect(() => vcdCaptureBytes(bad)).toThrow("CONFIG_INVALID");
+    const previous = process.env.SYNTHIA_VCD_LIMIT_MB;
+    process.env.SYNTHIA_VCD_LIMIT_MB = "8";
+    const root = await mkdtemp(join(tmpdir(), "synthia-h42-"));
+    try {
+      expect(vcdCaptureBytes()).toBe(8 * 1024 * 1024);
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, vcdLimitMb: 32, commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }) });
+      await adapter.execute({ ...request("vcd-config"), operation: "simulate", testbench: "tb", sources: [...request().sources, { path: "tb.v", content: "module tb; endmodule" }] });
+      expect(await readFile(join(root, "vcd-config", "output", "waveform.tcl"), "utf8")).toContain("limit_vcd 33554432");
+    } finally {
+      if (previous === undefined) delete process.env.SYNTHIA_VCD_LIMIT_MB; else process.env.SYNTHIA_VCD_LIMIT_MB = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("H44 source validation compiles without elaboration", () => {
+  for (const failed of [false, true]) test(`xvlog ${failed ? "syntax failure propagates" : "success seals compiler evidence"}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-h44-"));
+    let calls = 0;
+    try {
+      const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "/tool chain/bin/vivado", commandRunner: async (_binary, _args, cwd) => {
+        calls++;
+        const script = await readFile(join(cwd, "run.tcl"), "utf8");
+        expect(script).toContain("xvlog");
+        expect(script).toContain("--work xil_defaultlib");
+        expect(script).toContain("--sv");
+        expect(script).toContain("compileSources $compiler {*}$includeArgs {");
+        expect(script).not.toMatch(/xelab|launch_simulation|elaborate|synth_design|read_verilog/);
+        return { exitCode: failed ? 1 : 0, stdout: failed ? "PHASE=compile\nERROR: [VRFC 10-2989] missing_name is not declared" : "PHASE=compile\nSOURCE_VALIDATION_OK", stderr: "" };
+      } });
+      const result = await adapter.execute({ ...request("parse"), operation: "validate_sources", sources: [
+        { path: "rtl/defs.vh", content: "`define WIDTH 1" },
+        { path: "rtl/top.v", content: "module top; endmodule" },
+        { path: "tb/tb.sv", content: "module tb; endmodule" },
+      ] });
+      expect(calls).toBe(1);
+      expect(result.status).toBe(failed ? "failed" : "succeeded");
+      expect(result.logDigest?.counts.failure).toBe(failed ? 1 : 0);
+      expect(result.evidence.entries.some(entry => entry.name === "stdout.log")).toBe(true);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test.skipIf(!Bun.which("tclsh"))("generated Tcl invokes only xvlog, preserving paths/modes and compiler errors on both platforms", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synthia-h44-tcl-"));
+    try {
+      for (const platform of ["unix", "windows"]) for (const fail of [false, true]) {
+        const adapter = new VivadoBatchAdapter({ workspaceRoot: root, binary: "/tool chain/bin/vivado", commandRunner: async (_binary, _args, cwd) => {
+          const script = await readFile(join(cwd, "run.tcl"), "utf8");
+          const prefix = `set ::tcl_platform(platform) ${platform}\nproc exec {args} {\n puts "COMMAND=$args"\n if {${fail ? 1 : 0}} { return -code error -errorcode {CHILDSTATUS 1 7} {ERROR: identifier missing} }\n return {compile succeeded}\n}\n`;
+          const file = join(cwd, "check-tcl.tcl");
+          await writeFile(file, prefix + script);
+          const proc = Bun.spawn(["tclsh", file], { cwd, stdout: "pipe", stderr: "pipe" });
+          return { exitCode: await proc.exited, stdout: await new Response(proc.stdout).text(), stderr: await new Response(proc.stderr).text() };
+        } });
+        const result = await adapter.execute({ ...request(`parse-${platform}-${fail}`), operation: "validate_sources" });
+        expect(result.status).toBe(fail ? "failed" : "succeeded");
+        expect(result.stdout).toContain(platform === "windows" ? "cmd.exe /d /c call {/tool chain/bin/xvlog.bat}" : "{/tool chain/bin/xvlog}");
+        expect(result.stdout?.includes("SOURCE_VALIDATION_OK")).toBe(!fail);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });

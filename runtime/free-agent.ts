@@ -1606,6 +1606,7 @@ export async function loadFreeAgentConversation(
   agentId: string,
   agentsDir?: string,
 ): Promise<LoadedFreeAgentConversation | null> {
+  if (agentId.startsWith("._")) return null;
   const dir = agentsDir ?? dirname(agentStatePath(agentId));
   const path = join(dir, `${agentId}.conversation.json`);
   try {
@@ -1653,6 +1654,7 @@ export async function appendSystemNoteToConversation(
   noteId: string,
   agentsDir?: string,
 ): Promise<boolean> {
+  if (agentId.startsWith("._")) return false;
   const dir = agentsDir ?? dirname(agentStatePath(agentId));
   const path = join(dir, `${agentId}.conversation.json`);
   let sidecar: LoadedFreeAgentConversation;

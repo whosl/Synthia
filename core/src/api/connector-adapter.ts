@@ -254,6 +254,7 @@ export class RemoteConnectorAdapter implements ConnectorPort {
     endpointConfig: Record<string, unknown>,
     allowlist: readonly string[],
     env: Record<string, string | undefined>,
+    private readonly loadProjectScope?: () => readonly string[],
   ) {
     this.factory = factory;
     this.endpointConfig = endpointConfig;
@@ -302,6 +303,17 @@ export class RemoteConnectorAdapter implements ConnectorPort {
    * rebuilt inline. Any other heartbeat error is rethrown.
    */
   private async ensureReady(projectId: string): Promise<RemoteClientLike> {
+    if (this.loadProjectScope) {
+      let scope: readonly string[];
+      try { scope = this.loadProjectScope(); }
+      catch { throw new ConnectorError("CONFIG_INVALID", "project scope reload failed", false); }
+      if (!scope.includes(projectId)) throw new ConnectorError("PROJECT_NOT_ALLOWED", "project not allowed", false);
+      if (JSON.stringify(scope) !== JSON.stringify(this.endpointConfig.project_scope)) {
+        this.endpointConfig.project_scope = [...scope];
+        this.clients.clear();
+        this.primed.clear();
+      }
+    }
     if (!this.primed.has(projectId)) {
       const client = this.buildClient(projectId);
       this.clients.set(projectId, client);
@@ -488,6 +500,17 @@ export async function createConnectorFromEnv(
     };
     const directEndpoint = String(config.endpoint_url ?? "");
     if (!directEndpoint) return undefined;
-    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env);
+    return new RemoteConnectorAdapter(httpModule.createMtlsDirectRemoteConnector, config, [new URL(directEndpoint).hostname], env,
+      () => readConnectorProjectScope(configPath, String(config.connector_id)));
   }
+}
+
+
+/** Read only the reloadable scope; the client transport remains startup-pinned. */
+export function readConnectorProjectScope(path: string, connectorId: string): readonly string[] {
+  const current = JSON.parse(readFileSync(path, "utf8"));
+  if (current.connector_id !== connectorId || !Array.isArray(current.project_scope)
+    || current.project_scope.some((id: unknown) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))
+    || new Set(current.project_scope).size !== current.project_scope.length) throw new Error("CONFIG_INVALID:project_scope");
+  return current.project_scope;
 }

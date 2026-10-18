@@ -1,6 +1,6 @@
 import { evidenceTextPage, parseEvidenceRange, type EvidenceRange } from "../core/src/domain/evidence-range.ts";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createReadStream, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -22,7 +22,7 @@ export interface WorkerExecution {
   execute(request: JobRequest, workspace: string, signal?: AbortSignal): Promise<WorkerExecutionResult>;
 }
 
-export interface WorkerRuntimeOptions { endpoint: ConnectorEndpoint; workspaceRoot: string; execution?: WorkerExecution; now?: () => Date; }
+export interface WorkerRuntimeOptions { endpoint: ConnectorEndpoint; workspaceRoot: string; evidenceRoot?: string; projectScope?: () => Promise<readonly string[]>; execution?: WorkerExecution; now?: () => Date; }
 const terminal = new Set<Job["state"]>(["succeeded", "failed", "cancelled", "timeout", "lost", "unknown_effect"]);
 const idRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const classes: readonly DataClassification[] = ["public", "internal", "confidential", "restricted"];
@@ -46,6 +46,7 @@ function exactObjectKeys(value: unknown, required: readonly string[], optional: 
 }
 
 export class WorkerRuntime {
+  private readonly evidenceRoot: string; private readonly projectScope?: WorkerRuntimeOptions["projectScope"];
   private readonly endpoint: ConnectorEndpoint; private readonly root: string; private readonly execution: WorkerExecution; private readonly clock: () => Date;
   private registration?: ConnectorRegistration; private discovery?: DiscoverySnapshot; private active = 0; private leaseExpiresAt?: number;
   private readonly jobs = new Map<string, Job>();
@@ -55,7 +56,7 @@ export class WorkerRuntime {
    *  (if any) has been merged; every request awaits it so post-restart
    *  queries cannot race the restore. */
   private readonly restorePromise: Promise<void>;
-  constructor(o: WorkerRuntimeOptions) { this.endpoint = copy(o.endpoint); this.root = o.workspaceRoot; this.execution = o.execution ?? unavailableExecution; this.clock = o.now ?? (() => new Date()); if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1) throw new Error("CONFIG_INVALID"); this.restorePromise = this.restoreRegistry(); }
+  constructor(o: WorkerRuntimeOptions) { this.endpoint = copy(o.endpoint); this.root = resolve(o.workspaceRoot); this.evidenceRoot = resolve(o.evidenceRoot ?? join(dirname(this.root), `${basename(this.root)}-evidence`)); this.projectScope = o.projectScope; this.execution = o.execution ?? unavailableExecution; this.clock = o.now ?? (() => new Date()); if (!idRe.test(this.endpoint.connector_id) || this.endpoint.protocol_version !== REMOTE_SCHEMA_VERSION || this.endpoint.max_concurrency < 1) throw new Error("CONFIG_INVALID"); this.restorePromise = this.restoreRegistry(); }
   private registryPath(): string { return join(this.root, "jobs-registry.json"); }
   /** Persist the in-memory job registry so a worker restart does not orphan
    *  every historical job's evidence API (files stay on disk; the manifest
@@ -75,17 +76,17 @@ export class WorkerRuntime {
       // Bounded snapshot: full requests (inline sources included) make single
       // entries bulky, and the monolithic file is rewritten on every submit —
       // cap to the most recent 512 jobs so the registry stays a bounded file.
-      // Older jobs degrade to JOB_NOT_FOUND; freeze at Core remains the
-      // durable path for evidence that must outlive the cap.
+      // Older terminal jobs load on demand from their durable per-job record.
       const recent = [...this.jobs.values()].slice(-512);
       const recentIds = new Set(recent.map((job) => job.id));
       const bindings = [...this.jobBindings.entries()].filter(([id]) => recentIds.has(id));
       const snapshot = { schema: "synthia-worker-jobs-registry.v1", jobs: recent, bindings };
       await mkdir(this.root, { recursive: true });
-      await writeFile(this.registryPath(), JSON.stringify(snapshot), "utf8");
+      await writeFile(`${this.registryPath()}.tmp`, JSON.stringify(snapshot), "utf8");
+      await rename(`${this.registryPath()}.tmp`, this.registryPath());
     } catch { /* best-effort persistence */ }
   }
-  private async restoreRegistry(): Promise<void> { try { const raw = await readFile(this.registryPath(), "utf8"); const parsed = JSON.parse(raw) as { jobs?: unknown; bindings?: unknown }; if (!Array.isArray(parsed.jobs) || !Array.isArray(parsed.bindings)) return; for (const job of parsed.jobs) { if (!job || typeof job !== "object" || typeof (job as Job).id !== "string") continue; const restored = copy(job as Job); if (!terminal.has(restored.state)) restored.state = "lost"; this.jobs.set(restored.id, restored); } for (const [id, binding] of parsed.bindings) { if (typeof id === "string" && binding && typeof binding === "object" && typeof binding.projectId === "string") this.jobBindings.set(id, binding as { projectId: string; classification: DataClassification }); } } catch { /* missing/corrupt snapshot → fresh registry */ } }
+  private async restoreRegistry(): Promise<void> { try { const raw = await readFile(this.registryPath(), "utf8"); const parsed = JSON.parse(raw) as { jobs?: unknown; bindings?: unknown }; if (!Array.isArray(parsed.jobs) || !Array.isArray(parsed.bindings)) return; for (const job of parsed.jobs) { if (!job || typeof job !== "object" || (typeof (job as Job).id !== "string" || !idRe.test((job as Job).id))) continue; const restored = copy(job as Job); if (!terminal.has(restored.state)) restored.state = "lost"; this.jobs.set(restored.id, restored); } for (const [id, binding] of parsed.bindings) { if (typeof id === "string" && binding && typeof binding === "object" && typeof binding.projectId === "string") this.jobBindings.set(id, binding as { projectId: string; classification: DataClassification }); } } catch { /* missing/corrupt snapshot → fresh registry */ } }
   private discoveryReady(): boolean {
     return this.discovery?.license_status === "available"
       && this.discovery.capabilities.length > 0
@@ -112,6 +113,10 @@ export class WorkerRuntime {
       e = await request.json() as RemoteEnvelope<unknown>;
     } catch {
       return responseError("INVALID_JSON", "request body must be JSON", 400);
+    }
+    if (this.projectScope) {
+      try { this.endpoint.project_scope = [...await this.projectScope()]; }
+      catch { return responseError("CONFIG_INVALID", "project scope reload failed", 503); }
     }
     const invalid = this.validateEnvelope(e); if (invalid) return invalid;
     const fingerprint = sha256(JSON.stringify({ ...e, correlation_id: undefined }));
@@ -144,9 +149,12 @@ export class WorkerRuntime {
     if (path === "/discover") { this.discovery = await this.execution.discover(); return { status: 200, body: this.envelope(e, this.discovery) }; }
     if (path === "/heartbeat") { if (!this.registration) throw new Error("NOT_REGISTERED"); if (this.endpoint.registration_state === "revoked") throw new Error("ENDPOINT_REVOKED"); this.discovery = await this.execution.discover(); const now = this.clock(); const drift = this.hasDrift(this.discovery); const ready = this.discoveryReady() && !drift; this.leaseExpiresAt = now.getTime() + this.endpoint.lease_seconds * 1000; this.registration = { ...this.registration, registration_state: ready ? "ready" : "degraded", discovered: copy(this.discovery), last_heartbeat_at: now.toISOString(), lease_expires_at: new Date(this.leaseExpiresAt).toISOString(), capability_drift: drift }; return { status: 200, body: this.envelope(e, this.registration) }; }
     if (path === "/jobs/submit") {
+      if (typeof p.request?.jobId === "string" && idRe.test(p.request.jobId) ) await this.restoreDurableJob(p.request.jobId);
       if (this.leaseExpiresAt !== undefined && this.clock().getTime() >= this.leaseExpiresAt) { this.registration = this.registration ? { ...this.registration, registration_state: "offline" } : this.registration; throw new Error("LEASE_EXPIRED"); }
       return this.submit(e, p.request as JobRequest, p.approval as Record<string, unknown> | undefined);
     }
+    const requestedId = p.job_id;
+    if (typeof requestedId === "string" && idRe.test(requestedId)) await this.restoreDurableJob(requestedId);
     const jobId = p.job_id; if (!good(jobId)) throw new Error("INVALID_JOB_ID"); const job = this.jobs.get(jobId); const binding = this.jobBindings.get(jobId);
     if (path === "/jobs/evidence/content" && !job && !binding && p.archived_entry !== undefined) {
       return this.archivedEvidenceContent(e, jobId, p);
@@ -170,7 +178,7 @@ export class WorkerRuntime {
       }
       return { status: 200, body: this.envelope(e, copy(job)) };
     }
-    if (path === "/jobs/evidence") { if (!job.evidence) throw new Error("EVIDENCE_NOT_AVAILABLE"); this.assertEvidenceLimits(job.evidence); return { status: 200, body: this.envelope(e, copy(job.evidence)) }; }
+    if (path === "/jobs/evidence") { if (!job.evidence) throw new Error(job.errorCode === "EVIDENCE_LIMIT_EXCEEDED" ? job.errorCode : "EVIDENCE_NOT_AVAILABLE"); this.assertEvidenceLimits(job.evidence); return { status: 200, body: this.envelope(e, copy(job.evidence)) }; }
     if (path === "/jobs/evidence/content") { const name = p.name; if (typeof name !== "string" || !evidenceNameRe.test(name)) throw new Error("EVIDENCE_NOT_AVAILABLE"); return this.evidenceContent(e, job, name, p.complete === true, p.range === undefined ? undefined : parseEvidenceRange(p.range)); }
     throw new Error("NOT_FOUND");
   }
@@ -190,7 +198,7 @@ export class WorkerRuntime {
       const result = await this.execution.execute(copy(job.request), workspace, controller.signal);
       if (this.jobs.get(job.id)?.state === "cancelled" || this.jobs.get(job.id)?.state === "cancelling") {
         job.state = "cancelled";
-        await this.snapshotRegistry();
+        await this.persistDurableJob(job);
         return;
       }
       job.state = result.outcome === "success" ? "succeeded" : result.outcome === "timeout" ? "timeout" : result.outcome === "lost" ? "lost" : result.outcome === "unknown_effect" ? "unknown_effect" : "failed";
@@ -201,21 +209,79 @@ export class WorkerRuntime {
         await mkdir(join(workspace, "output"), { recursive: true });
         await writeFile(outputPath, result.output, "utf8");
         const outputEntry = { name: "worker-result.json", uri: `workspace://${job.id}/output/worker-result.json`, sha256: job.outputSha256, sizeBytes: new TextEncoder().encode(result.output).byteLength, mediaType: "application/json" };
-        job.evidence = { jobId: job.id, entries: [...(result.evidence?.entries ?? []), outputEntry] };
-      } else if (result.evidence) job.evidence = result.evidence;
+        result.evidence = { jobId: job.id, entries: [...(result.evidence?.entries ?? []), outputEntry] };
+      }
+      // Publish the manifest only after content + binding have been sealed outside
+      // the disposable workspace. The per-job record survives the 512-job index.
+      await this.persistDurableJob({ ...job, evidence: result.evidence });
+      job.evidence = result.evidence;
       // Terminal transitions persist before run() settles — a crash right
       // after completion must not reload the job as non-terminal/lost.
       await this.snapshotRegistry();
-    } catch {
+    } catch (error) {
+      process.stderr.write(`[worker] job ${job.id} execution/evidence persistence failed: ${error instanceof Error ? error.message : String(error)}\n`);
       if (this.jobs.get(job.id)?.state === "cancelled" || this.jobs.get(job.id)?.state === "cancelling") {
         job.state = "cancelled";
         await this.snapshotRegistry();
         return;
       }
       job.state = "failed";
-      if (!job.errorCode) job.errorCode = "WORKER_EXECUTION_ERROR";
+      if (!job.errorCode) job.errorCode = error instanceof Error && error.message.startsWith("EVIDENCE_") ? error.message : "WORKER_EXECUTION_ERROR";
     } finally {
       this.activeControllers.delete(job.id);
+      await this.snapshotRegistry();
+    }
+  }
+  private async checkedEvidence(root: string, jobId: string, entry: EvidenceManifest["entries"][number]): Promise<Buffer> {
+    for (const path of [root, join(root, jobId), join(root, jobId, "output")]) {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("EVIDENCE_CORRUPT");
+    }
+    const path = join(root, jobId, "output", entry.name);
+    const info = await lstat(path);
+    if (info.size > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED");
+    if (!info.isFile() || info.isSymbolicLink() || info.size !== entry.sizeBytes) throw new Error("EVIDENCE_CORRUPT");
+    const bytes = await readFile(path);
+    if (bytes.byteLength !== entry.sizeBytes || sha256(bytes) !== entry.sha256) throw new Error("EVIDENCE_CORRUPT");
+    return bytes;
+  }
+  private async persistDurableJob(job: Job): Promise<void> {
+    if (job.evidence) this.assertEvidenceLimits(job.evidence);
+    await mkdir(this.evidenceRoot, { recursive: true });
+    const staging = await mkdtemp(join(this.evidenceRoot, ".seal-"));
+    try {
+      if ((await lstat(this.evidenceRoot)).isSymbolicLink()) throw new Error("EVIDENCE_CORRUPT");
+      await mkdir(join(staging, "output"));
+      for (const entry of job.evidence?.entries ?? []) {
+        if (!evidenceNameRe.test(entry.name)) throw new Error("EVIDENCE_CORRUPT");
+        const bytes = await this.checkedEvidence(this.root, job.id, entry);
+        await writeFile(join(staging, "output", entry.name), bytes);
+      }
+      await writeFile(join(staging, "job.json"), JSON.stringify({ job, binding: this.jobBindings.get(job.id) }), "utf8");
+      await rename(staging, join(this.evidenceRoot, job.id));
+    } finally { await rm(staging, { recursive: true, force: true }); }
+  }
+  private async restoreDurableJob(jobId: string): Promise<void> {
+    // A stale registry may still say running/lost, or omit the newly sealed
+    // manifest if the process stopped between the seal and snapshot rename.
+    if (this.jobs.get(jobId)?.evidence || this.activeControllers.has(jobId) || this.pending.includes(jobId)) return;
+    const path = join(this.evidenceRoot, jobId, "job.json");
+    let sealedDirectoryExists = false;
+    try {
+      for (const dir of [this.evidenceRoot, join(this.evidenceRoot, jobId)]) {
+        const info = await lstat(dir);
+        if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("EVIDENCE_CORRUPT");
+      }
+      sealedDirectoryExists = true;
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_CORRUPT");
+      const { job, binding } = JSON.parse(await readFile(path, "utf8"));
+      if (job?.id !== jobId || !terminal.has(job.state) || !good(binding?.projectId) || !classes.includes(binding.classification) || job.request?.projectId !== binding.projectId) throw new Error("EVIDENCE_CORRUPT");
+      if (job.evidence) this.assertEvidenceLimits(job.evidence);
+      this.jobs.set(jobId, job);
+      this.jobBindings.set(jobId, binding);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || sealedDirectoryExists) throw new Error("EVIDENCE_CORRUPT");
     }
   }
   /** Read-only recovery: Core supplies its frozen digest, never a filesystem URI. */
@@ -230,12 +296,6 @@ export class WorkerRuntime {
       || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0
       || typeof entry.mediaType !== "string" || !entry.mediaType.trim()) throw new Error("EVIDENCE_CORRUPT");
     this.assertEvidenceLimits({ jobId, entries: [entry] });
-    try {
-      for (const [path, directory] of [[join(this.root, jobId), true], [join(this.root, jobId, "output"), true], [join(this.root, jobId, "output", name), false]] as const) {
-        const details = await lstat(path);
-        if (details.isSymbolicLink() || (directory ? !details.isDirectory() : !details.isFile())) throw new Error("EVIDENCE_CORRUPT");
-      }
-    } catch { throw new Error("EVIDENCE_CORRUPT"); }
     return this.evidenceContent(e, { id: jobId, evidence: { jobId, entries: [entry] } }, name,
       p.complete === true, p.range === undefined ? undefined : parseEvidenceRange(p.range));
   }
@@ -244,10 +304,15 @@ export class WorkerRuntime {
     this.assertEvidenceLimits(job.evidence);
     const entry = job.evidence.entries.find(x => x.name === name);
     if (!entry) throw new Error("EVIDENCE_NOT_AVAILABLE");
-    const filePath = join(this.root, job.id, "output", name);
+    let root = this.evidenceRoot;
+    try { await lstat(join(root, job.id)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("EVIDENCE_CORRUPT");
+      root = this.root; // Only legacy jobs lack a sealed directory.
+    }
     let buf: Buffer;
-    try { const details = await stat(filePath); if (details.size > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); if (!details.isFile() || details.size !== entry.sizeBytes) throw new Error("EVIDENCE_CORRUPT"); buf = await readFile(filePath) as Buffer; } catch (error) { if (error instanceof Error && error.message === "EVIDENCE_LIMIT_EXCEEDED") throw error; throw new Error("EVIDENCE_CORRUPT"); }
-    if (sha256(buf) !== entry.sha256) throw new Error("EVIDENCE_CORRUPT");
+    try { buf = await this.checkedEvidence(root, job.id, entry); }
+    catch (error) { if ((error as Error).message === "EVIDENCE_LIMIT_EXCEEDED") throw error; throw new Error("EVIDENCE_CORRUPT"); }
     if (range) {
       const page = evidenceTextPage(buf.toString("utf8"), range);
       const contentBytes = Buffer.from(page.content, "utf8");
@@ -264,7 +329,7 @@ export class WorkerRuntime {
     }
     return { status: 200, body: this.envelope(e, { name: entry.name, sha256: entry.sha256, sizeBytes: buf.byteLength, mediaType: entry.mediaType, content_base64: Buffer.from(contentBytes).toString("base64"), truncated }) };
   }
-  private assertEvidenceLimits(manifest: EvidenceManifest): void { if (manifest.entries.length > MAX_EVIDENCE_ENTRIES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); let total = 0; for (const entry of manifest.entries) { if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || entry.sizeBytes > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); total += entry.sizeBytes; if (!Number.isSafeInteger(total) || total > MAX_EVIDENCE_TOTAL_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); } }
+  private assertEvidenceLimits(manifest: EvidenceManifest): void { if (manifest.entries.length > MAX_EVIDENCE_ENTRIES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); let total = 0; for (const entry of manifest.entries) { if (!evidenceNameRe.test(entry.name) || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error("EVIDENCE_CORRUPT"); if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || entry.sizeBytes > MAX_EVIDENCE_ENTRY_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); total += entry.sizeBytes; if (!Number.isSafeInteger(total) || total > MAX_EVIDENCE_TOTAL_BYTES) throw new Error("EVIDENCE_LIMIT_EXCEEDED"); } }
   private envelope<T>(e: RemoteEnvelope<unknown>, payload: T): RemoteEnvelope<T> { return { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: e.correlation_id, causation_id: e.correlation_id, idempotency_key: e.idempotency_key, actor: e.actor, project_id: e.project_id, classification: e.classification, capability_version: e.capability_version, payload }; }
   private jobIdFrom(v: unknown): string { return v && typeof v === "object" && "id" in v && typeof v.id === "string" ? v.id : "worker"; }
   private ok<T>(body: RemoteEnvelope<T>, status: number): Response { return Response.json(body, { status }); }

@@ -80,6 +80,7 @@ export interface LogDigest {
   readonly performance?: { readonly requirements: PerformanceRequirements; readonly total: number; readonly metrics: readonly PerformanceMetric[]; readonly failed: boolean };
   /** Total classified line counts before capping. */
   readonly counts: LogDigestCounts;
+  readonly judging: { readonly total: number; readonly lines: readonly LogDigestLine[]; readonly truncated: boolean };
   readonly failureLines: readonly LogDigestLine[];
   readonly warningLines: readonly LogDigestLine[];
   readonly passLines: readonly LogDigestLine[];
@@ -92,6 +93,8 @@ export interface LogDigest {
 }
 
 export const LOG_DIGEST_FILE_NAME = "log-digest.json";
+export const MAX_JUDGING_LINES = 256;
+const JUDGING_RE = /(?:^|\b)(?:DIGEST|TB\s+PASS|SCENE|FRAME|PIXEL|SPRITE0|LINE_RATE_MBPS|GOODPUT_MBPS|DROPPED_PKTS|CYCLES_PER_PIXEL)\b/i;
 export const MAX_FAILURE_LINES = 20;
 export const MAX_WARNING_LINES = 15;
 export const MAX_PASS_LINES = 10;
@@ -139,6 +142,8 @@ function stdoutSimulatorRegion(stdout: string): { start: number; end: number } |
 }
 
 interface Classified {
+  judging: LogDigestLine[];
+  judgingTotal: number;
   failure: LogDigestLine[];
   warning: LogDigestLine[];
   pass: LogDigestLine[];
@@ -157,6 +162,8 @@ function scanStream(
   region: { start: number; end: number } | undefined,
   requirements: PerformanceRequirements,
 ): Classified {
+  const judging: LogDigestLine[] = [];
+  let judgingTotal = 0;
   const lines = text.split(/\r?\n/);
   const failure: LogDigestLine[] = [];
   const warning: LogDigestLine[] = [];
@@ -182,6 +189,11 @@ function scanStream(
     const inSimulatorRegion = skipTbRegion && region !== undefined && i >= region.start && i <= region.end;
     if (inSimulatorRegion) continue;
 
+    if (JUDGING_RE.test(line)) {
+      judgingTotal++;
+      if (judging.length === MAX_JUDGING_LINES) judging.splice(MAX_JUDGING_LINES / 2, 1);
+      judging.push({ source, index: i + 1, line: capLine(line, LINE_CHAR_CAP) });
+    }
     const metric = performanceMetric(line, requirements);
     if (metric) {
       metricsTotal++;
@@ -212,7 +224,7 @@ function scanStream(
     }
   }
   return {
-    failure, warning, pass, phaseMarkers, truncated, metrics, metricsTotal, metricsFailed,
+    judging, judgingTotal, failure, warning, pass, phaseMarkers, truncated, metrics, metricsTotal, metricsFailed,
     counts: { failure: failureTotal, warning: warningTotal, pass: passTotal },
   };
 }
@@ -234,8 +246,16 @@ export function buildLogDigest(
   const err = scanStream(stderr, "stderr", false, undefined, requirements);
   const sim = simulator !== undefined ? scanStream(simulator, "simulator", false, undefined, requirements) : undefined;
 
+  const judgingLines = [...sim?.judging ?? [], ...out.judging, ...err.judging];
+  const judgingTotal = out.judgingTotal + err.judgingTotal + (sim?.judgingTotal ?? 0);
+  const judging = {
+    total: judgingTotal,
+    lines: judgingLines.length <= MAX_JUDGING_LINES ? judgingLines : [...judgingLines.slice(0, MAX_JUDGING_LINES / 2), ...judgingLines.slice(-MAX_JUDGING_LINES / 2)],
+    truncated: judgingTotal > MAX_JUDGING_LINES,
+  };
   return {
     schema: "synthia-log-digest.v1",
+    judging,
     operation,
     performance: {
       requirements: { ...requirements },
@@ -257,6 +277,6 @@ export function buildLogDigest(
       stderr: stderr.length,
       ...(simulator !== undefined ? { simulator: simulator.length } : {}),
     },
-    truncated: out.truncated || err.truncated || (sim?.truncated ?? false) || out.metricsTotal + err.metricsTotal + (sim?.metricsTotal ?? 0) > MAX_METRICS,
+    truncated: judging.truncated || out.truncated || err.truncated || (sim?.truncated ?? false) || out.metricsTotal + err.metricsTotal + (sim?.metricsTotal ?? 0) > MAX_METRICS,
   };
 }

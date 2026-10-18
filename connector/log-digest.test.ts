@@ -156,3 +156,18 @@ describe("H34 independent performance verdict", () => {
     expect(digest.counts.pass).toBe(1);
   });
 });
+
+test("H43 dedicated judging channel retains late SCENE 11 and metrics despite PASS overflow", () => {
+  const simulator = `${"PASS noise\n".repeat(60)}${Array.from({ length: 12 }, (_, i) => `SCENE ${i} PASS`).join("\n")}\nFRAME 2\nPIXEL 100\nSPRITE0 hit\nDIGEST done\nTB PASS\nLINE_RATE_MBPS 12\nGOODPUT_MBPS 11.5\nDROPPED_PKTS 0`;
+  const digest = buildLogDigest("simulate", { stdout: vivadoSimulateStdout(simulator), simulator });
+  expect(digest.passLines.some(line => line.line.includes("SCENE 11"))).toBe(false);
+  expect(digest.judging.lines.map(line => line.line)).toEqual(simulator.split("\n").filter(line => line !== "PASS noise"));
+  expect(digest.judging.total).toBe(20);
+  expect(digest.judging.truncated).toBe(false);
+  const large = buildLogDigest("simulate", { simulator: `${"SCENE early\n".repeat(900)}SCENE 999 PASS\nGOODPUT_MBPS 1` });
+  expect(large.judging.total).toBe(902);
+  expect(large.judging.lines.length).toBe(256);
+  expect(large.judging.lines.at(-1)?.line).toBe("GOODPUT_MBPS 1");
+  expect(large.judging.truncated).toBe(true);
+  expect(large.counts.failure).toBe(1);
+});

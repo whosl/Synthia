@@ -239,7 +239,7 @@ export async function listAgents(): Promise<string[]> {
   }
   return entries
     .filter(f =>
-      f.endsWith(".json") &&
+      !f.startsWith("._") && f.endsWith(".json") &&
       !f.endsWith(".conversation.json")
     )
     .map(f => f.replace(/\.json$/, ""));

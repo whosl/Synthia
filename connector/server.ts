@@ -1,3 +1,4 @@
+import { readProjectScope } from "./project-scope.ts";
 import { createServer, type Server } from "node:https";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
@@ -34,6 +35,7 @@ export interface WorkerConfig extends ConnectorEndpoint {
   workspace_root: string;
   evidence_root: string;
   vivado_binary: string;
+  vcd_limit_mb?: number;
   vivado_part: PartPolicy;
   vivado_install_identity: string;
   capability_map_version: string;
@@ -236,7 +238,7 @@ export function createWorkerExecution(
   },
   commandRunner?: CommandRunner,
 ): WorkerExecution {
-  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, profileHash: config.toolchain_profile_hash, commandRunner });
+  const adapter = new VivadoBatchAdapter({ workspaceRoot: config.workspace_root, binary: config.vivado_binary, profileHash: config.toolchain_profile_hash, vcdLimitMb: config.vcd_limit_mb, commandRunner });
   return {
     async discover(): Promise<DiscoverySnapshot> {
       const remoteAttestation = {
@@ -313,6 +315,8 @@ export async function startWorker(configPath?: string): Promise<{ server: Server
   const options: WorkerRuntimeOptions = {
     endpoint: config,
     workspaceRoot: config.workspace_root,
+    evidenceRoot: config.evidence_root,
+    projectScope: () => readProjectScope(resolvedConfigPath, config.connector_id),
     execution: createWorkerExecution(config, {
       activeConfigSha256: loaded.sha256,
       workerProcessInstanceId,

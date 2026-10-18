@@ -1,7 +1,7 @@
-# bench-lib T2 harness 台账（p17-p26 执行期）
+# bench-lib T2/T3 harness 台账（p17-p38 执行期）
 
 - 起始：2026-09-10；持续更新
-- 范围：T2 基准执行期间暴露的平台/工具链/harness 问题，含已修、绕过、仅记录
+- 范围：T2/T3 基准执行期间暴露的平台/工具链/harness 问题，含已修、绕过、仅记录；2026-10-18 补 T3 收尾 H39–H46
 - 分类：**ARCH**=架构级根因，**BUG**=缺陷，**GAP**=覆盖/语义缺口，**OPS**=运维面问题，**OBS**=观察记录
 - 处置：fixed=已修 / worked-around=会话或操作者侧绕过 / deferred=轮间再修 / open=未处置
 
@@ -9,7 +9,7 @@
 
 | # | 类型 | 问题 | 证据 | 处置 |
 |---|---|---|---|---|
-| H25 | ARCH | **worker job 状态纯内存**（server.bundle 的 jobs Map）：worker 重启即全损，Core 侧 job 永久滞留 submitted，无孤儿检测/自动标记失败/补偿协议 | 周一 worker 楔死重启后 09:24 两 job 永久 submitted；周五 00:10/00:40 两对同型 | fixed（补偿协议即 H14 收割器落地；worker 落盘队列仍为长期项） |
+| H25 | ARCH | **worker job 状态纯内存**（server.bundle 的 jobs Map）：worker 重启即全损，Core 侧 job 永久滞留 submitted，无孤儿检测/自动标记失败/补偿协议 | 周一 worker 楔死重启后 09:24 两 job 永久 submitted；周五 00:10/00:40 两对同型 | fixed（H14 补偿已上线、H30 registry 已落盘；终态证据内容持久化缺口由 H39 根治，worktree 已修待窗口；非终态重启仍按 lost + 补偿，不自动重跑） |
 | H24 | ARCH | **event_kind DB 检查约束与代码事件种类强耦合**：代码新增会话事件种类（如 permission_request）必须同步迁移，否则写库即炸——部署顺序雷 | 00:32:57 task_conversation_event 违反 check constraint（permission_request 不在枚举），11 分钟窗口内 job 流中断 | fixed（0036 约束解除，随修复批次部署 2026-09-15） |
 | H26 | ARCH | **submitJob 的网络调用在 DB 事务内**（源码实证：runIdempotent 事务回调内 await connector.submitJob，注释自述为原子性设计）：worker 慢/挂时整个提交路径拖死并占用连接——属有意设计的权衡，风险在 worker 退化场景 | validate POST 30s 客户端超时（服务端事务悬置）；周一楔死期 POST 挂起 | fixed（提交移出事务+补偿，探针验证无挂起） |
 
@@ -68,7 +68,7 @@
 | H35 | BUG | **Learned Skill 参数泛化拒绝**（p31 `task-d142e3f722e8d8845a122e399a2c639f`）：末段 8 次 close 拒绝、apply 带中文/空格 reason_codes 拒绝而省略成功。只读会话实证 `human_corrections: 0` 与数组均已完整落盘，**未发现 falsy-zero 丢参或数组序列化损坏**。根因：工具 stringList 把原因文本按 ID 校验；close refList 禁空格；evolution-client 再把引用按 ID 校验；省略数组无默认值，均被泛化报 invalid_arguments。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：原因/引用采用有界非空文本数组；省略引用默认 []，0 明确保留，错误指明字段；沿用生产 skill_id 自动解析和默认 role/reason_codes。两个真实 app ID × 4 参数形态通过工具→mock HTTP 回归；未关闭真实 application。见四b、四d |
 | H36 | GAP | **上下文高压下模型调用楔死无自动处置**（p28 `task-65477236b84486aa1cf3d3273acdb4a2`，R25 40/29/20+ 分钟无会话落盘，需操作者 abort）：H31 水位观测不足以恢复。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：仅挂起模型请求（chat/chatStream、摘要模型调用）计时；默认 15 分钟，可设 `SYNTHIA_MODEL_WATCHDOG_MINUTES`，0 禁用。超时 abort 请求、持久化系统中断注记、重试一次；二次超时失败。会话落盘刷新空闲计时，工具期不计时；用户取消不重试，旧流增量丢弃。见四b、四d |
 | H37 | GAP | **证据文本 262144 字符单读上限无分页**（p28 约 1.19MB waveform.vcd 被 fail-closed 拒读）：agent 被迫改读 worker-result.json，完整波形证据不可达。 | **已部署（2026-10-02 07:55 CST，42cf5fa）**：synthia_job_evidence 增加 offset/limit（UTF-16 字符，默认 65536、最多 262144），贯通 Core/Connector/Worker；manifest 总字节数及每项大小/hash；页面 totalChars/nextOffset/next_read，保留整文件 hash 并校验页 hash。分页无需套用 UI 整 VCD 的 8MiB 上限，但仍守 Worker 64MiB 单文件/128MiB 总证据限制。项目/任务隔离、二进制拒读、Unicode 边界与损坏拒读保持。见四b、四d |
-| H38 | BUG/GAP | **模型输出超限三形态**（p28/p32，2026-10-03/10-08）：空回复、模型请求楔死、预告式收口（有正文/冒号结尾但零工具→awaiting_user）；另有 tb_top.v 生成截断/乱码残骸。旧 conversation 无结束原因，不能由叙述反推截断。 | **首批 aa72598 已部署；终结留痕补修本地完成，待窗口（2026-10-08）**：结束信号透传到 ChatTurn/assistant audit；非空 text + max_tokens 自动续跑 ≤2 次、stderr/conversation 留痕；空回复沿 nudge 独立 ≤1 次；楔死沿 H36。P2 独立 7 请求未验证有效思考控制，不接入无效 env；P3 两技能 >8KiB 骨架工作副本/分段 ≤8KiB/完整登记后读回。残余正常 end_turn 语义性收口待 P1 上线统计后决定 Cline 式门控。预算拒绝→Project Agent 恢复的本地静默链已复现并补齐错误注记/新状态恢复；空正文耗尽改为可见系统提示。见四e、四f |
+| H38 | BUG/GAP | **模型输出超限三形态**（p28/p32，2026-10-03/10-08）：空回复、模型请求楔死、预告式收口（有正文/冒号结尾但零工具→awaiting_user）；另有 tb_top.v 生成截断/乱码残骸。旧 conversation 无结束原因，不能由叙述反推截断。 | **首批 aa72598 已部署；终结留痕补修随 57c51f0 于 2026-10-14 14:30 CST 已部署（现网 940c199 为其后代）**：结束信号透传到 ChatTurn/assistant audit；非空 text + max_tokens 自动续跑 ≤2 次、stderr/conversation 留痕；空回复沿 nudge 独立 ≤1 次；楔死沿 H36。P2 独立 7 请求未验证有效思考控制，不接入无效 env；P3 两技能 >8KiB 骨架工作副本/分段 ≤8KiB/完整登记后读回。残余正常 end_turn 语义性收口待 P1 上线统计后决定 Cline 式门控。预算拒绝→Project Agent 恢复的本地静默链已复现并补齐错误注记/新状态恢复；空正文耗尽改为可见系统提示。见四e、四f |
 
 ## 四c、H36 看门狗首次实弹记录（2026-10-02）
 
@@ -108,29 +108,50 @@ p32 盲测会话（task-6bd05f30）10:01 起模型调用挂起 → **10:16:45 �
 - **23** 个 Runtime 会话状态与 **216** 个 Worker 历史作业索引保留；p31/p32 仍为 awaiting_user，真实 application 状态与部署前一致（两个均已为 pending_evaluation）。没有代替 T3 agent 启动新任务。
 - 备份、准确版本、hash 与验证范围见 [platform-ablation-deployment.md](platform-ablation-deployment.md)。四b/四c 的“未部署”记录保留为此前阶段历史；当前状态以本节为准。
 
-## 四e、H38 模型输出超限处置（2026-10-08，platform-ops，未部署）
+## 四e、H38 模型输出超限处置（2026-10-08 开发；2026-10-14 14:30 CST 已部署）
 
 结束信号之前丢在 Anthropic adapter（pi-ai length 未传给 ChatTurn）；现 buffered/streaming 均透传并将截断归一为 max_tokens。free-agent 只自动续跑非空纯文本的机器截断，单 prompt 两次上限；保留部分正文并在每次续跑前落盘 retry 计数，stderr 对齐 H36 风格。原 empty nudge 与 H36 watchdog 保持独立，耗尽仍走 claim-check/原回合结束；正常 end_turn 的预告文本不做语义猜测。
 
 | taxonomy / 信号 | 处置 | 状态 |
 |---|---|---|
 | 空回复/空白（含 max_tokens） | 原 nudge，单 prompt 1 次，独立计数 | 保留；本批补重试前落盘 |
-| 非空 text + max_tokens | P1 自动续轮，单 prompt ≤2 次；正文/stopReason/retry/耗尽留痕 | 本地已修，待 Runtime 窗口 |
+| 非空 text + max_tokens | P1 自动续轮，单 prompt ≤2 次；正文/stopReason/retry/耗尽留痕 | 已部署：2026-10-14 14:30 CST，57c51f0 |
 | model.chat/chatStream 请求楔死 | H36 watchdog abort + 注记 + 重试一次 | 已上线，保留 |
 | 非空正常 end_turn 的预告式收口 | 上线后按 stopReason 统计，再决定 Cline 式保守门控 | 待观测 |
 | 大文件截断/乱码 | P3：>8KiB 先骨架工作副本、生成每段 ≤8KiB，完整登记后读回 | 两技能模板已固化，闸门/冻结域不变 |
 
 P2：官方 GLM-4.6 thinking 开关说明不构成 Anthropic 兼容端点的 budget 契约；reasoning_effort 官方仅 GLM-5.2+。平台配置独立小请求共 7 个（203 输入/1281 输出 tokens），disabled 仍返回思考、budget=1 仍有 603 字符思考，故意无效参数也返回 200，未验证有效思考预算/关闭能力；不新增 SYNTHIA_MODEL_THINKING_*。不读基准 tokens 文件、不发 p32 消息。详细边界、探针表与证据见 [platform-h38-output-limit.md](platform-h38-output-limit.md)、[platform-h38-thinking-probe.json](platform-h38-thinking-probe.json)。
 
-验证：受影响测试 **210 pass / 0 fail**；根回归 **979 pass / 400 skip / 0 fail**（未设 DATABASE_URL）；Core check / Runtime TypeScript / diff 检查通过。仅需后续窗口更新代码/模板并重启 Runtime；本轮未部署、未重启任何服务，Worker bundle 不变。
+验证：受影响测试 **210 pass / 0 fail**；根回归 **979 pass / 400 skip / 0 fail**（未设 DATABASE_URL）；Core check / Runtime TypeScript / diff 检查通过。开发轮未部署/重启，Worker bundle 不变；后续已随 **57c51f0 于 2026-10-14 14:30 CST 部署**，现网 HEAD **940c199** 为其后代（2026-10-18 清账确认部署状态）。
 
-## 四f、H38 部署后静默终结补修（2026-10-08，worktree，未部署）
+## 四f、H38 部署后静默终结补修（2026-10-08 开发；2026-10-14 14:30 CST 已部署）
 
 634 消息/约 4.45MB 的独立旧版复现：摘要提示词超预算→机械投影仍估算 213396 tokens（输入预算 134464）→prepareRequest 抛错、模型调用 0 次→prompt catch 未记 conversation→Project Agent catch 恢复 awaiting_user 且旧 handle.currentState 覆盖失败上下文，形成无看门狗/无本地错误/endedReason=None 的表现。当前 defaultBeforeModelCall 固定放行；其潜在 stop-return 漏记录同时修复。源码 blame 表明预算/恢复缺口在 H38 前存在；未重放正在接受操作者手术的生产会话。
 
 补修：所有错误在 prompt catch 中先写 system/stderr 再持久化并抛出；预检 stop 记录原因；空正文（含 max_tokens）沿一次 nudge，耗尽写非空系统提示；成功收尾增加本轮有效记录不变量。Project Agent 错误恢复读最新落盘状态，保留 context_limit 等失败诊断。预算护栏与完整历史保留。
 
-新六项回归旧版 **0/6 通过**、修复后通过；受影响 **188 pass / 0 fail**，根回归 **986 pass / 400 skip / 0 fail**（无 DATABASE_URL），Core check / Runtime TypeScript 通过。只需后续 Runtime 窗口，本轮未部署/重启，未写 p32 文件。链路、终结出口矩阵和日志见 [platform-h38-turn-termination.md](platform-h38-turn-termination.md)。
+新六项回归旧版 **0/6 通过**、修复后通过；受影响 **188 pass / 0 fail**，根回归 **986 pass / 400 skip / 0 fail**（无 DATABASE_URL），Core check / Runtime TypeScript 通过。开发轮未部署/重启、未写 p32 文件；后续已随 **57c51f0 于 2026-10-14 14:30 CST 部署**，现网 **940c199** 为其后代。链路、终结出口矩阵和日志见 [platform-h38-turn-termination.md](platform-h38-turn-termination.md)。
+
+## 四g、T3 harness 收尾（2026-10-18，platform-ops，已修待部署窗口）
+
+T3 jpeg/usb/msp430/fpganes（p27–p38）收官后的 W-1..W-8 归档为 H39–H46。下表证据来自本批操作者报告；验证均使用 worktree 合成作业/会话，没有向 p31–p38 发消息或改会话。正式部署目录未修改、服务未重启。
+
+| # / 任务 | 类型 | 问题与执行期证据 | 处置 / 本地验证 | 生效条件 |
+|---|---|---|---|---|
+| H39 / W-1 / H25 | ARCH | p38 至少 4 个 job 的 stdout 在 Worker 重启后 EVIDENCE_NOT_AVAILABLE / job not found；H30 registry 仅保状态/manifest | 终态 evidence 全量按既有大小上限封存到 workspace 外 evidence_root，临时目录原子发布 job.json + 文件；读时校验 SHA/大小/绑定，按 jobId 恢复；补 workspace/registry 丢失和快照落后于封存的重启测试、跨项目拒绝/缺件拒绝。H32 stdout 5 MiB 不变 | Worker bundle 更新并重启；evidence_root 保留在持久盘；旧内容若已丢失不可回补 |
+| H40 / W-2 | OPS | T3 三次堆积 4/10/5 个 node Worker，端口竞争导致 Core request_timeout | deploy/supervise/worker-watchdog-66.ps1：端口命名 mutex 覆盖清场和前台子进程生命周期，仅清理匹配本部署 bundle 绝对路径的 node/bun；他者占端口则拒绝。Bun 源契约测试通过 | 更新 schtasks action 使用新脚本、MultipleInstancesPolicy=IgnoreNew；66 机互斥/孤儿进程实测待操作者窗口 |
+| H41 / W-3 | GAP | p35/p37 新项目需 Core client.json + Worker config 双重启，多轮 PROJECT_NOT_ALLOWED | 双侧每次请求读 project_scope；Core 清除旧 client 缓存，Worker 在幂等缓存返回前重新鉴权；增/删/损坏/恢复/connector 身份变化测试；失败拒绝，不使用过期 scope | 首次更新 Core + Worker 并重启；此后仅 scope 文件原子更新，无需重启；其余 TLS/工具链配置仍启动固定 |
+| H42 / W-4 | GAP | p32/p38 长仿真 VCD 在 4 MiB 提前截断 | 默认 limit_vcd 16 MiB；SYNTHIA_VCD_LIMIT_MB 或 Worker vcd_limit_mb 可配，配置优先；只接受整数 1..64 MiB，越界/无效拒绝。测试默认/环境/配置优先级与硬顶 | Worker 更新并重启；修改该配置也需重启；过程日志 5 MiB、证据单项 64 MiB/总量 128 MiB/64 项上限保留 |
+| H43 / W-5 | GAP | p38 普通 passLines 窗口容不下 SCENE 11 + 指标，判卷面不完整 | logDigest.judging 专用通道保留 DIGEST / TB PASS / SCENE / FRAME / PIXEL / SPRITE0 及四类吞吐指标，最多 256 行，超限保首尾并给 total/truncated；测试 60 PASS 干扰、尾部场景/指标和溢出 | Worker 更新并重启；新增 digest 字段，现有 counts/performance/判定规则不变 |
+| H44 / W-6 | GAP | p38 validate 轻量门漏编译错，直至 simulate elaborate 才失败，烧约 30 分钟 | validate_sources 用配置 Vivado 同目录 xvlog 做真正编译解析，保源顺序/.v/.sv 模式、include 路径；头文件仅作 include；编译失败证据保留且 job failed；mock runner + 本地 Tcl 执行脚本验证双平台命令及 CHILDSTATUS 传播 | Worker 更新并重启；66 机实际 xvlog smoke 待窗口；不跑 xelab/综合/仿真，不能替代 elaboration |
+| H45 / W-7 | GAP | p32/p37 两次 recovery failed after internal error: internal error 无根因 | turn/restart recovery 的 stderr / endedReason 加有界 stack+cause，单诊断最多 8192 字符/5 层并防循环；合成 Project Agent 恢复失败实测持久化原因含调用位置与嵌套原因 | Runtime 更新并重启；不改变历史 endedReason |
+| H46 / W-8 | BUG | .runs/._agent-*.json（macOS resource fork）反复触发 recovery 读取失败，H13 复发 | listAgents 枚举及 loadFreeAgentConversation 跳过 ._ 前缀；注记写入同样拒绝；测试垃圾旁车、正常加载与真实损坏仍报错 | Runtime 更新并重启；不删除任何原会话文件 |
+
+W-9：四e/四f 已改为已部署，版本 **57c51f0 / 2026-10-14 14:30 CST**；用户报告当前生产 HEAD **940c199**，Git 祖先关系单独核验。W-10：问题–修法–测试–生效条件矩阵及窗口验收步骤见 [harness-closeout-20261015.md](harness-closeout-20261015.md)（按指定文件名；实际开发/验证日期 2026-10-18）。
+
+本批受影响套件 **168 pass / 0 fail**（8 文件）；根目录回归 **1619 pass / 410 skip / 0 fail**（144 文件，未设 DATABASE_URL）；Core check、Runtime TypeScript、Node bundle 语法检查通过。Bun 的 Windows 看门狗验证是源契约测试，本地 Tcl 测试的 xvlog 是命令 stub，不能代替 66 机实测；未连生产数据库、未启动真实 FPGA job。源码与 canonical bundle 同步入仓库，正式 release 仍须原发布/签发流程。
+
+操作者裁决项不做：Worker 从 160T 切回 70T、p33 删除、模型看门狗 30min 回 15min、H27 证据 UI、H34 矩阵平台强制。本批无数据库迁移、无前端改动。
 
 ## 五、深核记录（2026-09-14 审核轮）
 

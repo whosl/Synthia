@@ -1,3 +1,4 @@
+import { readProjectScope } from "./project-scope.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -46,7 +47,7 @@ async function waitForEvidence(rt: WorkerRuntime, jobId: string): Promise<void> 
 
 function runtime(root: string, execute: (request: JobRequest, workspace: string) => Promise<WorkerExecutionResult>, workerEndpoint: ConnectorEndpoint = endpoint): WorkerRuntime {
   const execution: WorkerExecution = { async discover() { return discovery; }, execute };
-  return new WorkerRuntime({ endpoint: workerEndpoint, workspaceRoot: root, execution });
+  return new WorkerRuntime({ endpoint: workerEndpoint, workspaceRoot: root, evidenceRoot: join(root, "durable"), execution });
 }
 
 async function prime(rt: WorkerRuntime): Promise<void> {
@@ -235,7 +236,7 @@ describe("worker evidence content endpoint", () => {
       await prime(rt);
       await submitJob(rt, "job-corrupt");
       // tamper the artifact on disk after the manifest was sealed
-      await writeFile(join(root, "job-corrupt", "output", "note.txt"), "tampered!!");
+      await writeFile(join(root, "durable", "job-corrupt", "output", "note.txt"), "tampered!!");
       const res = await post(rt, "/jobs/evidence/content", { job_id: "job-corrupt", name: "note.txt" });
       expect(res.status).toBe(422);
       expect(res.errorCode).toBe("EVIDENCE_CORRUPT");
@@ -434,7 +435,7 @@ describe("H37 bounded evidence ranges", () => {
         const invalid = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range });
         expect(invalid.status).not.toBe(200);
       }
-      await writeFile(join(root, "job-range", "output", "waveform.vcd"), "x".repeat(text.length));
+      await writeFile(join(root, "durable", "job-range", "output", "waveform.vcd"), "x".repeat(text.length));
       const corrupt = await post(rt, "/jobs/evidence/content", { job_id: "job-range", name: "waveform.vcd", range: { offset: 0, limit: 10 } });
       expect(corrupt.errorCode).toBe("EVIDENCE_CORRUPT");
     } finally { await rm(root, { recursive: true, force: true }); }
@@ -499,4 +500,90 @@ describe("worker reads Core-attested archived artifacts without restoring jobs",
       }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+});
+
+describe("H39 durable terminal evidence", () => {
+  test("cold restart reads stdout + pages after workspace and registry removal, with scope binding", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "synthia-h39-"));
+    const workspace = join(parent, "workspaces");
+    const store = join(parent, "evidence");
+    let executions = 0;
+    const text = "波形 stdout\n".repeat(40_000);
+    const execution: WorkerExecution = {
+      async discover() { return discovery; },
+      async execute(request, dir) {
+        executions++;
+        await mkdir(join(dir, "output"), { recursive: true });
+        await writeFile(join(dir, "output", "stdout.log"), text);
+        return { outcome: "success", evidence: { jobId: request.jobId!, entries: [{ name: "stdout.log", sha256: sha256(text), sizeBytes: Buffer.byteLength(text), mediaType: "text/plain" }] } };
+      },
+    };
+    const make = (workspaceRoot = workspace) => new WorkerRuntime({ endpoint: { ...endpoint, project_scope: ["p1", "p2"] }, workspaceRoot, evidenceRoot: store, execution });
+    try {
+      const rt = make();
+      await prime(rt);
+      await submitJob(rt, "job-durable");
+      // Let the terminal snapshot finish before removing the disposable tree.
+      for (let i = 0; i < 1000; i++) {
+        if ((await readFile(join(workspace, "jobs-registry.json"), "utf8")).includes('"state":"succeeded"')) break;
+        await tick();
+      }
+      await rm(workspace, { recursive: true, force: true });
+      for (let i = 0; i < 2; i++) {
+        const coldRoot = join(parent, `cold-${i}`);
+        if (i === 1) {
+          // Crash after sealing but before the final registry snapshot.
+          await mkdir(coldRoot, { recursive: true });
+          const sealed = JSON.parse(await readFile(join(store, "job-durable", "job.json"), "utf8"));
+          await writeFile(join(coldRoot, "jobs-registry.json"), JSON.stringify({ jobs: [{ ...sealed.job, state: "running", evidence: undefined }], bindings: [["job-durable", sealed.binding]] }));
+        }
+        const restarted = make(coldRoot);
+        const denied = await post(restarted, "/jobs/evidence", { job_id: "job-durable" }, "0", { projectId: "p2" });
+        expect(denied.status).toBe(404);
+        expect((await post(restarted, "/jobs/status", { job_id: "job-durable" })).payload).toMatchObject({ state: "succeeded" });
+        const content = await post(restarted, "/jobs/evidence/content", { job_id: "job-durable", name: "stdout.log", complete: true });
+        expect(Buffer.from((content.payload as ContentReply).content_base64, "base64").toString()).toBe(text);
+        const page = await post(restarted, "/jobs/evidence/content", { job_id: "job-durable", name: "stdout.log", range: { offset: 300000, limit: 100 } });
+        expect(page.status).toBe(200);
+      }
+      expect(executions).toBe(1);
+      // A deleted sealed file must not be hidden behind a surviving old workspace copy.
+      await mkdir(join(workspace, "job-durable", "output"), { recursive: true });
+      await writeFile(join(workspace, "job-durable", "output", "stdout.log"), text);
+      await rm(join(store, "job-durable", "output", "stdout.log"));
+      expect((await post(make(), "/jobs/evidence/content", { job_id: "job-durable", name: "stdout.log" })).errorCode).toBe("EVIDENCE_CORRUPT");
+      // A broken sealed record must never be mistaken for a never-run ID.
+      const sealed = JSON.parse(await readFile(join(store, "job-durable", "job.json"), "utf8"));
+      await rm(join(store, "job-durable", "job.json"));
+      const cold = make(join(parent, "cold-corrupt"));
+      await prime(cold);
+      expect((await post(cold, "/jobs/submit", { request: sealed.job.request }, "fake-1")).errorCode).toBe("EVIDENCE_CORRUPT");
+      expect(executions).toBe(1);
+    } finally { await rm(parent, { recursive: true, force: true }); }
+  });
+});
+
+test("H41 Worker reads changed project_scope before cached responses, fails closed on bad config", async () => {
+  const root = await mkdtemp(join(tmpdir(), "synthia-h41-worker-"));
+  const path = join(root, "config.json");
+  const update = (scope: string[]) => writeFile(path, JSON.stringify({ connector_id: endpoint.connector_id, project_scope: scope }));
+  const rt = new WorkerRuntime({ endpoint, workspaceRoot: join(root, "workspace"), evidenceRoot: join(root, "evidence"),
+    projectScope: () => readProjectScope(path, endpoint.connector_id) });
+  try {
+    await update(["p1"]);
+    expect((await post(rt, "/registration", {}, "0", { projectId: "p2" })).status).toBe(403);
+    await update(["p1", "p2"]);
+    expect((await post(rt, "/registration", {}, "0", { projectId: "p2" })).status).toBe(200);
+    const envelope = { schema_version: REMOTE_SCHEMA_VERSION, correlation_id: "cached", idempotency_key: "cached", actor: { actor_type: "service", actor_id: "core" }, project_id: "p2", classification: "internal", capability_version: "0", payload: {} };
+    const cachedRequest = () => new Request("https://worker.test/registration", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope) });
+    expect((await rt.handle(cachedRequest())).status).toBe(200);
+    await update(["p1"]);
+    expect((await rt.handle(cachedRequest())).status).toBe(403);
+    await writeFile(path, "{}");
+    expect((await post(rt, "/registration", {})).status).toBe(503);
+    await rm(path);
+    expect((await post(rt, "/registration", {})).status).toBe(503);
+    await update(["p1"]);
+    expect((await post(rt, "/registration", {})).status).toBe(200);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

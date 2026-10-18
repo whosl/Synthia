@@ -44,21 +44,28 @@ export interface ToolchainMetadata { readonly binary: string; readonly vivadoVer
 export interface VivadoExecutionResult { readonly status: VivadoResultStatus; readonly jobId: string; readonly operation: VivadoOperation; readonly command: readonly string[]; readonly inputSha256: string; readonly workspace: string; readonly toolchain: ToolchainMetadata; readonly exitCode?: number; readonly phase?: string; readonly phaseExitCode?: number; readonly simulatorStdout?: string; readonly stdout?: string; readonly stderr?: string; readonly output?: unknown; readonly errorCode?: string; readonly error?: Record<string, unknown>; readonly evidence: EvidenceManifest; readonly unsupportedReason?: "BINARY_UNAVAILABLE" | "LICENSE_UNAVAILABLE" | "PART_UNAVAILABLE"; readonly timeoutMs?: number; readonly timedOut?: boolean; readonly signal?: string | null; readonly logDigest?: LogDigest }
 export interface CommandResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly signal?: string | null }
 export type CommandRunner = (command: string, args: readonly string[], cwd: string, timeoutMs: number, signal?: AbortSignal) => Promise<CommandResult>;
-export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner }
+export interface VivadoAdapterOptions { readonly workspaceRoot: string; readonly binary?: string; readonly part?: string; readonly profileHash?: string; readonly commandRunner?: CommandRunner; readonly vcdLimitMb?: number }
 export const VIVADO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const VIVADO_MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 /** Run until the testbench finishes. Frame-based suites can need hundreds of
  * simulated milliseconds; the process timeout bounds broken/nonterminating TBs. */
 const XSIM_RUNTIME = "all";
-export const WAVEFORM_CAPTURE_BYTES = 4 * 1024 * 1024;
+export const WAVEFORM_CAPTURE_BYTES = 16 * 1024 * 1024;
+export const MAX_VCD_LIMIT_MB = 64;
+export function vcdCaptureBytes(value: unknown = process.env.SYNTHIA_VCD_LIMIT_MB): number {
+  if (value === undefined) return WAVEFORM_CAPTURE_BYTES;
+  const mb = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isInteger(mb) || mb < 1 || mb > MAX_VCD_LIMIT_MB) throw new Error("CONFIG_INVALID:SYNTHIA_VCD_LIMIT_MB (1..64)");
+  return mb * 1024 * 1024;
+}
 
 /** Controlled XSim script: bounded VCD capture never changes the TB verdict. */
-function waveformScript(outputDir: string): string {
+function waveformScript(outputDir: string, limitBytes: number): string {
   return `set wave_open 0
 if {[catch {
   open_vcd ${tclQuote(join(outputDir, "waveform.vcd"))}
   set wave_open 1
-  limit_vcd ${WAVEFORM_CAPTURE_BYTES}
+  limit_vcd ${limitBytes}
   log_vcd [get_objects -r /*]
 } wave_error]} { puts "SYNTHIA_WAVEFORM_EXPORT_UNAVAILABLE: $wave_error" }
 set run_code [catch {run ${XSIM_RUNTIME}} run_error run_options]
@@ -275,7 +282,42 @@ function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string):
   const top = "top" in request && typeof request.top === "string" ? `-top ${tclQuote(request.top)}` : ""; const part = "part" in request && typeof request.part === "string" ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
   if (request.operation === "discover_toolchain") return "puts [version -short]\nputs [join [get_parts *] \\\"\\n\\\"]";
   if (request.operation === "query_parts") return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
-  if (request.operation === "validate_sources") return `${sources}\nputs SOURCE_VALIDATION_OK`;
+  if (request.operation === "validate_sources") {
+    const compilerBin = tclQuote(dirname(request.toolchain?.vivadoBinary ?? "vivado"));
+    const includeDirs = [...new Set([inputDir, ...request.sources.map(source => dirname(join(inputDir, source.path)))])].map(tclQuote).join(" ");
+    // Keep source order and language mode. Headers participate through -i,
+    // rather than being compiled as independent translation units.
+    const groups: { sv: boolean; paths: string[] }[] = [];
+    for (const source of request.sources) {
+      if (/\.(?:vh|svh)$/i.test(source.path)) continue;
+      const sv = /\.sv$/i.test(source.path) || source.mediaType?.includes("systemverilog") === true;
+      const previous = groups.at(-1);
+      if (previous?.sv === sv) previous.paths.push(tclQuote(join(inputDir, source.path)));
+      else groups.push({ sv, paths: [tclQuote(join(inputDir, source.path))] });
+    }
+    if (!groups.length) reject("NO_COMPILABLE_SOURCES");
+    return `set compiler [file join ${compilerBin} xvlog]
+if {${compilerBin} eq "."} { set compiler xvlog }
+set includeArgs [list --work xil_defaultlib]
+foreach inc [list ${includeDirs}] { lappend includeArgs -i $inc }
+puts PHASE=compile
+proc compileSources {compiler args} {
+  if {$::tcl_platform(platform) eq "windows"} {
+    set command [list cmd.exe /d /c call "$compiler.bat" {*}$args]
+  } else {
+    set command [list $compiler {*}$args]
+  }
+  if {[catch {exec {*}$command 2>@1} output options]} {
+    puts $output
+    puts PHASE_EXIT_CODE=1
+    return -options $options $output
+  }
+  puts $output
+}
+${groups.map(group => `compileSources $compiler {*}$includeArgs ${group.sv ? "--sv " : ""}${group.paths.join(" ")}`).join("\n")}
+puts PHASE_EXIT_CODE=0
+puts SOURCE_VALIDATION_OK`;
+  }
   if (request.operation === "simulate") {
     const designPaths: string[] = []; const simPaths: string[] = [];
     for (const source of request.sources) {
@@ -729,8 +771,8 @@ async function failedImplementationEvidence(workspace: string, jobId: string): P
   return evidence(workspace, jobId, FAILED_IMPLEMENTATION_OMISSIONS);
 }
 export class VivadoBatchAdapter {
-  private readonly run: CommandRunner; private readonly root: string; private readonly defaultBinary: string; private readonly configuredPart: string | undefined; private readonly configuredProfileHash: string | undefined; private readonly injected: boolean;
-  constructor(options: VivadoAdapterOptions) { this.root = resolve(options.workspaceRoot); this.defaultBinary = options.binary ?? "vivado"; this.configuredPart = options.part; this.configuredProfileHash = options.profileHash; this.injected = options.commandRunner !== undefined; this.run = options.commandRunner ?? defaultRunner; }
+  private readonly vcdLimitBytes: number; private readonly run: CommandRunner; private readonly root: string; private readonly defaultBinary: string; private readonly configuredPart: string | undefined; private readonly configuredProfileHash: string | undefined; private readonly injected: boolean;
+  constructor(options: VivadoAdapterOptions) { this.vcdLimitBytes = vcdCaptureBytes(options.vcdLimitMb); this.root = resolve(options.workspaceRoot); this.defaultBinary = options.binary ?? "vivado"; this.configuredPart = options.part; this.configuredProfileHash = options.profileHash; this.injected = options.commandRunner !== undefined; this.run = options.commandRunner ?? defaultRunner; }
   async execute(request: VivadoRequest, signal?: AbortSignal): Promise<VivadoExecutionResult> {
     validateVivadoRequest(request);
     if (request.runClass === "evolution_eval") reject("EVOLUTION_EVAL_DEDICATED_ROUTE_REQUIRED");
@@ -765,7 +807,7 @@ export class VivadoBatchAdapter {
       writeFile(join(outputDir, "run.tcl"), runScript, "utf8"),
       writeFile(join(outputDir, "input-manifest.json"), JSON.stringify(evidenceInputManifest(effectiveRequest), null, 2), "utf8"),
     ]);
-    if (request.operation === "simulate") await writeFile(join(outputDir, "waveform.tcl"), waveformScript(outputDir), "utf8");
+    if (request.operation === "simulate") await writeFile(join(outputDir, "waveform.tcl"), waveformScript(outputDir, this.vcdLimitBytes), "utf8");
     const effectiveTimeout = request.timeoutMs ?? VIVADO_DEFAULT_TIMEOUT_MS;
     let result: CommandResult;
     try {

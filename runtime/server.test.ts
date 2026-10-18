@@ -2574,6 +2574,44 @@ describe("RuntimeServer — POST /tasks + full chain", () => {
     }
   });
 
+  test("H45 project turn recovery retains bounded stack and nested cause in persisted reason", async () => {
+    const projectId = "p-h45-recovery";
+    const taskId = `project-agent-${crypto.randomUUID()}`;
+    const recoveryError = new Error("internal error", { cause: new Error("database transport closed") });
+    const taskEvents: TaskConversationClient = {
+      projectId, taskId,
+      async appendEvent(input) {
+        if (input.type === "assistant_message" && input.payload.text === "[error] internal error") throw recoveryError;
+        return { taskId, eventId: input.eventId, sequence: 1, replayed: false };
+      },
+    };
+    const governance = new EarlyGateProjectInfoGovernance(projectInfo({
+      projectType: "engineering", processVersionId: "GJB_REF_V1", processProfileId: "GJB_REF_V1",
+      processProfileName: "GJB 参考流程 v1", processProfileVersion: "GJB_REF_V1", targetPart: "xc7k70tfbv676-1",
+    }), "pi-h45-recovery");
+    const server = new RuntimeServer(makeConfig(), async () => ({
+      model: new CounterScriptedModel(), connector: new FakeVivadoConnector({ behavior: successBehavior() }),
+      governance, taskEvents,
+    }), () => new FailOnceConversationalModel("internal error"));
+    await server.start();
+    try {
+      const created = await postTaskRaw(server, {
+        project_id: projectId, process_instance_id: "pi-h45-recovery", task: "exercise recovery failure",
+        mode: "agent", task_id: taskId, task_kind: "main", execution_intent: "project_agent",
+        authorization_scope: MAIN_TASK_AUTHORIZATION,
+      });
+      expect(created.status).toBe(201);
+      createdAgentIds.push(taskId);
+      expect((await fetch(`${server.url}/tasks/${taskId}/start`, { method: "POST" })).status).toBe(200);
+      await waitForStatus(server, taskId, ["fail_closed"]);
+      const state = await loadAgentState(taskId);
+      expect(state?.endedReason).toContain("project-agent turn recovery failed after internal error");
+      expect(state?.endedReason).toContain("server.test.ts");
+      expect(state?.endedReason).toContain("Caused by: Error: database transport closed");
+      expect(state!.endedReason!.length).toBeLessThan(8500);
+    } finally { await server.stop(); await deleteAgent(taskId).catch(() => {}); }
+  });
+
   test("a Project Agent clears an older callback failure when a later turn reaches Core", async () => {
     const projectId = "p-core-project-callback-recovery";
     const taskId = `project-agent-${crypto.randomUUID()}`;
