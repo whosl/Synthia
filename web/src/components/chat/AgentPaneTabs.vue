@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import type { SideTaskSummary } from "../../api/types.ts";
 import { SIDE_TASK_STATUS_TEXT } from "../../domain/side-tasks.ts";
 
 defineProps<{
   activePane: "main" | "new" | string;
   sideAgents: readonly SideTaskSummary[];
+  /** 已归档（本浏览器隐藏）但 Core 里仍存在的探索任务；空则不显示恢复入口。 */
+  archivedAgents: readonly SideTaskSummary[];
   canCreateSideAgent: boolean;
 }>();
 
@@ -12,7 +15,29 @@ const emit = defineEmits<{
   select: [pane: "main" | string];
   create: [];
   archive: [taskId: string];
+  restore: [taskId: string];
 }>();
+
+const archivedOpen = ref(false);
+const archivedAnchor = ref<HTMLElement | null>(null);
+
+function toggleArchived(): void {
+  archivedOpen.value = !archivedOpen.value;
+}
+
+function onDocClick(event: MouseEvent): void {
+  if (!archivedOpen.value) return;
+  const anchor = archivedAnchor.value;
+  if (anchor && !anchor.contains(event.target as Node)) archivedOpen.value = false;
+}
+
+function onRestore(taskId: string): void {
+  archivedOpen.value = false;
+  emit("restore", taskId);
+}
+
+onMounted(() => document.addEventListener("click", onDocClick));
+onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
 
 function shortTitle(task: SideTaskSummary): string {
   const title = task.objective.trim();
@@ -64,6 +89,39 @@ function shortTitle(task: SideTaskSummary): string {
           title="归档窗格（任务记录仍保留）"
           @click.stop="emit('archive', agent.task_id)"
         >×</button>
+      </div>
+    </div>
+
+    <div v-if="archivedAgents.length > 0" ref="archivedAnchor" class="relative flex-none">
+      <button
+        type="button"
+        class="agent-pane-restore h-full cursor-pointer border-0 border-l border-line bg-transparent px-2"
+        :class="{ 'is-open': archivedOpen }"
+        :aria-expanded="archivedOpen"
+        aria-label="已归档的探索任务"
+        title="已归档的探索任务（恢复显示）"
+        @click="toggleArchived"
+      >⟲ {{ archivedAgents.length }}</button>
+      <div
+        v-if="archivedOpen"
+        class="absolute top-full right-0 z-30 mt-1 w-72 rounded-md border border-line bg-panel p-1 shadow-lg"
+        role="menu"
+        aria-label="恢复已归档的探索任务"
+      >
+        <button
+          v-for="agent in archivedAgents"
+          :key="agent.task_id"
+          type="button"
+          class="agent-pane-restore-item flex w-full cursor-pointer items-center justify-between gap-2 rounded-sm border-0 bg-transparent px-2 py-1.5 text-left"
+          role="menuitem"
+          @click="onRestore(agent.task_id)"
+        >
+          <span class="min-w-0 flex-1 truncate text-xs text-fg-secondary" :title="agent.objective">
+            {{ agent.objective.trim().length > 26 ? `${agent.objective.trim().slice(0, 26)}…` : agent.objective.trim() }}
+          </span>
+          <span class="flex-none text-[10px] text-fg-muted">{{ SIDE_TASK_STATUS_TEXT[agent.status] }}</span>
+          <span class="flex-none text-xs text-brand">恢复</span>
+        </button>
       </div>
     </div>
 
@@ -128,6 +186,21 @@ function shortTitle(task: SideTaskSummary): string {
 
 .agent-pane-archive {
   font-size: 14px;
+}
+
+.agent-pane-restore {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.agent-pane-restore:hover,
+.agent-pane-restore.is-open {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.agent-pane-restore-item:hover {
+  background: var(--surface-hover);
 }
 
 /* 全局 * { scrollbar-width: thin } 同为未分层规则，滚动条隐藏也留在 scoped。 */

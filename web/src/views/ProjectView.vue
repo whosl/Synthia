@@ -313,6 +313,10 @@ const archivedSideAgentIds = ref<ReadonlySet<string>>((() => {
 const visibleSideAgents = computed(() => sideTasks.value.filter(
   (task) => !archivedSideAgentIds.value.has(task.task_id),
 ));
+/** 本浏览器归档但 Core 仍存在的探索任务——标签栏的 ⟲ 恢复入口数据源。 */
+const archivedSideAgents = computed(() => sideTasks.value.filter(
+  (task) => archivedSideAgentIds.value.has(task.task_id),
+));
 
 // ─────────────────────────────────────────────────────────────────────
 // P4 Core-owned G0-G4 / formal input / delivery
@@ -813,6 +817,13 @@ function onArchiveSideAgent(taskId: string): void {
   archivedSideAgentIds.value = next;
   window.localStorage.setItem(archivedSideAgentStorageKey, JSON.stringify([...next]));
   if (activeAgentPane.value === taskId) closeSideTasks();
+}
+
+function onRestoreSideAgent(taskId: string): void {
+  const next = new Set(archivedSideAgentIds.value);
+  if (!next.delete(taskId)) return;
+  archivedSideAgentIds.value = next;
+  window.localStorage.setItem(archivedSideAgentStorageKey, JSON.stringify([...next]));
 }
 
 async function onAdoptSideTask(request: AdoptSideTaskRequest): Promise<void> {
@@ -2800,10 +2811,12 @@ function onToggleChatOverlay(): void {
           <AgentPaneTabs
             :active-pane="activeAgentPane"
             :side-agents="visibleSideAgents"
+            :archived-agents="archivedSideAgents"
             :can-create-side-agent="sideTasksEnabled && sideTaskParent !== null && sideTaskBaseCommit !== null"
             @select="onSelectAgentPane"
             @create="onAddSideAgent"
             @archive="onArchiveSideAgent"
+            @restore="onRestoreSideAgent"
           />
           <ChatFeed
             v-if="activeAgentPane === 'main' && !conversationInitializing"
@@ -2878,10 +2891,12 @@ function onToggleChatOverlay(): void {
             <AgentPaneTabs
               :active-pane="activeAgentPane"
               :side-agents="visibleSideAgents"
+            :archived-agents="archivedSideAgents"
               :can-create-side-agent="sideTasksEnabled && sideTaskParent !== null && sideTaskBaseCommit !== null"
               @select="onSelectAgentPane"
               @create="onAddSideAgent"
               @archive="onArchiveSideAgent"
+            @restore="onRestoreSideAgent"
             />
             <ChatFeed
               v-if="activeAgentPane === 'main' && !conversationInitializing"
