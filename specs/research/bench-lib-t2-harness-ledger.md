@@ -157,7 +157,32 @@ W-9：四e/四f 已改为已部署，版本 **57c51f0 / 2026-10-14 14:30 CST**�
 
 对第二节可疑项逐一对源码/库实证：H25（Map 内存 + Core 无 reaper，grep 全仓无 job 回收）✅、H24（约束枚举 8 种）✅、H23（0014 唯一漂移）✅、H15（模式收窄为行首 FAIL）✅、H16（映射链完整）✅、H26（事务内网络调用，注释自认设计）✅；**两项被修正**：H17"来源不明"撤回（键归属操作者脚本）、H19 收窄（idle 态正常）；H22 收窄（SSE 面有活性，REST 面无）。取证方法沉淀：idempotency_records 的键模式是调用方指纹（`ui-run-*`=UI 按钮、`p17-*-1`=操作者脚本、会话提交另有键型）。
 
+## 四h、全量回挖批次（2026-10-20，T1+T2+T3 会话历史三路扫描 + SQL/源码核验）
+
+方法：三个并行扫描 agent 覆盖 p11–p38 会话历史（29+12+11 份 conversation，约 6000 条消息）+ 全项目 tool_run 错误码分布 + 操作者对每个"未解决"标注逐项源码核验。**已证实修复（勿重复计入）**：run 100ms→`run all`、waveform.tcl 反斜杠转义（tclQuote 括号）、claim-check 否定守卫（12 字符窗口）、证据清单/分页读取、VCD 16MiB、judging 通道、worker 看门狗互斥、W-1 证据封存、W-3 scope 热载、skipAll 持久化、H35/H36/H38 家族。以下为核验后仍然开着的项：
+
+| # | 类 | 问题（证据） | 修法方向 |
+|---|---|---|---|
+| H47 | GAP | digest 失败上下文过窄：`CONTEXT_LINES=2` 且只收 contextBefore（p14：DUT 值被截丢、跨轮比较被误导；truncated 标志不反映上下文丢失） | 提到 4 行 + 增加 contextAfter；截断标志覆盖上下文丢失 |
+| H48 | BUG | INCONCLUSIVE 无因诊断（38 例：p19×18/p27×13/p32×7）：judgeSimulation 只报错误码，不报缺的是 `$finish` 行还是 `PASS` 标记；且 `$display` 打印的 `** FATAL **`（无冒号）不命中失败模式（p14 T1 即有，跨三时代） | 判定结果带 {finished, passMarker, exit} 详情进 digest；失败模式补 `\*\*\s*FATAL\s*\*\*` |
+| H49 | GAP | 证据错误分类过粗：短 ID/错名/未终态/真丢失共用 not_found 与 EVIDENCE_NOT_AVAILABLE（p29 误归因"历史失联"、p38 两度误判"整体失联"） | 工具/worker 错误码分型 + 文案列出可尝试的正确形态 |
+| H50 | GAP | 历史良本可追溯不可取回：revision/hash/manifest 齐全但 workspace 读恒回 head，无版本选择器（p36 v9 污染后只能停等人工 git 救援） | `synthia_workspace_read` 加可选 `revision_id`（Core getRevisionContent 端点已存在，只差工具面接线） |
+| H51 | BUG | 残稿覆盖不设防：登记通道接受静默截断/污染稿覆盖已验证 head，跨 4 项目 ≥5 次（p27 26K 截断×2、p32 33KB→3KB、p36 错误正文入 tb_top、p37 2602 字符残稿、p38 v24 非目标区漂移） | 写入加可选 `expected_target_hash` 乐观锁（side-task 通道已有该字段，主通道缺失）+ 体积骤降守卫（<60% 需显式 force） |
+| H52 | GAP | validate 覆盖承诺不透明：xvlog-only 编译（W-6 已收窄）后 elaborate 级缺陷仍延迟暴露（p32 join_none 零错零警直到 simulate）；结果文案未声明"未 elaborate"边界 | 可选 xelab 空跑（顶层 elaborate 检查）或至少结果明示覆盖范围 |
+| H53 | GAP | simulate 无 plusargs 注入（p26 WDEL 档位无法激发，覆盖缺口；只能改源码常量） | simulate 请求加白名单化 plusargs 数组，走 `xsim.simulate.xsim.more_options` |
+| H54 | GAP | 运行期数据文件无通道：`.hex/.mem` 被 sources 语言检查拒收（p25 程序镜像被迫全部内联进 RTL；p36 同） | 请求加 `dataFiles`（字符集/大小受限），staged 到 workspace 相对路径供 `$readmemh` |
+| H55 | BUG | 未就绪重试风暴：worker 重启后的 ready 窗口内 CAPABILITY_UNAVAILABLE 直通模型，p27 曾 4 分钟 5 连败（runtime 只对 LEASE_EXPIRED 有重试） | RemoteVivadoConnector 对 not-ready 错误有界退避重试（~3 次 10/20/40s，drift 仍 fail-closed） |
+| H56 | GAP | 摘要预算病理未防：巨型工具结果（250KB VCD 页）进摘要区直接撑爆提示预算 → 机械截断 → 仍超窗（上下文手术 ×2 的根，H38 续批只修了证据丢失面） | serializeMessagesForSummary 单条工具结果封顶（8KB+标记"全文见证据分页"）；仍超则分段多轮摘要 |
+| H57 | GAP | 50 轮保护中断无闭环：保护触发后只追加恢复注记，会话终态 failed、无自动续跑（p14 留下未闭环会话） | 保护注记后接一次自动"继续收口"提示（复用 empty-reply nudge 通道）或终态改 interrupted+待续语义 |
+| H58 | BUG | implement 判读与 STA 证据矛盾：p36 同 job 报 TIMING_UNCONSTRAINED 但 STA 有效时钟+正 slack+routed.dcp 在（人工按实读证据放行；触发机制未查） | 复现并查 unconstrained 判定逻辑（疑扫的是引脚约束而非时钟约束） |
+| H59 | GAP | 报告技能类型通道缺位：黄金侧 REFERENCE_IMPLEMENTATION 源集无法走报告技能，被迫 intake 通道+错误标签（p29） | 报告技能的 artifact 类型集补黄金侧类型 |
+| H60 | GAP | learned-skill apply 校验错误不指名字段：reason_codes/role 组合失败只报四字段泛化错误（p28/p29/p31/p32 跨项目；省略可选参数可绕过） | 校验错误结构化列出字段级原因（H35 的后续完善） |
+
+其他记录（不单独立项）：p28 FORMAL_BINDING_MISMATCH 源于共享 worker 器件切换外溢（运维纪律项：切换前公告窗口）；T1 会话文件 5/6 已轮转丢失（取证面收窄，建议 .runs 归档策略）；tool.log 与 stdout.log 证据完全重复（存储浪费）。
+
 ## 六、附注
 
 - tool.log 与 stdout.log 证据完全重复（p22 job：95966B==95966B）——存储/传输浪费，建议去重
 - 操作者失误 2 起（不属 harness 但记录）：printf 转义写坏 timescale（会话修复）；UTC 时区误判误诊挂死（阈值改本地 45min+先校 date）
+
+
