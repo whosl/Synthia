@@ -40,3 +40,17 @@
 - openmsp430 / usbhostslave / fpganes 的厂商原语在 FPGA 移植层（BENCH-CARD 已标注文件），核心 RTL 纯净；做模板时**剥掉板级封装**，需求按核心定义
 - 大设计（>10k 行）sim 时长会显著拉长（XSIM_RUNTIME_CAP 限制要评估）；openmsp430 建议裁剪外设子集出题
 - 参考实现的 bench 目录多有测试向量（aes/des/can/picorv32），交叉验证时用；但盲测 TB 必须模型自写
+
+## T4 再验证轮（2026-10-20 入库，harness H39-H46 收尾后的复验）
+
+新增五件（调研标准：规范公开权威、核心零原语/spram 可替换、类型与既有库互补）：
+
+| 梯队 | 设计 | 类型 | 行数 | 与既有库的关系 |
+|---|---|---|---|---|
+| T4a | spi | 串行协议 | 1.4k | 与 i2c 成协议族对照；**兼作 harness 修复冒烟件** |
+| T4b | sdram | **存储控制器（新类型）** | 2k | 初始化/刷新/仲裁类从未考过 |
+| T4c | uart16550 | 寄存器接口+FIFO | ~11k | 深度 FIFO/可编程触发中断是 CFI 类新收敛难点 |
+| T4d | or1200 | 32 位 RISC CPU | ~33k | OpenRISC 手册全公开（权威性同 TI 手册）；与 msp430 成 CISC/RISC 极 |
+| T4e | ethmac | MAC 数据通路+协议 | ~44k | IEEE 802.3；最大件，视 T4a-d 进度决定是否发车 |
+
+vdf-fpga（竞赛对照）仍在库待用。本轮同时验证 H39（证据封存）/W-5（digest 判卷通道）/W-6（validate xvlog 真解析）在真实基准流程中的实效。
