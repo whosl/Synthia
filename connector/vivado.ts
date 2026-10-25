@@ -103,10 +103,15 @@ function isPlainObject(value: unknown): boolean { return typeof value === "objec
 const VERILOG_MEDIA_TYPES: Record<string, true> = { "text/verilog": true, "text/x-verilog": true, "text/systemverilog": true, "text/x-systemverilog": true, "application/systemverilog": true };
 function assertSourceLanguage(source: SourceInput): void {
   const lower = source.path.toLowerCase();
-  const extOk = lower.endsWith(".v") || lower.endsWith(".vh") || lower.endsWith(".sv") || lower.endsWith(".svh");
+  const extOk = lower.endsWith(".v") || lower.endsWith(".vh") || lower.endsWith(".sv") || lower.endsWith(".svh") || lower.endsWith(".h");
   const mediaOk = source.mediaType === undefined || VERILOG_MEDIA_TYPES[source.mediaType] === true;
   if (!extOk || !mediaOk) reject("UNSUPPORTED_SOURCE_LANGUAGE");
 }
+// Header files (bare .h included — FreeCores-style `include "inc.h"`) are never
+// compiled as translation units: they reach xvlog/read_verilog only through -i /
+// -include_dirs resolution, staged under their original filenames.
+const HEADER_SOURCE_RE = /\.(?:h|vh|svh)$/i;
+function isHeaderSource(source: SourceInput): boolean { return HEADER_SOURCE_RE.test(source.path); }
 function stripVerilogLexical(text: string): string {
   let out = ""; let i = 0; const n = text.length;
   while (i < n) {
@@ -272,13 +277,15 @@ export function validateVivadoRequest(request: VivadoRequest): void {
 }
 
 function tclQuote(value: string): string { return `{${value.replace(/[{}]/g, c => `\\${c}`)}}`; }
-function readSourceLine(source: SourceInput, inputDir: string): string {
+function readSourceLine(source: SourceInput, inputDir: string, includeDirs: string): string {
   const target = tclQuote(join(inputDir, source.path));
   const isSystemVerilog = source.path.toLowerCase().endsWith(".sv") || source.mediaType === "text/systemverilog" || source.mediaType === "application/systemverilog";
-  return isSystemVerilog ? `read_verilog -sv ${target}` : `read_verilog ${target}`;
+  const incOpt = includeDirs ? `-include_dirs {${includeDirs}} ` : "";
+  return isSystemVerilog ? `read_verilog -sv ${incOpt}${target}` : `read_verilog ${incOpt}${target}`;
 }
 function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string): string {
-  const sources = "sources" in request ? request.sources.map(s => readSourceLine(s, inputDir)).join("\n") : "";
+  const includeDirs = "sources" in request ? [...new Set([inputDir, ...request.sources.map(source => dirname(join(inputDir, source.path)))])].map(tclQuote).join(" ") : "";
+  const sources = "sources" in request ? request.sources.filter(source => !isHeaderSource(source)).map(s => readSourceLine(s, inputDir, includeDirs)).join("\n") : "";
   const top = "top" in request && typeof request.top === "string" ? `-top ${tclQuote(request.top)}` : ""; const part = "part" in request && typeof request.part === "string" ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
   if (request.operation === "discover_toolchain") return "puts [version -short]\nputs [join [get_parts *] \\\"\\n\\\"]";
   if (request.operation === "query_parts") return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
@@ -289,7 +296,7 @@ function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string):
     // rather than being compiled as independent translation units.
     const groups: { sv: boolean; paths: string[] }[] = [];
     for (const source of request.sources) {
-      if (/\.(?:vh|svh)$/i.test(source.path)) continue;
+      if (isHeaderSource(source)) continue;
       const sv = /\.sv$/i.test(source.path) || source.mediaType?.includes("systemverilog") === true;
       const previous = groups.at(-1);
       if (previous?.sv === sv) previous.paths.push(tclQuote(join(inputDir, source.path)));
@@ -321,6 +328,7 @@ puts SOURCE_VALIDATION_OK`;
   if (request.operation === "simulate") {
     const designPaths: string[] = []; const simPaths: string[] = [];
     for (const source of request.sources) {
+      if (isHeaderSource(source)) continue;
       const target = tclQuote(join(inputDir, source.path));
       const testSource = declaredModules(source).includes(request.testbench) || /(^|\/)(?:tb|test|tests|testbench)(?:\/|$)/i.test(source.path);
       (testSource ? simPaths : designPaths).push(target);
@@ -331,7 +339,7 @@ puts SOURCE_VALIDATION_OK`;
     const projectPart = tclQuote(request.toolchain?.part ?? "xc7k70tfbv676-1");
     const topQ = tclQuote(request.top);
     const tbQ = tclQuote(request.testbench);
-    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl [file normalize ${tclQuote(join(outputDir, "waveform.tcl"))}] [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
+    return `${sources}\ncreate_project synthia_batch ${project} -part ${projectPart} -force\nadd_files -fileset sources_1 ${designFiles}\nadd_files -fileset sim_1 ${simFiles}\nset_property include_dirs {${includeDirs}} [get_filesets sources_1]\nset_property include_dirs {${includeDirs}} [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nset_property top ${topQ} [get_filesets sources_1]\nset_property top ${tbQ} [get_filesets sim_1]\nset_property xsim.simulate.runtime {${XSIM_RUNTIME}} [get_filesets sim_1]\nset_property xsim.simulate.custom_tcl [file normalize ${tclQuote(join(outputDir, "waveform.tcl"))}] [get_filesets sim_1]\nupdate_compile_order -fileset sources_1\nupdate_compile_order -fileset sim_1\nlaunch_simulation -mode behavioral -scripts_only -absolute_path\nset simRoot [file normalize [file join ${project} "synthia_batch.sim" "sim_1" "behav" "xsim"]]\ncd $simRoot\nproc phaseExitCode {options} {\n  if {[dict exists $options -errorcode]} {\n    set ec [dict get $options -errorcode]\n    if {[llength $ec] >= 3 && [lindex $ec 0] eq "CHILDSTATUS"} { return [lindex $ec 2] }\n  }\n  return 1\n}\nproc catLog {p} { if {![catch {set f [open $p r]}]} { set d [read $f]; close $f; if {[string length $d] > 0} { puts $d } } }\nset phase compile\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot compile.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=compile"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot compile.log]}\nset phase elaborate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot elaborate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=elaborate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts $sim_output; catch {catLog [file join $simRoot elaborate.log]}; catch {catLog [file join $simRoot compile.log]}; return -options $sim_options $sim_output }
 catch {catLog [file join $simRoot elaborate.log]}\nset phase simulate\nif {[catch {exec cmd.exe /d /c [list call [file join $simRoot simulate.bat]] 2>@1} sim_output sim_options]} { puts "PHASE=simulate"; puts "PHASE_EXIT_CODE=[phaseExitCode $sim_options]"; puts "SIMULATOR_OUTPUT_BEGIN"; puts $sim_output; puts "SIMULATOR_OUTPUT_END"; return -options $sim_options $sim_output }\nputs "PHASE=simulate"\nputs "PHASE_EXIT_CODE=0"\nputs "SIMULATOR_OUTPUT_BEGIN"\nputs $sim_output\nputs "SIMULATOR_OUTPUT_END"\nputs SIMULATION_OK`;
   }
