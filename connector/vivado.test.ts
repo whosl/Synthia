@@ -340,11 +340,12 @@ describe("Vivado simulate contract", () => {
       expect(wave).toContain("return -options $run_options $run_error");
 
       // Mixed sources: .v -> read_verilog, .sv -> read_verilog -sv (no free-form paths);
-      // include dirs ride along so `include headers resolve in batch mode
-      expect(tcl).toMatch(/read_verilog -include_dirs \{\{.*\}\} \{.*rtl\/dut\.v\}/);
-      expect(tcl).toMatch(/read_verilog -sv -include_dirs \{\{.*\}\} \{.*tb\/tb\.sv\}/);
+      // no -include_dirs here — Vivado 2021.1 read_verilog lacks the option (Common 17-170)
+      // and resolves relative `include against the including file's directory
+      expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/dut.v")}}`);
+      expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "tb/tb.sv")}}`);
       // Validated mediaType selects SystemVerilog parsing regardless of extension
-      expect(tcl).toMatch(/read_verilog -sv -include_dirs \{\{.*\}\} \{.*rtl\/sv_as_v\.v\}/);
+      expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "rtl/sv_as_v.v")}}`);
       // Sim filesets carry the include dirs for project-mode compilation
       expect(tcl).toContain("set_property include_dirs {");
       expect(tcl).toContain("[get_filesets sources_1]");
@@ -387,8 +388,8 @@ describe("Vivado simulate contract", () => {
       expect(await readFile(join(inputDir, "rtl/deep/nested/dut.v"), "utf8")).toBe("module dut; endmodule\n");
       expect(await readFile(join(inputDir, "tb/inner/tb.sv"), "utf8")).toBe("module tb; endmodule\n");
       const tcl = await readFile(join(result.workspace, "run.tcl"), "utf8");
-      expect(tcl).toMatch(/read_verilog -include_dirs \{\{.*\}\} \{.*rtl\/deep\/nested\/dut\.v\}/);
-      expect(tcl).toMatch(/read_verilog -sv -include_dirs \{\{.*\}\} \{.*tb\/inner\/tb\.sv\}/);
+      expect(tcl).toContain(`read_verilog {${join(inputDir, "rtl/deep/nested/dut.v")}}`);
+      expect(tcl).toContain(`read_verilog -sv {${join(inputDir, "tb/inner/tb.sv")}}`);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

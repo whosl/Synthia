@@ -277,15 +277,19 @@ export function validateVivadoRequest(request: VivadoRequest): void {
 }
 
 function tclQuote(value: string): string { return `{${value.replace(/[{}]/g, c => `\\${c}`)}}`; }
-function readSourceLine(source: SourceInput, inputDir: string, includeDirs: string): string {
+// NB: read_verilog has NO -include_dirs option in Vivado 2021.1 (Common 17-170).
+// It resolves relative `include against the *including file's* directory — verified
+// against a foreign cwd on the 66 toolchain — so headers staged beside their
+// consumers need no flags here. The simulate project flow carries the dirs via
+// the fileset include_dirs property instead.
+function readSourceLine(source: SourceInput, inputDir: string): string {
   const target = tclQuote(join(inputDir, source.path));
   const isSystemVerilog = source.path.toLowerCase().endsWith(".sv") || source.mediaType === "text/systemverilog" || source.mediaType === "application/systemverilog";
-  const incOpt = includeDirs ? `-include_dirs {${includeDirs}} ` : "";
-  return isSystemVerilog ? `read_verilog -sv ${incOpt}${target}` : `read_verilog ${incOpt}${target}`;
+  return isSystemVerilog ? `read_verilog -sv ${target}` : `read_verilog ${target}`;
 }
 function scriptFor(request: VivadoRequest, inputDir: string, outputDir: string): string {
   const includeDirs = "sources" in request ? [...new Set([inputDir, ...request.sources.map(source => dirname(join(inputDir, source.path)))])].map(tclQuote).join(" ") : "";
-  const sources = "sources" in request ? request.sources.filter(source => !isHeaderSource(source)).map(s => readSourceLine(s, inputDir, includeDirs)).join("\n") : "";
+  const sources = "sources" in request ? request.sources.filter(source => !isHeaderSource(source)).map(s => readSourceLine(s, inputDir)).join("\n") : "";
   const top = "top" in request && typeof request.top === "string" ? `-top ${tclQuote(request.top)}` : ""; const part = "part" in request && typeof request.part === "string" ? `-part ${tclQuote(request.part)}` : request.toolchain?.part ? `-part ${tclQuote(request.toolchain.part)}` : "";
   if (request.operation === "discover_toolchain") return "puts [version -short]\nputs [join [get_parts *] \\\"\\n\\\"]";
   if (request.operation === "query_parts") return `puts [join [get_parts ${tclQuote(request.pattern ?? "*")}] "\\n"]`;
